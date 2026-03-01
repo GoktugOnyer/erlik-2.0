@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pentest Agent</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body { background: #030712; }
+        #log-panel { font-family: 'Consolas', 'Monaco', monospace; }
+        .log-recon { color: #38bdf8; }
+        .log-scan { color: #a78bfa; }
+        .log-test { color: #fb923c; }
+        .log-verify { color: #facc15; }
+        .log-report { color: #4ade80; }
+        .log-error { color: #f87171; }
+        .log-system { color: #94a3b8; }
+        .phase-active { background: #22d3ee; color: #030712; }
+        .phase-done { background: #10b981; color: #030712; }
+        .phase-pending { background: #1e293b; color: #64748b; }
+    </style>
+</head>
+<body class="bg-gray-950 text-gray-100 min-h-screen">
+    <!-- Header -->
+    <header class="border-b border-gray-800 px-6 py-4 flex items-center justify-between">
+        <div class="flex items-center gap-3">
+            <h1 class="text-xl font-bold text-white">Pentest Agent</h1>
+            <span class="text-xs text-gray-500">qwen2.5-coder-7b</span>
+        </div>
+        <div class="flex items-center gap-2">
+            <span id="health-dot" class="w-2.5 h-2.5 rounded-full bg-gray-600"></span>
+            <span id="health-text" class="text-sm text-gray-400">Checking...</span>
+        </div>
+    </header>
+
+    <main class="p-6 max-w-7xl mx-auto space-y-6">
+        <!-- Config Section -->
+        <section class="bg-gray-900 border border-gray-800 rounded-lg p-5">
+            <div class="flex flex-wrap gap-4 items-end">
+                <div class="flex-1 min-w-[300px]">
+                    <label class="block text-sm text-gray-400 mb-1">Target URL</label>
+                    <input id="target-url" type="text" value="http://juice-shop:3000"
+                        class="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm text-white focus:outline-none focus:border-cyan-500">
+                </div>
+                <div>
+                    <label class="block text-sm text-gray-400 mb-1">Scope</label>
+                    <select id="scope-mode"
+                        class="bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm text-white focus:outline-none focus:border-cyan-500">
+                        <option value="full">Full Pentest</option>
+                        <option value="recon_only">Recon Only</option>
+                        <option value="web_vulns">Web Vulnerabilities</option>
+                        <option value="injection">Injection Testing</option>
+                        <option value="auth_bypass">Auth Bypass</option>
+                    </select>
+                </div>
+                <button id="start-btn" onclick="startSession()"
+                    class="bg-cyan-600 hover:bg-cyan-500 text-white font-medium px-6 py-2 rounded text-sm transition">
+                    Start Session
+                </button>
+            </div>
+        </section>
+
+        <!-- Status Bar (hidden until session starts) -->
+        <section id="status-bar" class="hidden bg-gray-900 border border-gray-800 rounded-lg p-4">
+            <div class="flex items-center justify-between mb-3">
+                <div class="flex items-center gap-4">
+                    <span class="text-sm text-gray-400">Session: <span id="session-id" class="text-cyan-400 font-mono">—</span></span>
+                    <span class="text-sm text-gray-400">Status: <span id="session-status" class="text-yellow-400 font-medium">—</span></span>
+                    <span class="text-sm text-gray-400">Phase: <span id="current-phase" class="text-white font-medium">—</span></span>
+                </div>
+            </div>
+            <!-- Kill Chain Progress -->
+            <div class="flex gap-1">
+                <div id="phase-recon" class="phase-pending flex-1 text-center py-1.5 rounded text-xs font-medium">Recon</div>
+                <div id="phase-scan" class="phase-pending flex-1 text-center py-1.5 rounded text-xs font-medium">Scan</div>
+                <div id="phase-test" class="phase-pending flex-1 text-center py-1.5 rounded text-xs font-medium">Test</div>
+                <div id="phase-verify" class="phase-pending flex-1 text-center py-1.5 rounded text-xs font-medium">Verify</div>
+                <div id="phase-report" class="phase-pending flex-1 text-center py-1.5 rounded text-xs font-medium">Report</div>
+            </div>
+        </section>
+
+        <!-- Two Column Layout -->
+        <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+            <!-- Agent Log -->
+            <div class="lg:col-span-2 bg-gray-900 border border-gray-800 rounded-lg flex flex-col" style="height: 500px;">
+                <div class="border-b border-gray-800 px-4 py-2.5 flex items-center justify-between">
+                    <h2 class="text-sm font-medium text-gray-300">Live Agent Log</h2>
+                    <span id="log-count" class="text-xs text-gray-500">0 entries</span>
+                </div>
+                <div id="log-panel" class="flex-1 overflow-y-auto p-4 text-xs leading-relaxed space-y-1">
+                    <div class="log-system">[system] Waiting for session...</div>
+                </div>
+            </div>
+
+            <!-- Findings Panel -->
+            <div class="bg-gray-900 border border-gray-800 rounded-lg flex flex-col" style="height: 500px;">
+                <div class="border-b border-gray-800 px-4 py-2.5 flex items-center justify-between">
+                    <h2 class="text-sm font-medium text-gray-300">Findings</h2>
+                    <span id="finding-count" class="text-xs text-gray-500">0 found</span>
+                </div>
+                <div id="findings-panel" class="flex-1 overflow-y-auto p-4 space-y-3">
+                    <div class="text-xs text-gray-500">No findings yet.</div>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <script>
+        let ws = null;
+        let sessionId = null;
+        let logCount = 0;
+
+        // Health check on load
+        async function checkHealth() {
+            try {
+                const resp = await fetch('/api/health');
+                const data = await resp.json();
+                const dot = document.getElementById('health-dot');
+                const text = document.getElementById('health-text');
+                if (data.ollama === 'connected') {
+                    dot.className = 'w-2.5 h-2.5 rounded-full ' + (data.model_available ? 'bg-green-400' : 'bg-yellow-400');
+                    text.textContent = data.model_available ? 'Ollama ready' : 'Model not pulled';
+                    text.className = 'text-sm ' + (data.model_available ? 'text-green-400' : 'text-yellow-400');
+                } else {
+                    dot.className = 'w-2.5 h-2.5 rounded-full bg-red-400';
+                    text.textContent = 'Ollama offline';
+                    text.className = 'text-sm text-red-400';
+                }
+            } catch {
+                document.getElementById('health-dot').className = 'w-2.5 h-2.5 rounded-full bg-red-400';
+                document.getElementById('health-text').textContent = 'API error';
+            }
+        }
+
+        function addLog(msg, cls = 'log-system') {
+            const panel = document.getElementById('log-panel');
+            const div = document.createElement('div');
+            div.className = cls;
+            div.textContent = msg;
+            panel.appendChild(div);
+            panel.scrollTop = panel.scrollHeight;
+            logCount++;
+            document.getElementById('log-count').textContent = logCount + ' entries';
+        }
+
+        async function startSession() {
+            const targetUrl = document.getElementById('target-url').value;
+            const scopeMode = document.getElementById('scope-mode').value;
+            const btn = document.getElementById('start-btn');
+            btn.disabled = true;
+            btn.textContent = 'Starting...';
+
+            try {
+                // Create session
+                const resp = await fetch('/api/sessions', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ target_url: targetUrl, scope_mode: scopeMode }),
+                });
+                const session = await resp.json();
+                sessionId = session.id;
+
+                // Show status bar
+                document.getElementById('status-bar').classList.remove('hidden');
+                document.getElementById('session-id').textContent = sessionId;
+                document.getElementById('session-status').textContent = session.status;
+
+                addLog(`[system] Session created: ${sessionId}`);
+                addLog(`[system] Target: ${targetUrl} | Scope: ${scopeMode}`);
+
+                // Connect WebSocket
+                const wsProtocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+                ws = new WebSocket(`${wsProtocol}//${location.host}/ws/${sessionId}`);
+                ws.onmessage = (event) => {
+                    try {
+                        const data = JSON.parse(event.data);
+                        if (data.type === 'status') {
+                            document.getElementById('session-status').textContent = data.status;
+                            addLog(`[system] ${data.message}`);
+                        } else if (data.type === 'log') {
+                            const cls = 'log-' + (data.phase || 'system');
+                            addLog(`[${data.phase || 'agent'}] ${data.message}`, cls);
+                        } else if (data.type === 'finding') {
+                            addFinding(data);
+                        }
+                    } catch {
+                        addLog(`[ws] ${event.data}`);
+                    }
+                };
+                ws.onclose = () => addLog('[system] WebSocket closed');
+
+                // Trigger start
+                await fetch(`/api/sessions/${sessionId}/start`, { method: 'POST' });
+                addLog('[system] Agent loop triggered (placeholder).');
+
+                btn.textContent = 'Running';
+            } catch (err) {
+                addLog(`[error] ${err.message}`, 'log-error');
+                btn.disabled = false;
+                btn.textContent = 'Start Session';
+            }
+        }
+
+        function addFinding(data) {
+            const panel = document.getElementById('findings-panel');
+            if (panel.querySelector('.text-gray-500')) panel.innerHTML = '';
+
+            const severityColors = {
+                critical: 'bg-red-900 text-red-300',
+                high: 'bg-orange-900 text-orange-300',
+                medium: 'bg-yellow-900 text-yellow-300',
+                low: 'bg-blue-900 text-blue-300',
+                info: 'bg-gray-800 text-gray-300',
+            };
+            const cls = severityColors[data.severity] || severityColors.info;
+
+            const div = document.createElement('div');
+            div.className = 'bg-gray-800 rounded p-3 border border-gray-700';
+            div.innerHTML = `
+                <div class="flex items-center justify-between mb-1">
+                    <span class="text-xs font-medium text-white">${data.vuln_type || 'Unknown'}</span>
+                    <span class="text-xs px-2 py-0.5 rounded ${cls}">${data.severity || '?'}</span>
+                </div>
+                <div class="text-xs text-gray-400">${data.url || ''}</div>
+            `;
+            panel.appendChild(div);
+
+            const count = panel.children.length;
+            document.getElementById('finding-count').textContent = count + ' found';
+        }
+
+        checkHealth();
+        setInterval(checkHealth, 15000);
+    </script>
+</body>
+</html>

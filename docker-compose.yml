@@ -1,0 +1,35 @@
+services:
+  juice-shop:
+    image: bkimminich/juice-shop:v17.1.1
+    container_name: juice-shop
+    ports:
+      - "3000:3000"
+    networks:
+      - pentest-net
+    restart: unless-stopped
+
+  kali-tools:
+    image: kalilinux/kali-rolling
+    container_name: kali-tools
+    depends_on:
+      - juice-shop
+    networks:
+      - pentest-net
+    stdin_open: true
+    tty: true
+    command: >
+      bash -c "
+        apt-get update &&
+        apt-get install -y --no-install-recommends
+          nmap ffuf sqlmap nuclei nikto
+          curl wget python3 python3-pip
+          netcat-openbsd dnsutils &&
+        apt-get clean &&
+        rm -rf /var/lib/apt/lists/* &&
+        tail -f /dev/null
+      "
+    restart: unless-stopped
+
+networks:
+  pentest-net:
+    driver: bridge
