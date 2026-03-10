@@ -1,0 +1,124 @@
+FROM kalilinux/kali-rolling
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# ===== Core pentest tools via apt =====
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    nmap ffuf sqlmap nuclei nikto gobuster dirb wfuzz \
+    whatweb wafw00f hydra commix arjun \
+    john hashcat \
+    curl wget python3 python3-pip python3-venv \
+    netcat-openbsd dnsutils whois \
+    testssl.sh \
+    # Node.js for Playwright
+    nodejs npm \
+    # Chromium deps for Playwright
+    chromium \
+    libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2 \
+    libxcomposite1 libxrandr2 libgbm1 libpango-1.0-0 \
+    libcairo2 libasound2t64 libxdamage1 libxshmfence1 \
+    # Build tools for Go binaries
+    ca-certificates git unzip \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# ===== Wordlists =====
+RUN mkdir -p /usr/share/wordlists && \
+    wget -q "https://github.com/brannondorsey/naive-hashcat/releases/download/data/rockyou.txt" \
+        -O /usr/share/wordlists/rockyou.txt
+
+# ===== Python tools via pip =====
+RUN pip3 install --no-cache-dir --break-system-packages \
+    sslyze \
+    XSStrike \
+    python-owasp-zap-v2.4
+
+# ===== Playwright =====
+RUN npm install -g playwright@latest 2>/dev/null || true
+ENV PLAYWRIGHT_BROWSERS_PATH=/usr/lib/chromium
+ENV NODE_PATH=/usr/local/lib/node_modules
+# Playwright will use the system chromium
+
+# ===== dalfox (XSS scanner) — Go binary from GitHub =====
+RUN ARCH=$(dpkg --print-architecture) && \
+    DALFOX_VERSION="2.9.3" && \
+    if [ "$ARCH" = "amd64" ]; then \
+        wget -q "https://github.com/hahwul/dalfox/releases/download/v${DALFOX_VERSION}/dalfox_${DALFOX_VERSION}_linux_amd64.tar.gz" -O /tmp/dalfox.tar.gz && \
+        tar -xzf /tmp/dalfox.tar.gz -C /usr/local/bin dalfox && \
+        chmod +x /usr/local/bin/dalfox && \
+        rm /tmp/dalfox.tar.gz; \
+    elif [ "$ARCH" = "arm64" ]; then \
+        wget -q "https://github.com/hahwul/dalfox/releases/download/v${DALFOX_VERSION}/dalfox_${DALFOX_VERSION}_linux_arm64.tar.gz" -O /tmp/dalfox.tar.gz && \
+        tar -xzf /tmp/dalfox.tar.gz -C /usr/local/bin dalfox && \
+        chmod +x /usr/local/bin/dalfox && \
+        rm /tmp/dalfox.tar.gz; \
+    fi
+
+# ===== jwt_tool =====
+RUN git clone --depth 1 https://github.com/ticarpi/jwt_tool.git /opt/jwt_tool && \
+    pip3 install --no-cache-dir --break-system-packages -r /opt/jwt_tool/requirements.txt && \
+    ln -s /opt/jwt_tool/jwt_tool.py /usr/local/bin/jwt_tool && \
+    chmod +x /opt/jwt_tool/jwt_tool.py
+
+# ===== crlfuzz (CRLF injection scanner) — Go binary =====
+RUN ARCH=$(dpkg --print-architecture) && \
+    CRLFUZZ_VERSION="1.4.1" && \
+    if [ "$ARCH" = "amd64" ]; then \
+        wget -q "https://github.com/dwisiswant0/crlfuzz/releases/download/v${CRLFUZZ_VERSION}/crlfuzz_${CRLFUZZ_VERSION}_linux_amd64.tar.gz" -O /tmp/crlfuzz.tar.gz && \
+        tar -xzf /tmp/crlfuzz.tar.gz -C /usr/local/bin crlfuzz && \
+        chmod +x /usr/local/bin/crlfuzz && \
+        rm /tmp/crlfuzz.tar.gz; \
+    elif [ "$ARCH" = "arm64" ]; then \
+        wget -q "https://github.com/dwisiswant0/crlfuzz/releases/download/v${CRLFUZZ_VERSION}/crlfuzz_${CRLFUZZ_VERSION}_linux_arm64.tar.gz" -O /tmp/crlfuzz.tar.gz && \
+        tar -xzf /tmp/crlfuzz.tar.gz -C /usr/local/bin crlfuzz && \
+        chmod +x /usr/local/bin/crlfuzz && \
+        rm /tmp/crlfuzz.tar.gz; \
+    fi
+
+# ===== ZAP CLI helper script =====
+RUN echo '#!/bin/bash\n\
+# Wrapper to call ZAP API from kali container\n\
+ZAP_HOST="${ZAP_HOST:-zap}"\n\
+ZAP_PORT="${ZAP_PORT:-8080}"\n\
+ZAP_BASE="http://${ZAP_HOST}:${ZAP_PORT}"\n\
+\n\
+case "$1" in\n\
+  spider)\n\
+    curl -s "${ZAP_BASE}/JSON/spider/action/scan/?url=$2&maxChildren=10&recurse=true"\n\
+    ;;\n\
+  active-scan)\n\
+    curl -s "${ZAP_BASE}/JSON/ascan/action/scan/?url=$2&recurse=true"\n\
+    ;;\n\
+  alerts)\n\
+    curl -s "${ZAP_BASE}/JSON/alert/view/alerts/?baseurl=$2&start=0&count=100"\n\
+    ;;\n\
+  status)\n\
+    curl -s "${ZAP_BASE}/JSON/core/view/version/"\n\
+    ;;\n\
+  spider-status)\n\
+    curl -s "${ZAP_BASE}/JSON/spider/view/status/?scanId=$2"\n\
+    ;;\n\
+  scan-status)\n\
+    curl -s "${ZAP_BASE}/JSON/ascan/view/status/?scanId=$2"\n\
+    ;;\n\
+  ajax-spider)\n\
+    curl -s "${ZAP_BASE}/JSON/ajaxSpider/action/scan/?url=$2"\n\
+    ;;\n\
+  summary)\n\
+    curl -s "${ZAP_BASE}/JSON/alert/view/alertsSummary/?baseurl=$2"\n\
+    ;;\n\
+  *)\n\
+    echo "ZAP CLI Wrapper"\n\
+    echo "Usage: zap-cli <command> [target_url]"\n\
+    echo "Commands: spider, active-scan, alerts, status, spider-status, scan-status, ajax-spider, summary"\n\
+    ;;\n\
+esac' > /usr/local/bin/zap-cli && chmod +x /usr/local/bin/zap-cli
+
+# ===== Playwright crawl helper =====
+# Simple wrapper that 7B LLMs can invoke like any other tool
+# Usage: pw-crawl http://juice-shop:3000
+COPY scripts/pw-crawl.js /usr/local/bin/pw-crawl.js
+RUN printf '#!/bin/bash\nNODE_PATH=/usr/local/lib/node_modules node /usr/local/bin/pw-crawl.js "$@"\n' > /usr/local/bin/pw-crawl && \
+    chmod +x /usr/local/bin/pw-crawl
+
+WORKDIR /work
+CMD ["tail", "-f", "/dev/null"]

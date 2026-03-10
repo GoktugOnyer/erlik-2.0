@@ -1,12 +1,25 @@
 import uuid
+import asyncio
+import time
+import json
+import re
+import os
+from datetime import datetime
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
-from fastapi.responses import HTMLResponse
+from pathlib import Path
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request
+from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.templating import Jinja2Templates
+import httpx
 
 from orchestrator.database import init_db, get_db
-from orchestrator.models import SessionCreate, SessionResponse
+from orchestrator.models import (
+    SessionCreate, SessionResponse, ReportResponse, SessionMetrics,
+    ChainCreate, ChainResponse, ChainSessionSummary,
+    BenchmarkCreate, BenchmarkSessionResult, BenchmarkResponse,
+)
 from orchestrator import llm_client
+from orchestrator.tool_executor import execute_tool, check_container_running
 
 
 @asynccontextmanager
@@ -15,8 +28,140 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="Pentest Agent", lifespan=lifespan)
+app = FastAPI(title="Erlik Pentest Agent", lifespan=lifespan)
 templates = Jinja2Templates(directory="dashboard/templates")
+
+
+# --- Preset Prompts ---
+
+PRESET_PROMPTS = {
+    "sqli_focused": {
+        "label": "Mission: SQL Injection Hunt",
+        "prompt": (
+            "MISSION: Find SQL injection vulnerabilities in the target application.\n\n"
+            "FOCUS AREAS:\n"
+            "- Discover API endpoints and pages that accept user input (query params, form fields, JSON bodies)\n"
+            "- Test each input point for SQL injection using appropriate tools\n"
+            "- Check for both error-based and blind SQLi\n"
+            "- Look for database information disclosure in error messages\n\n"
+            "METHODOLOGY:\n"
+            "1. Reconnaissance — identify the tech stack and map the application\n"
+            "2. Endpoint Discovery — find all URLs that accept parameters\n"
+            "3. Injection Testing — test discovered endpoints with sqlmap and manual payloads\n"
+            "4. Validation — confirm any findings with additional evidence\n\n"
+            "DECISION GUIDANCE:\n"
+            "- YOU decide which specific commands to run and in what order\n"
+            "- When you find an endpoint with parameters, test it for injection\n"
+            "- Prioritize endpoints that return dynamic data or database content\n"
+            "- Use curl to probe endpoints before running heavy scanners\n"
+            "- If sqlmap confirms injection, report it immediately then keep testing other endpoints"
+        ),
+    },
+    "full_recon": {
+        "label": "Mission: Full Reconnaissance",
+        "prompt": (
+            "MISSION: Perform comprehensive reconnaissance and vulnerability scanning of the target.\n\n"
+            "FOCUS AREAS:\n"
+            "- Map the entire attack surface: ports, services, technologies, directories\n"
+            "- Discover all API endpoints, hidden paths, and admin interfaces\n"
+            "- Run broad vulnerability scans across multiple categories\n"
+            "- Test for misconfigurations, information disclosure, and known CVEs\n\n"
+            "METHODOLOGY:\n"
+            "1. Service Enumeration — identify all running services and their versions\n"
+            "2. Directory & Endpoint Discovery — find hidden paths and API routes\n"
+            "3. Technology Fingerprinting — identify frameworks, libraries, middleware\n"
+            "4. Broad Vulnerability Scanning — test across all major vuln categories\n\n"
+            "DECISION GUIDANCE:\n"
+            "- YOU decide which tools to use and in what order\n"
+            "- Start broad (recon), then go deep on anything interesting\n"
+            "- Use different wordlists if the first scan doesn't find much\n"
+            "- Probe every discovered endpoint with curl before heavy scanning\n"
+            "- Cover as many tool categories as possible: scanning, fuzzing, injection testing"
+        ),
+    },
+    "auth_and_access": {
+        "label": "Mission: Auth & Access Control",
+        "prompt": (
+            "MISSION: Test authentication mechanisms and access controls for weaknesses.\n\n"
+            "FOCUS AREAS:\n"
+            "- Find login endpoints and test for weak/default credentials\n"
+            "- Test for broken access control (accessing resources without auth)\n"
+            "- Check for user enumeration through error message differences\n"
+            "- Look for exposed admin panels and sensitive API endpoints\n"
+            "- Test JWT tokens if the app uses them\n\n"
+            "METHODOLOGY:\n"
+            "1. Discovery — find login pages, registration forms, password reset flows\n"
+            "2. Credential Testing — try common passwords against discovered accounts\n"
+            "3. Access Control — try accessing protected endpoints without authentication\n"
+            "4. Token Analysis — if JWT/session tokens exist, analyze them for weaknesses\n\n"
+            "AVAILABLE RESOURCES:\n"
+            "- Password list: /usr/share/wordlists/rockyou.txt (14M passwords)\n"
+            "- Wordlists: /usr/share/dirb/wordlists/common.txt\n"
+            "- Tools: hydra (brute force), jwt_tool (JWT analysis), curl (manual testing)\n\n"
+            "DECISION GUIDANCE:\n"
+            "- YOU decide which commands to run\n"
+            "- First discover what authentication the app uses\n"
+            "- Try common admin credentials manually before brute forcing\n"
+            "- Check if any API endpoints return data without authentication\n"
+            "- Look for user data exposure in API responses"
+        ),
+    },
+    "injection_suite": {
+        "label": "Mission: All Injection Types",
+        "prompt": (
+            "MISSION: Test for all types of injection vulnerabilities.\n\n"
+            "FOCUS AREAS:\n"
+            "- SQL Injection (error-based, blind, time-based)\n"
+            "- Cross-Site Scripting (reflected, stored, DOM-based)\n"
+            "- Command Injection (OS command execution)\n"
+            "- CRLF Injection (header injection)\n"
+            "- Any other injection types the tools support\n\n"
+            "METHODOLOGY:\n"
+            "1. Surface Mapping — find all input points (params, headers, forms, APIs)\n"
+            "2. SQLi Testing — test inputs with sqlmap at high sensitivity\n"
+            "3. XSS Testing — test inputs with xsstrike and dalfox\n"
+            "4. Other Injections — test with commix (OS injection) and crlfuzz (CRLF)\n"
+            "5. Manual Verification — use curl to verify and demonstrate any findings\n\n"
+            "DECISION GUIDANCE:\n"
+            "- YOU decide which endpoints to test and with which tools\n"
+            "- Focus on endpoints that echo user input back in responses\n"
+            "- Test query parameters, form fields, and JSON body values\n"
+            "- Use high sensitivity levels for sqlmap (--level=3 or higher)\n"
+            "- Try manual injection payloads with curl for interesting endpoints"
+        ),
+    },
+    "owasp_methodology": {
+        "label": "Mission: OWASP Top 10 Assessment",
+        "prompt": (
+            "MISSION: Systematically test for OWASP Top 10 vulnerabilities.\n\n"
+            "FOCUS AREAS:\n"
+            "- A01 Broken Access Control — unauthorized access to resources\n"
+            "- A02 Cryptographic Failures — sensitive data in transit/at rest\n"
+            "- A03 Injection — SQL, XSS, command injection\n"
+            "- A05 Security Misconfiguration — default configs, verbose errors, unnecessary features\n"
+            "- A07 Authentication Failures — weak passwords, broken auth flows\n"
+            "- A09 Logging & Monitoring — information disclosure in errors\n\n"
+            "METHODOLOGY:\n"
+            "1. Recon & Mapping — understand the app structure and technology\n"
+            "2. Access Control Testing — try accessing endpoints without auth\n"
+            "3. Injection Testing — test all input points for SQLi and XSS\n"
+            "4. Configuration Review — check for verbose errors, exposed files, defaults\n"
+            "5. Authentication Testing — test login with common credentials\n\n"
+            "AVAILABLE RESOURCES:\n"
+            "- Password list: /usr/share/wordlists/rockyou.txt\n"
+            "- Wordlists: /usr/share/dirb/wordlists/common.txt\n\n"
+            "DECISION GUIDANCE:\n"
+            "- YOU decide which tools and commands to run\n"
+            "- Cover multiple OWASP categories, don't spend all time on one\n"
+            "- Use curl to explore endpoints before heavy scanning\n"
+            "- Report findings as you discover them, don't wait until the end"
+        ),
+    },
+    "custom": {
+        "label": "Custom (Freeform)",
+        "prompt": "",
+    },
+}
 
 
 # --- WebSocket Manager ---
@@ -46,6 +191,2609 @@ class ConnectionManager:
 
 manager = ConnectionManager()
 
+# --- Running Agent Tasks ---
+running_tasks: dict[str, asyncio.Task] = {}
+
+
+# --- Agent Loop ---
+
+DEFAULT_MAX_TURNS = 15   # default LLM round-trips per session
+ABSOLUTE_MAX_TURNS = 150  # safety cap — thesis spec maximum (prevents infinite loops)
+
+# --- Tool Phase Categories for Enforcement ---
+TOOL_PHASES = {
+    "recon": {"nmap", "whatweb", "nikto", "wafw00f", "whois", "sslyze", "testssl"},
+    "discovery": {"gobuster", "ffuf", "dirb", "wfuzz", "arjun", "pw-crawl"},
+    "vuln_scan": {"nuclei", "sqlmap", "xsstrike", "dalfox", "commix", "crlfuzz", "zap-cli"},
+    "exploitation": {"curl", "hydra", "john", "hashcat", "jwt_tool"},
+}
+MIN_PHASES_BEFORE_DONE = 3  # must cover at least 3 of 4 phases before "done" is accepted
+DEFAULT_MIN_TURNS_BEFORE_DONE = 8   # base min tools before "done" is accepted (scales with max_turns)
+
+# --- Chain Mode Phase Definitions ---
+CHAIN_PHASES = ["recon", "discovery", "vuln_scan", "exploitation"]
+
+CHAIN_PHASE_DIRECTIVES = {
+    "recon": (
+        "CHAIN PHASE: RECONNAISSANCE\n"
+        "Focus ONLY on: port scanning, service identification, technology detection, WAF detection.\n"
+        "Tools to prioritize: nmap, whatweb, wafw00f, nikto, sslyze, whois\n"
+        "Do NOT run discovery or exploitation tools yet. Just gather information about the target.\n"
+        "When you have identified services, technologies, and open ports — use 'done'."
+    ),
+    "discovery": (
+        "CHAIN PHASE: DISCOVERY\n"
+        "Focus ONLY on: directory enumeration, endpoint discovery, parameter finding, crawling.\n"
+        "Tools to prioritize: gobuster, ffuf, dirb, wfuzz, arjun, pw-crawl, curl\n"
+        "Do NOT re-run recon tools. Use the prior recon data provided above.\n"
+        "When you have discovered endpoints and parameters — use 'done'."
+    ),
+    "vuln_scan": (
+        "CHAIN PHASE: VULNERABILITY SCANNING\n"
+        "Focus ONLY on: testing discovered endpoints for vulnerabilities.\n"
+        "Tools to prioritize: sqlmap, xsstrike, dalfox, commix, nuclei, crlfuzz, zap-cli\n"
+        "Test EVERY discovered endpoint and parameter from prior sessions.\n"
+        "Report each finding with a 'finding' action before moving on."
+    ),
+    "exploitation": (
+        "CHAIN PHASE: EXPLOITATION & VALIDATION\n"
+        "Focus ONLY on: confirming found vulnerabilities, extracting data, chaining attacks.\n"
+        "Tools to prioritize: curl, sqlmap (with --dump), hydra, john, jwt_tool\n"
+        "Validate and exploit each vulnerability found in prior sessions.\n"
+        "Try to chain findings for deeper impact."
+    ),
+}
+
+
+def _get_phase_coverage(tools_executed: set, enabled_tools: list) -> tuple:
+    """Return (completed_phases_set, uncovered_phase_descriptions_list).
+
+    A phase counts as completed if at least one of its tools was executed.
+    A phase is only considered uncovered if at least one of its tools is enabled.
+    """
+    completed = set()
+    uncovered = []
+    enabled_set = set(enabled_tools)
+    for phase_name, phase_tools in TOOL_PHASES.items():
+        available = phase_tools & enabled_set
+        if not available:
+            continue  # skip phases with no enabled tools
+        if phase_tools & tools_executed:
+            completed.add(phase_name)
+        else:
+            examples = sorted(available)[:3]
+            uncovered.append(f"{phase_name} (try: {', '.join(examples)})")
+    return completed, uncovered
+
+
+# --- Output Cleaning & Parsing Helpers ---
+
+_ANSI_RE = re.compile(r'\x1b\[[0-9;]*[a-zA-Z]|\x1b\[\??\d+[a-zA-Z]')
+
+
+def _strip_ansi(text: str) -> str:
+    """Remove ANSI escape codes from tool output."""
+    return _ANSI_RE.sub('', text)
+
+
+# --- Semantic Loop Detection ---
+
+def _normalize_command(command: str) -> tuple[str, str]:
+    """Extract (tool_name, core_target) from a command for similarity comparison."""
+    parts = command.strip().split()
+    if not parts:
+        return ("", "")
+    tool = parts[0].split("/")[-1]
+    # Extract the target URL/host from common flag patterns
+    target = ""
+    for i, p in enumerate(parts):
+        if p in ("-u", "--url", "-t", "--target") and i + 1 < len(parts):
+            target = parts[i + 1].strip('"').strip("'")
+            break
+        if p.startswith("http://") or p.startswith("https://"):
+            target = p.strip('"').strip("'")
+            break
+    return (tool, target)
+
+
+def _is_duplicate_command(command: str, recent_commands: list[str], max_similar: int = 1) -> bool:
+    """Check if this command is too similar to recently executed commands.
+    Returns True if the same tool has been used on the same target >= max_similar times.
+    Checks ALL commands in the session, not just a small window."""
+    tool, target = _normalize_command(command)
+    if not tool:
+        return False
+
+    similar_count = 0
+    for prev in recent_commands:  # check ALL commands in session
+        prev_tool, prev_target = _normalize_command(prev)
+        if prev_tool == tool and (prev_target == target or not target or not prev_target):
+            similar_count += 1
+    return similar_count >= max_similar
+
+
+# --- Smart Message Trimming ---
+
+# Rough token estimation: ~4 chars per token for English text
+MAX_ESTIMATED_TOKENS = 3600  # leave ~496 tokens for LLM response within 4096 window
+
+
+def _estimate_tokens(messages: list[dict]) -> int:
+    """Rough token count: ~4 chars per token."""
+    return sum(len(m.get("content", "")) for m in messages) // 4
+
+
+def _trim_messages(messages: list[dict], recent_commands: list[str] = None,
+                   findings_data: list[dict] = None) -> list[dict]:
+    """Keep messages within context window. Preserves system prompt and recent turns,
+    summarizes older conversation into a compact recap.
+
+    Uses the authoritative recent_commands and findings_data lists (maintained by
+    the agent loop) instead of fragile regex parsing of message content.
+    This prevents Ollama from silently truncating old messages, which causes
+    the LLM to forget what tools it already ran and lose coherence.
+    """
+    if _estimate_tokens(messages) <= MAX_ESTIMATED_TOKENS:
+        return messages  # fits, no trimming needed
+
+    # Always keep system message (index 0)
+    system_msg = messages[0]
+    rest = messages[1:]
+
+    # Keep at least the last 6 messages (3 turns: assistant+user pairs)
+    keep_recent = 6
+    if len(rest) <= keep_recent:
+        return messages  # can't trim further
+
+    # Split into old (to summarize) and recent (to keep)
+    recent_msgs = rest[-keep_recent:]
+
+    # Build compact summary using authoritative tracking lists
+    summary_parts = ["CONVERSATION HISTORY (summarized):"]
+
+    # Use the real commands list if available
+    if recent_commands:
+        # Group by tool name for compact display
+        tool_runs = {}
+        for cmd in recent_commands:
+            tool, target = _normalize_command(cmd)
+            if tool:
+                if tool not in tool_runs:
+                    tool_runs[tool] = set()
+                if target:
+                    tool_runs[tool].add(target)
+        tool_strs = []
+        for t, targets in tool_runs.items():
+            if targets:
+                tool_strs.append(f"{t}({len(targets)} targets)")
+            else:
+                tool_strs.append(t)
+        summary_parts.append(f"Tools already run ({len(recent_commands)} executions): {', '.join(tool_strs)}")
+        summary_parts.append(f"FULL COMMAND LIST: {'; '.join(recent_commands[-20:])}")  # last 20 for reference
+    else:
+        # Fallback: parse from messages
+        tools_run = []
+        for msg in rest[:-keep_recent]:
+            content = msg.get("content", "")
+            tool_match = re.search(r'Tool: (\S+) \| Status: (\S+)', content)
+            if tool_match:
+                tools_run.append(f"{tool_match.group(1)}({tool_match.group(2)})")
+        if tools_run:
+            summary_parts.append(f"Tools already run: {', '.join(tools_run)}")
+
+    # Use findings data if available
+    if findings_data:
+        finding_strs = [f"[{f.get('severity','?').upper()}] {f.get('vuln_type','?')}" for f in findings_data[:10]]
+        summary_parts.append(f"Findings so far ({len(findings_data)}): {'; '.join(finding_strs)}")
+
+    summary_parts.append("")
+    summary_parts.append("CRITICAL RULES:")
+    summary_parts.append("- Do NOT re-run any tool listed above on the same target.")
+    summary_parts.append("- Use a DIFFERENT tool or test a DIFFERENT endpoint/parameter.")
+    summary_parts.append("- If you have enough findings, use the 'done' action.")
+
+    summary_msg = {"role": "user", "content": "\n".join(summary_parts)}
+    return [system_msg, summary_msg] + recent_msgs
+
+
+def _parse_tool_output(tool_name: str, output: str, command: str) -> str:
+    """Extract key findings from cleaned tool output. Returns concise summary for LLM."""
+    findings = []
+    lines = output.split("\n")
+
+    if tool_name == "nmap":
+        for line in lines:
+            m = re.search(r'(\d+)/(\w+)\s+open\s+(\S+)\s*(.*)', line)
+            if m:
+                findings.append(f"  Port {m.group(1)}: {m.group(3)} {m.group(4).strip()}")
+        if findings:
+            return "OPEN PORTS:\n" + "\n".join(findings)
+
+    elif tool_name in ("gobuster", "ffuf", "dirb", "wfuzz"):
+        for line in lines:
+            m = re.search(r'(/\S+)\s+\(Status:\s*(\d+)\)', line)
+            if not m:
+                m = re.search(r'(\S+)\s+\[Status:\s*(\d+)', line)
+            if m and m.group(2) in ("200", "301", "302", "307"):
+                findings.append(f"  {m.group(1)} (status {m.group(2)})")
+        if findings:
+            return f"DISCOVERED PATHS ({len(findings)}):\n" + "\n".join(findings[:15])
+
+    elif tool_name == "sqlmap":
+        for line in lines:
+            if "injectable" in line.lower():
+                findings.append(line.strip())
+            elif "back-end DBMS" in line:
+                findings.append(line.strip())
+            elif "columns found" in line.lower() or "entries" in line.lower():
+                findings.append(line.strip())
+        if findings:
+            return "SQL INJECTION RESULTS:\n  " + "\n  ".join(findings)
+
+    elif tool_name == "nuclei":
+        for line in lines:
+            if any(sev in line.lower() for sev in ("[critical]", "[high]", "[medium]", "[low]", "[info]")):
+                findings.append(line.strip())
+        if findings:
+            return f"NUCLEI FINDINGS ({len(findings)}):\n  " + "\n  ".join(findings[:10])
+
+    elif tool_name == "whatweb":
+        techs = re.findall(r'\[([^\]]+)\]', output)
+        useful = [t for t in techs if len(t) < 40 and not t.startswith("1m") and not t.startswith("0m")]
+        if useful:
+            return "TECHNOLOGIES: " + ", ".join(useful[:10])
+
+    elif tool_name in ("xsstrike", "dalfox"):
+        for line in lines:
+            if "vuln" in line.lower() or "found" in line.lower() or "reflect" in line.lower():
+                findings.append(line.strip())
+        if findings:
+            return "XSS RESULTS:\n  " + "\n  ".join(findings[:5])
+
+    elif tool_name == "arjun":
+        params = re.findall(r'(?:Found|Parameter):\s*(\w+)', output, re.IGNORECASE)
+        if params:
+            return "PARAMETERS FOUND: " + ", ".join(params)
+
+    elif tool_name == "pw-crawl":
+        # Extract discovered links and API calls
+        links = re.findall(r'  (https?://\S+)', output)
+        api_calls = []
+        in_api_section = False
+        for line in lines:
+            if "API Calls Observed" in line:
+                in_api_section = True
+                continue
+            if in_api_section and line.strip().startswith("http"):
+                api_calls.append(line.strip())
+            elif in_api_section and line.startswith("==="):
+                in_api_section = False
+        result_parts = []
+        if links:
+            result_parts.append(f"LINKS ({len(links)}): {', '.join(links[:10])}")
+        if api_calls:
+            result_parts.append(f"API ENDPOINTS: {', '.join(api_calls[:10])}")
+        forms = re.findall(r'Action: (\S+) Method: (\S+)', output)
+        if forms:
+            result_parts.append(f"FORMS: {', '.join(f'{f[1]} {f[0]}' for f in forms[:5])}")
+        if result_parts:
+            return "JS CRAWL RESULTS:\n  " + "\n  ".join(result_parts)
+
+    elif tool_name == "zap-cli":
+        # Parse ZAP JSON output
+        try:
+            data = json.loads(output)
+            # alerts response
+            if "alerts" in data:
+                alerts = data["alerts"]
+                by_risk = {}
+                for a in alerts:
+                    risk = a.get("risk", "Informational")
+                    name = a.get("name") or a.get("alert") or "Unknown"
+                    by_risk.setdefault(risk, []).append(name)
+                summary_parts = []
+                for risk in ["High", "Medium", "Low", "Informational"]:
+                    if risk in by_risk:
+                        unique = list(dict.fromkeys(by_risk[risk]))  # deduplicate preserving order
+                        summary_parts.append(f"  {risk}: {', '.join(unique[:5])}")
+                if summary_parts:
+                    return f"ZAP ALERTS ({len(alerts)} total):\n" + "\n".join(summary_parts)
+            # spider/scan response
+            elif "scan" in data:
+                return f"ZAP scan started (ID: {data['scan']})"
+            elif "status" in data:
+                return f"ZAP scan status: {data['status']}%"
+            elif "version" in data:
+                return f"ZAP version: {data['version']}"
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+    return ""
+
+
+def _auto_detect_findings(tool_name: str, output: str, command: str) -> list[dict]:
+    """Programmatically detect confirmed vulnerabilities from tool output.
+    Returns list of finding dicts ready to save to DB.
+    This removes dependence on the LLM to report findings."""
+    findings = []
+
+    # --- sqlmap: confirmed SQL injection ---
+    if tool_name == "sqlmap":
+        # Check for confirmed injection (sqlmap "resumed injection point" or "is vulnerable")
+        sqli_confirmed = False
+        dbms = ""
+        payload_lines = []
+        param = ""
+        for line in output.split("\n"):
+            if "injection point" in line.lower() or "is vulnerable" in line.lower():
+                sqli_confirmed = True
+            if "back-end DBMS" in line and ":" in line:
+                dbms = line.split(":")[-1].strip()
+            if "Parameter:" in line:
+                pm = re.search(r'Parameter:\s*(\S+)', line)
+                if pm:
+                    param = pm.group(1)
+            if "Payload:" in line:
+                payload_lines.append(line.strip())
+        if sqli_confirmed:
+            url_match = re.search(r'-u\s+"?([^"\s]+)', command)
+            url = url_match.group(1) if url_match else ""
+            evidence = f"DBMS: {dbms}" if dbms else "SQL injection confirmed by sqlmap"
+            if payload_lines:
+                evidence += "\n" + "\n".join(payload_lines[:3])
+            findings.append({
+                "vuln_type": "SQL Injection",
+                "severity": "high",
+                "url": url,
+                "parameter": param,
+                "evidence": evidence,
+            })
+
+    # --- nuclei: high/critical findings ---
+    elif tool_name == "nuclei":
+        for line in output.split("\n"):
+            line_lower = line.lower()
+            if "[critical]" in line_lower or "[high]" in line_lower:
+                # Parse nuclei output format: [template-id] [protocol] [severity] url
+                parts = re.findall(r'\[([^\]]+)\]', line)
+                sev = "high"
+                vuln_type = "Nuclei Finding"
+                url = ""
+                for p in parts:
+                    if p.lower() in ("critical", "high"):
+                        sev = p.lower()
+                    elif p not in ("http", "https", "tcp", "dns", "ssl"):
+                        vuln_type = p
+                url_match = re.search(r'(https?://\S+)', line)
+                if url_match:
+                    url = url_match.group(1)
+                findings.append({
+                    "vuln_type": vuln_type,
+                    "severity": sev,
+                    "url": url,
+                    "parameter": "",
+                    "evidence": line.strip()[:500],
+                })
+
+    # --- xsstrike/dalfox: confirmed XSS ---
+    elif tool_name in ("xsstrike", "dalfox"):
+        for line in output.split("\n"):
+            line_lower = line.lower()
+            if ("vulnerable" in line_lower or "confirmed" in line_lower or
+                    "reflected" in line_lower and "xss" in line_lower):
+                url_match = re.search(r'-u\s+"?([^"\s]+)', command) or re.search(r'url\s+"?([^"\s]+)', command)
+                url = url_match.group(1) if url_match else ""
+                findings.append({
+                    "vuln_type": "Cross-Site Scripting (XSS)",
+                    "severity": "medium",
+                    "url": url,
+                    "parameter": "",
+                    "evidence": line.strip()[:500],
+                })
+                break  # one finding per tool run
+
+    # --- curl: data exposure detection ---
+    elif tool_name == "curl":
+        output_lower = output.lower()
+        # Exposed user data (emails, passwords in API responses)
+        if ('"email"' in output_lower and '"password"' in output_lower) or \
+           ('"email"' in output_lower and ('"role"' in output_lower or '"isadmin"' in output_lower)):
+            url_match = re.search(r'(https?://\S+)', command)
+            url = url_match.group(1) if url_match else ""
+            # Count emails found
+            emails = re.findall(r'"email"\s*:\s*"([^"]+)"', output)
+            evidence = f"API exposes user data: {len(emails)} user records found"
+            if emails:
+                evidence += f"\nSample: {emails[0]}"
+            findings.append({
+                "vuln_type": "Sensitive Data Exposure",
+                "severity": "medium",
+                "url": url,
+                "parameter": "",
+                "evidence": evidence,
+            })
+        # Stack trace / error disclosure
+        elif "stacktrace" in output_lower or "stack trace" in output_lower or \
+                ("error" in output_lower and ("express" in output_lower or "node" in output_lower)):
+            url_match = re.search(r'(https?://\S+)', command)
+            url = url_match.group(1) if url_match else ""
+            # Extract the error type
+            err_match = re.search(r'<h2><em>\d+</em>\s*(.+?)</h2>', output)
+            err_msg = err_match.group(1).strip() if err_match else "Server error with stack trace"
+            findings.append({
+                "vuln_type": "Information Disclosure",
+                "severity": "info",
+                "url": url,
+                "parameter": "",
+                "evidence": err_msg[:300],
+            })
+
+    # --- nikto: findings ---
+    elif tool_name == "nikto":
+        for line in output.split("\n"):
+            if line.strip().startswith("+ ") and ("OSVDB" in line or "vulnerability" in line.lower()
+                                                   or "outdated" in line.lower() or "XSS" in line):
+                findings.append({
+                    "vuln_type": "Nikto Finding",
+                    "severity": "info",
+                    "url": "",
+                    "parameter": "",
+                    "evidence": line.strip()[:300],
+                })
+
+    # --- commix: command injection ---
+    elif tool_name == "commix":
+        for line in output.split("\n"):
+            if "injectable" in line.lower() or "is vulnerable" in line.lower():
+                url_match = re.search(r'-u\s+"?([^"\s]+)', command)
+                url = url_match.group(1) if url_match else ""
+                findings.append({
+                    "vuln_type": "Command Injection",
+                    "severity": "critical",
+                    "url": url,
+                    "parameter": "",
+                    "evidence": line.strip()[:500],
+                })
+                break
+
+    # --- zap-cli: ZAP proxy alerts ---
+    elif tool_name == "zap-cli":
+        # zap-cli alerts returns JSON: {"alerts": [{...}, ...]}
+        try:
+            data = json.loads(output)
+            alerts = data.get("alerts", [])
+            seen = set()  # deduplicate by (name, url)
+            for alert in alerts:
+                risk = (alert.get("risk") or "").lower()
+                name = alert.get("name") or alert.get("alert") or "ZAP Finding"
+                url = alert.get("url") or ""
+                evidence = alert.get("evidence") or ""
+                desc = alert.get("description") or ""
+                param = alert.get("param") or ""
+
+                # Map ZAP risk to our severity
+                sev_map = {"high": "high", "medium": "medium", "low": "low", "informational": "info"}
+                severity = sev_map.get(risk, "info")
+
+                # Only auto-report medium+ findings
+                if severity not in ("high", "medium", "critical"):
+                    continue
+
+                dedup_key = (name, url)
+                if dedup_key in seen:
+                    continue
+                seen.add(dedup_key)
+
+                evidence_str = f"{name}"
+                if evidence:
+                    evidence_str += f"\nEvidence: {evidence[:200]}"
+                if desc:
+                    evidence_str += f"\nDescription: {desc[:200]}"
+
+                findings.append({
+                    "vuln_type": name,
+                    "severity": severity,
+                    "url": url,
+                    "parameter": param,
+                    "evidence": evidence_str[:500],
+                })
+        except (json.JSONDecodeError, TypeError, KeyError):
+            pass  # Not JSON alerts output (could be spider/scan status)
+
+    return findings
+
+
+def _build_chaining_hint(tool_name: str, parsed_output: str, command: str) -> str:
+    """Suggest concrete next commands based on what a tool found."""
+    hints = []
+
+    if tool_name == "nmap" and "OPEN PORTS" in parsed_output:
+        hints.append('Consider: whatweb http://juice-shop:3000')
+        hints.append('Consider: gobuster dir -u http://juice-shop:3000 -w /usr/share/dirb/wordlists/common.txt --exclude-length 3748')
+
+    elif tool_name in ("gobuster", "ffuf", "dirb") and "DISCOVERED PATHS" in parsed_output:
+        paths = re.findall(r'  (/\S+)', parsed_output)
+        api_paths = [p for p in paths if '/api' in p.lower() or '/rest' in p.lower()]
+        if api_paths:
+            target = api_paths[0].split(" ")[0]
+            hints.append(f'Consider: curl -s http://juice-shop:3000{target}')
+            hints.append(f'Consider: sqlmap -u "http://juice-shop:3000{target}?q=test" --batch --level=3')
+        elif paths:
+            target = paths[0].split(" ")[0]
+            hints.append(f'Consider: curl -s http://juice-shop:3000{target}')
+
+    elif tool_name == "whatweb" and "TECHNOLOGIES" in parsed_output:
+        hints.append('Consider: gobuster dir -u http://juice-shop:3000 -w /usr/share/dirb/wordlists/common.txt --exclude-length 3748')
+        hints.append('Consider: nikto -h http://juice-shop:3000')
+
+    elif tool_name == "curl":
+        url_match = re.search(r'(http\S+)', command)
+        if url_match:
+            url = url_match.group(1).rstrip("'\"")
+            base = url.split("?")[0]
+            hints.append(f'Consider: sqlmap -u "{base}?q=test" --batch --level=3')
+            hints.append(f'Consider: nuclei -u {base}')
+
+    elif tool_name == "arjun" and "PARAMETERS FOUND" in parsed_output:
+        params_match = re.search(r'PARAMETERS FOUND: (.+)', parsed_output)
+        url_match = re.search(r'-u\s+(\S+)', command)
+        if params_match and url_match:
+            base_url = url_match.group(1)
+            first_param = params_match.group(1).split(",")[0].strip()
+            hints.append(f'Consider: sqlmap -u "{base_url}?{first_param}=test" --batch --level=3')
+
+    elif tool_name == "pw-crawl" and parsed_output:
+        # Extract API endpoints from crawl results
+        api_urls = re.findall(r'(http\S+/(?:api|rest)/\S+)', parsed_output)
+        if api_urls:
+            first_api = api_urls[0].split("?")[0]
+            hints.append(f'Consider: curl -s {first_api}')
+            hints.append(f'Consider: sqlmap -u "{first_api}?q=test" --batch --level=3')
+        else:
+            hints.append('Consider: zap-cli spider http://juice-shop:3000')
+
+    elif tool_name == "zap-cli":
+        if "spider" in command:
+            hints.append('Consider: zap-cli active-scan http://juice-shop:3000')
+        elif "active-scan" in command:
+            hints.append('Consider: zap-cli alerts http://juice-shop:3000')
+        elif "alerts" in command and "ZAP ALERTS" in parsed_output:
+            hints.append('Consider: curl -s http://juice-shop:3000/rest/products/search?q=test')
+            hints.append('Consider: sqlmap -u "http://juice-shop:3000/rest/products/search?q=test" --batch --level=3')
+
+    if hints:
+        return "SUGGESTED NEXT STEPS:\n" + "\n".join(f"  → {h}" for h in hints[:3])
+    return ""
+
+
+TOOL_USE_SYSTEM_PROMPT = """You are an autonomous penetration testing agent. You have access to security tools running inside a Kali Linux container targeting a web application.
+
+IMPORTANT RULES:
+1. You MUST respond with ONLY a JSON object for each action. No markdown, no explanations outside the JSON.
+2. After each tool result, analyze the output and decide the next action.
+3. When you find a vulnerability, report it immediately using the "finding" action BEFORE running the next tool.
+4. You MUST NOT call "done" until you have run tools from at least 3 of the 4 testing phases listed below. You will be BLOCKED from finishing if you skip phases.
+
+TARGET: http://juice-shop:3000
+ALWAYS use the full URL "http://juice-shop:3000" as the target. NEVER use bare hostnames without http://.
+
+MANDATORY TESTING PHASES (you must cover at least 3 before calling "done"):
+  Phase 1 — RECON: Identify services, technologies, and server info.
+    Tools: nmap, whatweb, nikto, wafw00f
+  Phase 2 — DISCOVERY: Find hidden directories, endpoints, and parameters.
+    Tools: gobuster, ffuf, dirb, wfuzz, arjun, pw-crawl
+  Phase 3 — VULNERABILITY SCANNING: Test for known vulns and injection points.
+    Tools: nuclei, sqlmap, xsstrike, dalfox, commix, crlfuzz, zap-cli
+  Phase 4 — MANUAL PROBING & EXPLOITATION: Explore endpoints, test auth, verify findings.
+    Tools: curl, hydra, jwt_tool
+
+RESPONSE FORMAT — always return exactly one JSON object:
+
+To run a tool:
+{"action": "run_tool", "command": "nmap -sV juice-shop -p 3000", "reason": "Port scan to identify services"}
+
+To report a vulnerability:
+{"action": "finding", "vuln_type": "SQL Injection", "severity": "high", "url": "http://juice-shop:3000/rest/products/search?q=test", "parameter": "q", "evidence": "Error message revealed SQL syntax"}
+
+To finish (ONLY after covering at least 3 phases):
+{"action": "done", "summary": "Completed testing. Found 3 vulnerabilities."}
+
+SEVERITY LEVELS: critical, high, medium, low, info
+
+TOOL USAGE EXAMPLES (use these exact URL formats):
+- nmap -sV juice-shop -p 3000
+- whatweb http://juice-shop:3000
+- nikto -h http://juice-shop:3000
+- gobuster dir -u http://juice-shop:3000 -w /usr/share/dirb/wordlists/common.txt --exclude-length 3748
+- ffuf -u http://juice-shop:3000/FUZZ -w /usr/share/dirb/wordlists/common.txt -fs 3748
+- sqlmap -u "http://juice-shop:3000/rest/products/search?q=test" --batch --level=3
+- curl -s http://juice-shop:3000/api/
+- curl -s http://juice-shop:3000/rest/products/search?q=' OR 1=1--
+- dirb http://juice-shop:3000 /usr/share/dirb/wordlists/common.txt
+- xsstrike -u http://juice-shop:3000/rest/products/search?q=test
+- dalfox url http://juice-shop:3000/rest/products/search?q=test
+- nuclei -u http://juice-shop:3000
+- arjun -u http://juice-shop:3000/api/Products
+- hydra -l admin -P /usr/share/wordlists/rockyou.txt juice-shop http-post-form "/rest/user/login:email=^USER^&password=^PASS^:Invalid"
+- zap-cli spider http://juice-shop:3000
+- zap-cli active-scan http://juice-shop:3000
+- zap-cli alerts http://juice-shop:3000
+- pw-crawl http://juice-shop:3000  (JS-rendered crawl — finds Angular/React routes and API calls that static tools miss)
+
+AVAILABLE RESOURCES ON THIS SYSTEM:
+- Wordlists: /usr/share/dirb/wordlists/common.txt, /usr/share/wordlists/rockyou.txt
+- ZAP proxy is running and accessible via zap-cli wrapper. Use "zap-cli spider" to crawl, then "zap-cli active-scan" to scan, then "zap-cli alerts" to get findings.
+- All tools run inside a Kali Linux container with network access to the target.
+
+WORKFLOW STRATEGY:
+1. Start with reconnaissance to understand the target (Phase 1).
+2. Discover hidden directories, API endpoints, and parameters (Phase 2).
+3. For each discovered endpoint, probe it to understand its behavior (Phase 4).
+4. Test promising endpoints with appropriate vulnerability scanners (Phase 3).
+5. Report each finding immediately when discovered.
+6. Only call "done" after thorough multi-phase testing.
+
+CHAINING RULES — use output from one tool as input for the next:
+- nmap finds open ports → run whatweb on those services.
+- gobuster/ffuf finds paths (status 200/301) → run curl on each interesting path to understand it.
+- curl reveals JSON API → run sqlmap on that URL with a query parameter (e.g. ?q=test).
+- curl shows HTML form or input fields → run xsstrike on the form action URL.
+- Any endpoint with query parameters (?q=, ?id=, ?search=) → ALWAYS test it with sqlmap.
+- sqlmap confirms injection → IMMEDIATELY report it as a finding, then continue testing other endpoints.
+- After recon + discovery → run "zap-cli spider http://juice-shop:3000" then "zap-cli active-scan http://juice-shop:3000" then "zap-cli alerts http://juice-shop:3000" — ZAP finds vulns automatically.
+- After the tool feedback, look at the "KEY FINDINGS" section — it shows you extracted data. Use those specific paths and parameters for your next tool.
+
+IMPORTANT:
+- ALWAYS include http:// in URLs for web tools (gobuster, ffuf, nikto, sqlmap, etc).
+- Use "juice-shop" as hostname (not localhost) — tools run inside Docker network.
+- Run ONE command at a time, then analyze the result.
+- Keep commands focused and fast. Use timeouts where possible.
+- NEVER repeat the same command if it fails. Try a DIFFERENT tool or a different approach.
+- After gobuster/ffuf find interesting paths, explore them with curl before running heavy scanners.
+- Use curl to probe API endpoints like /api/, /rest/, /ftp/, /api/Products, etc.
+
+TOOL EFFICIENCY:
+- Prefer fast targeted tools over slow broad scanners.
+- nikto is VERY slow (60s+ timeout). Use it only if you have turns to spare. Prefer curl + sqlmap + nuclei for faster results.
+- commix needs a URL with a parameter (e.g. commix -u "http://host/path?param=val" --batch). Without a parameter it does nothing.
+- crlfuzz does NOT support --batch. Just use: crlfuzz -u "http://host/path"
+- sqlmap needs a URL with a query parameter: sqlmap -u "http://host/path?q=test" --batch --level=3
+- Focus your limited turns on tools that test specific endpoints with parameters.
+"""
+
+
+def _parse_llm_action(response: str) -> dict | None:
+    """Extract JSON action from LLM response."""
+    # Try direct parse
+    try:
+        return json.loads(response.strip())
+    except json.JSONDecodeError:
+        pass
+    # Try to find JSON in markdown code block
+    match = re.search(r'```(?:json)?\s*\n?(.*?)\n?```', response, re.DOTALL)
+    if match:
+        try:
+            return json.loads(match.group(1).strip())
+        except json.JSONDecodeError:
+            pass
+    # Try to find any JSON object in the text
+    match = re.search(r'\{[^{}]*"action"\s*:\s*"[^"]+?"[^{}]*\}', response, re.DOTALL)
+    if match:
+        try:
+            return json.loads(match.group(0))
+        except json.JSONDecodeError:
+            pass
+    return None
+
+
+# --- Report Generation ---
+
+REPORT_LLM_PROMPT = """You are a senior penetration tester writing a brief analysis. DO NOT rewrite the steps or describe what tools do.
+You will ONLY provide:
+1. An executive summary (exactly 3 sentences)
+2. A risk level (CRITICAL / HIGH / MEDIUM / LOW / INFO) with 1 sentence justification
+3. For each finding below, provide ONE concrete remediation sentence
+4. 2-3 suggested next steps for deeper testing
+
+TARGET: {target_url}
+SCAN DURATION: {duration}
+TOTAL STEPS: {total_steps}
+TOTAL FINDINGS: {total_findings}
+
+FINDINGS:
+{findings_text}
+
+PHASES COMPLETED: {phases_completed}
+PHASES MISSED: {phases_missed}
+
+Respond in this EXACT format (nothing else):
+
+EXECUTIVE_SUMMARY: <3 sentences about what was tested, what was found, overall risk>
+
+RISK_LEVEL: <CRITICAL|HIGH|MEDIUM|LOW|INFO>
+RISK_REASON: <1 sentence why>
+
+{remediation_prompts}
+
+NEXT_STEPS:
+- <suggestion 1>
+- <suggestion 2>
+- <suggestion 3>
+"""
+
+
+def _strip_tool_noise(tool_name: str, output: str) -> str:
+    """Remove ASCII art banners, nmap fingerprints, and other noise from tool output.
+    Returns a cleaner version suitable for report display."""
+    if not output:
+        return "(no output)"
+
+    lines = output.split("\n")
+    cleaned = []
+
+    for line in lines:
+        # Skip nmap service fingerprint lines (SF:...)
+        if line.strip().startswith("SF:") or line.strip().startswith("SF-"):
+            continue
+        # Skip nmap fingerprint submission notice
+        if "submit the following fingerprint" in line:
+            continue
+        # Skip ASCII art lines (lines made mostly of special chars like _ / \ | + -)
+        stripped = line.strip()
+        if stripped and len(stripped) > 3:
+            non_art = re.sub(r'[_/\\|+\-~=\s`\'!@#$%^&*()<>{}]', '', stripped)
+            # If more than 70% is art characters, skip it
+            if len(non_art) < len(stripped) * 0.3 and not any(kw in stripped.lower() for kw in [
+                'http', 'port', 'open', 'vuln', 'found', 'inject', 'error', 'warn',
+                'status', 'host', 'target', 'param', 'sql', 'xss', 'cve', 'critical',
+            ]):
+                continue
+        # Skip legal disclaimers
+        if any(kw in line.lower() for kw in ['legal disclaimer', 'prior mutual consent', 'responsible for any misuse']):
+            continue
+        # Skip empty copyright/attribution lines
+        if line.strip().startswith("Copyright") and ("commix" in tool_name or "project" in line.lower()):
+            continue
+        # Skip gobuster/tool headers that are purely cosmetic
+        if stripped == "===============================================================":
+            continue
+
+        cleaned.append(line)
+
+    # Remove leading/trailing blank lines
+    while cleaned and not cleaned[0].strip():
+        cleaned.pop(0)
+    while cleaned and not cleaned[-1].strip():
+        cleaned.pop()
+
+    return "\n".join(cleaned) if cleaned else "(no output)"
+
+
+def _summarize_step_result(tool_name: str, output: str, command: str, parsed_findings: str) -> str:
+    """Generate a one-line summary of what a tool step produced."""
+    if not output:
+        return "No output"
+
+    output_lower = output.lower()
+
+    # Check for tool errors/failures
+    if "error" in output_lower[:200] and ("flag" in output_lower[:200] or "usage" in output_lower[:200]):
+        return "⚠️ Tool error (invalid arguments)"
+    if "wildcard" in output_lower or "please exclude" in output_lower:
+        return "⚠️ Wildcard response detected — needs --exclude-length"
+
+    # If we have parsed findings, use them as summary
+    if parsed_findings:
+        # Take first line of parsed findings
+        first_line = parsed_findings.split("\n")[0].strip()
+        if len(first_line) > 100:
+            first_line = first_line[:97] + "..."
+        return first_line
+
+    # Tool-specific summaries
+    if tool_name == "nmap":
+        open_ports = re.findall(r'(\d+)/\w+\s+open\s+(\S+)', output)
+        if open_ports:
+            port_str = ", ".join(f"{p[0]}/{p[1]}" for p in open_ports[:5])
+            return f"Open ports: {port_str}"
+        return "Scan complete — no open ports found"
+
+    if tool_name in ("gobuster", "ffuf", "dirb"):
+        paths = re.findall(r'(/\S+)\s+\(Status:\s*(\d+)\)', output)
+        if not paths:
+            paths = re.findall(r'(\S+)\s+\[Status:\s*(\d+)', output)
+        if paths:
+            return f"Found {len(paths)} paths: {', '.join(p[0] for p in paths[:5])}"
+        return "No paths discovered"
+
+    if tool_name == "sqlmap":
+        if "is vulnerable" in output_lower or "injection point" in output_lower:
+            return "🔴 SQL injection confirmed!"
+        if "not injectable" in output_lower:
+            return "Not injectable"
+        return "Scan complete"
+
+    if tool_name == "curl":
+        # Check response code hints
+        lines = output.strip().split("\n")
+        if len(lines) <= 3:
+            return lines[0][:100] if lines[0] else "Empty response"
+        return f"Response received ({len(lines)} lines)"
+
+    if tool_name in ("xsstrike", "dalfox"):
+        if "vulnerable" in output_lower or "found" in output_lower:
+            return "🔴 XSS vulnerability found!"
+        return "No XSS found"
+
+    if tool_name == "nuclei":
+        critical = output_lower.count("[critical]")
+        high = output_lower.count("[high]")
+        medium = output_lower.count("[medium]")
+        if critical or high:
+            return f"🔴 Found {critical} critical, {high} high severity issues"
+        if medium:
+            return f"⚠️ Found {medium} medium severity issues"
+        return "No significant findings"
+
+    if tool_name == "nikto":
+        finding_count = sum(1 for line in output.split("\n") if line.strip().startswith("+ "))
+        return f"Found {finding_count} items" if finding_count else "Scan complete"
+
+    if tool_name == "zap-cli":
+        try:
+            data = json.loads(output)
+            if "alerts" in data:
+                alerts = data["alerts"]
+                high = sum(1 for a in alerts if a.get("risk", "").lower() == "high")
+                med = sum(1 for a in alerts if a.get("risk", "").lower() == "medium")
+                if high:
+                    return f"🔴 ZAP found {high} high, {med} medium severity alerts"
+                if med:
+                    return f"⚠️ ZAP found {med} medium severity alerts"
+                return f"ZAP found {len(alerts)} alerts (low/info)"
+            if "scan" in data:
+                return f"Scan started (ID: {data['scan']})"
+            if "status" in data:
+                return f"Scan progress: {data['status']}%"
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+    # Generic: return first meaningful line
+    for line in output.split("\n"):
+        stripped = line.strip()
+        if stripped and len(stripped) > 10 and not stripped.startswith(("=", "-", "#", "+--")):
+            return stripped[:100]
+
+    return "Completed"
+
+
+def _build_discovery_chain(finding: dict, steps: list[dict]) -> list[dict]:
+    """Trace back through steps to find how a finding's URL was discovered.
+
+    For each finding URL, walks through steps in order and checks if
+    the step's output/command contributed to finding that URL path.
+    Returns list of {step, tool, phase, contribution} dicts.
+    """
+    from urllib.parse import urlparse
+
+    chain = []
+    finding_url = finding.get("url", "") or ""
+    if not finding_url or finding_url == "N/A":
+        return chain
+
+    parsed = urlparse(finding_url)
+    full_path = parsed.path  # e.g. /rest/products/search
+    path_segments = [s for s in full_path.split("/") if s]
+
+    # Build path prefixes: /rest, /rest/products, /rest/products/search
+    path_prefixes = []
+    current = ""
+    for seg in path_segments:
+        current += f"/{seg}"
+        path_prefixes.append(current)
+
+    seen_contributions = set()  # dedup
+
+    for step in steps:
+        output = (step.get("tool_output") or step.get("output") or "")
+        tool = step.get("tool_called") or step.get("tool") or ""
+        cmd = (step.get("tool_input") or step.get("command") or "")
+        step_num = step.get("step_number") or step.get("step") or 0
+        phase = step.get("phase", "")
+
+        contribution = None
+
+        # Recon tools that identified the service
+        if tool in ("nmap", "whatweb", "wafw00f") and (
+            "open" in output.lower() or "http" in output.lower() or "200" in output
+        ):
+            contribution = "Identified target service"
+
+        # Check if output contains the full finding URL or path
+        elif full_path and (finding_url in output or full_path in output):
+            contribution = f"Found {full_path}"
+
+        # Check if output contains a parent path (discovery step)
+        elif path_prefixes:
+            for prefix in reversed(path_prefixes[:-1]):
+                if prefix in output and len(prefix) > 1:
+                    contribution = f"Discovered {prefix}"
+                    break
+
+        # Check if the command targeted the finding URL (testing step)
+        if not contribution and finding_url in cmd:
+            contribution = f"Tested {full_path}"
+
+        if contribution and contribution not in seen_contributions:
+            seen_contributions.add(contribution)
+            chain.append({
+                "step": step_num,
+                "tool": tool,
+                "phase": phase,
+                "contribution": contribution,
+            })
+
+    return chain
+
+
+async def _generate_report(session_id: str, model: str, target_url: str,
+                           session_type: str, vuln_category: str,
+                           total_steps: int, total_findings: int,
+                           total_duration_ms: int):
+    """Generate a hybrid pentest report: programmatic data sections + LLM analysis."""
+    db = await get_db()
+    try:
+        # Fetch steps — convert to dicts immediately for safe key access
+        cursor = await db.execute(
+            "SELECT step_number, phase, tool_called, tool_input, tool_output, duration_ms, prompt_sent "
+            "FROM steps WHERE session_id = ? ORDER BY step_number", (session_id,)
+        )
+        raw_steps = await cursor.fetchall()
+        steps = []
+        for row in raw_steps:
+            steps.append({
+                "step_number": row[0],
+                "phase": row[1] or "",
+                "tool_called": row[2] or "N/A",
+                "tool_input": row[3] or "",
+                "tool_output": row[4] or "",
+                "duration_ms": row[5] or 0,
+                "prompt_sent": row[6] or "",
+            })
+
+        # Fetch findings — convert to dicts immediately
+        cursor = await db.execute(
+            "SELECT vuln_type, severity, url, parameter, evidence "
+            "FROM findings WHERE session_id = ? ORDER BY id", (session_id,)
+        )
+        raw_findings = await cursor.fetchall()
+        findings = []
+        for row in raw_findings:
+            findings.append({
+                "vuln_type": row[0] or "Unknown",
+                "severity": row[1] or "info",
+                "url": row[2] or "N/A",
+                "parameter": row[3] or "N/A",
+                "evidence": row[4] or "N/A",
+            })
+    finally:
+        await db.close()
+
+    # Format duration
+    duration_str = f"{total_duration_ms / 1000:.1f} seconds" if total_duration_ms else "Unknown"
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    # ─── PART 1: Build programmatic report sections (exact data, no LLM) ───
+
+    report_lines = []
+    report_lines.append("# Penetration Test Report")
+    report_lines.append("")
+    report_lines.append("## Session Info")
+    report_lines.append(f"| Field | Value |")
+    report_lines.append(f"|-------|-------|")
+    report_lines.append(f"| **Target** | `{target_url}` |")
+    report_lines.append(f"| **Session ID** | `{session_id}` |")
+    report_lines.append(f"| **Type** | {session_type or 'cold'} |")
+    report_lines.append(f"| **Category** | {vuln_category or 'general'} |")
+    report_lines.append(f"| **Model** | {model} |")
+    report_lines.append(f"| **Duration** | {duration_str} |")
+    report_lines.append(f"| **Steps** | {total_steps} |")
+    report_lines.append(f"| **Findings** | {total_findings} |")
+    report_lines.append(f"| **Date** | {timestamp} |")
+    report_lines.append("")
+
+    # Placeholder for LLM sections (filled in later)
+    report_lines.append("## Executive Summary")
+    report_lines.append("")
+    exec_summary_index = len(report_lines)  # We'll insert LLM text here
+    report_lines.append("*Generating...*")
+    report_lines.append("")
+    report_lines.append("## Risk Level")
+    report_lines.append("")
+    risk_level_index = len(report_lines)
+    report_lines.append("*Generating...*")
+    report_lines.append("")
+
+    # ─── Scan Timeline (per-step blocks — visual, easy to read) ───
+    report_lines.append("## Scan Timeline")
+    report_lines.append("")
+
+    # Track phases for coverage
+    phases_seen = set()
+
+    # Collect raw output for expandable section at end
+    raw_output_sections = []
+
+    if steps:
+        for s in steps:
+            sn = s["step_number"]
+            tool = s["tool_called"]
+            phase = s["phase"]
+            cmd = s["tool_input"]
+            output = s["tool_output"]
+            dur = s["duration_ms"]
+            phases_seen.add(phase)
+
+            # Parse key findings and generate summary
+            parsed = _parse_tool_output(tool, output, cmd)
+            summary = _summarize_step_result(tool, output, cmd, parsed)
+
+            # Step heading with tool and phase
+            report_lines.append(f"### Step {sn} — `{tool}` [{phase}]")
+            report_lines.append("")
+            report_lines.append(f"**Command:**")
+            report_lines.append(f"```bash")
+            report_lines.append(cmd)
+            report_lines.append(f"```")
+
+            # Result summary line
+            report_lines.append(f"**Result:** {summary} &nbsp; ⏱️ {dur}ms")
+            report_lines.append("")
+
+            # If this step found something interesting, show parsed output
+            if parsed:
+                report_lines.append(f"**Key Findings:**")
+                report_lines.append(f"```")
+                report_lines.append(parsed)
+                report_lines.append(f"```")
+                report_lines.append("")
+
+            report_lines.append("---")
+            report_lines.append("")
+
+            # Store cleaned output for expandable section
+            cleaned_output = _strip_tool_noise(tool, output)
+            raw_output_sections.append({
+                "step": sn,
+                "tool": tool,
+                "phase": phase,
+                "command": cmd,
+                "output": cleaned_output,
+                "duration_ms": dur,
+                "parsed": parsed,
+            })
+    else:
+        report_lines.append("*No steps were recorded for this session.*")
+        report_lines.append("")
+
+    # ─── Vulnerabilities Found (programmatic — exact evidence + discovery chain) ───
+    report_lines.append(f"## Vulnerabilities Found ({len(findings)})")
+    report_lines.append("")
+
+    # Severity color map for inline HTML
+    SEV_COLORS = {
+        "CRITICAL": "#ff2d55",
+        "HIGH": "#ff8800",
+        "MEDIUM": "#ffee00",
+        "LOW": "#00fff5",
+        "INFO": "#6a6a8a",
+    }
+
+    if findings:
+        for i, f in enumerate(findings, 1):
+            sev = f["severity"].upper()
+            vtype = f["vuln_type"]
+            color = SEV_COLORS.get(sev, "#c0c0d0")
+            report_lines.append(f'### <span style="color:{color};">[{sev}]</span> {vtype}')
+            report_lines.append("")
+            report_lines.append(f"- **URL:** `{f['url']}`")
+            report_lines.append(f"- **Parameter:** `{f['parameter']}`")
+
+            # Discovery chain — the "road" to this finding
+            chain = _build_discovery_chain(f, steps)
+            if chain:
+                road_parts = []
+                for c in chain:
+                    road_parts.append(
+                        f'<span class="road-step">Step {c["step"]}</span> '
+                        f'(`{c["tool"]}`: {c["contribution"]})'
+                    )
+                road_html = ' <span class="road-arrow">→</span> '.join(road_parts)
+                report_lines.append(f'- **Discovery Road:**')
+                report_lines.append(f'<div class="discovery-road">{road_html}</div>')
+                report_lines.append("")
+
+            report_lines.append(f"- **Evidence:**")
+            report_lines.append(f"```")
+            report_lines.append(f"{f['evidence']}")
+            report_lines.append(f"```")
+            # Placeholder for LLM remediation
+            report_lines.append(f"- **Remediation:** *See below*")
+            report_lines.append("")
+    else:
+        report_lines.append("*No vulnerabilities were found during this session.*")
+        report_lines.append("")
+
+    # ─── Coverage Assessment (programmatic — map tools to standard phases) ───
+    TOOL_PHASE_MAP = {
+        "nmap": "recon", "whatweb": "recon", "wafw00f": "recon", "whois": "recon",
+        "sslyze": "recon", "testssl": "recon",
+        "gobuster": "discovery", "ffuf": "discovery", "dirb": "discovery",
+        "wfuzz": "discovery", "arjun": "discovery", "nikto": "discovery", "pw-crawl": "discovery",
+        "nuclei": "vuln_scan", "xsstrike": "vuln_scan", "dalfox": "vuln_scan",
+        "crlfuzz": "vuln_scan", "zap-cli": "vuln_scan",
+        "sqlmap": "exploitation", "commix": "exploitation", "hydra": "exploitation",
+        "curl": "discovery",  # curl is used for exploring endpoints
+    }
+    all_phases = {"recon", "discovery", "vuln_scan", "exploitation"}
+    tools_used = [s["tool_called"] for s in steps]
+    completed_phases = set()
+    for tool in tools_used:
+        mapped = TOOL_PHASE_MAP.get(tool)
+        if mapped:
+            completed_phases.add(mapped)
+    missed_phases = all_phases - completed_phases
+    phases_completed_str = ", ".join(sorted(completed_phases)) if completed_phases else "none"
+    phases_missed_str = ", ".join(sorted(missed_phases)) if missed_phases else "none"
+
+    report_lines.append("## Coverage Assessment")
+    report_lines.append("")
+    report_lines.append(f"- **Phases completed:** {phases_completed_str}")
+    report_lines.append(f"- **Phases missed:** {phases_missed_str}")
+    report_lines.append(f"- **Tools used:** {', '.join(s['tool_called'] for s in steps)}")
+    report_lines.append("")
+
+    # ─── Raw Tool Output (expandable — noise-stripped) ───
+    if raw_output_sections:
+        report_lines.append("## Raw Tool Output")
+        report_lines.append("")
+        for sec in raw_output_sections:
+            output_lines = sec["output"].split("\n")
+            line_count = len(output_lines)
+            report_lines.append(
+                f"<details><summary>Step {sec['step']} — {sec['tool']} [{sec['phase']}] "
+                f"({sec['duration_ms']}ms, {line_count} lines)</summary>")
+            report_lines.append("")
+            report_lines.append(f"```bash")
+            report_lines.append(sec["command"])
+            report_lines.append(f"```")
+            report_lines.append(f"```")
+            # Limit to 80 lines even in expandable section
+            if line_count > 80:
+                report_lines.extend(output_lines[:80])
+                report_lines.append(f"... ({line_count} total lines, truncated)")
+            else:
+                report_lines.append(sec["output"])
+            report_lines.append(f"```")
+            report_lines.append("")
+            report_lines.append("</details>")
+            report_lines.append("")
+
+    # ─── PART 2: LLM analysis (small, focused prompt) ───
+
+    # Build findings text for LLM
+    findings_for_llm = []
+    remediation_prompts = []
+    for i, f in enumerate(findings, 1):
+        findings_for_llm.append(
+            f"FINDING {i}: [{f['severity'].upper()}] {f['vuln_type']} at {f['url']} (param: {f['parameter']})"
+        )
+        remediation_prompts.append(f"REMEDIATION_{i}: <one sentence fix for {f['vuln_type']} at {f['url']}>")
+
+    findings_text = "\n".join(findings_for_llm) if findings_for_llm else "No vulnerabilities found."
+    remediation_text = "\n".join(remediation_prompts) if remediation_prompts else ""
+
+    prompt = REPORT_LLM_PROMPT.format(
+        target_url=target_url,
+        duration=duration_str,
+        total_steps=total_steps,
+        total_findings=total_findings,
+        findings_text=findings_text,
+        phases_completed=phases_completed_str,
+        phases_missed=phases_missed_str,
+        remediation_prompts=remediation_text,
+    )
+
+    # Call LLM for analysis only
+    start_time = time.time()
+    llm_analysis = ""
+    try:
+        llm_analysis = await llm_client.chat(
+            [{"role": "user", "content": prompt}],
+            model=model,
+        )
+        gen_duration = int((time.time() - start_time) * 1000)
+    except Exception as e:
+        llm_analysis = f"LLM analysis failed: {e}"
+        gen_duration = int((time.time() - start_time) * 1000)
+
+    # ─── PART 3: Parse LLM response and merge into report ───
+
+    # Extract executive summary
+    exec_match = re.search(r'EXECUTIVE_SUMMARY:\s*(.+?)(?=\nRISK_LEVEL:|\Z)', llm_analysis, re.DOTALL)
+    executive_summary = exec_match.group(1).strip() if exec_match else "Analysis not available."
+
+    # Extract risk level
+    risk_match = re.search(r'RISK_LEVEL:\s*(\S+)', llm_analysis)
+    risk_level = risk_match.group(1).strip() if risk_match else "UNKNOWN"
+    risk_reason_match = re.search(r'RISK_REASON:\s*(.+?)(?=\nREMEDIATION_|\nNEXT_STEPS:|\Z)', llm_analysis, re.DOTALL)
+    risk_reason = risk_reason_match.group(1).strip() if risk_reason_match else ""
+
+    # Extract remediations
+    remediations = {}
+    for m in re.finditer(r'REMEDIATION_(\d+):\s*(.+?)(?=\nREMEDIATION_|\nNEXT_STEPS:|\Z)', llm_analysis, re.DOTALL):
+        remediations[int(m.group(1))] = m.group(2).strip()
+
+    # Extract next steps
+    next_steps = []
+    next_match = re.search(r'NEXT_STEPS:\s*(.+?)$', llm_analysis, re.DOTALL)
+    if next_match:
+        for line in next_match.group(1).strip().split("\n"):
+            line = line.strip().lstrip("- •")
+            if line:
+                next_steps.append(line.strip())
+
+    # Now replace placeholders in the report
+    report_lines[exec_summary_index] = executive_summary
+    report_lines[risk_level_index] = f"**{risk_level}** — {risk_reason}"
+
+    # Replace remediation placeholders in findings
+    for i, f in enumerate(findings, 1):
+        rem = remediations.get(i, "Refer to OWASP guidelines for remediation.")
+        # Find and replace the placeholder
+        for j, line in enumerate(report_lines):
+            if line == f"- **Remediation:** *See below*":
+                report_lines[j] = f"- **Remediation:** {rem}"
+                break
+
+    # Add next steps to coverage section
+    if next_steps:
+        report_lines.append("### Suggested Next Steps")
+        report_lines.append("")
+        for ns in next_steps[:5]:
+            report_lines.append(f"- {ns}")
+        report_lines.append("")
+
+    # Build final report
+    report_md = "\n".join(report_lines)
+
+    # Store in DB
+    db = await get_db()
+    try:
+        await db.execute(
+            "INSERT OR REPLACE INTO reports (session_id, report_markdown, executive_summary, "
+            "generated_by_model, generation_duration_ms) VALUES (?, ?, ?, ?, ?)",
+            (session_id, report_md, executive_summary, model, gen_duration),
+        )
+        await db.commit()
+    finally:
+        await db.close()
+
+    return report_md, executive_summary, gen_duration
+
+
+# --- File-Based Report Saving ---
+
+REPORTS_DIR = Path(__file__).parent.parent / "data" / "reports"
+
+
+async def _save_report_file(session_id: str, target_url: str, session_type: str,
+                            vuln_category: str, model: str, scope_mode: str,
+                            total_steps: int, total_findings: int,
+                            total_duration_ms: int, full_steps: list,
+                            full_findings: list, llm_report: str) -> str:
+    """Save a comprehensive markdown report file.
+
+    The llm_report is now a hybrid report (programmatic data + LLM analysis)
+    that already contains compact timeline, findings, coverage, and expandable
+    raw output sections. This file version adds full untruncated output for
+    archival purposes.
+    """
+    REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+
+    lines = []
+
+    # Include the hybrid report (compact timeline + expandable raw output already included)
+    if llm_report:
+        lines.append(llm_report)
+    else:
+        lines.append(f"# Pentest Report — {session_id}")
+        lines.append("")
+        lines.append("*Report generation failed. Raw data below.*")
+
+    lines.append("")
+    lines.append("---")
+    lines.append("")
+
+    # Add FULL untruncated step log (for archival — the main report has noise-stripped versions)
+    lines.append("## Full Untruncated Step Log")
+    lines.append("")
+    if full_steps:
+        for s in full_steps:
+            tool = s.get("tool", "Unknown")
+            phase = s.get("phase", "")
+            status = "OK" if s.get("success") else "FAILED"
+            duration = s.get("duration_ms", 0)
+            cmd = s.get("command", "N/A")
+            output = s.get("output", "")
+            line_count = len(output.split("\n")) if output else 0
+
+            lines.append(
+                f"<details><summary>Step {s['step']} — {tool} [{phase}] "
+                f"({status}, {duration}ms, {line_count} lines)</summary>")
+            lines.append("")
+            lines.append(f"```bash")
+            lines.append(f"{cmd}")
+            lines.append(f"```")
+            lines.append("```")
+            lines.append(output if output else "(no output)")
+            lines.append("```")
+            lines.append("")
+            lines.append("</details>")
+            lines.append("")
+    else:
+        lines.append("*No steps were recorded for this session.*")
+        lines.append("")
+
+    # Write file
+    report_path = REPORTS_DIR / f"{session_id}.md"
+    report_content = "\n".join(lines)
+    report_path.write_text(report_content, encoding="utf-8")
+
+    return str(report_path)
+
+
+# --- Recon Context Extraction & Injection ---
+
+async def _extract_recon_context(session_id: str):
+    """Parse tool outputs from a completed session and store structured recon data."""
+    db = await get_db()
+    try:
+        cursor = await db.execute(
+            "SELECT tool_called, tool_input, tool_output FROM steps "
+            "WHERE session_id = ? AND tool_output IS NOT NULL",
+            (session_id,)
+        )
+        steps = await cursor.fetchall()
+    finally:
+        await db.close()
+
+    context_entries = []
+
+    for step in steps:
+        tool = step["tool_called"] or ""
+        output = step["tool_output"] or ""
+        command = step["tool_input"] or ""
+
+        # Extract discovered directories from gobuster/ffuf/dirb
+        if tool in ("gobuster", "ffuf", "dirb"):
+            for line in output.split("\n"):
+                # Gobuster: /path (Status: 200) [Size: 1234]
+                m = re.search(r'(/\S+)\s+\(Status:\s*(\d+)\)', line)
+                if m:
+                    context_entries.append(("directory", m.group(1), f"status={m.group(2)}", tool))
+                # ffuf: path [Status: 200, Size: 1234]
+                m2 = re.search(r'(\S+)\s+\[Status:\s*(\d+)', line)
+                if m2 and not m:
+                    context_entries.append(("directory", m2.group(1), f"status={m2.group(2)}", tool))
+
+        # Extract technologies from whatweb/nmap
+        elif tool == "whatweb":
+            # whatweb output has [tech] patterns
+            techs = re.findall(r'\[([^\]]+)\]', output)
+            for t in techs[:20]:
+                context_entries.append(("technology", t.strip(), "", tool))
+
+        elif tool == "nmap":
+            # Extract services: port/proto open service version
+            for line in output.split("\n"):
+                m = re.search(r'(\d+)/(\w+)\s+open\s+(\S+)\s*(.*)', line)
+                if m:
+                    svc = f"{m.group(1)}/{m.group(2)} {m.group(3)} {m.group(4).strip()}"
+                    context_entries.append(("service", f"port-{m.group(1)}", svc, tool))
+
+        # Extract parameters from arjun
+        elif tool == "arjun":
+            params = re.findall(r'(?:Found|Parameter):\s*(\w+)', output, re.IGNORECASE)
+            for p in params:
+                context_entries.append(("parameter", p, "", tool))
+
+        # Extract API endpoints from curl
+        elif tool == "curl":
+            # Try to extract URLs from command
+            url_match = re.search(r'(https?://\S+)', command)
+            if url_match:
+                context_entries.append(("endpoint", url_match.group(1), output[:200], tool))
+
+    # Store entries in DB
+    if context_entries:
+        db = await get_db()
+        try:
+            await db.executemany(
+                "INSERT INTO recon_context (session_id, context_type, key, value, source_tool) "
+                "VALUES (?, ?, ?, ?, ?)",
+                [(session_id, ct, k, v, st) for ct, k, v, st in context_entries],
+            )
+            await db.commit()
+        finally:
+            await db.close()
+
+    return len(context_entries)
+
+
+async def _get_warm_start_context(parent_session_id: str) -> str:
+    """Build a warm-start context string from a parent session's recon data."""
+    db = await get_db()
+    try:
+        cursor = await db.execute(
+            "SELECT context_type, key, value, source_tool FROM recon_context "
+            "WHERE session_id = ? ORDER BY context_type, key",
+            (parent_session_id,)
+        )
+        rows = await cursor.fetchall()
+
+        # Also get parent findings for awareness
+        cursor2 = await db.execute(
+            "SELECT vuln_type, severity, url, parameter FROM findings "
+            "WHERE session_id = ? ORDER BY id",
+            (parent_session_id,)
+        )
+        parent_findings = await cursor2.fetchall()
+    finally:
+        await db.close()
+
+    if not rows and not parent_findings:
+        return ""
+
+    sections = {}
+    for r in rows:
+        ct = r["context_type"]
+        sections.setdefault(ct, [])
+        entry = r["key"]
+        if r["value"]:
+            entry += f" ({r['value']})"
+        sections[ct].append(entry)
+
+    lines = ["== PRIOR RECONNAISSANCE DATA (from parent session) =="]
+    for ct, entries in sections.items():
+        lines.append(f"\n### {ct.upper()}S:")
+        for e in entries[:50]:  # cap at 50 per type
+            lines.append(f"  - {e}")
+
+    if parent_findings:
+        lines.append("\n### PREVIOUSLY FOUND VULNERABILITIES:")
+        for f in parent_findings:
+            lines.append(f"  - [{f['severity']}] {f['vuln_type']} at {f['url']} (param: {f['parameter']})")
+
+    lines.append(
+        "\n\nINSTRUCTION: Use this prior reconnaissance data to SKIP redundant scanning. "
+        "Do NOT re-run tools that discovered the information above. Instead, focus on:\n"
+        "1. Deeper vulnerability testing on discovered endpoints and parameters\n"
+        "2. Exploitation of previously found vulnerabilities\n"
+        "3. Testing for vulnerabilities NOT covered in the prior session\n"
+        "4. Chaining findings for more complex attack scenarios\n"
+    )
+
+    return "\n".join(lines)
+
+
+# --- Chain Mode Functions ---
+
+def _get_next_chain_phase(current_phase: str):
+    """Return the next chain phase, or None if all phases are done."""
+    try:
+        idx = CHAIN_PHASES.index(current_phase)
+        return CHAIN_PHASES[idx + 1] if idx + 1 < len(CHAIN_PHASES) else None
+    except ValueError:
+        return None
+
+
+async def _compile_chain_context(chain_id: str, up_to_position: int) -> str:
+    """Build a compact compiled context from ALL prior sessions in a chain.
+
+    Unlike _get_warm_start_context (which dumps one parent's raw data at ~1400 tokens),
+    this aggregates and deduplicates across all chain sessions into ~400 tokens.
+    Items already tested (have findings) are marked [T], discovered-only marked [D].
+    """
+    db = await get_db()
+    try:
+        # Get all chain session IDs up to this position
+        cursor = await db.execute(
+            "SELECT id, chain_phase FROM sessions "
+            "WHERE chain_id = ? AND chain_position < ? ORDER BY chain_position",
+            (chain_id, up_to_position)
+        )
+        prior_sessions = await cursor.fetchall()
+        if not prior_sessions:
+            return ""
+
+        session_ids = [s["id"] for s in prior_sessions]
+        placeholders = ",".join("?" * len(session_ids))
+
+        # Aggregate recon_context (deduplicated by key)
+        cursor = await db.execute(
+            f"SELECT DISTINCT context_type, key, value FROM recon_context "
+            f"WHERE session_id IN ({placeholders}) ORDER BY context_type, key",
+            session_ids
+        )
+        context_rows = await cursor.fetchall()
+
+        # Aggregate findings
+        cursor = await db.execute(
+            f"SELECT vuln_type, severity, url, parameter FROM findings "
+            f"WHERE session_id IN ({placeholders}) ORDER BY id",
+            session_ids
+        )
+        findings = await cursor.fetchall()
+    finally:
+        await db.close()
+
+    # Build compact context
+    lines = [f"== CHAIN CONTEXT (from {len(prior_sessions)} prior sessions) =="]
+
+    # Group context by type, mark tested items
+    sections = {}
+    for r in context_rows:
+        ct = r["context_type"]
+        sections.setdefault(ct, [])
+        entry = r["key"]
+        if r["value"]:
+            entry += f" ({r['value']})"
+        # Check if this was already tested (finding exists referencing this key)
+        tested = any(f["url"] and r["key"] in (f["url"] or "") for f in findings)
+        marker = "[T]" if tested else "[D]"
+        sections[ct].append(f"  {marker} {entry}")
+
+    for ct, entries in sections.items():
+        lines.append(f"\n{ct.upper()}S:")
+        for e in entries[:30]:  # tighter cap for token efficiency
+            lines.append(e)
+
+    if findings:
+        lines.append(f"\nFOUND VULNERABILITIES ({len(findings)}):")
+        for f in findings:
+            lines.append(f"  - [{f['severity']}] {f['vuln_type']} @ {f['url'] or 'N/A'} (param: {f['parameter'] or 'N/A'})")
+
+    lines.append("\n[D]=discovered only, [T]=already tested. Focus on [D] items.")
+    return "\n".join(lines)
+
+
+async def _create_chain_session(chain_id: str, chain_row, phase: str, position: int) -> str:
+    """Create a new session linked to a chain. Returns the session_id."""
+    session_id = uuid.uuid4().hex[:12]
+    enabled_tools_str = chain_row["enabled_tools"]
+    max_turns = int(chain_row["max_turns_per_session"]) if chain_row["max_turns_per_session"] else DEFAULT_MAX_TURNS
+    no_timeout = bool(chain_row["no_timeout"]) if chain_row["no_timeout"] else False
+
+    db = await get_db()
+    try:
+        await db.execute(
+            "INSERT INTO sessions (id, target_url, scope_mode, system_prompt, model, enabled_tools, "
+            "session_type, no_timeout, max_turns, chain_id, chain_position, chain_phase) "
+            "VALUES (?, ?, ?, ?, ?, ?, 'chain', ?, ?, ?, ?, ?)",
+            (session_id, chain_row["target_url"], chain_row["scope_mode"],
+             chain_row["system_prompt"], chain_row["model"], enabled_tools_str,
+             1 if no_timeout else 0, max_turns,
+             chain_id, position, phase),
+        )
+        await db.commit()
+    finally:
+        await db.close()
+
+    return session_id
+
+
+async def _start_chain_session(session_id: str):
+    """Start a chain session internally (no HTTP request needed)."""
+    db = await get_db()
+    try:
+        row = await db.execute("SELECT * FROM sessions WHERE id = ?", (session_id,))
+        session = await row.fetchone()
+        if not session:
+            return
+
+        await db.execute(
+            "UPDATE sessions SET status = 'running', updated_at = datetime('now') WHERE id = ?",
+            (session_id,),
+        )
+        await db.commit()
+    finally:
+        await db.close()
+
+    enabled_tools = session["enabled_tools"].split(",") if session["enabled_tools"] else []
+    no_timeout = bool(session["no_timeout"]) if session["no_timeout"] else False
+    max_turns = int(session["max_turns"]) if session["max_turns"] else DEFAULT_MAX_TURNS
+
+    task = asyncio.create_task(
+        agent_loop(
+            session_id=session_id,
+            target_url=session["target_url"],
+            scope_mode=session["scope_mode"],
+            system_prompt=session["system_prompt"],
+            enabled_tools=enabled_tools,
+            model=session["model"],
+            session_type="chain",
+            parent_session_id=None,
+            vuln_category=session["vuln_category"],
+            no_timeout=no_timeout,
+            max_turns=max_turns,
+        )
+    )
+    running_tasks[session_id] = task
+
+    await manager.broadcast(session_id, {
+        "type": "status", "status": "running",
+        "message": "Chain session started",
+    })
+
+
+async def _chain_auto_progress(session_id: str):
+    """Called at the end of a chain session. Auto-creates and starts the next session if applicable."""
+    db = await get_db()
+    try:
+        # Get this session's chain info
+        row = await db.execute(
+            "SELECT chain_id, chain_position, chain_phase FROM sessions WHERE id = ?",
+            (session_id,)
+        )
+        session_info = await row.fetchone()
+        if not session_info or not session_info["chain_id"]:
+            return
+
+        chain_id = session_info["chain_id"]
+        current_position = session_info["chain_position"] or 0
+        current_phase = session_info["chain_phase"] or "recon"
+
+        # Get the chain record
+        row = await db.execute("SELECT * FROM chains WHERE id = ?", (chain_id,))
+        chain = await row.fetchone()
+        if not chain:
+            return
+
+        # Check auto_progress
+        if not chain["auto_progress"]:
+            await db.execute(
+                "UPDATE chains SET status = 'paused', updated_at = datetime('now') WHERE id = ?",
+                (chain_id,)
+            )
+            await db.commit()
+            # Broadcast that chain is paused, waiting for manual continue
+            await manager.broadcast(session_id, {
+                "type": "chain_ready",
+                "chain_id": chain_id,
+                "completed_phase": current_phase,
+                "message": "Chain paused. Click CONTINUE to proceed to next phase.",
+            })
+            return
+
+        # Determine next phase
+        next_phase = _get_next_chain_phase(current_phase)
+
+        if next_phase is None:
+            # All phases done — chain complete!
+            await db.execute(
+                "UPDATE chains SET status = 'completed', current_phase = ?, "
+                "total_sessions = ?, updated_at = datetime('now') WHERE id = ?",
+                (current_phase, current_position + 1, chain_id)
+            )
+            await db.commit()
+            await manager.broadcast(session_id, {
+                "type": "chain_complete",
+                "chain_id": chain_id,
+                "total_sessions": current_position + 1,
+                "message": "All chain phases completed!",
+            })
+            return
+
+        # Update chain to next phase
+        next_position = current_position + 1
+        await db.execute(
+            "UPDATE chains SET current_phase = ?, current_position = ?, "
+            "total_sessions = ?, status = 'running', updated_at = datetime('now') WHERE id = ?",
+            (next_phase, next_position, next_position + 1, chain_id)
+        )
+        await db.commit()
+    finally:
+        await db.close()
+
+    # Broadcast chain progress
+    await manager.broadcast(session_id, {
+        "type": "chain_progress",
+        "chain_id": chain_id,
+        "completed_phase": current_phase,
+        "next_phase": next_phase,
+        "position": next_position,
+        "message": f"Chain progressing: {current_phase} → {next_phase}",
+    })
+
+    # Create and start the next session
+    db = await get_db()
+    try:
+        row = await db.execute("SELECT * FROM chains WHERE id = ?", (chain_id,))
+        chain = await row.fetchone()
+    finally:
+        await db.close()
+
+    if chain:
+        next_session_id = await _create_chain_session(chain_id, chain, next_phase, next_position)
+
+        # Broadcast to the OLD session so dashboard knows the new session ID
+        await manager.broadcast(session_id, {
+            "type": "chain_session_start",
+            "chain_id": chain_id,
+            "session_id": next_session_id,
+            "phase": next_phase,
+            "position": next_position,
+            "message": f"Starting {next_phase} session: {next_session_id}",
+        })
+
+        # Small delay to let dashboard connect to new session
+        await asyncio.sleep(2)
+        await _start_chain_session(next_session_id)
+
+
+# --- Agent Loop ---
+
+async def agent_loop(session_id: str, target_url: str, scope_mode: str,
+                     system_prompt: str, enabled_tools: list[str], model: str,
+                     session_type: str = "cold", parent_session_id: str = None,
+                     vuln_category: str = None, no_timeout: bool = False,
+                     max_turns: int = DEFAULT_MAX_TURNS):
+    """Multi-turn agent loop: LLM plans tools, we execute them, feed results back."""
+    db = None
+    step_number = 0
+    findings_count = 0
+    session_start_time = time.time()
+    full_steps_data = []      # full untruncated data for file report
+    full_findings_data = []   # full untruncated findings for file report
+
+    # Scale min-turns-before-done proportionally to max_turns
+    # Default: 8 min out of 15 max (53%). Scale same ratio for higher limits.
+    min_turns_before_done = max(DEFAULT_MIN_TURNS_BEFORE_DONE, int(max_turns * 0.5))
+    min_turns_before_done = min(min_turns_before_done, 25)  # cap at 25 — no need to force more
+
+    await manager.broadcast(session_id, {
+        "type": "log", "phase": "recon",
+        "message": f"Session config: max_turns={max_turns}, min_before_done={min_turns_before_done}, no_timeout={no_timeout}",
+    })
+
+    try:
+        # ===== Phase 1: RECON — pre-flight checks =====
+        await manager.broadcast(session_id, {
+            "type": "log", "phase": "recon",
+            "message": f"Starting reconnaissance on {target_url}",
+        })
+        await manager.broadcast(session_id, {"type": "phase", "active": "recon"})
+
+        if session_type == "warm" and parent_session_id:
+            await manager.broadcast(session_id, {
+                "type": "log", "phase": "recon",
+                "message": f"WARM START: Loading context from parent session {parent_session_id}",
+            })
+
+        # Check target reachability from host
+        target_reachable = False
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.get(target_url)
+                target_reachable = True
+                await manager.broadcast(session_id, {
+                    "type": "log", "phase": "recon",
+                    "message": f"Target responded: HTTP {resp.status_code} ({len(resp.content)} bytes)",
+                })
+        except Exception as e:
+            await manager.broadcast(session_id, {
+                "type": "log", "phase": "error",
+                "message": f"Target unreachable: {e}",
+            })
+            await manager.broadcast(session_id, {
+                "type": "log", "phase": "system",
+                "message": "Make sure Docker Desktop is running and juice-shop container is up (docker compose up -d)",
+            })
+
+        await asyncio.sleep(0)  # yield for cancellation
+
+        # Check Ollama
+        await manager.broadcast(session_id, {
+            "type": "log", "phase": "recon",
+            "message": f"Connecting to LLM model: {model}",
+        })
+
+        health = await llm_client.health_check()
+        if health.get("ollama") != "connected":
+            await manager.broadcast(session_id, {
+                "type": "log", "phase": "error",
+                "message": "Ollama is not running. Start it with: ollama serve",
+            })
+            await _finish_session(session_id, "error")
+            return
+
+        available_models = health.get("models", [])
+        model_found = any(model in m or model.split(":")[0] in m for m in available_models)
+        if not model_found:
+            await manager.broadcast(session_id, {
+                "type": "log", "phase": "error",
+                "message": f"Model '{model}' not found. Available: {', '.join(available_models)}",
+            })
+            await _finish_session(session_id, "error")
+            return
+
+        await manager.broadcast(session_id, {
+            "type": "log", "phase": "recon",
+            "message": "LLM connected and model loaded",
+        })
+
+        # Check kali-tools container
+        kali_running = await check_container_running()
+        if not kali_running:
+            await manager.broadcast(session_id, {
+                "type": "log", "phase": "error",
+                "message": "kali-tools container is not running. Start it with: docker compose up -d",
+            })
+            if not target_reachable:
+                await _finish_session(session_id, "error")
+                return
+            await manager.broadcast(session_id, {
+                "type": "log", "phase": "system",
+                "message": "Will generate attack plan without tool execution (kali-tools not available)",
+            })
+
+        # ===== Phase 2: SCAN — build initial prompt & start agent loop =====
+        await manager.broadcast(session_id, {"type": "phase", "active": "scan"})
+
+        # Build message history
+        combined_system = TOOL_USE_SYSTEM_PROMPT
+        guided_mode = system_prompt and system_prompt.startswith("MISSION:")
+        if system_prompt:
+            combined_system += f"\n\nADDITIONAL INSTRUCTIONS:\n{system_prompt}"
+
+        # Inject warm-start context if applicable
+        if session_type == "warm" and parent_session_id:
+            warm_context = await _get_warm_start_context(parent_session_id)
+            if warm_context:
+                combined_system += f"\n\n{warm_context}"
+                await manager.broadcast(session_id, {
+                    "type": "log", "phase": "recon",
+                    "message": f"Injected {len(warm_context)} chars of prior recon context",
+                })
+            else:
+                await manager.broadcast(session_id, {
+                    "type": "log", "phase": "recon",
+                    "message": "No prior recon context found for parent session",
+                })
+
+        # Inject chain context if applicable
+        if session_type == "chain":
+            chain_db = await get_db()
+            try:
+                chain_row = await chain_db.execute(
+                    "SELECT chain_id, chain_position, chain_phase FROM sessions WHERE id = ?",
+                    (session_id,)
+                )
+                chain_info = await chain_row.fetchone()
+            finally:
+                await chain_db.close()
+
+            if chain_info and chain_info["chain_id"]:
+                chain_position = chain_info["chain_position"] or 0
+                chain_phase = chain_info["chain_phase"] or "recon"
+
+                # Inject compiled context from all prior chain sessions
+                if chain_position > 0:
+                    chain_ctx = await _compile_chain_context(chain_info["chain_id"], chain_position)
+                    if chain_ctx:
+                        combined_system += f"\n\n{chain_ctx}"
+                        await manager.broadcast(session_id, {
+                            "type": "log", "phase": "recon",
+                            "message": f"CHAIN: Injected compiled context from {chain_position} prior sessions ({len(chain_ctx)} chars)",
+                        })
+
+                # Inject phase-specific directive
+                phase_directive = CHAIN_PHASE_DIRECTIVES.get(chain_phase, "")
+                if phase_directive:
+                    combined_system += f"\n\n{phase_directive}"
+                    await manager.broadcast(session_id, {
+                        "type": "log", "phase": "recon",
+                        "message": f"CHAIN: Phase directive set — {chain_phase.upper()}",
+                    })
+
+        messages = [{"role": "system", "content": combined_system}]
+
+        tools_str = ", ".join(enabled_tools) if enabled_tools else "none"
+        target_info = f"Target: http://juice-shop:3000 (web app)"
+        if target_reachable:
+            target_info += " — confirmed reachable"
+        else:
+            target_info += " — WARNING: may be unreachable"
+
+        if guided_mode:
+            initial_prompt = (
+                f"Begin penetration testing.\n"
+                f"{target_info}\n"
+                f"Scope: {scope_mode}\n"
+                f"Enabled tools: {tools_str}\n\n"
+                f"REMEMBER: Always use http://juice-shop:3000 as the target URL.\n"
+                f"You have been given a MISSION above. Read it carefully. "
+                f"Begin by choosing your first reconnaissance step. Respond with a JSON action."
+            )
+        else:
+            initial_prompt = (
+                f"Begin penetration testing.\n"
+                f"{target_info}\n"
+                f"Scope: {scope_mode}\n"
+                f"Enabled tools: {tools_str}\n\n"
+                f"REMEMBER: Always use http://juice-shop:3000 as the target URL.\n"
+                f"Start by running a reconnaissance command. Respond with a JSON action."
+            )
+        messages.append({"role": "user", "content": initial_prompt})
+
+        await manager.broadcast(session_id, {
+            "type": "log", "phase": "scan",
+            "message": "Sending initial prompt to LLM...",
+        })
+
+        # ===== Multi-turn agent loop =====
+        failed_commands: dict[str, int] = {}  # track repeated failures
+        recent_commands: list[str] = []  # track commands for semantic dedup
+        tools_executed: set[str] = set()  # track distinct tools run (for phase enforcement)
+        consecutive_container_failures = 0  # circuit breaker for container-down
+        turns_since_last_finding = 0  # stagnation detection
+        last_findings_count = 0  # to track new findings per turn
+
+        for turn in range(max_turns):
+            await asyncio.sleep(0)  # yield for cancellation
+
+            step_number += 1
+            phase = "scan" if turn < 3 else "test"
+            await manager.broadcast(session_id, {"type": "phase", "active": phase})
+
+            # === Container-down circuit breaker ===
+            if consecutive_container_failures >= 3:
+                await manager.broadcast(session_id, {
+                    "type": "log", "phase": "error",
+                    "message": "⚠ kali-tools container is down (3 consecutive failures). Stopping session.",
+                })
+                break
+
+            # === Stagnation detection: stop if no new findings in last N turns ===
+            # Kicks in after the first 40% of turns, triggers after 5 consecutive dry turns
+            stagnation_start = max(5, int(max_turns * 0.4))
+            stagnation_threshold = max(5, int(max_turns * 0.35))
+            if turn >= stagnation_start and turns_since_last_finding >= stagnation_threshold:
+                await manager.broadcast(session_id, {
+                    "type": "log", "phase": "system",
+                    "message": f"⚠ No new findings in {turns_since_last_finding} turns. Auto-stopping to save resources.",
+                })
+                break
+
+            # Trim messages to fit context window (prevents Ollama silent truncation)
+            messages = _trim_messages(messages, recent_commands=recent_commands,
+                                      findings_data=full_findings_data)
+
+            # Call LLM
+            start_time = time.time()
+            try:
+                response = await llm_client.chat(messages, model=model)
+                duration = int((time.time() - start_time) * 1000)
+            except Exception as e:
+                await manager.broadcast(session_id, {
+                    "type": "log", "phase": "error",
+                    "message": f"LLM error: {e}",
+                })
+                await _finish_session(session_id, "error")
+                return
+
+            await manager.broadcast(session_id, {
+                "type": "log", "phase": phase,
+                "message": f"[Turn {turn + 1}/{max_turns}] LLM responded ({duration}ms)",
+            })
+
+            # Broadcast progress update for dashboard progress bar
+            await manager.broadcast(session_id, {
+                "type": "progress",
+                "turn": turn + 1,
+                "max_turns": max_turns,
+                "findings_count": findings_count,
+                "tools_run": len(tools_executed),
+                "elapsed_ms": int((time.time() - session_start_time) * 1000),
+            })
+
+            # Track stagnation (no new findings)
+            if findings_count > last_findings_count:
+                turns_since_last_finding = 0
+                last_findings_count = findings_count
+            else:
+                turns_since_last_finding += 1
+
+            # Parse action from LLM response
+            action = _parse_llm_action(response)
+
+            if not action:
+                # LLM didn't return valid JSON — log its text and nudge it
+                for line in response.split("\n")[:10]:
+                    if line.strip():
+                        await manager.broadcast(session_id, {
+                            "type": "log", "phase": phase,
+                            "message": line.strip(),
+                        })
+
+                # Nudge LLM to use JSON format
+                messages.append({"role": "assistant", "content": response})
+                messages.append({"role": "user", "content":
+                    "Please respond with a valid JSON object. Example: "
+                    '{"action": "run_tool", "command": "whatweb http://juice-shop:3000", "reason": "Fingerprint the web server"}'
+                })
+
+                # Save step
+                db = await get_db()
+                await db.execute(
+                    "INSERT INTO steps (session_id, phase, step_number, prompt_sent, model_response, duration_ms) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (session_id, phase, step_number, "(nudge to JSON)", response[:2000], duration),
+                )
+                await db.commit()
+                await db.close()
+                db = None
+                continue
+
+            action_type = action.get("action", "")
+
+            # --- ACTION: run_tool ---
+            if action_type == "run_tool":
+                command = action.get("command", "")
+                reason = action.get("reason", "")
+
+                # Check if this command has already failed too many times
+                cmd_key = command.strip()
+                if failed_commands.get(cmd_key, 0) >= 2:
+                    await manager.broadcast(session_id, {
+                        "type": "log", "phase": phase,
+                        "message": f">> SKIPPED (repeated failure): {command}",
+                    })
+                    messages.append({"role": "assistant", "content": response})
+                    messages.append({"role": "user", "content":
+                        f"STOP: The command '{command}' has failed {failed_commands[cmd_key]} times with the same error. "
+                        f"Do NOT retry it. Choose a DIFFERENT tool or approach. "
+                        f"Available tools: {tools_str}. "
+                        f"If you have enough findings, use the 'done' action."
+                    })
+                    continue
+
+                # Check for semantic duplicates (same tool + same target run too many times)
+                if _is_duplicate_command(command, recent_commands):
+                    dup_tool, dup_target = _normalize_command(command)
+                    # Count how many times this tool was already used
+                    tool_count = sum(1 for c in recent_commands if _normalize_command(c)[0] == dup_tool)
+                    await manager.broadcast(session_id, {
+                        "type": "log", "phase": phase,
+                        "message": f">> SKIPPED (duplicate: {dup_tool} already ran {tool_count}x): {command}",
+                    })
+                    # Build list of tools NOT yet used
+                    all_tools = set(enabled_tools)
+                    used_tools = set(_normalize_command(c)[0] for c in recent_commands)
+                    unused_tools = all_tools - used_tools
+                    unused_str = ", ".join(sorted(unused_tools)[:10]) if unused_tools else "all tools already used"
+                    messages.append({"role": "assistant", "content": response})
+                    messages.append({"role": "user", "content":
+                        f"STOP: You already ran {dup_tool} on this target {tool_count} times. "
+                        f"Do NOT use {dup_tool} again. "
+                        f"Tools you have NOT tried yet: {unused_str}. "
+                        f"Try one of those, or test a different URL path/parameter. "
+                        f"If you have enough findings, use the 'done' action."
+                    })
+                    continue
+
+                await manager.broadcast(session_id, {
+                    "type": "log", "phase": phase,
+                    "message": f">> EXECUTING: {command}",
+                })
+                if reason:
+                    await manager.broadcast(session_id, {
+                        "type": "log", "phase": phase,
+                        "message": f"   Reason: {reason}",
+                    })
+
+                # Execute the tool
+                if kali_running:
+                    result = await execute_tool(command, enabled_tools, no_timeout=no_timeout)
+
+                    tool_name = result["tool"]
+                    tools_executed.add(tool_name)  # track for phase enforcement
+                    raw_output = result["output"] or result.get("error", "No output")
+                    tool_output = _strip_ansi(raw_output)  # clean ANSI codes
+                    tool_duration = result["duration_ms"]
+
+                    status = "OK" if result["success"] else "FAILED"
+
+                    # === Container-down circuit breaker ===
+                    error_str = result.get("error", "") or ""
+                    if "container is not running" in error_str:
+                        consecutive_container_failures += 1
+                        await manager.broadcast(session_id, {
+                            "type": "log", "phase": "error",
+                            "message": f"⚠ Container down ({consecutive_container_failures}/3 before auto-stop)",
+                        })
+                    else:
+                        consecutive_container_failures = 0  # reset on any non-container error
+
+                    # Track repeated failures
+                    if not result["success"]:
+                        failed_commands[cmd_key] = failed_commands.get(cmd_key, 0) + 1
+                    else:
+                        failed_commands.pop(cmd_key, None)  # clear on success
+
+                    # Track for semantic deduplication
+                    recent_commands.append(command)
+
+                    await manager.broadcast(session_id, {
+                        "type": "log", "phase": phase,
+                        "message": f"<< {tool_name} [{status}] ({tool_duration}ms)",
+                    })
+
+                    # Parse key findings from output
+                    parsed_findings = _parse_tool_output(tool_name, tool_output, command)
+                    chaining_hint = _build_chaining_hint(tool_name, parsed_findings, command) if parsed_findings else ""
+
+                    # Stream key findings to dashboard log (or first 30 lines of raw output)
+                    if parsed_findings:
+                        for pline in parsed_findings.split("\n")[:10]:
+                            if pline.strip():
+                                await manager.broadcast(session_id, {
+                                    "type": "log", "phase": phase,
+                                    "message": f"   🔍 {pline.strip()}",
+                                })
+                    else:
+                        output_lines = tool_output.split("\n")
+                        for i, line in enumerate(output_lines[:30]):
+                            if line.strip():
+                                await manager.broadcast(session_id, {
+                                    "type": "log", "phase": phase,
+                                    "message": f"   {line.rstrip()}",
+                                })
+                            if i % 10 == 0:
+                                await asyncio.sleep(0.02)
+                        if len(output_lines) > 30:
+                            await manager.broadcast(session_id, {
+                                "type": "log", "phase": phase,
+                                "message": f"   ... ({len(output_lines) - 30} more lines)",
+                            })
+
+                    # === Auto-detect findings programmatically ===
+                    auto_findings = _auto_detect_findings(tool_name, tool_output, command)
+                    for af in auto_findings:
+                        # Check for duplicates (same vuln_type + url)
+                        is_dup = any(
+                            f["vuln_type"] == af["vuln_type"] and f["url"] == af["url"]
+                            for f in full_findings_data
+                        )
+                        if is_dup:
+                            continue
+
+                        findings_count += 1
+                        await manager.broadcast(session_id, {
+                            "type": "log", "phase": "test",
+                            "message": f"!! AUTO-FINDING: [{af['severity'].upper()}] {af['vuln_type']}",
+                        })
+                        if af.get("url"):
+                            await manager.broadcast(session_id, {
+                                "type": "log", "phase": "test",
+                                "message": f"   URL: {af['url']}  Param: {af.get('parameter', '')}",
+                            })
+
+                        # Send to UI
+                        await manager.broadcast(session_id, {
+                            "type": "finding",
+                            "vuln_type": af["vuln_type"],
+                            "severity": af["severity"],
+                            "url": af.get("url", ""),
+                            "parameter": af.get("parameter", ""),
+                            "evidence": af.get("evidence", ""),
+                        })
+
+                        # Save to DB
+                        db = await get_db()
+                        await db.execute(
+                            "INSERT INTO findings (session_id, vuln_type, severity, url, parameter, evidence) "
+                            "VALUES (?, ?, ?, ?, ?, ?)",
+                            (session_id, af["vuln_type"], af["severity"],
+                             af.get("url", ""), af.get("parameter", ""),
+                             af.get("evidence", "")[:2000]),
+                        )
+                        await db.commit()
+                        await db.close()
+                        db = None
+
+                        # Collect for report
+                        full_findings_data.append(af)
+
+                    # Feed result back to LLM with structured feedback
+                    messages.append({"role": "assistant", "content": response})
+
+                    # === TOOL FEEDBACK ===
+                    completed_phases, uncovered = _get_phase_coverage(tools_executed, enabled_tools)
+                    phase_status = f"Phases covered: {', '.join(sorted(completed_phases)) or 'none'}"
+                    if uncovered:
+                        phase_status += f". Still needed: {', '.join(p.split(' (')[0] for p in uncovered)}"
+
+                    if result["success"]:
+                        tool_feedback = f"Tool: {tool_name} | Status: {status} | Duration: {tool_duration}ms\n\n"
+                        if parsed_findings:
+                            tool_feedback += f"=== KEY FINDINGS ===\n{parsed_findings}\n\n"
+                        tool_feedback += f"=== RAW OUTPUT (truncated) ===\n{tool_output[:2500]}\n\n"
+                        if chaining_hint:
+                            tool_feedback += f"{chaining_hint}\n\n"
+                        tool_feedback += f"[{phase_status}]\n"
+                        if uncovered:
+                            tool_feedback += "Move to an UNCOVERED phase. Do NOT re-run tools from covered phases.\n"
+                        else:
+                            tool_feedback += "All phases covered. You may use 'done' when testing is complete.\n"
+                        tool_feedback += "If you found vulnerabilities in the output, report them with a 'finding' action FIRST.\n"
+                        tool_feedback += "Respond with a JSON action."
+                    else:
+                        tool_feedback = (
+                            f"Tool: {tool_name} | Status: FAILED | Duration: {tool_duration}ms\n"
+                            f"Error:\n{tool_output[:1500]}\n\n"
+                        )
+                        # Special recovery hints for common failures
+                        if tool_name in ("gobuster", "ffuf") and "exclude" in tool_output.lower():
+                            tool_feedback += (
+                                "This failed because the server returns the same response for all paths.\n"
+                                "RETRY with: gobuster dir -u http://juice-shop:3000 -w /usr/share/dirb/wordlists/common.txt --exclude-length 3748\n"
+                                "Or use: ffuf -u http://juice-shop:3000/FUZZ -w /usr/share/dirb/wordlists/common.txt -fs 3748\n"
+                            )
+                        else:
+                            tool_feedback += (
+                                "This command failed. Do NOT retry it. Try a DIFFERENT tool or approach.\n"
+                                "Remember: use http://juice-shop:3000 with http:// prefix.\n"
+                            )
+                        if uncovered:
+                            tool_feedback += f"Move to an uncovered phase: {uncovered[0]}\n"
+                        tool_feedback += "Respond with a JSON action."
+                    messages.append({"role": "user", "content": tool_feedback})
+
+                    # Save step to DB (cleaned output, larger truncation)
+                    db = await get_db()
+                    await db.execute(
+                        "INSERT INTO steps (session_id, phase, step_number, prompt_sent, model_response, "
+                        "tool_called, tool_input, tool_output, duration_ms) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (session_id, phase, step_number, reason[:500], response[:2000],
+                         tool_name, command[:1000], tool_output[:4000], tool_duration),
+                    )
+                    await db.commit()
+                    await db.close()
+                    db = None
+
+                    # Collect full untruncated data for file report
+                    full_steps_data.append({
+                        "step": step_number,
+                        "phase": phase,
+                        "tool": tool_name,
+                        "command": command,
+                        "reason": reason,
+                        "output": tool_output,
+                        "success": result["success"],
+                        "duration_ms": tool_duration,
+                    })
+
+                else:
+                    # No kali container — just log and move on
+                    messages.append({"role": "assistant", "content": response})
+                    messages.append({"role": "user", "content":
+                        f"[SIMULATED] kali-tools container not available. Cannot execute: {command}\n"
+                        f"Suggest the next tool to run or use 'done' to finish."
+                    })
+
+            # --- ACTION: finding ---
+            elif action_type == "finding":
+                vuln_type = action.get("vuln_type", "Unknown")
+                severity = action.get("severity", "info")
+                vuln_url = action.get("url", "")
+                parameter = action.get("parameter", "")
+                evidence = action.get("evidence", "")
+
+                findings_count += 1
+                await manager.broadcast(session_id, {
+                    "type": "log", "phase": "test",
+                    "message": f"!! FINDING: [{severity.upper()}] {vuln_type}",
+                })
+                if vuln_url:
+                    await manager.broadcast(session_id, {
+                        "type": "log", "phase": "test",
+                        "message": f"   URL: {vuln_url}  Param: {parameter}",
+                    })
+
+                # Send finding to UI
+                await manager.broadcast(session_id, {
+                    "type": "finding",
+                    "vuln_type": vuln_type,
+                    "severity": severity,
+                    "url": vuln_url,
+                    "parameter": parameter,
+                    "evidence": evidence,
+                })
+
+                # Save finding to DB
+                db = await get_db()
+                await db.execute(
+                    "INSERT INTO findings (session_id, vuln_type, severity, url, parameter, evidence) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (session_id, vuln_type, severity, vuln_url, parameter, evidence[:2000]),
+                )
+                await db.commit()
+                await db.close()
+                db = None
+
+                # Collect full untruncated finding for file report
+                full_findings_data.append({
+                    "vuln_type": vuln_type,
+                    "severity": severity,
+                    "url": vuln_url,
+                    "parameter": parameter,
+                    "evidence": evidence,
+                })
+
+                # Continue the loop — ask LLM what to do next
+                messages.append({"role": "assistant", "content": response})
+                messages.append({"role": "user", "content":
+                    f"Finding recorded: [{severity}] {vuln_type}. "
+                    f"Continue testing with the next tool, or use 'done' if all tests are complete."
+                })
+
+            # --- ACTION: done ---
+            elif action_type == "done":
+                summary = action.get("summary", "Testing complete.")
+
+                # Enforce minimum turns
+                if step_number < min_turns_before_done and turn < max_turns - 2:
+                    rejection_msg = (
+                        f"REJECTED: You have only run {step_number} tools. "
+                        f"You must run at least {min_turns_before_done} before finishing.\n"
+                        f"Continue testing — try discovering more endpoints with curl, "
+                        f"or test found endpoints with sqlmap, xsstrike, or nuclei.\n"
+                        f"Respond with a JSON action."
+                    )
+                    await manager.broadcast(session_id, {
+                        "type": "log", "phase": "scan",
+                        "message": f"[ENFORCEMENT] Rejected premature 'done' - "
+                                   f"only {step_number}/{min_turns_before_done} tools run",
+                    })
+                    messages.append({"role": "assistant", "content": response})
+                    messages.append({"role": "user", "content": rejection_msg})
+                    continue
+
+                # Enforce minimum phase coverage (relaxed for chain sessions — they focus on 1 phase)
+                completed_phases, uncovered = _get_phase_coverage(tools_executed, enabled_tools)
+                min_phases = 1 if session_type == "chain" else MIN_PHASES_BEFORE_DONE
+
+                if len(completed_phases) < min_phases and uncovered and turn < max_turns - 2:
+                    first_missing = uncovered[0]
+                    first_phase_name = first_missing.split(" (")[0]
+                    suggestion_cmds = {
+                        "recon": '{"action": "run_tool", "command": "nmap -sV juice-shop -p 3000", "reason": "Port scan to identify services"}',
+                        "discovery": '{"action": "run_tool", "command": "gobuster dir -u http://juice-shop:3000 -w /usr/share/dirb/wordlists/common.txt --exclude-length 3748", "reason": "Directory enumeration to find hidden paths"}',
+                        "vuln_scan": '{"action": "run_tool", "command": "nuclei -u http://juice-shop:3000 -severity medium,high,critical", "reason": "Scanning for known vulnerabilities"}',
+                        "exploitation": '{"action": "run_tool", "command": "curl -s http://juice-shop:3000/api/Products", "reason": "Probing API endpoints for data exposure"}',
+                    }
+                    suggested = suggestion_cmds.get(first_phase_name, "")
+
+                    rejection_msg = (
+                        f"REJECTED: You cannot finish yet. You have only completed "
+                        f"{len(completed_phases)}/{MIN_PHASES_BEFORE_DONE} required testing phases.\n"
+                        f"Phases completed: {', '.join(sorted(completed_phases)) or 'none'}.\n"
+                        f"Phases still needed:\n"
+                    )
+                    for desc in uncovered:
+                        rejection_msg += f"  - {desc}\n"
+                    rejection_msg += (
+                        f"\nDo NOT repeat tools you already ran. Run a tool from a NEW phase.\n"
+                    )
+                    if suggested:
+                        rejection_msg += (
+                            f"Here is a suggested command for the {first_phase_name} phase - "
+                            f"use this or a similar tool:\n{suggested}\n"
+                        )
+
+                    await manager.broadcast(session_id, {
+                        "type": "log", "phase": "scan",
+                        "message": f"[ENFORCEMENT] Rejected premature 'done' - "
+                                   f"only {len(completed_phases)}/{MIN_PHASES_BEFORE_DONE} phases covered. "
+                                   f"Missing: {', '.join(p.split(' (')[0] for p in uncovered)}",
+                    })
+
+                    messages.append({"role": "assistant", "content": response})
+                    messages.append({"role": "user", "content": rejection_msg})
+                    continue
+
+                # Allow done (sufficient phase coverage or near turn limit)
+                completed_phases, _ = _get_phase_coverage(tools_executed, enabled_tools)
+                done_msg = f"Agent finished: {summary}"
+                done_msg += f" (phases covered: {', '.join(sorted(completed_phases))})"
+                await manager.broadcast(session_id, {
+                    "type": "log", "phase": "report",
+                    "message": done_msg,
+                })
+                break
+
+            else:
+                # Unknown action
+                messages.append({"role": "assistant", "content": response})
+                messages.append({"role": "user", "content":
+                    f"Unknown action '{action_type}'. Use 'run_tool', 'finding', or 'done'."
+                })
+
+        # ===== Phase 5: REPORT =====
+        total_duration_ms = int((time.time() - session_start_time) * 1000)
+
+        await manager.broadcast(session_id, {"type": "phase", "active": "report"})
+        await manager.broadcast(session_id, {
+            "type": "log", "phase": "report",
+            "message": f"Scan complete. {step_number} steps, {findings_count} findings. Generating report...",
+        })
+
+        # Update session metrics
+        db = await get_db()
+        try:
+            await db.execute(
+                "UPDATE sessions SET total_steps = ?, total_findings = ?, total_duration_ms = ? WHERE id = ?",
+                (step_number, findings_count, total_duration_ms, session_id),
+            )
+            await db.commit()
+        finally:
+            await db.close()
+            db = None
+
+        # Generate report
+        try:
+            report_md, exec_summary, gen_duration = await _generate_report(
+                session_id=session_id,
+                model=model,
+                target_url=target_url,
+                session_type=session_type,
+                vuln_category=vuln_category,
+                total_steps=step_number,
+                total_findings=findings_count,
+                total_duration_ms=total_duration_ms,
+            )
+            await manager.broadcast(session_id, {
+                "type": "log", "phase": "report",
+                "message": f"Report generated ({gen_duration}ms)",
+            })
+            # Send report to dashboard
+            await manager.broadcast(session_id, {
+                "type": "report",
+                "report_markdown": report_md,
+                "executive_summary": exec_summary,
+            })
+
+            # Save comprehensive report file to disk
+            try:
+                report_path = await _save_report_file(
+                    session_id=session_id,
+                    target_url=target_url,
+                    session_type=session_type,
+                    vuln_category=vuln_category,
+                    model=model,
+                    scope_mode=scope_mode,
+                    total_steps=step_number,
+                    total_findings=findings_count,
+                    total_duration_ms=total_duration_ms,
+                    full_steps=full_steps_data,
+                    full_findings=full_findings_data,
+                    llm_report=report_md,
+                )
+                await manager.broadcast(session_id, {
+                    "type": "log", "phase": "report",
+                    "message": f"Comprehensive report saved to {report_path}",
+                })
+            except Exception as e:
+                await manager.broadcast(session_id, {
+                    "type": "log", "phase": "error",
+                    "message": f"Failed to save report file: {e}",
+                })
+
+        except Exception as e:
+            report_md = None
+            await manager.broadcast(session_id, {
+                "type": "log", "phase": "error",
+                "message": f"Report generation failed: {e}",
+            })
+
+            # Still try to save raw data file even if LLM report failed
+            try:
+                report_path = await _save_report_file(
+                    session_id=session_id,
+                    target_url=target_url,
+                    session_type=session_type,
+                    vuln_category=vuln_category,
+                    model=model,
+                    scope_mode=scope_mode,
+                    total_steps=step_number,
+                    total_findings=findings_count,
+                    total_duration_ms=total_duration_ms,
+                    full_steps=full_steps_data,
+                    full_findings=full_findings_data,
+                    llm_report="",
+                )
+                await manager.broadcast(session_id, {
+                    "type": "log", "phase": "report",
+                    "message": f"Raw data report saved to {report_path} (LLM report failed)",
+                })
+            except Exception:
+                pass
+
+        # Extract recon context for future warm-start sessions
+        try:
+            ctx_count = await _extract_recon_context(session_id)
+            if ctx_count > 0:
+                await manager.broadcast(session_id, {
+                    "type": "log", "phase": "report",
+                    "message": f"Extracted {ctx_count} recon context entries for future warm-start sessions",
+                })
+        except Exception as e:
+            await manager.broadcast(session_id, {
+                "type": "log", "phase": "error",
+                "message": f"Recon context extraction failed: {e}",
+            })
+
+        await _finish_session(session_id, "completed")
+
+        # Chain auto-progression: create and start next session if this is a chain session
+        if session_type == "chain":
+            try:
+                await _chain_auto_progress(session_id)
+            except Exception as e:
+                await manager.broadcast(session_id, {
+                    "type": "log", "phase": "error",
+                    "message": f"Chain auto-progression failed: {e}",
+                })
+
+    except asyncio.CancelledError:
+        await manager.broadcast(session_id, {
+            "type": "log", "phase": "system",
+            "message": "Agent stopped by user",
+        })
+        await _finish_session(session_id, "stopped")
+
+    except Exception as e:
+        await manager.broadcast(session_id, {
+            "type": "log", "phase": "error",
+            "message": f"Unexpected error: {e}",
+        })
+        await _finish_session(session_id, "error")
+
+    finally:
+        if db:
+            await db.close()
+        running_tasks.pop(session_id, None)
+
+
+async def _finish_session(session_id: str, status: str):
+    db = await get_db()
+    try:
+        await db.execute(
+            "UPDATE sessions SET status = ?, updated_at = datetime('now') WHERE id = ?",
+            (status, session_id),
+        )
+        await db.commit()
+    finally:
+        await db.close()
+
+    await manager.broadcast(session_id, {
+        "type": "status", "status": status,
+        "message": f"Session {status}",
+    })
+
 
 # --- Routes ---
 
@@ -54,14 +2802,50 @@ async def dashboard(request: Request):
     return templates.TemplateResponse("index.html", {"request": request})
 
 
+@app.get("/api/presets")
+async def get_presets():
+    return PRESET_PROMPTS
+
+
+@app.get("/api/models")
+async def get_models():
+    models = await llm_client.list_models()
+    return {"models": models, "default": llm_client.DEFAULT_MODEL}
+
+
+@app.get("/api/sessions")
+async def list_sessions():
+    """List all sessions (for warm-start parent picker, history, and chain grouping)."""
+    db = await get_db()
+    try:
+        cursor = await db.execute(
+            "SELECT id, target_url, scope_mode, session_type, vuln_category, status, "
+            "total_steps, total_findings, total_duration_ms, created_at, "
+            "chain_id, chain_phase, chain_position "
+            "FROM sessions ORDER BY created_at DESC"
+        )
+        rows = await cursor.fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        await db.close()
+
+
 @app.post("/api/sessions", response_model=SessionResponse)
 async def create_session(data: SessionCreate):
     session_id = uuid.uuid4().hex[:12]
+    enabled_tools_str = ",".join(data.enabled_tools)
     db = await get_db()
     try:
+        # Resolve max_turns: 0 = unlimited (use ABSOLUTE_MAX_TURNS safety cap)
+        effective_max_turns = data.max_turns if data.max_turns > 0 else ABSOLUTE_MAX_TURNS
+        effective_max_turns = min(effective_max_turns, ABSOLUTE_MAX_TURNS)  # enforce cap
+
         await db.execute(
-            "INSERT INTO sessions (id, target_url, scope_mode) VALUES (?, ?, ?)",
-            (session_id, data.target_url, data.scope_mode.value),
+            "INSERT INTO sessions (id, target_url, scope_mode, system_prompt, model, enabled_tools, "
+            "session_type, parent_session_id, vuln_category, no_timeout, max_turns) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (session_id, data.target_url, data.scope_mode.value, data.system_prompt, data.model,
+             enabled_tools_str, data.session_type, data.parent_session_id, data.vuln_category,
+             1 if data.no_timeout else 0, effective_max_turns),
         )
         await db.commit()
         row = await db.execute("SELECT * FROM sessions WHERE id = ?", (session_id,))
@@ -70,8 +2854,17 @@ async def create_session(data: SessionCreate):
             id=session["id"],
             target_url=session["target_url"],
             scope_mode=session["scope_mode"],
+            system_prompt=session["system_prompt"],
+            model=session["model"],
+            enabled_tools=session["enabled_tools"],
             status=session["status"],
             created_at=session["created_at"],
+            session_type=session["session_type"] or "cold",
+            parent_session_id=session["parent_session_id"],
+            vuln_category=session["vuln_category"],
+            total_duration_ms=session["total_duration_ms"],
+            total_steps=session["total_steps"] or 0,
+            total_findings=session["total_findings"] or 0,
         )
     finally:
         await db.close()
@@ -84,14 +2877,22 @@ async def get_session(session_id: str):
         row = await db.execute("SELECT * FROM sessions WHERE id = ?", (session_id,))
         session = await row.fetchone()
         if not session:
-            from fastapi import HTTPException
             raise HTTPException(404, "Session not found")
         return SessionResponse(
             id=session["id"],
             target_url=session["target_url"],
             scope_mode=session["scope_mode"],
+            system_prompt=session["system_prompt"],
+            model=session["model"],
+            enabled_tools=session["enabled_tools"],
             status=session["status"],
             created_at=session["created_at"],
+            session_type=session["session_type"] or "cold",
+            parent_session_id=session["parent_session_id"],
+            vuln_category=session["vuln_category"],
+            total_duration_ms=session["total_duration_ms"],
+            total_steps=session["total_steps"] or 0,
+            total_findings=session["total_findings"] or 0,
         )
     finally:
         await db.close()
@@ -99,21 +2900,62 @@ async def get_session(session_id: str):
 
 @app.post("/api/sessions/{session_id}/start")
 async def start_session(session_id: str):
+    # Check if already running
+    if session_id in running_tasks and not running_tasks[session_id].done():
+        return {"status": "already_running", "message": "Session is already running."}
+
     db = await get_db()
     try:
+        row = await db.execute("SELECT * FROM sessions WHERE id = ?", (session_id,))
+        session = await row.fetchone()
+        if not session:
+            raise HTTPException(404, "Session not found")
+
         await db.execute(
             "UPDATE sessions SET status = 'running', updated_at = datetime('now') WHERE id = ?",
             (session_id,),
         )
         await db.commit()
-        await manager.broadcast(session_id, {
-            "type": "status",
-            "status": "running",
-            "message": "Session started. Agent loop is a TODO placeholder.",
-        })
-        return {"status": "running", "message": "Agent loop not yet implemented."}
     finally:
         await db.close()
+
+    enabled_tools = session["enabled_tools"].split(",") if session["enabled_tools"] else []
+
+    # Launch the agent loop as a background task
+    no_timeout = bool(session["no_timeout"]) if session["no_timeout"] else False
+    max_turns = int(session["max_turns"]) if session["max_turns"] else DEFAULT_MAX_TURNS
+    task = asyncio.create_task(
+        agent_loop(
+            session_id=session_id,
+            target_url=session["target_url"],
+            scope_mode=session["scope_mode"],
+            system_prompt=session["system_prompt"],
+            enabled_tools=enabled_tools,
+            model=session["model"],
+            session_type=session["session_type"] or "cold",
+            parent_session_id=session["parent_session_id"],
+            vuln_category=session["vuln_category"],
+            no_timeout=no_timeout,
+            max_turns=max_turns,
+        )
+    )
+    running_tasks[session_id] = task
+
+    await manager.broadcast(session_id, {
+        "type": "status", "status": "running",
+        "message": "Agent loop started",
+    })
+
+    return {"status": "running", "message": "Agent loop started."}
+
+
+@app.post("/api/sessions/{session_id}/stop")
+async def stop_session(session_id: str):
+    task = running_tasks.get(session_id)
+    if task and not task.done():
+        task.cancel()
+        return {"status": "stopping", "message": "Stop signal sent."}
+    return {"status": "not_running", "message": "No active agent loop for this session."}
 
 
 @app.get("/api/sessions/{session_id}/steps")
@@ -142,9 +2984,1340 @@ async def list_findings(session_id: str):
         await db.close()
 
 
+@app.get("/api/sessions/{session_id}/report")
+async def get_report(session_id: str):
+    """Get the generated report for a session."""
+    db = await get_db()
+    try:
+        cursor = await db.execute(
+            "SELECT * FROM reports WHERE session_id = ?", (session_id,)
+        )
+        row = await cursor.fetchone()
+        if not row:
+            raise HTTPException(404, "Report not found. Session may not have completed yet.")
+        return ReportResponse(
+            session_id=row["session_id"],
+            report_markdown=row["report_markdown"],
+            executive_summary=row["executive_summary"],
+            generated_by_model=row["generated_by_model"],
+            generation_duration_ms=row["generation_duration_ms"],
+            created_at=row["created_at"],
+        )
+    finally:
+        await db.close()
+
+
+@app.get("/api/sessions/{session_id}/report/download")
+async def download_report_file(session_id: str):
+    """Download the comprehensive report file for a session."""
+    report_path = REPORTS_DIR / f"{session_id}.md"
+    if not report_path.exists():
+        raise HTTPException(404, "Report file not found. Session may not have completed yet.")
+    return FileResponse(
+        path=str(report_path),
+        filename=f"pentest-report-{session_id}.md",
+        media_type="text/markdown",
+    )
+
+
+@app.get("/api/thesis/comparison")
+async def thesis_comparison(vuln_category: str = None):
+    """Compare warm vs cold session metrics for thesis analysis."""
+    db = await get_db()
+    try:
+        query = """
+            SELECT s.id, s.target_url, s.session_type, s.vuln_category, s.status,
+                   s.total_steps, s.total_findings, s.total_duration_ms, s.created_at,
+                   s.parent_session_id
+            FROM sessions s
+            WHERE s.status = 'completed'
+        """
+        params = []
+        if vuln_category:
+            query += " AND s.vuln_category = ?"
+            params.append(vuln_category)
+        query += " ORDER BY s.created_at"
+
+        cursor = await db.execute(query, params)
+        sessions = await cursor.fetchall()
+
+        results = {"cold": [], "warm": []}
+        for s in sessions:
+            sid = s["id"]
+            # Get findings breakdown
+            fc = await db.execute(
+                "SELECT severity, COUNT(*) as cnt FROM findings WHERE session_id = ? GROUP BY severity",
+                (sid,)
+            )
+            sev_rows = await fc.fetchall()
+            by_severity = {r["severity"]: r["cnt"] for r in sev_rows}
+
+            fc2 = await db.execute(
+                "SELECT vuln_type, COUNT(*) as cnt FROM findings WHERE session_id = ? GROUP BY vuln_type",
+                (sid,)
+            )
+            type_rows = await fc2.fetchall()
+            by_type = {r["vuln_type"]: r["cnt"] for r in type_rows}
+
+            entry = {
+                "session_id": sid,
+                "target_url": s["target_url"],
+                "session_type": s["session_type"] or "cold",
+                "vuln_category": s["vuln_category"],
+                "total_steps": s["total_steps"] or 0,
+                "total_findings": s["total_findings"] or 0,
+                "total_duration_ms": s["total_duration_ms"],
+                "findings_by_severity": by_severity,
+                "findings_by_type": by_type,
+                "created_at": s["created_at"],
+            }
+
+            stype = s["session_type"] or "cold"
+            results.setdefault(stype, []).append(entry)
+
+        # Compute aggregates
+        summary = {}
+        for stype in ("cold", "warm"):
+            sessions_list = results.get(stype, [])
+            if sessions_list:
+                avg_findings = sum(s["total_findings"] for s in sessions_list) / len(sessions_list)
+                avg_steps = sum(s["total_steps"] for s in sessions_list) / len(sessions_list)
+                durations = [s["total_duration_ms"] for s in sessions_list if s["total_duration_ms"]]
+                avg_duration = sum(durations) / len(durations) if durations else 0
+                summary[stype] = {
+                    "count": len(sessions_list),
+                    "avg_findings": round(avg_findings, 2),
+                    "avg_steps": round(avg_steps, 2),
+                    "avg_duration_ms": round(avg_duration, 0),
+                }
+            else:
+                summary[stype] = {"count": 0, "avg_findings": 0, "avg_steps": 0, "avg_duration_ms": 0}
+
+        # Detection rate improvement
+        cold_avg = summary["cold"]["avg_findings"]
+        warm_avg = summary["warm"]["avg_findings"]
+        if cold_avg > 0:
+            improvement_pct = round(((warm_avg - cold_avg) / cold_avg) * 100, 1)
+        else:
+            improvement_pct = None
+
+        return {
+            "filter": {"vuln_category": vuln_category},
+            "summary": summary,
+            "detection_rate_improvement_pct": improvement_pct,
+            "sessions": results,
+        }
+    finally:
+        await db.close()
+
+
+@app.get("/api/thesis/export")
+async def thesis_export():
+    """Export all thesis data as JSON for analysis in pandas/R/Excel."""
+    db = await get_db()
+    try:
+        # Sessions
+        c1 = await db.execute("SELECT * FROM sessions ORDER BY created_at")
+        sessions = [dict(r) for r in await c1.fetchall()]
+
+        # Findings
+        c2 = await db.execute("SELECT * FROM findings ORDER BY session_id, id")
+        findings = [dict(r) for r in await c2.fetchall()]
+
+        # Steps
+        c3 = await db.execute("SELECT * FROM steps ORDER BY session_id, step_number")
+        steps = [dict(r) for r in await c3.fetchall()]
+
+        # Reports
+        c4 = await db.execute("SELECT session_id, executive_summary, generated_by_model, generation_duration_ms, created_at FROM reports")
+        reports = [dict(r) for r in await c4.fetchall()]
+
+        # Recon context
+        c5 = await db.execute("SELECT * FROM recon_context ORDER BY session_id, context_type")
+        recon = [dict(r) for r in await c5.fetchall()]
+
+        return {
+            "exported_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "sessions": sessions,
+            "findings": findings,
+            "steps": steps,
+            "reports": reports,
+            "recon_context": recon,
+        }
+    finally:
+        await db.close()
+
+
+# --- Chain Mode API ---
+
+@app.post("/api/chains")
+async def create_chain(data: ChainCreate):
+    """Create a new chain and auto-start the first (recon) session."""
+    chain_id = uuid.uuid4().hex[:12]
+    enabled_tools_str = ",".join(data.enabled_tools)
+
+    # Resolve max_turns
+    effective_max_turns = data.max_turns_per_session if data.max_turns_per_session > 0 else ABSOLUTE_MAX_TURNS
+    effective_max_turns = min(effective_max_turns, ABSOLUTE_MAX_TURNS)
+
+    db = await get_db()
+    try:
+        await db.execute(
+            "INSERT INTO chains (id, target_url, scope_mode, system_prompt, model, enabled_tools, "
+            "current_phase, current_position, total_sessions, status, auto_progress, "
+            "max_turns_per_session, no_timeout) VALUES (?, ?, ?, ?, ?, ?, 'recon', 0, 1, 'running', ?, ?, ?)",
+            (chain_id, data.target_url, data.scope_mode.value, data.system_prompt, data.model,
+             enabled_tools_str, 1 if data.auto_progress else 0, effective_max_turns,
+             1 if data.no_timeout else 0),
+        )
+        await db.commit()
+
+        # Get the chain row back
+        row = await db.execute("SELECT * FROM chains WHERE id = ?", (chain_id,))
+        chain = await row.fetchone()
+    finally:
+        await db.close()
+
+    # Create and start the first session (recon phase)
+    first_session_id = await _create_chain_session(chain_id, chain, "recon", 0)
+
+    # Small delay then start the session
+    await asyncio.sleep(0.5)
+    await _start_chain_session(first_session_id)
+
+    return {
+        "id": chain_id,
+        "target_url": data.target_url,
+        "scope_mode": data.scope_mode.value,
+        "model": data.model,
+        "current_phase": "recon",
+        "current_position": 0,
+        "total_sessions": 1,
+        "status": "running",
+        "auto_progress": data.auto_progress,
+        "max_turns_per_session": effective_max_turns,
+        "created_at": datetime.now().isoformat(),
+        "first_session_id": first_session_id,
+    }
+
+
+@app.get("/api/chains")
+async def list_chains():
+    """List all chains with summary info."""
+    db = await get_db()
+    try:
+        cursor = await db.execute(
+            "SELECT * FROM chains ORDER BY created_at DESC"
+        )
+        chains = await cursor.fetchall()
+        result = []
+        for c in chains:
+            # Get sessions in this chain
+            scursor = await db.execute(
+                "SELECT id, chain_position, chain_phase, status, total_steps, total_findings, total_duration_ms "
+                "FROM sessions WHERE chain_id = ? ORDER BY chain_position",
+                (c["id"],)
+            )
+            sessions = [dict(s) for s in await scursor.fetchall()]
+            result.append({
+                **dict(c),
+                "auto_progress": bool(c["auto_progress"]),
+                "sessions": sessions,
+            })
+        return result
+    finally:
+        await db.close()
+
+
+@app.get("/api/chains/{chain_id}")
+async def get_chain(chain_id: str):
+    """Get chain details with all linked sessions."""
+    db = await get_db()
+    try:
+        row = await db.execute("SELECT * FROM chains WHERE id = ?", (chain_id,))
+        chain = await row.fetchone()
+        if not chain:
+            raise HTTPException(404, "Chain not found")
+
+        # Get all sessions in this chain
+        cursor = await db.execute(
+            "SELECT id, chain_position, chain_phase, status, total_steps, total_findings, "
+            "total_duration_ms, created_at FROM sessions WHERE chain_id = ? ORDER BY chain_position",
+            (chain_id,)
+        )
+        sessions = [dict(s) for s in await cursor.fetchall()]
+
+        return {
+            **dict(chain),
+            "auto_progress": bool(chain["auto_progress"]),
+            "sessions": sessions,
+        }
+    finally:
+        await db.close()
+
+
+@app.post("/api/chains/{chain_id}/continue")
+async def continue_chain(chain_id: str):
+    """Manually continue a paused chain to its next phase."""
+    db = await get_db()
+    try:
+        row = await db.execute("SELECT * FROM chains WHERE id = ?", (chain_id,))
+        chain = await row.fetchone()
+        if not chain:
+            raise HTTPException(404, "Chain not found")
+
+        if chain["status"] not in ("paused", "created"):
+            raise HTTPException(400, f"Chain is {chain['status']}, not paused")
+
+        current_phase = chain["current_phase"]
+        next_phase = _get_next_chain_phase(current_phase)
+        if next_phase is None:
+            raise HTTPException(400, "Chain has completed all phases")
+
+        next_position = (chain["current_position"] or 0) + 1
+
+        await db.execute(
+            "UPDATE chains SET current_phase = ?, current_position = ?, "
+            "total_sessions = ?, status = 'running', updated_at = datetime('now') WHERE id = ?",
+            (next_phase, next_position, next_position + 1, chain_id)
+        )
+        await db.commit()
+
+        # Re-fetch chain for session creation
+        row = await db.execute("SELECT * FROM chains WHERE id = ?", (chain_id,))
+        chain = await row.fetchone()
+    finally:
+        await db.close()
+
+    # Create and start next session
+    next_session_id = await _create_chain_session(chain_id, chain, next_phase, next_position)
+    await asyncio.sleep(0.5)
+    await _start_chain_session(next_session_id)
+
+    return {
+        "status": "running",
+        "chain_id": chain_id,
+        "phase": next_phase,
+        "position": next_position,
+        "session_id": next_session_id,
+    }
+
+
+@app.post("/api/chains/{chain_id}/stop")
+async def stop_chain(chain_id: str):
+    """Stop the entire chain and cancel any running session."""
+    db = await get_db()
+    try:
+        row = await db.execute("SELECT * FROM chains WHERE id = ?", (chain_id,))
+        chain = await row.fetchone()
+        if not chain:
+            raise HTTPException(404, "Chain not found")
+
+        # Find and stop any running sessions in this chain
+        cursor = await db.execute(
+            "SELECT id FROM sessions WHERE chain_id = ? AND status = 'running'",
+            (chain_id,)
+        )
+        running_sessions = await cursor.fetchall()
+        for s in running_sessions:
+            task = running_tasks.get(s["id"])
+            if task and not task.done():
+                task.cancel()
+
+        await db.execute(
+            "UPDATE chains SET status = 'stopped', updated_at = datetime('now') WHERE id = ?",
+            (chain_id,)
+        )
+        await db.commit()
+    finally:
+        await db.close()
+
+    return {"status": "stopped", "chain_id": chain_id, "message": "Chain stopped."}
+
+
 @app.get("/api/health")
 async def health():
     return await llm_client.health_check()
+
+
+@app.get("/api/tools/test")
+async def test_tools():
+    """Test which tools are available in the kali-tools container."""
+    from orchestrator.tool_executor import check_container_running, CONTAINER_NAME, DOCKER_BIN
+    import asyncio as _asyncio
+    import subprocess as _sp
+
+    if not await check_container_running():
+        return {"container": "not_running", "tools": {}, "error": "kali-tools container is not running"}
+
+    # Map tool names to their version/check commands
+    tool_checks = {
+        # Recon & Scanning
+        "nmap": "nmap --version",
+        "nuclei": "nuclei -version",
+        "nikto": "nikto -Version",
+        "whatweb": "whatweb --version",
+        "wafw00f": "wafw00f --version 2>&1 | head -1",
+        "arjun": "arjun --help 2>&1 | head -1",
+        "whois": "whois --version 2>&1 | head -1",
+        "sslyze": "sslyze --version 2>&1 | head -1",
+        "testssl": "testssl --help 2>&1 | head -3",
+        # Fuzzing & Discovery
+        "ffuf": "ffuf -V",
+        "gobuster": "gobuster version",
+        "dirb": "dirb 2>&1 | head -2",
+        "wfuzz": "wfuzz --version 2>&1 | head -1",
+        # Injection & Exploitation
+        "sqlmap": "sqlmap --version",
+        "xsstrike": "xsstrike --help 2>&1 | head -1",
+        "dalfox": "dalfox version 2>&1 | head -1",
+        "commix": "commix --version 2>&1 | head -1",
+        "crlfuzz": "crlfuzz -version 2>&1 | head -1",
+        # Auth & Crypto
+        "hydra": "hydra -h 2>&1 | head -1",
+        "john": "john --help 2>&1 | head -1",
+        "hashcat": "hashcat --version 2>&1 | head -1",
+        "jwt_tool": "jwt_tool 2>&1 | head -3",
+        # Browser & Automation
+        "playwright": "npx playwright --version 2>&1 | head -1",
+        "pw-crawl": "pw-crawl 2>&1 | head -1",
+        "zap-cli": "zap-cli status 2>&1 | head -1",
+        # Utilities
+        "curl": "curl --version 2>&1 | head -1",
+        "netcat": "nc -h 2>&1 | head -1",
+    }
+
+    results = {}
+
+    def _sync_check_tool(name, cmd):
+        try:
+            r = _sp.run(
+                [DOCKER_BIN, "exec", CONTAINER_NAME, "bash", "-c", cmd],
+                capture_output=True, text=True, timeout=10,
+            )
+            output = (r.stdout + r.stderr).strip()
+            first_line = output.split("\n")[0][:120] if output else ""
+            is_missing = "command not found" in output or "No such file" in output
+            return name, {
+                "available": not is_missing and (r.returncode == 0 or bool(output)),
+                "version": first_line,
+            }
+        except Exception as e:
+            return name, {"available": False, "version": str(e)}
+
+    # Run all checks via thread pool
+    loop = _asyncio.get_event_loop()
+    tasks = [loop.run_in_executor(None, _sync_check_tool, n, c) for n, c in tool_checks.items()]
+    for coro in _asyncio.as_completed(tasks):
+        name, result = await coro
+        results[name] = result
+
+    available_count = sum(1 for v in results.values() if v["available"])
+    total = len(results)
+
+    return {
+        "container": "running",
+        "available": available_count,
+        "total": total,
+        "tools": results,
+    }
+
+
+# --- Benchmark System ---
+
+# OWASP Juice Shop ground truth vulnerabilities
+JUICE_SHOP_GROUND_TRUTH = [
+    {
+        "target_name": "OWASP Juice Shop",
+        "target_url": "http://localhost:3000",
+        "vuln_type": "SQL Injection",
+        "severity": "high",
+        "url_pattern": "/rest/products/search",
+        "parameter": "q",
+        "description": "Boolean-based blind and time-based blind SQL injection on product search endpoint",
+        "owasp_category": "A03:2021 Injection",
+    },
+    {
+        "target_name": "OWASP Juice Shop",
+        "target_url": "http://localhost:3000",
+        "vuln_type": "CORS Misconfiguration",
+        "severity": "medium",
+        "url_pattern": "",
+        "parameter": "",
+        "description": "Access-Control-Allow-Origin: * allows cross-domain data theft of unauthenticated resources",
+        "owasp_category": "A01:2021 Broken Access Control",
+    },
+    {
+        "target_name": "OWASP Juice Shop",
+        "target_url": "http://localhost:3000",
+        "vuln_type": "Information Disclosure",
+        "severity": "info",
+        "url_pattern": "/api/",
+        "parameter": "",
+        "description": "Verbose error pages expose Express.js framework, stack traces, and file paths",
+        "owasp_category": "A05:2021 Security Misconfiguration",
+    },
+    {
+        "target_name": "OWASP Juice Shop",
+        "target_url": "http://localhost:3000",
+        "vuln_type": "Sensitive Data Exposure",
+        "severity": "medium",
+        "url_pattern": "/ftp",
+        "parameter": "",
+        "description": "FTP directory listing exposes sensitive files (acquisitions.md, legal.md, etc)",
+        "owasp_category": "A01:2021 Broken Access Control",
+    },
+    {
+        "target_name": "OWASP Juice Shop",
+        "target_url": "http://localhost:3000",
+        "vuln_type": "Broken Authentication",
+        "severity": "high",
+        "url_pattern": "/rest/user/login",
+        "parameter": "",
+        "description": "No rate limiting on login endpoint, weak JWT secret, admin credentials guessable",
+        "owasp_category": "A07:2021 Identification and Authentication Failures",
+    },
+    {
+        "target_name": "OWASP Juice Shop",
+        "target_url": "http://localhost:3000",
+        "vuln_type": "XSS",
+        "severity": "high",
+        "url_pattern": "/rest/products/search",
+        "parameter": "q",
+        "description": "Reflected/DOM-based XSS via search query parameter and product reviews",
+        "owasp_category": "A03:2021 Injection",
+    },
+    {
+        "target_name": "OWASP Juice Shop",
+        "target_url": "http://localhost:3000",
+        "vuln_type": "Broken Access Control",
+        "severity": "high",
+        "url_pattern": "/api/Users",
+        "parameter": "",
+        "description": "User enumeration and admin API accessible without proper authorization",
+        "owasp_category": "A01:2021 Broken Access Control",
+    },
+    {
+        "target_name": "OWASP Juice Shop",
+        "target_url": "http://localhost:3000",
+        "vuln_type": "Security Misconfiguration",
+        "severity": "info",
+        "url_pattern": "/robots.txt",
+        "parameter": "",
+        "description": "Missing security headers, verbose error messages, default configurations exposed",
+        "owasp_category": "A05:2021 Security Misconfiguration",
+    },
+]
+
+
+async def _seed_ground_truth():
+    """Seed Juice Shop ground truth if not already present."""
+    db = await get_db()
+    try:
+        cursor = await db.execute(
+            "SELECT COUNT(*) as cnt FROM ground_truth WHERE target_name = 'OWASP Juice Shop'"
+        )
+        row = await cursor.fetchone()
+        if row["cnt"] > 0:
+            return  # already seeded
+
+        for gt in JUICE_SHOP_GROUND_TRUTH:
+            await db.execute(
+                "INSERT INTO ground_truth (target_name, target_url, vuln_type, severity, "
+                "url_pattern, parameter, description, owasp_category) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (gt["target_name"], gt["target_url"], gt["vuln_type"], gt["severity"],
+                 gt["url_pattern"], gt["parameter"], gt["description"], gt["owasp_category"])
+            )
+        await db.commit()
+    finally:
+        await db.close()
+
+
+def _match_finding_to_ground_truth(finding: dict, ground_truths: list[dict]) -> bool:
+    """Check if a finding matches any ground truth vulnerability."""
+    f_type = (finding.get("vuln_type") or "").lower()
+    f_url = (finding.get("url") or "").lower()
+    f_param = (finding.get("parameter") or "").lower()
+    f_evidence = (finding.get("evidence") or "").lower()
+
+    for gt in ground_truths:
+        gt_type = gt["vuln_type"].lower()
+        gt_url_pattern = (gt.get("url_pattern") or "").lower()
+        gt_param = (gt.get("parameter") or "").lower()
+
+        # Type-based matching (fuzzy)
+        type_match = False
+        if gt_type in f_type or f_type in gt_type:
+            type_match = True
+        # Cross-match common aliases
+        if gt_type == "sql injection" and ("sqli" in f_type or "sql" in f_type or "injection" in f_type):
+            type_match = True
+        if gt_type == "xss" and ("cross-site" in f_type or "xss" in f_type or "script" in f_type):
+            type_match = True
+        if gt_type == "cors misconfiguration" and ("cors" in f_type or "cross-domain" in f_type or "cross domain" in f_type):
+            type_match = True
+        if gt_type == "information disclosure" and ("info" in f_type or "disclosure" in f_type or "error" in f_type):
+            type_match = True
+        if gt_type == "broken access control" and ("access" in f_type or "authorization" in f_type or "idor" in f_type):
+            type_match = True
+        if gt_type == "broken authentication" and ("auth" in f_type or "login" in f_type or "brute" in f_type):
+            type_match = True
+        if gt_type == "sensitive data exposure" and ("sensitive" in f_type or "data" in f_type or "exposure" in f_type or "ftp" in f_type):
+            type_match = True
+        if gt_type == "security misconfiguration" and ("misconfig" in f_type or "header" in f_type or "nikto" in f_type):
+            type_match = True
+
+        if not type_match:
+            continue
+
+        # URL pattern matching (if ground truth specifies one)
+        if gt_url_pattern and gt_url_pattern not in f_url:
+            # Also check evidence for URL patterns
+            if gt_url_pattern not in f_evidence:
+                continue
+
+        # Parameter matching (if ground truth specifies one)
+        if gt_param and gt_param not in f_param and gt_param not in f_evidence:
+            continue
+
+        return True
+
+    return False
+
+
+async def _compute_benchmark_metrics(session_id: str, ground_truths: list[dict]) -> dict:
+    """Compute all benchmark metrics for a single session."""
+    db = await get_db()
+    try:
+        # Get session info
+        row = await db.execute("SELECT * FROM sessions WHERE id = ?", (session_id,))
+        session_row = await row.fetchone()
+        if not session_row:
+            return {}
+        session = dict(session_row)
+
+        # Get findings
+        cursor = await db.execute(
+            "SELECT * FROM findings WHERE session_id = ?", (session_id,)
+        )
+        findings = [dict(r) for r in await cursor.fetchall()]
+
+        # Get steps
+        cursor = await db.execute(
+            "SELECT * FROM steps WHERE session_id = ? ORDER BY step_number", (session_id,)
+        )
+        steps = [dict(r) for r in await cursor.fetchall()]
+
+        # --- Compute metrics ---
+        total_findings = len(findings)
+        total_steps = session["total_steps"] or len(steps)
+        duration_ms = session["total_duration_ms"] or 0
+        enabled_tools = (session["enabled_tools"] or "").split(",")
+        enabled_tools = [t.strip() for t in enabled_tools if t.strip()]
+
+        # True positives: findings that match ground truth
+        true_positives = 0
+        matched_gt_indices = set()
+        for f in findings:
+            if _match_finding_to_ground_truth(f, ground_truths):
+                true_positives += 1
+                # Track which ground truths were matched
+                for i, gt in enumerate(ground_truths):
+                    if _match_finding_to_ground_truth({"vuln_type": f.get("vuln_type"),
+                                                        "url": f.get("url"),
+                                                        "parameter": f.get("parameter"),
+                                                        "evidence": f.get("evidence")}, [gt]):
+                        matched_gt_indices.add(i)
+
+        false_positives = total_findings - true_positives
+        missed_vulns = len(ground_truths) - len(matched_gt_indices)
+
+        # Precision & Recall
+        precision = true_positives / total_findings if total_findings > 0 else 0.0
+        recall = len(matched_gt_indices) / len(ground_truths) if ground_truths else 0.0
+        f1 = (2 * precision * recall / (precision + recall)) if (precision + recall) > 0 else 0.0
+
+        # Severity score (weighted)
+        severity_weights = {"critical": 5, "high": 4, "medium": 3, "low": 2, "info": 1}
+        severity_score = sum(
+            severity_weights.get((f.get("severity") or "info").lower(), 1)
+            for f in findings
+        )
+
+        # Findings per minute
+        duration_min = duration_ms / 60000.0 if duration_ms else 0
+        findings_per_min = total_findings / duration_min if duration_min > 0 else 0.0
+
+        # Findings per turn
+        findings_per_turn = total_findings / total_steps if total_steps > 0 else 0.0
+
+        # Tool coverage
+        unique_tools = set()
+        for s in steps:
+            tool = s.get("tool_called")
+            if tool:
+                unique_tools.add(tool)
+        tool_coverage = len(unique_tools) / len(enabled_tools) if enabled_tools else 0.0
+
+        # Phase coverage
+        phases = set()
+        for s in steps:
+            phase = s.get("phase")
+            if phase:
+                phases.add(phase)
+
+        # Time to first finding / first high
+        session_created = session["created_at"]
+        time_to_first_finding = None
+        time_to_first_high = None
+        for f in findings:
+            f_created = f.get("created_at", "")
+            if f_created and session_created:
+                try:
+                    t_session = datetime.fromisoformat(session_created)
+                    t_finding = datetime.fromisoformat(f_created)
+                    delta_ms = int((t_finding - t_session).total_seconds() * 1000)
+                    if time_to_first_finding is None:
+                        time_to_first_finding = delta_ms
+                    sev = (f.get("severity") or "").lower()
+                    if sev in ("high", "critical") and time_to_first_high is None:
+                        time_to_first_high = delta_ms
+                except Exception:
+                    pass
+
+        # Severity distribution
+        sev_dist = {}
+        for f in findings:
+            sev = (f.get("severity") or "info").lower()
+            sev_dist[sev] = sev_dist.get(sev, 0) + 1
+
+        # Vuln types found
+        vuln_types = list(set(f.get("vuln_type", "Unknown") for f in findings))
+
+        return {
+            "session_id": session_id,
+            "session_type": session.get("session_type") or "cold",
+            "total_findings": total_findings,
+            "true_positives": true_positives,
+            "false_positives": false_positives,
+            "missed_vulns": missed_vulns,
+            "precision": round(precision, 4),
+            "recall": round(recall, 4),
+            "f1_score": round(f1, 4),
+            "severity_score": severity_score,
+            "findings_per_minute": round(findings_per_min, 4),
+            "findings_per_turn": round(findings_per_turn, 4),
+            "tool_coverage": round(tool_coverage, 4),
+            "unique_tools_used": len(unique_tools),
+            "total_tools_available": len(enabled_tools),
+            "time_to_first_finding_ms": time_to_first_finding,
+            "time_to_first_high_ms": time_to_first_high,
+            "total_duration_ms": duration_ms,
+            "total_steps": total_steps,
+            "phases_covered": sorted(list(phases)),
+            "vuln_types_found": vuln_types,
+            "severity_distribution": sev_dist,
+        }
+    finally:
+        await db.close()
+
+
+@app.get("/api/ground-truth")
+async def get_ground_truth(target_name: str = "OWASP Juice Shop"):
+    """Get ground truth vulnerabilities for a target."""
+    await _seed_ground_truth()
+    db = await get_db()
+    try:
+        cursor = await db.execute(
+            "SELECT * FROM ground_truth WHERE target_name = ? ORDER BY severity, vuln_type",
+            (target_name,)
+        )
+        rows = await cursor.fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        await db.close()
+
+
+@app.get("/api/benchmark/{session_id}/metrics")
+async def get_session_metrics(session_id: str, target_name: str = "OWASP Juice Shop"):
+    """Compute benchmark metrics for a single session against ground truth."""
+    await _seed_ground_truth()
+    db = await get_db()
+    try:
+        cursor = await db.execute(
+            "SELECT * FROM ground_truth WHERE target_name = ?", (target_name,)
+        )
+        ground_truths = [dict(r) for r in await cursor.fetchall()]
+    finally:
+        await db.close()
+
+    metrics = await _compute_benchmark_metrics(session_id, ground_truths)
+    if not metrics:
+        raise HTTPException(404, "Session not found")
+    return metrics
+
+
+@app.get("/api/benchmark/compare")
+async def compare_sessions(session_ids: str, target_name: str = "OWASP Juice Shop"):
+    """Compare multiple sessions. Pass comma-separated session IDs."""
+    await _seed_ground_truth()
+    ids = [s.strip() for s in session_ids.split(",") if s.strip()]
+    if not ids:
+        raise HTTPException(400, "No session IDs provided")
+
+    db = await get_db()
+    try:
+        cursor = await db.execute(
+            "SELECT * FROM ground_truth WHERE target_name = ?", (target_name,)
+        )
+        ground_truths = [dict(r) for r in await cursor.fetchall()]
+    finally:
+        await db.close()
+
+    results = []
+    for sid in ids:
+        metrics = await _compute_benchmark_metrics(sid, ground_truths)
+        if metrics:
+            results.append(metrics)
+
+    return {
+        "ground_truth_count": len(ground_truths),
+        "sessions": results,
+    }
+
+
+@app.get("/api/benchmarks")
+async def list_benchmarks():
+    """List all benchmark runs."""
+    db = await get_db()
+    try:
+        cursor = await db.execute(
+            "SELECT * FROM benchmark_runs ORDER BY created_at DESC"
+        )
+        rows = await cursor.fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        await db.close()
+
+
+@app.get("/api/benchmarks/{benchmark_id}")
+async def get_benchmark(benchmark_id: str):
+    """Get a benchmark run with computed results for all session types."""
+    await _seed_ground_truth()
+    db = await get_db()
+    try:
+        row = await db.execute("SELECT * FROM benchmark_runs WHERE id = ?", (benchmark_id,))
+        bench = await row.fetchone()
+        if not bench:
+            raise HTTPException(404, "Benchmark not found")
+        bench = dict(bench)
+
+        # Get ground truth
+        cursor = await db.execute(
+            "SELECT * FROM ground_truth WHERE target_name = ?",
+            (bench.get("target_name") or "OWASP Juice Shop",)
+        )
+        ground_truths = [dict(r) for r in await cursor.fetchall()]
+    finally:
+        await db.close()
+
+    # Compute metrics for each session type
+    result = {
+        "id": bench["id"],
+        "target_url": bench["target_url"],
+        "target_name": bench.get("target_name") or "",
+        "status": bench["status"],
+        "model": bench.get("model") or "",
+        "max_turns": bench.get("max_turns") or 15,
+        "cold": None,
+        "warm": None,
+        "chain": None,
+        "ground_truth_count": len(ground_truths),
+        "created_at": bench["created_at"],
+        "completed_at": bench.get("completed_at"),
+    }
+
+    # Cold session metrics
+    if bench.get("cold_session_id"):
+        metrics = await _compute_benchmark_metrics(bench["cold_session_id"], ground_truths)
+        if metrics:
+            result["cold"] = metrics
+
+    # Warm session metrics
+    if bench.get("warm_session_id"):
+        metrics = await _compute_benchmark_metrics(bench["warm_session_id"], ground_truths)
+        if metrics:
+            result["warm"] = metrics
+
+    # Chain metrics — aggregate all chain sessions
+    if bench.get("chain_id"):
+        db2 = await get_db()
+        try:
+            cursor = await db2.execute(
+                "SELECT id FROM sessions WHERE chain_id = ? ORDER BY chain_position",
+                (bench["chain_id"],)
+            )
+            chain_session_ids = [r["id"] for r in await cursor.fetchall()]
+        finally:
+            await db2.close()
+
+        if chain_session_ids:
+            # Use the last (most complete) chain session for primary metrics,
+            # but aggregate findings from ALL chain sessions
+            all_chain_findings = []
+            all_chain_steps = []
+            total_chain_duration = 0
+            total_chain_steps_count = 0
+            all_chain_tools = set()
+            all_chain_phases = set()
+
+            db3 = await get_db()
+            try:
+                for csid in chain_session_ids:
+                    # Get session info
+                    srow = await db3.execute("SELECT * FROM sessions WHERE id = ?", (csid,))
+                    csession_row = await srow.fetchone()
+                    if csession_row:
+                        csession = dict(csession_row)
+                        total_chain_duration += (csession["total_duration_ms"] or 0)
+                        total_chain_steps_count += (csession["total_steps"] or 0)
+                        phase = csession.get("chain_phase")
+                        if phase:
+                            all_chain_phases.add(phase)
+
+                    # Get findings
+                    fcur = await db3.execute("SELECT * FROM findings WHERE session_id = ?", (csid,))
+                    all_chain_findings.extend([dict(r) for r in await fcur.fetchall()])
+
+                    # Get steps
+                    scur = await db3.execute("SELECT * FROM steps WHERE session_id = ?", (csid,))
+                    step_rows = [dict(r) for r in await scur.fetchall()]
+                    all_chain_steps.extend(step_rows)
+                    for s in step_rows:
+                        if s.get("tool_called"):
+                            all_chain_tools.add(s["tool_called"])
+            finally:
+                await db3.close()
+
+            # Compute chain-aggregate metrics
+            total_findings = len(all_chain_findings)
+            true_positives = sum(
+                1 for f in all_chain_findings
+                if _match_finding_to_ground_truth(f, ground_truths)
+            )
+            # Deduplicate matched ground truths
+            matched_gt = set()
+            for f in all_chain_findings:
+                for i, gt in enumerate(ground_truths):
+                    if _match_finding_to_ground_truth(f, [gt]):
+                        matched_gt.add(i)
+
+            false_positives = total_findings - true_positives
+            missed_vulns = len(ground_truths) - len(matched_gt)
+            precision = true_positives / total_findings if total_findings > 0 else 0.0
+            recall = len(matched_gt) / len(ground_truths) if ground_truths else 0.0
+            f1 = (2 * precision * recall / (precision + recall)) if (precision + recall) > 0 else 0.0
+
+            severity_weights = {"critical": 5, "high": 4, "medium": 3, "low": 2, "info": 1}
+            severity_score = sum(
+                severity_weights.get((f.get("severity") or "info").lower(), 1)
+                for f in all_chain_findings
+            )
+
+            duration_min = total_chain_duration / 60000.0 if total_chain_duration else 0
+            findings_per_min = total_findings / duration_min if duration_min > 0 else 0.0
+            findings_per_turn = total_findings / total_chain_steps_count if total_chain_steps_count > 0 else 0.0
+
+            enabled_tools = (bench.get("enabled_tools") or "").split(",")
+            enabled_tools = [t.strip() for t in enabled_tools if t.strip()]
+            tool_coverage = len(all_chain_tools) / len(enabled_tools) if enabled_tools else 0.0
+
+            sev_dist = {}
+            for f in all_chain_findings:
+                sev = (f.get("severity") or "info").lower()
+                sev_dist[sev] = sev_dist.get(sev, 0) + 1
+
+            vuln_types = list(set(f.get("vuln_type", "Unknown") for f in all_chain_findings))
+
+            # Time to first finding across chain
+            time_to_first_finding = None
+            time_to_first_high = None
+            if all_chain_findings and chain_session_ids:
+                db4 = await get_db()
+                try:
+                    first_row = await db4.execute(
+                        "SELECT created_at FROM sessions WHERE id = ?", (chain_session_ids[0],)
+                    )
+                    first_session = await first_row.fetchone()
+                    if first_session:
+                        chain_start = first_session["created_at"]
+                        for f in all_chain_findings:
+                            f_created = f.get("created_at", "")
+                            if f_created and chain_start:
+                                try:
+                                    t_start = datetime.fromisoformat(chain_start)
+                                    t_finding = datetime.fromisoformat(f_created)
+                                    delta_ms = int((t_finding - t_start).total_seconds() * 1000)
+                                    if time_to_first_finding is None:
+                                        time_to_first_finding = delta_ms
+                                    sev = (f.get("severity") or "").lower()
+                                    if sev in ("high", "critical") and time_to_first_high is None:
+                                        time_to_first_high = delta_ms
+                                except Exception:
+                                    pass
+                finally:
+                    await db4.close()
+
+            result["chain"] = {
+                "session_id": ",".join(chain_session_ids),
+                "session_type": "chain",
+                "total_findings": total_findings,
+                "true_positives": true_positives,
+                "false_positives": false_positives,
+                "missed_vulns": missed_vulns,
+                "precision": round(precision, 4),
+                "recall": round(recall, 4),
+                "f1_score": round(f1, 4),
+                "severity_score": severity_score,
+                "findings_per_minute": round(findings_per_min, 4),
+                "findings_per_turn": round(findings_per_turn, 4),
+                "tool_coverage": round(tool_coverage, 4),
+                "unique_tools_used": len(all_chain_tools),
+                "total_tools_available": len(enabled_tools),
+                "time_to_first_finding_ms": time_to_first_finding,
+                "time_to_first_high_ms": time_to_first_high,
+                "total_duration_ms": total_chain_duration,
+                "total_steps": total_chain_steps_count,
+                "phases_covered": sorted(list(all_chain_phases)),
+                "vuln_types_found": vuln_types,
+                "severity_distribution": sev_dist,
+            }
+
+    return result
+
+
+# --- Benchmark WebSocket manager for progress updates ---
+benchmark_ws_clients: dict[str, list[WebSocket]] = {}
+
+
+@app.websocket("/ws/benchmark/{benchmark_id}")
+async def benchmark_websocket(websocket: WebSocket, benchmark_id: str):
+    await websocket.accept()
+    if benchmark_id not in benchmark_ws_clients:
+        benchmark_ws_clients[benchmark_id] = []
+    benchmark_ws_clients[benchmark_id].append(websocket)
+    try:
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        benchmark_ws_clients[benchmark_id].remove(websocket)
+
+
+async def _broadcast_benchmark(benchmark_id: str, data: dict):
+    """Send progress update to all benchmark WebSocket clients."""
+    clients = benchmark_ws_clients.get(benchmark_id, [])
+    for ws in clients[:]:
+        try:
+            await ws.send_json(data)
+        except Exception:
+            clients.remove(ws)
+
+
+async def _wait_for_session_complete(session_id: str, benchmark_id: str,
+                                      session_type: str, timeout: int = 1200):
+    """Wait for a session to finish (completed/stopped/error). Timeout in seconds."""
+    start = time.time()
+    while time.time() - start < timeout:
+        db = await get_db()
+        try:
+            row = await db.execute("SELECT status FROM sessions WHERE id = ?", (session_id,))
+            session = await row.fetchone()
+            if session and session["status"] in ("completed", "stopped", "error"):
+                await _broadcast_benchmark(benchmark_id, {
+                    "type": "session_done",
+                    "session_type": session_type,
+                    "session_id": session_id,
+                    "status": session["status"],
+                })
+                return session["status"]
+        finally:
+            await db.close()
+        await asyncio.sleep(3)
+
+    return "timeout"
+
+
+async def _wait_for_chain_complete(chain_id: str, benchmark_id: str, timeout: int = 2400):
+    """Wait for an entire chain to finish. Timeout in seconds."""
+    start = time.time()
+    while time.time() - start < timeout:
+        db = await get_db()
+        try:
+            row = await db.execute("SELECT status FROM chains WHERE id = ?", (chain_id,))
+            chain = await row.fetchone()
+            if chain and chain["status"] in ("completed", "stopped", "error"):
+                await _broadcast_benchmark(benchmark_id, {
+                    "type": "session_done",
+                    "session_type": "chain",
+                    "chain_id": chain_id,
+                    "status": chain["status"],
+                })
+                return chain["status"]
+        finally:
+            await db.close()
+        await asyncio.sleep(3)
+
+    return "timeout"
+
+
+async def _run_benchmark_sequence(benchmark_id: str, data: BenchmarkCreate):
+    """Run cold → warm → chain benchmark sequentially."""
+    db = await get_db()
+    try:
+        await db.execute(
+            "UPDATE benchmark_runs SET status = 'running', started_at = datetime('now') WHERE id = ?",
+            (benchmark_id,)
+        )
+        await db.commit()
+    finally:
+        await db.close()
+
+    enabled_tools_str = ",".join(data.enabled_tools)
+    effective_max_turns = data.max_turns if data.max_turns > 0 else ABSOLUTE_MAX_TURNS
+    effective_max_turns = min(effective_max_turns, ABSOLUTE_MAX_TURNS)
+
+    cold_session_id = None
+    warm_session_id = None
+    chain_id_result = None
+
+    try:
+        # ========== PHASE 1: COLD START ==========
+        await _broadcast_benchmark(benchmark_id, {
+            "type": "phase_start", "phase": "cold", "message": "Starting cold start session..."
+        })
+
+        cold_session_id = uuid.uuid4().hex[:12]
+        db = await get_db()
+        try:
+            await db.execute(
+                "INSERT INTO sessions (id, target_url, scope_mode, system_prompt, model, enabled_tools, "
+                "session_type, no_timeout, max_turns) VALUES (?, ?, ?, ?, ?, ?, 'cold', ?, ?)",
+                (cold_session_id, data.target_url, "full", data.system_prompt, data.model,
+                 enabled_tools_str, 1 if data.no_timeout else 0, effective_max_turns)
+            )
+            await db.execute(
+                "UPDATE benchmark_runs SET cold_session_id = ? WHERE id = ?",
+                (cold_session_id, benchmark_id)
+            )
+            await db.commit()
+
+            # Read session back
+            row = await db.execute("SELECT * FROM sessions WHERE id = ?", (cold_session_id,))
+            session = await row.fetchone()
+        finally:
+            await db.close()
+
+        # Start agent loop
+        enabled_tools_list = session["enabled_tools"].split(",") if session["enabled_tools"] else []
+        task = asyncio.create_task(
+            agent_loop(
+                session_id=cold_session_id,
+                target_url=data.target_url,
+                scope_mode="full",
+                system_prompt=data.system_prompt,
+                enabled_tools=enabled_tools_list,
+                model=data.model,
+                session_type="cold",
+                no_timeout=data.no_timeout,
+                max_turns=effective_max_turns,
+            )
+        )
+        running_tasks[cold_session_id] = task
+
+        # Update session status to running
+        db = await get_db()
+        try:
+            await db.execute(
+                "UPDATE sessions SET status = 'running', updated_at = datetime('now') WHERE id = ?",
+                (cold_session_id,)
+            )
+            await db.commit()
+        finally:
+            await db.close()
+
+        # Wait for cold session to complete
+        cold_status = await _wait_for_session_complete(cold_session_id, benchmark_id, "cold")
+
+        await _broadcast_benchmark(benchmark_id, {
+            "type": "phase_complete", "phase": "cold",
+            "session_id": cold_session_id, "status": cold_status,
+        })
+
+        # Small delay between sessions
+        await asyncio.sleep(5)
+
+        # ========== PHASE 2: WARM START (uses cold session as parent) ==========
+        await _broadcast_benchmark(benchmark_id, {
+            "type": "phase_start", "phase": "warm",
+            "message": f"Starting warm start session (parent: {cold_session_id})..."
+        })
+
+        warm_session_id = uuid.uuid4().hex[:12]
+        db = await get_db()
+        try:
+            await db.execute(
+                "INSERT INTO sessions (id, target_url, scope_mode, system_prompt, model, enabled_tools, "
+                "session_type, parent_session_id, no_timeout, max_turns) VALUES (?, ?, ?, ?, ?, ?, 'warm', ?, ?, ?)",
+                (warm_session_id, data.target_url, "full", data.system_prompt, data.model,
+                 enabled_tools_str, cold_session_id, 1 if data.no_timeout else 0, effective_max_turns)
+            )
+            await db.execute(
+                "UPDATE benchmark_runs SET warm_session_id = ? WHERE id = ?",
+                (warm_session_id, benchmark_id)
+            )
+            await db.commit()
+        finally:
+            await db.close()
+
+        task = asyncio.create_task(
+            agent_loop(
+                session_id=warm_session_id,
+                target_url=data.target_url,
+                scope_mode="full",
+                system_prompt=data.system_prompt,
+                enabled_tools=enabled_tools_list,
+                model=data.model,
+                session_type="warm",
+                parent_session_id=cold_session_id,
+                no_timeout=data.no_timeout,
+                max_turns=effective_max_turns,
+            )
+        )
+        running_tasks[warm_session_id] = task
+
+        db = await get_db()
+        try:
+            await db.execute(
+                "UPDATE sessions SET status = 'running', updated_at = datetime('now') WHERE id = ?",
+                (warm_session_id,)
+            )
+            await db.commit()
+        finally:
+            await db.close()
+
+        warm_status = await _wait_for_session_complete(warm_session_id, benchmark_id, "warm")
+
+        await _broadcast_benchmark(benchmark_id, {
+            "type": "phase_complete", "phase": "warm",
+            "session_id": warm_session_id, "status": warm_status,
+        })
+
+        await asyncio.sleep(5)
+
+        # ========== PHASE 3: CHAIN MODE ==========
+        await _broadcast_benchmark(benchmark_id, {
+            "type": "phase_start", "phase": "chain",
+            "message": "Starting chain mode (4 phases: recon → vuln_scan → exploitation → reporting)..."
+        })
+
+        chain_id_result = uuid.uuid4().hex[:12]
+        db = await get_db()
+        try:
+            await db.execute(
+                "INSERT INTO chains (id, target_url, scope_mode, system_prompt, model, enabled_tools, "
+                "current_phase, current_position, total_sessions, status, auto_progress, "
+                "max_turns_per_session, no_timeout) VALUES (?, ?, ?, ?, ?, ?, 'recon', 0, 1, 'running', 1, ?, ?)",
+                (chain_id_result, data.target_url, "full", data.system_prompt, data.model,
+                 enabled_tools_str, effective_max_turns, 1 if data.no_timeout else 0)
+            )
+            await db.execute(
+                "UPDATE benchmark_runs SET chain_id = ? WHERE id = ?",
+                (chain_id_result, benchmark_id)
+            )
+            await db.commit()
+
+            row = await db.execute("SELECT * FROM chains WHERE id = ?", (chain_id_result,))
+            chain = await row.fetchone()
+        finally:
+            await db.close()
+
+        # Create and start first chain session
+        first_chain_session = await _create_chain_session(chain_id_result, chain, "recon", 0)
+        await asyncio.sleep(0.5)
+        await _start_chain_session(first_chain_session)
+
+        # Wait for the entire chain to finish
+        chain_status = await _wait_for_chain_complete(chain_id_result, benchmark_id)
+
+        await _broadcast_benchmark(benchmark_id, {
+            "type": "phase_complete", "phase": "chain",
+            "chain_id": chain_id_result, "status": chain_status,
+        })
+
+        # ========== BENCHMARK COMPLETE ==========
+        db = await get_db()
+        try:
+            await db.execute(
+                "UPDATE benchmark_runs SET status = 'completed', completed_at = datetime('now') WHERE id = ?",
+                (benchmark_id,)
+            )
+            await db.commit()
+        finally:
+            await db.close()
+
+        await _broadcast_benchmark(benchmark_id, {
+            "type": "benchmark_complete",
+            "benchmark_id": benchmark_id,
+            "cold_session_id": cold_session_id,
+            "warm_session_id": warm_session_id,
+            "chain_id": chain_id_result,
+        })
+
+    except Exception as e:
+        db = await get_db()
+        try:
+            await db.execute(
+                "UPDATE benchmark_runs SET status = 'error', completed_at = datetime('now') WHERE id = ?",
+                (benchmark_id,)
+            )
+            await db.commit()
+        finally:
+            await db.close()
+
+        await _broadcast_benchmark(benchmark_id, {
+            "type": "benchmark_error",
+            "benchmark_id": benchmark_id,
+            "error": str(e),
+        })
+
+
+@app.post("/api/benchmarks/run")
+async def run_benchmark(data: BenchmarkCreate):
+    """Start a full benchmark run: cold → warm → chain sequentially."""
+    await _seed_ground_truth()
+    benchmark_id = uuid.uuid4().hex[:12]
+    enabled_tools_str = ",".join(data.enabled_tools)
+
+    db = await get_db()
+    try:
+        await db.execute(
+            "INSERT INTO benchmark_runs (id, target_url, target_name, status, model, max_turns, "
+            "no_timeout, system_prompt, enabled_tools) VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, ?)",
+            (benchmark_id, data.target_url, data.target_name, data.model, data.max_turns,
+             1 if data.no_timeout else 0, data.system_prompt, enabled_tools_str)
+        )
+        await db.commit()
+    finally:
+        await db.close()
+
+    # Launch benchmark as background task
+    asyncio.create_task(_run_benchmark_sequence(benchmark_id, data))
+
+    return {
+        "benchmark_id": benchmark_id,
+        "status": "pending",
+        "message": "Benchmark started. Connect to /ws/benchmark/{id} for live updates.",
+    }
 
 
 @app.websocket("/ws/{session_id}")
@@ -153,7 +4326,5 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
     try:
         while True:
             data = await websocket.receive_text()
-            # Echo for now
-            await websocket.send_text(f"echo: {data}")
     except WebSocketDisconnect:
         manager.disconnect(session_id, websocket)
