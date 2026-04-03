@@ -171,6 +171,52 @@
             color: var(--dark-bg);
         }
 
+        /* ===== Benchmark Info Tooltips ===== */
+        .bench-info-btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 16px;
+            height: 16px;
+            border-radius: 50%;
+            border: 1px solid rgba(106,106,138,0.5);
+            background: rgba(13,13,21,0.8);
+            color: #6a6a8a;
+            font-size: 0.55rem;
+            cursor: pointer;
+            margin-left: 4px;
+            transition: all 0.2s ease;
+            position: relative;
+        }
+        .bench-info-btn:hover {
+            border-color: var(--neon-cyan);
+            color: var(--neon-cyan);
+            box-shadow: 0 0 6px rgba(0,255,245,0.3);
+        }
+        .bench-info-tooltip {
+            display: none;
+            position: fixed;
+            z-index: 9999;
+            max-width: 320px;
+            padding: 12px 16px;
+            border-radius: 6px;
+            background: rgba(13,13,21,0.97);
+            border: 1px solid var(--neon-cyan);
+            box-shadow: 0 0 20px rgba(0,255,245,0.15);
+            color: #b0b0c0;
+            font-family: monospace;
+            font-size: 0.75rem;
+            line-height: 1.5;
+            pointer-events: none;
+        }
+        .bench-info-tooltip .tip-title {
+            color: var(--neon-cyan);
+            font-family: 'Press Start 2P', monospace;
+            font-size: 0.45rem;
+            margin-bottom: 6px;
+            letter-spacing: 1px;
+        }
+
         /* ===== Chain Mode Phase Indicators ===== */
         .chain-phase {
             padding: 4px 12px;
@@ -615,7 +661,7 @@
                 <div>
                     <label class="block font-pixel mb-2" style="font-size:0.55rem; color:#6a6a8a;">MAX TURNS</label>
                     <div class="flex items-center gap-2">
-                        <input type="range" id="max-turns-slider" min="0" max="150" value="15" step="5"
+                        <input type="range" id="max-turns-slider" min="0" max="150" value="30" step="5"
                             class="accent-cyan-400" style="width:100px; height:6px;"
                             oninput="updateMaxTurnsLabel()">
                         <span id="max-turns-label" class="font-mono" style="color:#00fff5; font-size:0.8rem; min-width:50px;">15</span>
@@ -1044,8 +1090,20 @@
                     </div>
                     <div>
                         <label class="block font-pixel mb-2" style="font-size:0.5rem; color:#6a6a8a;">MAX TURNS</label>
-                        <input id="bench-max-turns" type="number" value="15" min="5" max="150"
+                        <input id="bench-max-turns" type="number" value="30" min="5" max="150"
                             class="cyber-input rounded px-3 py-2" style="width:80px; font-size:0.85rem;">
+                    </div>
+                    <div>
+                        <label class="block font-pixel mb-2" style="font-size:0.5rem; color:#6a6a8a;">REPEAT <span class="bench-info-btn" onmouseenter="showBenchInfo(event,'repeat')" onmouseleave="hideBenchInfo()">?</span></label>
+                        <input id="bench-repeat" type="number" value="1" min="1" max="50"
+                            class="cyber-input rounded px-3 py-2" style="width:70px; font-size:0.85rem;">
+                    </div>
+                    <div>
+                        <label class="block font-pixel mb-2" style="font-size:0.5rem; color:#6a6a8a;">NO TIMEOUT <span class="bench-info-btn" onmouseenter="showBenchInfo(event,'no_timeout')" onmouseleave="hideBenchInfo()">?</span></label>
+                        <label class="flex items-center gap-2 py-2" style="cursor:pointer;">
+                            <input type="checkbox" id="bench-no-timeout" checked class="accent-cyan-400" style="width:16px;height:16px;">
+                            <span class="font-mono" style="font-size:0.8rem; color:#8a8a9a;">Enabled</span>
+                        </label>
                     </div>
                     <div>
                         <button id="bench-start-btn" onclick="startBenchmark()"
@@ -1056,7 +1114,8 @@
                     </div>
                 </div>
                 <p class="mt-2 font-mono" style="color:#4a4a5a; font-size:0.75rem;">
-                    Runs Cold Start → Warm Start → Chain Mode sequentially. Each session uses the same settings for fair comparison.
+                    Runs Cold Start &rarr; Warm Start &rarr; Chain Mode sequentially. Each session uses the same settings for fair comparison.
+                    <span id="bench-repeat-info" style="color:var(--neon-orange); display:none;"> &bull; <span id="bench-repeat-count">1</span> rounds &mdash; each round produces 3 sessions with individual reports.</span>
                 </p>
             </div>
 
@@ -1064,19 +1123,33 @@
             <div id="bench-progress" class="hidden cyber-panel neon-border-purple rounded-lg p-4">
                 <div class="flex items-center justify-between mb-3">
                     <span class="font-pixel neon-text-purple" style="font-size:0.6rem;">BENCHMARK IN PROGRESS</span>
-                    <span id="bench-status-text" class="font-mono" style="color:#00fff5; font-size:0.85rem;">Starting...</span>
+                    <div class="flex items-center gap-3">
+                        <span id="bench-status-text" class="font-mono" style="color:#00fff5; font-size:0.85rem;">Starting...</span>
+                    </div>
+                </div>
+                <!-- Round counter bar — visible when repeat > 1 -->
+                <div id="bench-round-bar" class="mb-3 rounded p-3 text-center" style="display:none; background:linear-gradient(135deg, rgba(255,165,0,0.1), rgba(139,92,246,0.1)); border:1px solid var(--neon-orange);">
+                    <div class="font-pixel" style="font-size:0.55rem; color:#6a6a8a; margin-bottom:4px;">ROUND</div>
+                    <div class="flex items-center justify-center gap-2">
+                        <span id="bench-round-current" class="font-pixel" style="font-size:1.4rem; color:var(--neon-orange);">1</span>
+                        <span class="font-pixel" style="font-size:0.8rem; color:#4a4a5a;">/</span>
+                        <span id="bench-round-total" class="font-pixel" style="font-size:1.4rem; color:#6a6a8a;">1</span>
+                    </div>
+                    <div id="bench-round-progress" class="mt-2 rounded-full" style="height:4px; background:#1a1a2e; overflow:hidden;">
+                        <div id="bench-round-fill" style="height:100%; width:0%; background:linear-gradient(90deg, var(--neon-orange), var(--neon-purple)); transition: width 0.5s ease;"></div>
+                    </div>
                 </div>
                 <div class="grid grid-cols-3 gap-3">
                     <div id="bench-cold-status" class="rounded p-3 text-center" style="background:rgba(13,13,21,0.8); border:1px solid #1a1a2e;">
-                        <div class="font-pixel mb-1" style="font-size:0.45rem; color:#6a6a8a;">COLD START</div>
+                        <div class="font-pixel mb-1" style="font-size:0.45rem; color:#6a6a8a;">COLD START <span class="bench-info-btn" onmouseenter="showBenchInfo(event,'cold')" onmouseleave="hideBenchInfo()">?</span></div>
                         <div class="font-mono" style="font-size:0.9rem; color:#4a4a5a;">Pending</div>
                     </div>
                     <div id="bench-warm-status" class="rounded p-3 text-center" style="background:rgba(13,13,21,0.8); border:1px solid #1a1a2e;">
-                        <div class="font-pixel mb-1" style="font-size:0.45rem; color:#6a6a8a;">WARM START</div>
+                        <div class="font-pixel mb-1" style="font-size:0.45rem; color:#6a6a8a;">WARM START <span class="bench-info-btn" onmouseenter="showBenchInfo(event,'warm')" onmouseleave="hideBenchInfo()">?</span></div>
                         <div class="font-mono" style="font-size:0.9rem; color:#4a4a5a;">Pending</div>
                     </div>
                     <div id="bench-chain-status" class="rounded p-3 text-center" style="background:rgba(13,13,21,0.8); border:1px solid #1a1a2e;">
-                        <div class="font-pixel mb-1" style="font-size:0.45rem; color:#6a6a8a;">CHAIN MODE</div>
+                        <div class="font-pixel mb-1" style="font-size:0.45rem; color:#6a6a8a;">CHAIN MODE <span class="bench-info-btn" onmouseenter="showBenchInfo(event,'chain')" onmouseleave="hideBenchInfo()">?</span></div>
                         <div class="font-mono" style="font-size:0.9rem; color:#4a4a5a;">Pending</div>
                     </div>
                 </div>
@@ -1096,14 +1169,17 @@
                         <thead>
                             <tr style="border-bottom:1px solid #1a1a2e; color:#6a6a8a;">
                                 <th class="px-4 py-2 text-left font-pixel" style="font-size:0.45rem;">METRIC</th>
-                                <th class="px-4 py-2 text-center font-pixel" style="font-size:0.45rem; color:var(--neon-cyan);">COLD</th>
-                                <th class="px-4 py-2 text-center font-pixel" style="font-size:0.45rem; color:var(--neon-orange);">WARM</th>
-                                <th class="px-4 py-2 text-center font-pixel" style="font-size:0.45rem; color:var(--neon-purple);">CHAIN</th>
+                                <th class="px-4 py-2 text-center font-pixel" style="font-size:0.45rem; color:var(--neon-cyan);">COLD <span class="bench-info-btn" onmouseenter="showBenchInfo(event,'cold')" onmouseleave="hideBenchInfo()">?</span></th>
+                                <th class="px-4 py-2 text-center font-pixel" style="font-size:0.45rem; color:var(--neon-orange);">WARM <span class="bench-info-btn" onmouseenter="showBenchInfo(event,'warm')" onmouseleave="hideBenchInfo()">?</span></th>
+                                <th class="px-4 py-2 text-center font-pixel" style="font-size:0.45rem; color:var(--neon-purple);">CHAIN <span class="bench-info-btn" onmouseenter="showBenchInfo(event,'chain')" onmouseleave="hideBenchInfo()">?</span></th>
                             </tr>
                         </thead>
                         <tbody id="bench-results-body">
                         </tbody>
                     </table>
+                </div>
+                <!-- Detailed Session Panels -->
+                <div id="bench-detail-panels" class="px-4 py-3" style="display:none;">
                 </div>
             </div>
 
@@ -1171,6 +1247,18 @@
             return min + 'm ' + sec + 's';
         }
 
+        function formatDate(dateStr) {
+            if (!dateStr) return '---';
+            const d = new Date(dateStr);
+            if (isNaN(d)) return dateStr;
+            const hh = String(d.getHours()).padStart(2, '0');
+            const mm = String(d.getMinutes()).padStart(2, '0');
+            const dd = String(d.getDate()).padStart(2, '0');
+            const mo = String(d.getMonth() + 1).padStart(2, '0');
+            const yy = d.getFullYear();
+            return `${hh}:${mm} ${dd}/${mo}/${yy}`;
+        }
+
         async function loadReportsList() {
             const container = document.getElementById('reports-list');
             const countEl = document.getElementById('reports-count');
@@ -1210,9 +1298,7 @@
                     const typeCls = s.session_type === 'warm' ? 'type-warm' : 'type-cold';
                     const duration = formatDuration(s.total_duration_ms);
 
-                    const date = s.created_at ? new Date(s.created_at).toLocaleDateString('en-GB', {
-                        day: '2-digit', month: 'short', year: '2-digit'
-                    }) : '---';
+                    const date = formatDate(s.created_at);
 
                     const hasReport = s.status === 'completed';
                     const viewBtn = hasReport
@@ -1521,7 +1607,7 @@
                 for (const s of standaloneSessions) {
                     const opt = document.createElement('option');
                     opt.value = s.id;
-                    const date = new Date(s.created_at).toLocaleString('en-GB', { hour12: false });
+                    const date = formatDate(s.created_at);
                     const findings = s.total_findings || 0;
                     const typeLabel = s.session_type === 'warm' ? ' [WARM]' : '';
                     opt.textContent = `${s.id} | ${s.target_url} | ${findings} findings${typeLabel} | ${date}`;
@@ -1604,7 +1690,7 @@
         }
 
         function buildStandaloneHtml(sid, htmlBody) {
-            const ts = new Date().toISOString().slice(0, 19).replace('T', ' ');
+            const ts = formatDate(new Date().toISOString());
             return `<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8"><title>Pentest Report - ${sid || 'Unknown'}</title>
 <link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Press+Start+2P&display=swap" rel="stylesheet">
@@ -1665,7 +1751,8 @@ ${htmlBody}
             const panel = document.getElementById('log-panel');
             const div = document.createElement('div');
             div.className = cls;
-            const time = new Date().toLocaleTimeString('en-GB', { hour12: false });
+            const now = new Date();
+            const time = String(now.getHours()).padStart(2,'0') + ':' + String(now.getMinutes()).padStart(2,'0');
             div.textContent = `${time} ${msg}`;
             panel.appendChild(div);
             panel.scrollTop = panel.scrollHeight;
@@ -2095,6 +2182,73 @@ ${htmlBody}
             btn.disabled = false;
         }
 
+        // ===== Benchmark Info Tooltips =====
+        const benchInfoDescriptions = {
+            cold: {
+                title: 'COLD START',
+                text: 'Fresh session with an empty database. The AI has zero prior knowledge — it must discover all services, endpoints, technologies, and vulnerabilities from scratch. This is the stateless baseline for RQ4.'
+            },
+            warm: {
+                title: 'WARM START',
+                text: 'A reconnaissance-only session runs first, populating the database with discovered services, endpoints, and technology stack. Then the actual test session starts with that accumulated knowledge injected via ContextBuilder. No vulnerability findings are pre-loaded — only recon data. Tests whether persistent context improves discovery (RQ4).'
+            },
+            chain: {
+                title: 'CHAIN MODE',
+                text: 'Runs the full kill chain as 4 sequential phases: Recon \u2192 Discovery \u2192 Vuln Scan \u2192 Exploitation. Each phase is a separate session, and each subsequent phase receives compiled context from all prior phases. Tests whether structured, phased progression finds more vulnerabilities than a single monolithic session.'
+            },
+            no_timeout: {
+                title: 'NO TIMEOUT',
+                text: 'When enabled, tool execution timeouts are extended to 10 minutes (instead of per-tool limits like 30\u2013180s). This prevents slow tools (sqlmap, nuclei, nikto, zap-cli) from being killed mid-scan and losing results. Recommended ON for benchmarks to ensure fair comparison \u2014 tools get enough time to finish their full scan.'
+            },
+            repeat: {
+                title: 'REPEAT COUNT',
+                text: 'Number of times to repeat the full benchmark (cold \u2192 warm \u2192 chain). Each iteration creates fresh sessions with their own reports. Use multiple iterations to collect more data for statistical analysis (e.g. Wilcoxon signed-rank test). Set to 5\u201310 for thesis-quality data. Max 50.'
+            }
+        };
+
+        // Create tooltip element
+        const benchTooltipEl = document.createElement('div');
+        benchTooltipEl.className = 'bench-info-tooltip';
+        benchTooltipEl.id = 'bench-info-tooltip';
+        document.body.appendChild(benchTooltipEl);
+
+        function showBenchInfo(event, type) {
+            const info = benchInfoDescriptions[type];
+            if (!info) return;
+            const tip = document.getElementById('bench-info-tooltip');
+            tip.innerHTML = `<div class="tip-title">${info.title}</div><div>${info.text}</div>`;
+            tip.style.display = 'block';
+
+            const rect = event.target.getBoundingClientRect();
+            let left = rect.left + rect.width / 2 - 160;
+            let top = rect.bottom + 8;
+
+            // Keep tooltip within viewport
+            if (left < 8) left = 8;
+            if (left + 320 > window.innerWidth) left = window.innerWidth - 328;
+            if (top + 200 > window.innerHeight) top = rect.top - tip.offsetHeight - 8;
+
+            tip.style.left = left + 'px';
+            tip.style.top = top + 'px';
+        }
+
+        function hideBenchInfo() {
+            document.getElementById('bench-info-tooltip').style.display = 'none';
+        }
+
+        // Live-update repeat count info text
+        document.getElementById('bench-repeat')?.addEventListener('input', function() {
+            const n = parseInt(this.value) || 1;
+            const infoEl = document.getElementById('bench-repeat-info');
+            const countEl = document.getElementById('bench-repeat-count');
+            if (n > 1) {
+                countEl.textContent = n;
+                infoEl.style.display = '';
+            } else {
+                infoEl.style.display = 'none';
+            }
+        });
+
         // ===== Benchmark System =====
         let benchmarkWs = null;
         let currentBenchmarkId = null;
@@ -2102,7 +2256,9 @@ ${htmlBody}
         async function startBenchmark() {
             const target = document.getElementById('bench-target').value.trim();
             const targetName = document.getElementById('bench-target-name').value.trim();
-            const maxTurns = parseInt(document.getElementById('bench-max-turns').value) || 15;
+            const maxTurns = parseInt(document.getElementById('bench-max-turns').value) || 30;
+            const noTimeout = document.getElementById('bench-no-timeout').checked;
+            const repeatN = Math.max(1, Math.min(parseInt(document.getElementById('bench-repeat').value) || 1, 50));
 
             if (!target) { alert('Enter a target URL'); return; }
 
@@ -2119,6 +2275,8 @@ ${htmlBody}
                         target_url: target,
                         target_name: targetName,
                         max_turns: maxTurns,
+                        no_timeout: noTimeout,
+                        repeat_n: repeatN,
                         model: document.getElementById('model-select').value || 'qwen2.5-coder:7b-instruct-q4_K_M',
                     }),
                 });
@@ -2138,10 +2296,29 @@ ${htmlBody}
                     el.style.borderColor = '#1a1a2e';
                 });
 
-                benchAddLog('Benchmark started: ' + data.benchmark_id);
+                // Track rounds
+                benchTotalRounds = repeatN;
+                benchCurrentRound = 1;
+
+                // Show round counter immediately if repeat > 1
+                const roundBar = document.getElementById('bench-round-bar');
+                if (repeatN > 1) {
+                    roundBar.style.display = '';
+                    document.getElementById('bench-round-current').textContent = '1';
+                    document.getElementById('bench-round-total').textContent = repeatN;
+                    document.getElementById('bench-round-fill').style.width = '0%';
+                    document.getElementById('bench-status-text').textContent = 'Round 1/' + repeatN + ' — Starting...';
+                } else {
+                    roundBar.style.display = 'none';
+                }
+
+                benchAddLog('Benchmark started: ' + data.benchmark_id + (repeatN > 1 ? ` (${repeatN} rounds)` : ''));
 
                 // Connect WebSocket for live updates
                 connectBenchmarkWs(data.benchmark_id);
+
+                // Start polling fallback — checks API status every 15s
+                startBenchmarkPolling(data.benchmark_id);
 
             } catch (err) {
                 alert('Failed to start benchmark: ' + err.message);
@@ -2152,23 +2329,158 @@ ${htmlBody}
             }
         }
 
+        let benchTotalRounds = 1;
+        let benchCurrentRound = 1;
+        let benchmarkPollInterval = null;
+        function startBenchmarkPolling(benchmarkId) {
+            if (benchmarkPollInterval) clearInterval(benchmarkPollInterval);
+            benchmarkPollInterval = setInterval(async () => {
+                try {
+                    const resp = await fetch(`/api/benchmarks/${benchmarkId}`);
+                    if (!resp.ok) return;
+                    const d = await resp.json();
+
+                    // Update phase statuses from API data
+                    if (d.cold) {
+                        const el = document.getElementById('bench-cold-status');
+                        if (el) {
+                            const mono = el.querySelector('.font-mono');
+                            if (mono.textContent === 'Pending' || mono.textContent === 'Running...') {
+                                if (d.warm || d.status === 'completed' || d.status === 'error') {
+                                    mono.textContent = 'COMPLETED';
+                                    mono.style.color = '#00ff41';
+                                    el.style.borderColor = 'var(--neon-green)';
+                                } else {
+                                    mono.textContent = `Running... (${d.cold.total_steps} steps)`;
+                                    mono.style.color = '#00fff5';
+                                    el.style.borderColor = 'var(--neon-cyan)';
+                                }
+                            }
+                        }
+                    }
+                    if (d.warm) {
+                        const el = document.getElementById('bench-warm-status');
+                        if (el) {
+                            const mono = el.querySelector('.font-mono');
+                            if (mono.textContent === 'Pending' || mono.textContent.startsWith('Running')) {
+                                if (d.chain || d.status === 'completed' || d.status === 'error') {
+                                    mono.textContent = 'COMPLETED';
+                                    mono.style.color = '#00ff41';
+                                    el.style.borderColor = 'var(--neon-green)';
+                                } else {
+                                    mono.textContent = `Running... (${d.warm.total_steps} steps)`;
+                                    mono.style.color = '#00fff5';
+                                    el.style.borderColor = 'var(--neon-cyan)';
+                                }
+                            }
+                        }
+                    }
+                    if (d.chain) {
+                        const el = document.getElementById('bench-chain-status');
+                        if (el) {
+                            const mono = el.querySelector('.font-mono');
+                            mono.textContent = d.status === 'completed' ? 'COMPLETED' : 'Running...';
+                            mono.style.color = d.status === 'completed' ? '#00ff41' : '#00fff5';
+                            el.style.borderColor = d.status === 'completed' ? 'var(--neon-green)' : 'var(--neon-cyan)';
+                        }
+                    }
+
+                    // Update status text
+                    const statusText = document.getElementById('bench-status-text');
+                    if (d.status === 'running') {
+                        if (d.chain) statusText.textContent = 'Running: CHAIN';
+                        else if (d.warm) statusText.textContent = 'Running: WARM';
+                        else if (d.cold) statusText.textContent = 'Running: COLD';
+                    }
+
+                    // Stop polling if benchmark is done
+                    if (d.status === 'completed' || d.status === 'error') {
+                        clearInterval(benchmarkPollInterval);
+                        benchmarkPollInterval = null;
+                        currentBenchmarkId = null;
+                        if (d.status === 'completed') {
+                            statusText.textContent = 'COMPLETE';
+                            statusText.style.color = '#00ff41';
+                            benchAddLog('Benchmark complete! Loading results...');
+                            setTimeout(() => loadBenchmarkResults(benchmarkId), 1500);
+                        } else {
+                            statusText.textContent = 'ERROR';
+                            statusText.style.color = '#ff4444';
+                            benchAddLog('Benchmark ended with error.');
+                        }
+                    }
+                } catch {}
+            }, 15000);
+        }
+
+        let benchmarkWsReconnectAttempts = 0;
+        const BENCH_WS_MAX_RECONNECT = 20;
+
         function connectBenchmarkWs(benchmarkId) {
             if (benchmarkWs) { try { benchmarkWs.close(); } catch {} }
             const wsProtocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
             benchmarkWs = new WebSocket(`${wsProtocol}//${location.host}/ws/benchmark/${benchmarkId}`);
 
+            benchmarkWs.onopen = () => {
+                benchmarkWsReconnectAttempts = 0;
+            };
+
             benchmarkWs.onmessage = (event) => {
                 try {
                     const data = JSON.parse(event.data);
+                    if (data.type === 'keepalive' || data.type === 'connected') return;
                     handleBenchmarkMsg(data);
                 } catch {}
             };
-            benchmarkWs.onerror = () => benchAddLog('WebSocket error');
-            benchmarkWs.onclose = () => benchAddLog('WebSocket closed');
+            benchmarkWs.onerror = () => {};
+            benchmarkWs.onclose = () => {
+                // Auto-reconnect if benchmark is still running
+                if (currentBenchmarkId && benchmarkWsReconnectAttempts < BENCH_WS_MAX_RECONNECT) {
+                    benchmarkWsReconnectAttempts++;
+                    const delay = Math.min(2000 * benchmarkWsReconnectAttempts, 15000);
+                    benchAddLog(`WebSocket reconnecting in ${delay/1000}s... (attempt ${benchmarkWsReconnectAttempts})`);
+                    setTimeout(() => connectBenchmarkWs(currentBenchmarkId), delay);
+                } else if (benchmarkWsReconnectAttempts >= BENCH_WS_MAX_RECONNECT) {
+                    benchAddLog('WebSocket reconnect limit reached. Benchmark may still be running in background.');
+                }
+            };
         }
 
         function handleBenchmarkMsg(data) {
-            if (data.type === 'phase_start') {
+            if (data.type === 'iteration_start') {
+                benchCurrentRound = data.iteration;
+                benchTotalRounds = data.total;
+                const roundBar = document.getElementById('bench-round-bar');
+                if (data.total > 1) {
+                    roundBar.style.display = '';
+                    document.getElementById('bench-round-current').textContent = data.iteration;
+                    document.getElementById('bench-round-total').textContent = data.total;
+                    const pct = ((data.iteration - 1) / data.total * 100);
+                    document.getElementById('bench-round-fill').style.width = pct + '%';
+                    document.getElementById('bench-status-text').textContent = `Round ${data.iteration}/${data.total} \u2014 Starting...`;
+                }
+                // Reset phase indicators for new iteration
+                ['cold', 'warm', 'chain'].forEach(phase => {
+                    const el = document.getElementById(`bench-${phase}-status`);
+                    if (el) {
+                        el.querySelector('.font-mono').textContent = 'Pending';
+                        el.querySelector('.font-mono').style.color = '#4a4a5a';
+                        el.style.borderColor = '#1a1a2e';
+                    }
+                });
+                benchAddLog(data.message || `Round ${data.iteration} starting...`);
+
+            } else if (data.type === 'iteration_complete') {
+                benchCurrentRound = data.iteration;
+                if (data.total > 1) {
+                    document.getElementById('bench-round-current').textContent = data.iteration;
+                    const pct = (data.iteration / data.total * 100);
+                    document.getElementById('bench-round-fill').style.width = pct + '%';
+                    document.getElementById('bench-status-text').textContent = `Round ${data.iteration}/${data.total} \u2014 Done`;
+                }
+                benchAddLog(data.message || `Round ${data.iteration}/${data.total} complete.`);
+
+            } else if (data.type === 'phase_start') {
                 const phase = data.phase;
                 const el = document.getElementById(`bench-${phase}-status`);
                 if (el) {
@@ -2176,7 +2488,8 @@ ${htmlBody}
                     el.querySelector('.font-mono').style.color = '#00fff5';
                     el.style.borderColor = 'var(--neon-cyan)';
                 }
-                document.getElementById('bench-status-text').textContent = `Running: ${phase.toUpperCase()}`;
+                const iterTag = benchTotalRounds > 1 ? ` [Round ${benchCurrentRound}/${benchTotalRounds}]` : '';
+                document.getElementById('bench-status-text').textContent = `Running: ${phase.toUpperCase()}${iterTag}`;
                 benchAddLog(data.message || `Starting ${phase}...`);
 
             } else if (data.type === 'phase_complete' || data.type === 'session_done') {
@@ -2198,7 +2511,10 @@ ${htmlBody}
             } else if (data.type === 'benchmark_complete') {
                 document.getElementById('bench-status-text').textContent = 'COMPLETE';
                 document.getElementById('bench-status-text').style.color = '#00ff41';
-                benchAddLog('Benchmark complete! Loading results...');
+                const totalIter = data.total_iterations || 1;
+                benchAddLog(`Benchmark complete! ${totalIter > 1 ? totalIter + ' iterations finished. ' : ''}Loading results...`);
+                currentBenchmarkId = null;  // stop auto-reconnect
+                if (benchmarkWs) { try { benchmarkWs.close(); } catch {} }
                 // Load results
                 setTimeout(() => loadBenchmarkResults(data.benchmark_id), 1500);
 
@@ -2206,12 +2522,15 @@ ${htmlBody}
                 document.getElementById('bench-status-text').textContent = 'ERROR';
                 document.getElementById('bench-status-text').style.color = '#ff4444';
                 benchAddLog('ERROR: ' + (data.error || 'Unknown error'));
+                currentBenchmarkId = null;  // stop auto-reconnect
+                if (benchmarkWs) { try { benchmarkWs.close(); } catch {} }
             }
         }
 
         function benchAddLog(msg) {
             const log = document.getElementById('bench-log');
-            const ts = new Date().toLocaleTimeString();
+            const now = new Date();
+            const ts = String(now.getHours()).padStart(2,'0') + ':' + String(now.getMinutes()).padStart(2,'0');
             log.innerHTML += `<div style="color:#5a5a6a;">[${ts}] ${msg}</div>`;
             log.scrollTop = log.scrollHeight;
         }
@@ -2313,6 +2632,146 @@ ${htmlBody}
                     <td class="px-4 py-1.5 text-center" style="color:#8a8a9a; font-size:0.7rem;">${wVulns}</td>
                     <td class="px-4 py-1.5 text-center" style="color:#8a8a9a; font-size:0.7rem;">${chVulns}</td>
                 </tr>`;
+
+            // Render detailed panels for each session
+            renderBenchDetailPanels(cold, warm, chain);
+        }
+
+        function renderBenchDetailPanels(cold, warm, chain) {
+            const container = document.getElementById('bench-detail-panels');
+            container.style.display = '';
+            container.innerHTML = '';
+
+            const sessions = [
+                { data: cold, label: 'COLD START', color: 'var(--neon-cyan)', icon: '\u2744' },
+                { data: warm, label: 'WARM START', color: 'var(--neon-orange)', icon: '\ud83d\udd25' },
+                { data: chain, label: 'CHAIN MODE', color: 'var(--neon-purple)', icon: '\u26d3' },
+            ];
+
+            sessions.forEach(({ data: s, label, color, icon }) => {
+                if (!s) return;
+
+                const sevColors = { critical: '#ff2d55', high: '#ff8800', medium: '#ffee00', low: '#00fff5', info: '#6a6a8a' };
+
+                // Tools used
+                const toolsHtml = (s.tools_used || []).map(t =>
+                    `<span style="display:inline-block; padding:2px 8px; margin:2px; border-radius:4px; font-size:0.75rem; background:rgba(0,255,245,0.08); border:1px solid ${color}; color:${color};">${t}</span>`
+                ).join('') || '<span style="color:#4a4a5a;">No tools used</span>';
+
+                // Tool execution path
+                const pathHtml = (s.tool_path || []).map(p =>
+                    `<span style="color:${color}; font-size:0.7rem;">${p.tool}</span>`
+                ).join(' <span style="color:#3a3a4a;">\u2192</span> ') || '<span style="color:#4a4a5a;">---</span>';
+
+                // Findings detail
+                let findingsHtml = '';
+                // Verification summary bar
+                const vs = s.verification_summary || {};
+                if (vs.verified || vs.likely || vs.unverified || vs.suspicious) {
+                    findingsHtml += `<div class="flex gap-3 mb-2 font-mono" style="font-size:0.7rem;">
+                        <span style="color:#00ff41;">\u2714 Verified: ${vs.verified || 0}</span>
+                        <span style="color:#ffee00;">\u2248 Likely: ${vs.likely || 0}</span>
+                        <span style="color:#6a6a8a;">? Unverified: ${vs.unverified || 0}</span>
+                        <span style="color:#ff4444;">\u26a0 Suspicious: ${vs.suspicious || 0}</span>
+                    </div>`;
+                }
+
+                if (s.findings_detail && s.findings_detail.length > 0) {
+                    findingsHtml += '<table style="width:100%; font-size:0.75rem; border-collapse:collapse;">';
+                    findingsHtml += '<tr style="color:#6a6a8a; border-bottom:1px solid #1a1a2e;"><th style="text-align:left; padding:4px 8px;">TP/FP</th><th style="text-align:left; padding:4px 8px;">Log Check</th><th style="text-align:left; padding:4px 8px;">Sev</th><th style="text-align:left; padding:4px 8px;">Vulnerability</th><th style="text-align:left; padding:4px 8px;">URL</th><th style="text-align:left; padding:4px 8px;">Why</th></tr>';
+                    s.findings_detail.forEach(f => {
+                        const sColor = sevColors[f.severity] || '#6a6a8a';
+                        const isTP = f.classification === 'TP';
+                        const clsColor = isTP ? '#00ff41' : '#ff4444';
+                        const clsLabel = isTP ? '\u2705 TP' : '\u274c FP';
+                        const scoreStr = f.match_score ? ` (${Number(f.match_score).toFixed(1)})` : '';
+
+                        // Verification badge
+                        const vColors = { verified: '#00ff41', likely: '#ffee00', unverified: '#6a6a8a', suspicious: '#ff4444' };
+                        const vIcons = { verified: '\u2714', likely: '\u2248', unverified: '?', suspicious: '\u26a0' };
+                        const vStatus = f.verification || 'unverified';
+                        const vColor = vColors[vStatus] || '#6a6a8a';
+                        const vIcon = vIcons[vStatus] || '?';
+                        const vTool = f.verification_tool ? ` [${f.verification_tool}]` : '';
+                        const vTooltip = f.verification_reason || '';
+                        const vSnippet = f.verification_snippet || '';
+
+                        findingsHtml += `<tr style="border-bottom:1px solid #0a0a1a;">
+                            <td style="padding:3px 8px;"><span style="color:${clsColor}; font-weight:bold; font-size:0.7rem;">${clsLabel}${scoreStr}</span></td>
+                            <td style="padding:3px 8px;" title="${vTooltip}\n\nSnippet: ${vSnippet}"><span style="color:${vColor}; font-size:0.7rem; cursor:help;">${vIcon} ${vStatus}${vTool}</span></td>
+                            <td style="padding:3px 8px;"><span style="color:${sColor}; font-weight:bold; text-transform:uppercase;">${f.severity}</span></td>
+                            <td style="padding:3px 8px; color:#c0c0d0;">${f.vuln_type}</td>
+                            <td style="padding:3px 8px; color:#8a8a9a; font-size:0.7rem; max-width:160px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${f.url || '---'}</td>
+                            <td style="padding:3px 8px; color:#5a5a6a; font-size:0.65rem; max-width:200px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${f.match_reason || ''}">${f.match_reason || '---'}</td>
+                        </tr>`;
+                    });
+                    findingsHtml += '</table>';
+                } else {
+                    findingsHtml = '<div style="color:#4a4a5a; font-size:0.8rem; padding:8px;">No vulnerabilities found</div>';
+                }
+
+                // Session ID for report link
+                const sessionIds = (s.session_id || '').split(',');
+                const viewReportBtn = sessionIds[0] ? `<button onclick="viewSessionReport('${sessionIds[0]}')" class="font-pixel px-3 py-1 rounded" style="font-size:0.45rem; background:transparent; border:1px solid ${color}; color:${color}; cursor:pointer;">\ud83d\udcdd VIEW FULL REPORT</button>` : '';
+
+                container.innerHTML += `
+                <div class="mb-3 rounded-lg" style="background:rgba(13,13,21,0.6); border:1px solid ${color}33; overflow:hidden;">
+                    <div class="flex items-center justify-between px-4 py-2" style="background:rgba(13,13,21,0.8); border-bottom:1px solid ${color}33; cursor:pointer;" onclick="this.parentElement.querySelector('.bench-detail-body').classList.toggle('hidden')">
+                        <div class="flex items-center gap-2">
+                            <span style="font-size:1rem;">${icon}</span>
+                            <span class="font-pixel" style="font-size:0.55rem; color:${color};">${label}</span>
+                            <span class="font-mono" style="font-size:0.75rem; color:#5a5a6a;">ID: ${s.session_id || '---'}</span>
+                        </div>
+                        <div class="flex items-center gap-3">
+                            ${viewReportBtn}
+                            <span class="font-mono" style="font-size:0.8rem; color:#4a4a5a;">\u25bc</span>
+                        </div>
+                    </div>
+                    <div class="bench-detail-body px-4 py-3">
+                        <div class="mb-3">
+                            <div class="font-pixel mb-1" style="font-size:0.45rem; color:#6a6a8a;">TOOLS USED (${(s.tools_used || []).length})</div>
+                            <div class="flex flex-wrap">${toolsHtml}</div>
+                        </div>
+                        <div class="mb-3">
+                            <div class="font-pixel mb-1" style="font-size:0.45rem; color:#6a6a8a;">EXECUTION PATH (${(s.tool_path || []).length} steps)</div>
+                            <div class="font-mono overflow-x-auto py-1" style="white-space:nowrap;">${pathHtml}</div>
+                        </div>
+                        <div>
+                            <div class="font-pixel mb-1" style="font-size:0.45rem; color:#6a6a8a;">VULNERABILITIES FOUND (${(s.findings_detail || []).length})</div>
+                            ${findingsHtml}
+                        </div>
+                    </div>
+                </div>`;
+            });
+        }
+
+        async function viewSessionReport(sessionId) {
+            try {
+                const resp = await fetch(`/api/sessions/${sessionId}/report`);
+                const data = await resp.json();
+                const md = data.report_markdown || '*No report available yet.*';
+
+                // Open report in a modal overlay
+                let modal = document.getElementById('bench-report-modal');
+                if (!modal) {
+                    modal = document.createElement('div');
+                    modal.id = 'bench-report-modal';
+                    modal.style.cssText = 'position:fixed; inset:0; z-index:9999; background:rgba(0,0,0,0.85); display:flex; align-items:center; justify-content:center; padding:20px;';
+                    modal.innerHTML = `
+                        <div style="background:#0d0d15; border:1px solid var(--neon-cyan); border-radius:12px; width:90%; max-width:900px; max-height:90vh; display:flex; flex-direction:column; overflow:hidden;">
+                            <div style="display:flex; align-items:center; justify-content:between; padding:12px 20px; border-bottom:1px solid #1a1a2e;">
+                                <span class="font-pixel" style="font-size:0.6rem; color:var(--neon-cyan); flex:1;">SESSION REPORT</span>
+                                <button onclick="document.getElementById('bench-report-modal').style.display='none'" style="background:none; border:1px solid #ff4444; color:#ff4444; padding:4px 12px; border-radius:6px; cursor:pointer; font-size:0.8rem;">\u2715 CLOSE</button>
+                            </div>
+                            <div id="bench-report-content" class="prose" style="padding:20px; overflow-y:auto; flex:1; color:#c0c0d0; font-size:0.85rem;"></div>
+                        </div>`;
+                    document.body.appendChild(modal);
+                }
+                document.getElementById('bench-report-content').innerHTML = marked.parse(md);
+                modal.style.display = 'flex';
+            } catch (err) {
+                alert('Failed to load report: ' + err.message);
+            }
         }
 
         async function loadBenchmarkHistory() {
@@ -2340,7 +2799,7 @@ ${htmlBody}
                             <span class="font-mono ml-2" style="color:#5a5a6a; font-size:0.75rem;">${b.target_name || b.target_url}</span>
                         </div>
                         <div class="flex items-center gap-3">
-                            <span class="font-mono" style="color:#5a5a6a; font-size:0.75rem;">${b.created_at || ''}</span>
+                            <span class="font-mono" style="color:#5a5a6a; font-size:0.75rem;">${formatDate(b.created_at)}</span>
                             <span class="font-pixel px-2 py-0.5 rounded" style="font-size:0.4rem; color:${statusColor}; border:1px solid ${statusColor};">${(b.status || '').toUpperCase()}</span>
                         </div>
                     `;

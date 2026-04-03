@@ -81,7 +81,7 @@ async def init_db():
                 total_sessions INTEGER NOT NULL DEFAULT 0,
                 status TEXT NOT NULL DEFAULT 'created',
                 auto_progress INTEGER NOT NULL DEFAULT 1,
-                max_turns_per_session INTEGER NOT NULL DEFAULT 15,
+                max_turns_per_session INTEGER NOT NULL DEFAULT 30,
                 no_timeout INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL DEFAULT (datetime('now')),
                 updated_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -108,8 +108,10 @@ async def init_db():
                 cold_session_id TEXT,
                 warm_session_id TEXT,
                 chain_id TEXT,
-                max_turns INTEGER NOT NULL DEFAULT 15,
+                max_turns INTEGER NOT NULL DEFAULT 30,
                 no_timeout INTEGER NOT NULL DEFAULT 0,
+                repeat_n INTEGER NOT NULL DEFAULT 1,
+                current_iteration INTEGER NOT NULL DEFAULT 1,
                 model TEXT NOT NULL DEFAULT 'qwen2.5-coder:7b-instruct-q4_K_M',
                 system_prompt TEXT NOT NULL DEFAULT '',
                 enabled_tools TEXT NOT NULL DEFAULT '',
@@ -165,7 +167,7 @@ async def init_db():
             ("total_steps", "INTEGER DEFAULT 0"),
             ("total_findings", "INTEGER DEFAULT 0"),
             ("no_timeout", "INTEGER DEFAULT 0"),
-            ("max_turns", "INTEGER DEFAULT 15"),
+            ("max_turns", "INTEGER DEFAULT 30"),
             ("chain_id", "TEXT DEFAULT NULL"),
             ("chain_position", "INTEGER DEFAULT NULL"),
             ("chain_phase", "TEXT DEFAULT NULL"),
@@ -173,6 +175,17 @@ async def init_db():
         for col_name, col_def in migrations:
             try:
                 await db.execute(f"ALTER TABLE sessions ADD COLUMN {col_name} {col_def}")
+            except Exception:
+                pass  # column already exists
+
+        # Migrations for benchmark_runs table
+        bench_migrations = [
+            ("repeat_n", "INTEGER NOT NULL DEFAULT 1"),
+            ("current_iteration", "INTEGER NOT NULL DEFAULT 1"),
+        ]
+        for col_name, col_def in bench_migrations:
+            try:
+                await db.execute(f"ALTER TABLE benchmark_runs ADD COLUMN {col_name} {col_def}")
             except Exception:
                 pass  # column already exists
 

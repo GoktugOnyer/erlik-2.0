@@ -29,7 +29,7 @@ class SessionCreate(BaseModel):
     parent_session_id: Optional[str] = None
     vuln_category: Optional[str] = None
     no_timeout: bool = False
-    max_turns: int = 15  # 0 = unlimited (capped at 150 for safety)
+    max_turns: int = 30  # 0 = unlimited (capped at 150 for safety)
 
 
 class SessionResponse(BaseModel):
@@ -119,7 +119,7 @@ class ChainCreate(BaseModel):
         "sslyze", "testssl",
         "playwright", "zap-cli", "pw-crawl",
     ]
-    max_turns_per_session: int = 15
+    max_turns_per_session: int = 30
     no_timeout: bool = False
     auto_progress: bool = True
 
@@ -154,8 +154,9 @@ class ChainSessionSummary(BaseModel):
 class BenchmarkCreate(BaseModel):
     target_url: str
     target_name: str = "OWASP Juice Shop"
-    max_turns: int = 15
-    no_timeout: bool = False
+    max_turns: int = 30
+    no_timeout: bool = True
+    repeat_n: int = 1
     model: str = "qwen2.5-coder:7b-instruct-q4_K_M"
     system_prompt: str = ""
     enabled_tools: list[str] = [

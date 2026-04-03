@@ -197,7 +197,7 @@ running_tasks: dict[str, asyncio.Task] = {}
 
 # --- Agent Loop ---
 
-DEFAULT_MAX_TURNS = 15   # default LLM round-trips per session
+DEFAULT_MAX_TURNS = 30   # default LLM round-trips per session
 ABSOLUTE_MAX_TURNS = 150  # safety cap — thesis spec maximum (prevents infinite loops)
 
 # --- Tool Phase Categories for Enforcement ---
@@ -216,31 +216,38 @@ CHAIN_PHASES = ["recon", "discovery", "vuln_scan", "exploitation"]
 CHAIN_PHASE_DIRECTIVES = {
     "recon": (
         "CHAIN PHASE: RECONNAISSANCE\n"
-        "Focus ONLY on: port scanning, service identification, technology detection, WAF detection.\n"
-        "Tools to prioritize: nmap, whatweb, wafw00f, nikto, sslyze, whois\n"
+        "Focus ONLY on: port scanning, service identification, technology detection, WAF detection, response header analysis.\n"
+        "Tools to prioritize: nmap, whatweb, wafw00f, curl (check response headers with -sI)\n"
         "Do NOT run discovery or exploitation tools yet. Just gather information about the target.\n"
-        "When you have identified services, technologies, and open ports — use 'done'."
+        "When you have identified services, technologies, headers, and open ports — use 'done'."
     ),
     "discovery": (
         "CHAIN PHASE: DISCOVERY\n"
-        "Focus ONLY on: directory enumeration, endpoint discovery, parameter finding, crawling.\n"
-        "Tools to prioritize: gobuster, ffuf, dirb, wfuzz, arjun, pw-crawl, curl\n"
+        "Focus ONLY on: directory enumeration, API endpoint discovery, parameter finding, crawling.\n"
+        "Tools to prioritize: gobuster, ffuf, arjun, pw-crawl, curl\n"
+        "Probe all discovered paths with curl to understand their behaviour. Look for API endpoints, file listings, documentation.\n"
         "Do NOT re-run recon tools. Use the prior recon data provided above.\n"
-        "When you have discovered endpoints and parameters — use 'done'."
+        "When you have a comprehensive map of endpoints and parameters — use 'done'."
     ),
     "vuln_scan": (
         "CHAIN PHASE: VULNERABILITY SCANNING\n"
-        "Focus ONLY on: testing discovered endpoints for vulnerabilities.\n"
-        "Tools to prioritize: sqlmap, xsstrike, dalfox, commix, nuclei, crlfuzz, zap-cli\n"
-        "Test EVERY discovered endpoint and parameter from prior sessions.\n"
+        "Focus on: testing discovered endpoints for injection, XSS, misconfigurations, and known CVEs.\n"
+        "Tools to prioritize: sqlmap, xsstrike, dalfox, nuclei, commix, crlfuzz, zap-cli\n"
+        "Test EVERY discovered endpoint with parameters from prior sessions.\n"
+        "Also test for CORS misconfiguration with: curl -sI -H 'Origin: http://evil.com' <target-url>\n"
         "Report each finding with a 'finding' action before moving on."
     ),
     "exploitation": (
         "CHAIN PHASE: EXPLOITATION & VALIDATION\n"
-        "Focus ONLY on: confirming found vulnerabilities, extracting data, chaining attacks.\n"
-        "Tools to prioritize: curl, sqlmap (with --dump), hydra, john, jwt_tool\n"
-        "Validate and exploit each vulnerability found in prior sessions.\n"
-        "Try to chain findings for deeper impact."
+        "Focus on: authentication attacks, authorisation bypass, access control testing, JWT attacks, business logic flaws.\n"
+        "Tools to prioritize: curl, jwt_tool, hydra, sqlmap (with --dump)\n"
+        "Strategy:\n"
+        "  1. Try SQL injection on any login endpoints discovered earlier.\n"
+        "  2. If you obtain a token, test it with jwt_tool for weak secrets and algorithm confusion.\n"
+        "  3. With a valid session, test access control: change resource IDs, access other users' data.\n"
+        "  4. Test any file upload or redirect endpoints for abuse.\n"
+        "  5. Try brute force on login if no injection works.\n"
+        "Validate and report each finding. Chain findings for deeper impact."
     ),
 }
 
@@ -296,18 +303,29 @@ def _normalize_command(command: str) -> tuple[str, str]:
     return (tool, target)
 
 
+# Tool families — tools doing the same job should not both run
+TOOL_FAMILIES = {
+    "gobuster": "dir_enum", "dirb": "dir_enum", "ffuf": "dir_enum",
+    "xsstrike": "xss_scan", "dalfox": "xss_scan",
+}
+
+
 def _is_duplicate_command(command: str, recent_commands: list[str], max_similar: int = 1) -> bool:
     """Check if this command is too similar to recently executed commands.
-    Returns True if the same tool has been used on the same target >= max_similar times.
+    Returns True if the same tool (or a tool in the same family) has been used
+    on the same target >= max_similar times.
     Checks ALL commands in the session, not just a small window."""
     tool, target = _normalize_command(command)
     if not tool:
         return False
 
+    family = TOOL_FAMILIES.get(tool, tool)
     similar_count = 0
     for prev in recent_commands:  # check ALL commands in session
         prev_tool, prev_target = _normalize_command(prev)
-        if prev_tool == tool and (prev_target == target or not target or not prev_target):
+        prev_family = TOOL_FAMILIES.get(prev_tool, prev_tool)
+        # Same tool family + same target = duplicate
+        if prev_family == family and (prev_target == target or not target or not prev_target):
             similar_count += 1
     return similar_count >= max_similar
 
@@ -324,7 +342,8 @@ def _estimate_tokens(messages: list[dict]) -> int:
 
 
 def _trim_messages(messages: list[dict], recent_commands: list[str] = None,
-                   findings_data: list[dict] = None) -> list[dict]:
+                   findings_data: list[dict] = None,
+                   discoveries: list[str] = None) -> list[dict]:
     """Keep messages within context window. Preserves system prompt and recent turns,
     summarizes older conversation into a compact recap.
 
@@ -332,6 +351,9 @@ def _trim_messages(messages: list[dict], recent_commands: list[str] = None,
     the agent loop) instead of fragile regex parsing of message content.
     This prevents Ollama from silently truncating old messages, which causes
     the LLM to forget what tools it already ran and lose coherence.
+
+    The 'discoveries' list contains key findings (paths, params, endpoints) that
+    must survive trimming so the LLM never forgets what was discovered.
     """
     if _estimate_tokens(messages) <= MAX_ESTIMATED_TOKENS:
         return messages  # fits, no trimming needed
@@ -385,6 +407,13 @@ def _trim_messages(messages: list[dict], recent_commands: list[str] = None,
     if findings_data:
         finding_strs = [f"[{f.get('severity','?').upper()}] {f.get('vuln_type','?')}" for f in findings_data[:10]]
         summary_parts.append(f"Findings so far ({len(findings_data)}): {'; '.join(finding_strs)}")
+
+    # === STICKY DISCOVERIES — never forget what was found ===
+    if discoveries:
+        summary_parts.append("")
+        summary_parts.append("DISCOVERED SO FAR (DO NOT re-scan these, TEST them instead):")
+        for d in discoveries[:20]:  # cap to save tokens
+            summary_parts.append(f"  - {d}")
 
     summary_parts.append("")
     summary_parts.append("CRITICAL RULES:")
@@ -451,7 +480,16 @@ def _parse_tool_output(tool_name: str, output: str, command: str) -> str:
             return "XSS RESULTS:\n  " + "\n  ".join(findings[:5])
 
     elif tool_name == "arjun":
-        params = re.findall(r'(?:Found|Parameter):\s*(\w+)', output, re.IGNORECASE)
+        # Match "parameter detected: name" lines from arjun v2+
+        params = re.findall(r'parameter detected:\s*(\w+)', output, re.IGNORECASE)
+        if not params:
+            # Fallback: "Parameters found: a, b, c" summary line
+            pf_match = re.search(r'Parameters found:\s*(.+)', output, re.IGNORECASE)
+            if pf_match:
+                params = [p.strip() for p in pf_match.group(1).split(",") if p.strip()]
+        if not params:
+            # Legacy format: "Found: paramname" or "Parameter: paramname"
+            params = re.findall(r'(?:Found|Parameter):\s*(\w+)', output, re.IGNORECASE)
         if params:
             return "PARAMETERS FOUND: " + ", ".join(params)
 
@@ -592,15 +630,15 @@ def _auto_detect_findings(tool_name: str, output: str, command: str) -> list[dic
                 })
                 break  # one finding per tool run
 
-    # --- curl: data exposure detection ---
+    # --- curl: multi-pattern detection ---
     elif tool_name == "curl":
         output_lower = output.lower()
-        # Exposed user data (emails, passwords in API responses)
+        url_match = re.search(r'(https?://\S+)', command)
+        url = url_match.group(1) if url_match else ""
+
+        # --- Exposed user data (emails, passwords in API responses) ---
         if ('"email"' in output_lower and '"password"' in output_lower) or \
            ('"email"' in output_lower and ('"role"' in output_lower or '"isadmin"' in output_lower)):
-            url_match = re.search(r'(https?://\S+)', command)
-            url = url_match.group(1) if url_match else ""
-            # Count emails found
             emails = re.findall(r'"email"\s*:\s*"([^"]+)"', output)
             evidence = f"API exposes user data: {len(emails)} user records found"
             if emails:
@@ -612,12 +650,182 @@ def _auto_detect_findings(tool_name: str, output: str, command: str) -> list[dic
                 "parameter": "",
                 "evidence": evidence,
             })
-        # Stack trace / error disclosure
-        elif "stacktrace" in output_lower or "stack trace" in output_lower or \
+
+        # --- Broken Access Control: user enumeration via /api/Users ---
+        if "/api/users" in url.lower() and '"email"' in output_lower:
+            emails = re.findall(r'"email"\s*:\s*"([^"]+)"', output)
+            if emails:
+                findings.append({
+                    "vuln_type": "Broken Access Control",
+                    "severity": "high",
+                    "url": url,
+                    "parameter": "",
+                    "evidence": f"User enumeration: GET /api/Users returns {len(emails)} user records without auth",
+                })
+
+        # --- IDOR: accessing other users' baskets ---
+        if "/rest/basket/" in url.lower() and '"products"' in output_lower:
+            # If the response contains basket data (products), it's accessible
+            basket_id = re.search(r'/rest/basket/(\d+)', url)
+            if basket_id:
+                findings.append({
+                    "vuln_type": "Broken Access Control",
+                    "severity": "critical",
+                    "url": url,
+                    "parameter": "id",
+                    "evidence": f"IDOR: basket {basket_id.group(1)} accessible — response contains product data",
+                })
+
+        # --- IDOR: accessing other users' orders ---
+        if "/api/orders" in url.lower() and ('"totalPrice"' in output_lower or '"products"' in output_lower):
+            order_id = re.search(r'/api/orders/(\w+)', url, re.IGNORECASE)
+            if order_id:
+                findings.append({
+                    "vuln_type": "Broken Access Control",
+                    "severity": "high",
+                    "url": url,
+                    "parameter": "id",
+                    "evidence": f"IDOR: order {order_id.group(1)} data accessible",
+                })
+
+        # --- SQL injection login bypass ---
+        if "/rest/user/login" in url.lower() and '"token"' in output_lower:
+            # Check if command contained SQL injection payload
+            sqli_patterns = ["or 1=1", "' or", "\"or", "1=1--", "admin'--", "' --"]
+            if any(p in command.lower() for p in sqli_patterns):
+                token_match = re.search(r'"token"\s*:\s*"([^"]{20,})"', output)
+                evidence = "SQL injection on login: server returned JWT token"
+                if token_match:
+                    evidence += f"\nToken: {token_match.group(1)[:50]}..."
+                findings.append({
+                    "vuln_type": "SQL Injection",
+                    "severity": "critical",
+                    "url": url,
+                    "parameter": "email",
+                    "evidence": evidence,
+                })
+
+        # --- CORS misconfiguration ---
+        if "access-control-allow-origin" in output_lower:
+            cors_match = re.search(r'access-control-allow-origin:\s*(\S+)', output, re.IGNORECASE)
+            if cors_match and cors_match.group(1).strip() == "*":
+                findings.append({
+                    "vuln_type": "CORS Misconfiguration",
+                    "severity": "medium",
+                    "url": url,
+                    "parameter": "",
+                    "evidence": f"Access-Control-Allow-Origin: * — allows any domain to read responses",
+                })
+            elif cors_match and "evil" in cors_match.group(1).lower():
+                findings.append({
+                    "vuln_type": "CORS Misconfiguration",
+                    "severity": "high",
+                    "url": url,
+                    "parameter": "",
+                    "evidence": f"Server reflects arbitrary Origin: {cors_match.group(1)}",
+                })
+
+        # --- Missing security headers ---
+        if command.strip().startswith("curl -s") and ("-I" in command or "-i" in command or "--head" in command):
+            headers_lower = output_lower
+            missing = []
+            if "content-security-policy" not in headers_lower:
+                missing.append("Content-Security-Policy")
+            if "x-frame-options" not in headers_lower:
+                missing.append("X-Frame-Options")
+            if "strict-transport-security" not in headers_lower:
+                missing.append("Strict-Transport-Security")
+            if "x-content-type-options" not in headers_lower:
+                missing.append("X-Content-Type-Options")
+            if missing and len(missing) >= 2:
+                findings.append({
+                    "vuln_type": "Security Misconfiguration",
+                    "severity": "medium",
+                    "url": url,
+                    "parameter": "",
+                    "evidence": f"Missing security headers: {', '.join(missing)}",
+                })
+
+        # --- X-Powered-By / Server header disclosure ---
+        if "x-powered-by:" in output_lower or ("server:" in output_lower and "express" in output_lower):
+            server_match = re.search(r'(?:x-powered-by|server):\s*(.+)', output, re.IGNORECASE)
+            if server_match:
+                findings.append({
+                    "vuln_type": "Information Disclosure",
+                    "severity": "medium",
+                    "url": url,
+                    "parameter": "",
+                    "evidence": f"Server header exposes: {server_match.group(1).strip()}",
+                })
+
+        # --- Exposed Swagger / API docs ---
+        if "/api-docs" in url.lower() and ("swagger" in output_lower or '"paths"' in output_lower or '"openapi"' in output_lower):
+            findings.append({
+                "vuln_type": "Security Misconfiguration",
+                "severity": "medium",
+                "url": url,
+                "parameter": "",
+                "evidence": "Swagger/OpenAPI documentation exposed — reveals all API endpoints",
+            })
+
+        # --- Exposed metrics endpoint ---
+        if "/metrics" in url.lower() and ("process_" in output_lower or "nodejs_" in output_lower or "http_request" in output_lower):
+            findings.append({
+                "vuln_type": "Security Misconfiguration",
+                "severity": "low",
+                "url": url,
+                "parameter": "",
+                "evidence": "Prometheus metrics endpoint exposed — reveals internal server state",
+            })
+
+        # --- FTP directory listing ---
+        if "/ftp" in url.lower() and ("acquisitions" in output_lower or ".md" in output_lower or ".bak" in output_lower):
+            findings.append({
+                "vuln_type": "Sensitive Data Exposure",
+                "severity": "medium",
+                "url": url,
+                "parameter": "",
+                "evidence": "FTP directory listing exposes sensitive files",
+            })
+
+        # --- Null byte bypass on file access ---
+        if "%2500" in url or "%00" in url:
+            if len(output.strip()) > 50 and "error" not in output_lower[:100]:
+                findings.append({
+                    "vuln_type": "Sensitive Data Exposure",
+                    "severity": "high",
+                    "url": url,
+                    "parameter": "",
+                    "evidence": f"Null byte bypass successful — restricted file accessible ({len(output)} bytes returned)",
+                })
+
+        # --- Open redirect ---
+        if "/redirect" in url.lower():
+            if "301" in output or "302" in output or "location:" in output_lower:
+                loc_match = re.search(r'location:\s*(\S+)', output, re.IGNORECASE)
+                if loc_match and ("evil" in loc_match.group(1).lower() or
+                                  "http" in loc_match.group(1).lower() and "juice" not in loc_match.group(1).lower()):
+                    findings.append({
+                        "vuln_type": "Open Redirect",
+                        "severity": "medium",
+                        "url": url,
+                        "parameter": "to",
+                        "evidence": f"Open redirect: server redirects to {loc_match.group(1)}",
+                    })
+
+        # --- Forged feedback (UserId manipulation) ---
+        if "/api/feedbacks" in url.lower() and '"userid"' in output_lower and "POST" in command.upper():
+            findings.append({
+                "vuln_type": "Broken Access Control",
+                "severity": "high",
+                "url": url,
+                "parameter": "UserId",
+                "evidence": "Forged feedback accepted — server allows setting arbitrary UserId",
+            })
+
+        # --- Stack trace / error disclosure ---
+        if "stacktrace" in output_lower or "stack trace" in output_lower or \
                 ("error" in output_lower and ("express" in output_lower or "node" in output_lower)):
-            url_match = re.search(r'(https?://\S+)', command)
-            url = url_match.group(1) if url_match else ""
-            # Extract the error type
             err_match = re.search(r'<h2><em>\d+</em>\s*(.+?)</h2>', output)
             err_msg = err_match.group(1).strip() if err_match else "Server error with stack trace"
             findings.append({
@@ -627,6 +835,42 @@ def _auto_detect_findings(tool_name: str, output: str, command: str) -> list[dic
                 "parameter": "",
                 "evidence": err_msg[:300],
             })
+
+    # --- jwt_tool: JWT vulnerabilities ---
+    elif tool_name == "jwt_tool":
+        output_lower = output.lower()
+        # JWT secret cracked
+        if "secret key" in output_lower or "cracked" in output_lower or "found" in output_lower:
+            secret_match = re.search(r'(?:secret|key|found)[:\s]+["\']?(\S+)', output, re.IGNORECASE)
+            findings.append({
+                "vuln_type": "Broken Authentication",
+                "severity": "critical",
+                "url": "",
+                "parameter": "",
+                "evidence": f"JWT weak secret cracked: {secret_match.group(1) if secret_match else 'key found'}",
+            })
+        # JWT none algorithm accepted
+        if "none" in output_lower and ("accepted" in output_lower or "bypass" in output_lower or "success" in output_lower):
+            findings.append({
+                "vuln_type": "Broken Authentication",
+                "severity": "critical",
+                "url": "",
+                "parameter": "",
+                "evidence": "JWT none algorithm attack successful — server accepts unsigned tokens",
+            })
+
+    # --- hydra: brute force success ---
+    elif tool_name == "hydra":
+        for line in output.split("\n"):
+            if "host:" in line.lower() and ("login:" in line.lower() or "password:" in line.lower()):
+                findings.append({
+                    "vuln_type": "Broken Authentication",
+                    "severity": "high",
+                    "url": "",
+                    "parameter": "",
+                    "evidence": f"Brute force success: {line.strip()[:300]}",
+                })
+                break
 
     # --- nikto: findings ---
     elif tool_name == "nikto":
@@ -713,14 +957,24 @@ def _build_chaining_hint(tool_name: str, parsed_output: str, command: str) -> st
 
     elif tool_name in ("gobuster", "ffuf", "dirb") and "DISCOVERED PATHS" in parsed_output:
         paths = re.findall(r'  (/\S+)', parsed_output)
-        api_paths = [p for p in paths if '/api' in p.lower() or '/rest' in p.lower()]
+        clean_paths = [p.split(" ")[0] for p in paths]
+        # Prioritize high-value paths that often contain sensitive data
+        HIGH_VALUE_KEYWORDS = ["/ftp", "/admin", "/api", "/rest", "/snippets",
+                               "/config", "/backup", "/robots", "/profile",
+                               "/redirect", "/promotion"]
+        high_value = [p for p in clean_paths if any(kw in p.lower() for kw in HIGH_VALUE_KEYWORDS)]
+        # List ALL interesting paths (200/301 status) for LLM to explore
+        if high_value:
+            for hv in high_value[:4]:
+                hints.append(f'Consider: curl -s http://juice-shop:3000{hv}')
+        elif clean_paths:
+            for cp in clean_paths[:3]:
+                hints.append(f'Consider: curl -s http://juice-shop:3000{cp}')
+        # Also suggest API sub-path enumeration
+        api_paths = [p for p in clean_paths if '/api' in p.lower() or '/rest' in p.lower()]
         if api_paths:
-            target = api_paths[0].split(" ")[0]
-            hints.append(f'Consider: curl -s http://juice-shop:3000{target}')
+            target = api_paths[0]
             hints.append(f'Consider: sqlmap -u "http://juice-shop:3000{target}?q=test" --batch --level=3')
-        elif paths:
-            target = paths[0].split(" ")[0]
-            hints.append(f'Consider: curl -s http://juice-shop:3000{target}')
 
     elif tool_name == "whatweb" and "TECHNOLOGIES" in parsed_output:
         hints.append('Consider: gobuster dir -u http://juice-shop:3000 -w /usr/share/dirb/wordlists/common.txt --exclude-length 3748')
@@ -739,8 +993,18 @@ def _build_chaining_hint(tool_name: str, parsed_output: str, command: str) -> st
         url_match = re.search(r'-u\s+(\S+)', command)
         if params_match and url_match:
             base_url = url_match.group(1)
-            first_param = params_match.group(1).split(",")[0].strip()
-            hints.append(f'Consider: sqlmap -u "{base_url}?{first_param}=test" --batch --level=3')
+            all_params = [p.strip() for p in params_match.group(1).split(",")]
+            # Prioritize params most likely to be injectable
+            priority = [p for p in all_params if p.lower() in
+                        ("q", "search", "query", "name", "sort", "order", "id", "filter")]
+            test_params = (priority + all_params)[:3]  # test up to 3 params
+            for param in test_params:
+                hints.append(f'Consider: sqlmap -u "{base_url}?{param}=test" --batch --level=3')
+            # Also suggest XSS testing on text params
+            text_params = [p for p in all_params if p.lower() in
+                           ("q", "search", "query", "name", "description", "comment")]
+            if text_params:
+                hints.append(f'Consider: xsstrike -u {base_url}?{text_params[0]}=test')
 
     elif tool_name == "pw-crawl" and parsed_output:
         # Extract API endpoints from crawl results
@@ -754,9 +1018,10 @@ def _build_chaining_hint(tool_name: str, parsed_output: str, command: str) -> st
 
     elif tool_name == "zap-cli":
         if "spider" in command:
-            hints.append('Consider: zap-cli active-scan http://juice-shop:3000')
+            hints.append('MANDATORY NEXT: zap-cli active-scan http://juice-shop:3000')
+            hints.append('THEN: zap-cli alerts http://juice-shop:3000')
         elif "active-scan" in command:
-            hints.append('Consider: zap-cli alerts http://juice-shop:3000')
+            hints.append('MANDATORY NEXT: zap-cli alerts http://juice-shop:3000')
         elif "alerts" in command and "ZAP ALERTS" in parsed_output:
             hints.append('Consider: curl -s http://juice-shop:3000/rest/products/search?q=test')
             hints.append('Consider: sqlmap -u "http://juice-shop:3000/rest/products/search?q=test" --batch --level=3')
@@ -778,14 +1043,14 @@ TARGET: http://juice-shop:3000
 ALWAYS use the full URL "http://juice-shop:3000" as the target. NEVER use bare hostnames without http://.
 
 MANDATORY TESTING PHASES (you must cover at least 3 before calling "done"):
-  Phase 1 — RECON: Identify services, technologies, and server info.
-    Tools: nmap, whatweb, nikto, wafw00f
-  Phase 2 — DISCOVERY: Find hidden directories, endpoints, and parameters.
-    Tools: gobuster, ffuf, dirb, wfuzz, arjun, pw-crawl
-  Phase 3 — VULNERABILITY SCANNING: Test for known vulns and injection points.
-    Tools: nuclei, sqlmap, xsstrike, dalfox, commix, crlfuzz, zap-cli
-  Phase 4 — MANUAL PROBING & EXPLOITATION: Explore endpoints, test auth, verify findings.
-    Tools: curl, hydra, jwt_tool
+  Phase 1 — RECON: Identify services, technologies, server info, and security headers.
+    Tools: nmap, whatweb, wafw00f, curl (response headers)
+  Phase 2 — DISCOVERY: Find hidden directories, API endpoints, and parameters.
+    Tools: gobuster, ffuf, dirb, arjun, pw-crawl, curl
+  Phase 3 — VULNERABILITY SCANNING: Test discovered endpoints for injection, XSS, and known CVEs.
+    Tools: nuclei, sqlmap, xsstrike, dalfox, commix, crlfuzz, zap-cli, nikto
+  Phase 4 — AUTH, LOGIC & EXPLOITATION: Test authentication, authorisation, access control, and business logic.
+    Tools: curl, hydra, jwt_tool, sqlmap
 
 RESPONSE FORMAT — always return exactly one JSON object:
 
@@ -803,62 +1068,79 @@ SEVERITY LEVELS: critical, high, medium, low, info
 TOOL USAGE EXAMPLES (use these exact URL formats):
 - nmap -sV juice-shop -p 3000
 - whatweb http://juice-shop:3000
-- nikto -h http://juice-shop:3000
 - gobuster dir -u http://juice-shop:3000 -w /usr/share/dirb/wordlists/common.txt --exclude-length 3748
 - ffuf -u http://juice-shop:3000/FUZZ -w /usr/share/dirb/wordlists/common.txt -fs 3748
-- sqlmap -u "http://juice-shop:3000/rest/products/search?q=test" --batch --level=3
+- sqlmap -u "http://juice-shop:3000/endpoint?param=test" --batch --level=3
 - curl -s http://juice-shop:3000/api/
-- curl -s http://juice-shop:3000/rest/products/search?q=' OR 1=1--
-- dirb http://juice-shop:3000 /usr/share/dirb/wordlists/common.txt
-- xsstrike -u http://juice-shop:3000/rest/products/search?q=test
-- dalfox url http://juice-shop:3000/rest/products/search?q=test
+- curl -sI http://juice-shop:3000  (check response headers)
+- xsstrike -u http://juice-shop:3000/endpoint?param=test
+- dalfox url http://juice-shop:3000/endpoint?param=test
 - nuclei -u http://juice-shop:3000
-- arjun -u http://juice-shop:3000/api/Products
-- hydra -l admin -P /usr/share/wordlists/rockyou.txt juice-shop http-post-form "/rest/user/login:email=^USER^&password=^PASS^:Invalid"
+- arjun -u http://juice-shop:3000/api/endpoint
+- hydra -l user -P /usr/share/wordlists/rockyou.txt target http-post-form "/login:user=^USER^&pass=^PASS^:Invalid"
+- jwt_tool <token> -C -d /usr/share/wordlists/rockyou.txt
+- jwt_tool <token> -X a
 - zap-cli spider http://juice-shop:3000
 - zap-cli active-scan http://juice-shop:3000
 - zap-cli alerts http://juice-shop:3000
-- pw-crawl http://juice-shop:3000  (JS-rendered crawl — finds Angular/React routes and API calls that static tools miss)
+- pw-crawl http://juice-shop:3000  (JS-rendered crawl — finds SPA routes and API calls that static tools miss)
+- nikto -h http://juice-shop:3000
 
 AVAILABLE RESOURCES ON THIS SYSTEM:
 - Wordlists: /usr/share/dirb/wordlists/common.txt, /usr/share/wordlists/rockyou.txt
-- ZAP proxy is running and accessible via zap-cli wrapper. Use "zap-cli spider" to crawl, then "zap-cli active-scan" to scan, then "zap-cli alerts" to get findings.
+- ZAP proxy is running and accessible via zap-cli wrapper. Use "zap-cli spider" → "zap-cli active-scan" → "zap-cli alerts".
 - All tools run inside a Kali Linux container with network access to the target.
 
 WORKFLOW STRATEGY:
-1. Start with reconnaissance to understand the target (Phase 1).
-2. Discover hidden directories, API endpoints, and parameters (Phase 2).
-3. For each discovered endpoint, probe it to understand its behavior (Phase 4).
-4. Test promising endpoints with appropriate vulnerability scanners (Phase 3).
-5. Report each finding immediately when discovered.
-6. Only call "done" after thorough multi-phase testing.
+1. Reconnaissance: identify services, technologies, and security posture (Phase 1).
+2. Discovery: enumerate directories, API endpoints, and parameters (Phase 2).
+3. For each discovered endpoint with parameters: test for injection and XSS (Phase 3).
+4. Authentication testing: attempt login bypass, test token security, check for weak credentials (Phase 4).
+5. Authorisation testing: with any obtained session/token, test access control by modifying resource IDs and accessing restricted resources (Phase 4).
+6. Report each finding immediately when discovered.
+7. Only call "done" after thorough multi-phase testing.
 
 CHAINING RULES — use output from one tool as input for the next:
-- nmap finds open ports → run whatweb on those services.
-- gobuster/ffuf finds paths (status 200/301) → run curl on each interesting path to understand it.
-- curl reveals JSON API → run sqlmap on that URL with a query parameter (e.g. ?q=test).
-- curl shows HTML form or input fields → run xsstrike on the form action URL.
-- Any endpoint with query parameters (?q=, ?id=, ?search=) → ALWAYS test it with sqlmap.
-- sqlmap confirms injection → IMMEDIATELY report it as a finding, then continue testing other endpoints.
-- After recon + discovery → run "zap-cli spider http://juice-shop:3000" then "zap-cli active-scan http://juice-shop:3000" then "zap-cli alerts http://juice-shop:3000" — ZAP finds vulns automatically.
-- After the tool feedback, look at the "KEY FINDINGS" section — it shows you extracted data. Use those specific paths and parameters for your next tool.
+- nmap finds open ports → run whatweb on discovered services.
+- gobuster/ffuf finds paths → run curl on each to understand the response.
+- curl reveals JSON API endpoints → test with sqlmap (if parameterised) and arjun (to discover parameters).
+- curl shows forms or input fields → test with xsstrike/dalfox.
+- Any endpoint with query parameters → test with sqlmap AND xsstrike.
+- sqlmap confirms injection → IMMEDIATELY report, then test other endpoints.
+- Successful authentication → extract session token → use it to test authorisation on other resources.
+- If you find a login endpoint → try SQL injection on it (e.g. ' OR 1=1--).
+- If you obtain a JWT token → test with jwt_tool for weak secrets and algorithm confusion.
+- If you find directory listings → look for backup files, config files, and sensitive data.
+- If you find an API documentation endpoint → use it to map the full API surface.
+- After tool feedback, check the "KEY FINDINGS" section — use those paths and parameters for your next tool.
+
+PENETRATION TESTING METHODOLOGY:
+- Check response headers early (curl -sI) — missing security headers are findings.
+- After discovery, probe ALL API endpoints with curl to understand their behaviour.
+- Test every parameterised endpoint for injection (SQLi, XSS, command injection).
+- When you obtain credentials or tokens, use them to test access control:
+  * Try accessing resources belonging to other users (change numeric IDs).
+  * Try accessing admin-only functionality with regular user tokens.
+  * Try modifying data that should be read-only.
+- Test file handling: upload endpoints, directory listings, path traversal.
+- Test redirects: any redirect endpoint may allow open redirect.
+- Check for information disclosure: error pages, debug endpoints, exposed documentation.
 
 IMPORTANT:
-- ALWAYS include http:// in URLs for web tools (gobuster, ffuf, nikto, sqlmap, etc).
+- ALWAYS include http:// in URLs for web tools.
 - Use "juice-shop" as hostname (not localhost) — tools run inside Docker network.
 - Run ONE command at a time, then analyze the result.
-- Keep commands focused and fast. Use timeouts where possible.
-- NEVER repeat the same command if it fails. Try a DIFFERENT tool or a different approach.
-- After gobuster/ffuf find interesting paths, explore them with curl before running heavy scanners.
-- Use curl to probe API endpoints like /api/, /rest/, /ftp/, /api/Products, etc.
+- NEVER repeat the same command if it fails. Try a DIFFERENT tool or approach.
+- After gobuster/ffuf find paths, explore them with curl before running heavy scanners.
 
 TOOL EFFICIENCY:
 - Prefer fast targeted tools over slow broad scanners.
-- nikto is VERY slow (60s+ timeout). Use it only if you have turns to spare. Prefer curl + sqlmap + nuclei for faster results.
-- commix needs a URL with a parameter (e.g. commix -u "http://host/path?param=val" --batch). Without a parameter it does nothing.
+- nikto is slow (60s+). Use it once for broad coverage, prefer curl + sqlmap + nuclei for speed.
+- commix needs a URL with a parameter (e.g. commix -u "http://host/path?param=val" --batch).
 - crlfuzz does NOT support --batch. Just use: crlfuzz -u "http://host/path"
 - sqlmap needs a URL with a query parameter: sqlmap -u "http://host/path?q=test" --batch --level=3
-- Focus your limited turns on tools that test specific endpoints with parameters.
+- jwt_tool is high-value for token-based auth: test for weak secrets and algorithm confusion.
+- curl is your most versatile tool — use it for probing, header checks, auth testing, and API exploration.
 """
 
 
@@ -1181,7 +1463,7 @@ async def _generate_report(session_id: str, model: str, target_url: str,
 
     # Format duration
     duration_str = f"{total_duration_ms / 1000:.1f} seconds" if total_duration_ms else "Unknown"
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    timestamp = datetime.now().strftime("%H:%M %d/%m/%Y")
 
     # ─── PART 1: Build programmatic report sections (exact data, no LLM) ───
 
@@ -1608,6 +1890,65 @@ async def _extract_recon_context(session_id: str):
             for p in params:
                 context_entries.append(("parameter", p, "", tool))
 
+        # Extract vulnerabilities/findings from nikto
+        elif tool == "nikto":
+            for line in output.split("\n"):
+                # Nikto: + /path: Description
+                m = re.search(r'\+\s+(/\S+):\s+(.+)', line)
+                if m:
+                    context_entries.append(("finding", m.group(1), m.group(2)[:200], tool))
+                # Nikto: + Server: Apache/2.4.49
+                m2 = re.search(r'\+\s+Server:\s+(.+)', line)
+                if m2:
+                    context_entries.append(("technology", m2.group(1).strip(), "", tool))
+
+        # Extract findings from nuclei
+        elif tool == "nuclei":
+            for line in output.split("\n"):
+                # nuclei: [template-id] [protocol] [severity] url
+                m = re.search(r'\[([^\]]+)\]\s+\[([^\]]+)\]\s+\[([^\]]+)\]\s+(\S+)', line)
+                if m:
+                    context_entries.append(("finding", m.group(4), f"{m.group(1)} [{m.group(3)}]", tool))
+                # Also catch simpler nuclei output: [template-id] url
+                m2 = re.search(r'\[([^\]]+)\]\s+(https?://\S+)', line)
+                if m2 and not m:
+                    context_entries.append(("finding", m2.group(2), m2.group(1), tool))
+
+        # Extract WAF info from wafw00f
+        elif tool == "wafw00f":
+            if "no waf" in output.lower() or "not behind" in output.lower():
+                context_entries.append(("technology", "No WAF detected", "", tool))
+            else:
+                m = re.search(r'behind\s+(\S.+?)(?:\s+WAF|\s*$)', output, re.IGNORECASE)
+                if m:
+                    context_entries.append(("technology", f"WAF: {m.group(1).strip()}", "", tool))
+
+        # Extract SSL/TLS info from sslyze/testssl
+        elif tool in ("sslyze", "testssl"):
+            for line in output.split("\n"):
+                if any(kw in line.lower() for kw in ["vulnerable", "weak", "deprecated", "insecure", "not ok"]):
+                    context_entries.append(("finding", "TLS/SSL", line.strip()[:200], tool))
+                m = re.search(r'(TLS\s+\d\.\d|SSL\s+\d)', line)
+                if m:
+                    context_entries.append(("technology", m.group(1), "", tool))
+
+        # Extract injection points from sqlmap
+        elif tool == "sqlmap":
+            for line in output.split("\n"):
+                m = re.search(r"Parameter:\s+(\S+)\s+\((\w+)\)", line)
+                if m:
+                    context_entries.append(("parameter", m.group(1), f"injectable ({m.group(2)})", tool))
+                if "is vulnerable" in line.lower() or "injectable" in line.lower():
+                    context_entries.append(("finding", "SQLi", line.strip()[:200], tool))
+
+        # Extract XSS findings from xsstrike/dalfox
+        elif tool in ("xsstrike", "dalfox"):
+            for line in output.split("\n"):
+                if any(kw in line.lower() for kw in ["vulnerable", "reflected", "found", "payload", "confirmed"]):
+                    url_m = re.search(r'(https?://\S+)', line)
+                    endpoint = url_m.group(1) if url_m else "unknown"
+                    context_entries.append(("finding", endpoint, line.strip()[:200], tool))
+
         # Extract API endpoints from curl
         elif tool == "curl":
             # Try to extract URLs from command
@@ -1958,7 +2299,7 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
     full_findings_data = []   # full untruncated findings for file report
 
     # Scale min-turns-before-done proportionally to max_turns
-    # Default: 8 min out of 15 max (53%). Scale same ratio for higher limits.
+    # Default: 8 min out of 30 max (~50%). Scale same ratio for higher limits.
     min_turns_before_done = max(DEFAULT_MIN_TURNS_BEFORE_DONE, int(max_turns * 0.5))
     min_turns_before_done = min(min_turns_before_done, 25)  # cap at 25 — no need to force more
 
@@ -2149,6 +2490,7 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
         consecutive_container_failures = 0  # circuit breaker for container-down
         turns_since_last_finding = 0  # stagnation detection
         last_findings_count = 0  # to track new findings per turn
+        sticky_discoveries: list[str] = []  # key discoveries that survive context trimming
 
         for turn in range(max_turns):
             await asyncio.sleep(0)  # yield for cancellation
@@ -2178,7 +2520,8 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
 
             # Trim messages to fit context window (prevents Ollama silent truncation)
             messages = _trim_messages(messages, recent_commands=recent_commands,
-                                      findings_data=full_findings_data)
+                                      findings_data=full_findings_data,
+                                      discoveries=sticky_discoveries)
 
             # Call LLM
             start_time = time.time()
@@ -2344,6 +2687,32 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
                     parsed_findings = _parse_tool_output(tool_name, tool_output, command)
                     chaining_hint = _build_chaining_hint(tool_name, parsed_findings, command) if parsed_findings else ""
 
+                    # === Populate sticky discoveries for context persistence ===
+                    if parsed_findings:
+                        if tool_name in ("gobuster", "ffuf", "dirb") and "DISCOVERED PATHS" in parsed_findings:
+                            disc_paths = re.findall(r'  (/\S+)', parsed_findings)
+                            for dp in disc_paths:
+                                clean_p = dp.split(" ")[0]
+                                entry = f"PATH: {clean_p} (from {tool_name})"
+                                if entry not in sticky_discoveries:
+                                    sticky_discoveries.append(entry)
+                        elif tool_name == "arjun" and "PARAMETERS FOUND" in parsed_findings:
+                            pm = re.search(r'PARAMETERS FOUND: (.+)', parsed_findings)
+                            if pm:
+                                url_m = re.search(r'-u\s+(\S+)', command)
+                                base = url_m.group(1) if url_m else "target"
+                                entry = f"PARAMS on {base}: {pm.group(1)} (from arjun)"
+                                if entry not in sticky_discoveries:
+                                    sticky_discoveries.append(entry)
+                        elif tool_name == "nmap" and "OPEN PORTS" in parsed_findings:
+                            entry = f"PORTS: {parsed_findings.replace('OPEN PORTS:', '').strip()} (from nmap)"
+                            if entry not in sticky_discoveries:
+                                sticky_discoveries.append(entry)
+                        elif tool_name == "whatweb" and "TECHNOLOGIES" in parsed_findings:
+                            entry = f"TECH: {parsed_findings.replace('TECHNOLOGIES: ', '')} (from whatweb)"
+                            if entry not in sticky_discoveries:
+                                sticky_discoveries.append(entry)
+
                     # Stream key findings to dashboard log (or first 30 lines of raw output)
                     if parsed_findings:
                         for pline in parsed_findings.split("\n")[:10]:
@@ -2432,6 +2801,40 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
                         tool_feedback += f"=== RAW OUTPUT (truncated) ===\n{tool_output[:2500]}\n\n"
                         if chaining_hint:
                             tool_feedback += f"{chaining_hint}\n\n"
+
+                        # === ZAP mandatory follow-through ===
+                        if tool_name == "zap-cli" and "spider" in command:
+                            tool_feedback += (
+                                "\nMANDATORY: You just started a ZAP spider. You MUST now:\n"
+                                "1. Run: zap-cli active-scan http://juice-shop:3000\n"
+                                "2. Then: zap-cli alerts http://juice-shop:3000\n"
+                                "Complete these 2 steps BEFORE using any other tool.\n\n"
+                            )
+                        elif tool_name == "zap-cli" and "active-scan" in command:
+                            tool_feedback += (
+                                "\nMANDATORY: Active scan complete. Now run: zap-cli alerts http://juice-shop:3000\n\n"
+                            )
+
+                        # === Mid-session nudges: push model toward untested phases ===
+                        if turn >= max_turns // 3:
+                            # XSS nudge
+                            xss_tools = {"xsstrike", "dalfox"} & set(enabled_tools)
+                            if xss_tools and not (xss_tools & tools_executed):
+                                tool_feedback += (
+                                    "\nYou have NOT tested for XSS yet! "
+                                    "Use xsstrike or dalfox on a discovered endpoint with parameters.\n"
+                                )
+
+                            # Auth nudge — generic, not target-specific
+                            jwt_commands_run = any("jwt_tool" in c for c in recent_commands)
+                            auth_tools = {"hydra", "jwt_tool"} & set(enabled_tools)
+                            if auth_tools and not (auth_tools & tools_executed):
+                                tool_feedback += (
+                                    "\nYou have NOT tested authentication/authorisation yet (Phase 4). "
+                                    "Look for login endpoints in your discovered paths and test them. "
+                                    "If you obtain a token, test it with jwt_tool.\n"
+                                )
+
                         tool_feedback += f"[{phase_status}]\n"
                         if uncovered:
                             tool_feedback += "Move to an UNCOVERED phase. Do NOT re-run tools from covered phases.\n"
@@ -2502,6 +2905,95 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
                 parameter = action.get("parameter", "")
                 evidence = action.get("evidence", "")
 
+                # === FALSE POSITIVE FILTER ===
+                # Check 1: Dedup — skip if auto-detection already captured this
+                is_auto_dup = any(
+                    f["vuln_type"] == vuln_type and f.get("url", "") == vuln_url
+                    for f in full_findings_data
+                )
+                if is_auto_dup:
+                    await manager.broadcast(session_id, {
+                        "type": "log", "phase": "test",
+                        "message": f">> SKIPPED finding (already auto-detected): [{severity}] {vuln_type}",
+                    })
+                    messages.append({"role": "assistant", "content": response})
+                    messages.append({"role": "user", "content":
+                        "This finding was already auto-detected and recorded. "
+                        "Continue testing with the next tool."
+                    })
+                    continue
+
+                # Check 2: Validate against recent tool output — reject if tool
+                # explicitly said "not injectable" or "does not appear to be injectable"
+                is_injection_claim = any(kw in vuln_type.lower() for kw in
+                    ("sql injection", "sqli", "command injection", "xss", "injection"))
+                if is_injection_claim and recent_commands:
+                    # Look at the last few tool outputs for contradiction
+                    last_outputs = []
+                    for msg in reversed(messages[-10:]):
+                        content = msg.get("content", "")
+                        if "RAW OUTPUT" in content or "Tool:" in content:
+                            last_outputs.append(content)
+                    recent_output_text = " ".join(last_outputs).lower()
+                    contradiction_phrases = [
+                        "not injectable", "does not appear to be injectable",
+                        "not appear to be dynamic", "all tested parameters do not appear",
+                        "no injection point found",
+                    ]
+                    # Only reject if the contradiction is about the SAME URL
+                    url_in_output = vuln_url.lower() in recent_output_text if vuln_url else False
+                    has_contradiction = any(cp in recent_output_text for cp in contradiction_phrases)
+                    if has_contradiction and url_in_output:
+                        await manager.broadcast(session_id, {
+                            "type": "log", "phase": "test",
+                            "message": f">> REJECTED finding (tool output contradicts): [{severity}] {vuln_type} at {vuln_url}",
+                        })
+                        messages.append({"role": "assistant", "content": response})
+                        messages.append({"role": "user", "content":
+                            f"REJECTED: Your finding '{vuln_type}' at {vuln_url} is a FALSE POSITIVE. "
+                            f"The tool output explicitly stated 'not injectable' or equivalent. "
+                            f"Only report findings that are CONFIRMED by tool output. "
+                            f"Continue testing with a different tool or endpoint."
+                        })
+                        continue
+
+                # Check 3: URL-level duplicate (same vuln_type + same url, ignore parameter)
+                # The LLM often reports the same finding multiple times with slightly different params
+                is_url_dup = any(
+                    f["vuln_type"] == vuln_type and f.get("url", "") == vuln_url
+                    for f in full_findings_data
+                )
+                if is_url_dup:
+                    await manager.broadcast(session_id, {
+                        "type": "log", "phase": "test",
+                        "message": f">> SKIPPED finding (duplicate vuln+url): [{severity}] {vuln_type} at {vuln_url}",
+                    })
+                    messages.append({"role": "assistant", "content": response})
+                    messages.append({"role": "user", "content":
+                        "This finding was already recorded for the same URL. "
+                        "Continue testing with a different tool or endpoint."
+                    })
+                    continue
+
+                # Check 4: Reject injection findings with no evidence
+                # If the LLM claims a high/critical injection but provides no evidence,
+                # it's hallucinating — no scanner confirmed the finding
+                evidence_empty = not evidence or evidence.strip().lower() in ("", "n/a", "none", "null")
+                if is_injection_claim and evidence_empty and severity.lower() in ("high", "critical"):
+                    await manager.broadcast(session_id, {
+                        "type": "log", "phase": "test",
+                        "message": f">> REJECTED finding (no evidence for {severity} injection): [{severity}] {vuln_type}",
+                    })
+                    messages.append({"role": "assistant", "content": response})
+                    messages.append({"role": "user", "content":
+                        f"REJECTED: You claimed '{vuln_type}' but provided NO evidence. "
+                        f"High/critical findings MUST include tool output, payloads, or error messages as evidence. "
+                        f"Only report findings that are CONFIRMED by a scanner. "
+                        f"Continue testing with a different tool."
+                    })
+                    continue
+
+                # === Finding passed validation ===
                 findings_count += 1
                 await manager.broadcast(session_id, {
                     "type": "log", "phase": "test",
@@ -3427,6 +3919,9 @@ async def test_tools():
 
 # OWASP Juice Shop ground truth vulnerabilities
 JUICE_SHOP_GROUND_TRUTH = [
+    # ──────────────────────────────────────────────────────────────────
+    # CATEGORY 1: SQL Injection (A03:2021 Injection)
+    # ──────────────────────────────────────────────────────────────────
     {
         "target_name": "OWASP Juice Shop",
         "target_url": "http://localhost:3000",
@@ -3434,9 +3929,317 @@ JUICE_SHOP_GROUND_TRUTH = [
         "severity": "high",
         "url_pattern": "/rest/products/search",
         "parameter": "q",
-        "description": "Boolean-based blind and time-based blind SQL injection on product search endpoint",
+        "description": "Boolean-based blind and UNION-based SQL injection on product search endpoint",
         "owasp_category": "A03:2021 Injection",
     },
+    {
+        "target_name": "OWASP Juice Shop",
+        "target_url": "http://localhost:3000",
+        "vuln_type": "SQL Injection",
+        "severity": "critical",
+        "url_pattern": "/rest/user/login",
+        "parameter": "email",
+        "description": "Authentication bypass via SQL injection (' OR 1=1-- on email field logs in as admin)",
+        "owasp_category": "A03:2021 Injection",
+    },
+    {
+        "target_name": "OWASP Juice Shop",
+        "target_url": "http://localhost:3000",
+        "vuln_type": "SQL Injection",
+        "severity": "high",
+        "url_pattern": "/api/Users",
+        "parameter": "",
+        "description": "SQL injection on user-related API endpoints allowing data exfiltration",
+        "owasp_category": "A03:2021 Injection",
+    },
+
+    # ──────────────────────────────────────────────────────────────────
+    # CATEGORY 2: XSS — Cross-Site Scripting (A03:2021 Injection)
+    # ──────────────────────────────────────────────────────────────────
+    {
+        "target_name": "OWASP Juice Shop",
+        "target_url": "http://localhost:3000",
+        "vuln_type": "XSS",
+        "severity": "high",
+        "url_pattern": "/rest/products/search",
+        "parameter": "q",
+        "description": "Reflected XSS via search query parameter — unsanitised input rendered in results",
+        "owasp_category": "A03:2021 Injection",
+    },
+    {
+        "target_name": "OWASP Juice Shop",
+        "target_url": "http://localhost:3000",
+        "vuln_type": "XSS",
+        "severity": "high",
+        "url_pattern": "/#/search",
+        "parameter": "q",
+        "description": "DOM-based XSS via URL fragment in Angular search route",
+        "owasp_category": "A03:2021 Injection",
+    },
+    {
+        "target_name": "OWASP Juice Shop",
+        "target_url": "http://localhost:3000",
+        "vuln_type": "XSS",
+        "severity": "high",
+        "url_pattern": "/#/track-result",
+        "parameter": "id",
+        "description": "DOM-based XSS in order tracking via id parameter reflected without sanitisation",
+        "owasp_category": "A03:2021 Injection",
+    },
+    {
+        "target_name": "OWASP Juice Shop",
+        "target_url": "http://localhost:3000",
+        "vuln_type": "XSS",
+        "severity": "medium",
+        "url_pattern": "/api/Users",
+        "parameter": "username",
+        "description": "Stored XSS via user profile username field rendered in admin panel and reviews",
+        "owasp_category": "A03:2021 Injection",
+    },
+
+    # ──────────────────────────────────────────────────────────────────
+    # CATEGORY 3: Broken Access Control (A01:2021)
+    # ──────────────────────────────────────────────────────────────────
+    {
+        "target_name": "OWASP Juice Shop",
+        "target_url": "http://localhost:3000",
+        "vuln_type": "Broken Access Control",
+        "severity": "high",
+        "url_pattern": "/api/Users",
+        "parameter": "",
+        "description": "User enumeration — GET /api/Users returns all users without authentication",
+        "owasp_category": "A01:2021 Broken Access Control",
+    },
+    {
+        "target_name": "OWASP Juice Shop",
+        "target_url": "http://localhost:3000",
+        "vuln_type": "Broken Access Control",
+        "severity": "critical",
+        "url_pattern": "/rest/basket",
+        "parameter": "id",
+        "description": "IDOR — accessing other users' baskets by changing the basket ID parameter",
+        "owasp_category": "A01:2021 Broken Access Control",
+    },
+    {
+        "target_name": "OWASP Juice Shop",
+        "target_url": "http://localhost:3000",
+        "vuln_type": "Broken Access Control",
+        "severity": "high",
+        "url_pattern": "/#/administration",
+        "parameter": "",
+        "description": "Admin panel accessible by navigating directly to /#/administration (client-side only authz)",
+        "owasp_category": "A01:2021 Broken Access Control",
+    },
+    {
+        "target_name": "OWASP Juice Shop",
+        "target_url": "http://localhost:3000",
+        "vuln_type": "Broken Access Control",
+        "severity": "high",
+        "url_pattern": "/api/Feedbacks",
+        "parameter": "UserId",
+        "description": "Forged feedback — POST /api/Feedbacks allows setting arbitrary UserId to impersonate users",
+        "owasp_category": "A01:2021 Broken Access Control",
+    },
+    {
+        "target_name": "OWASP Juice Shop",
+        "target_url": "http://localhost:3000",
+        "vuln_type": "Broken Access Control",
+        "severity": "medium",
+        "url_pattern": "/api/Products",
+        "parameter": "",
+        "description": "Product manipulation — PUT /api/Products/:id allows unauthenticated product description changes",
+        "owasp_category": "A01:2021 Broken Access Control",
+    },
+    {
+        "target_name": "OWASP Juice Shop",
+        "target_url": "http://localhost:3000",
+        "vuln_type": "Broken Access Control",
+        "severity": "high",
+        "url_pattern": "/api/Quantitys",
+        "parameter": "",
+        "description": "Unauthenticated access to quantity manipulation API",
+        "owasp_category": "A01:2021 Broken Access Control",
+    },
+
+    # ──────────────────────────────────────────────────────────────────
+    # CATEGORY 4: Broken Authentication (A07:2021)
+    # ──────────────────────────────────────────────────────────────────
+    {
+        "target_name": "OWASP Juice Shop",
+        "target_url": "http://localhost:3000",
+        "vuln_type": "Broken Authentication",
+        "severity": "high",
+        "url_pattern": "/rest/user/login",
+        "parameter": "",
+        "description": "No rate limiting on login endpoint allows unlimited brute-force attempts",
+        "owasp_category": "A07:2021 Identification and Authentication Failures",
+    },
+    {
+        "target_name": "OWASP Juice Shop",
+        "target_url": "http://localhost:3000",
+        "vuln_type": "Broken Authentication",
+        "severity": "critical",
+        "url_pattern": "/rest/user/login",
+        "parameter": "password",
+        "description": "Admin account uses weak/guessable credentials (admin@juice-sh.op with admin123)",
+        "owasp_category": "A07:2021 Identification and Authentication Failures",
+    },
+    {
+        "target_name": "OWASP Juice Shop",
+        "target_url": "http://localhost:3000",
+        "vuln_type": "Broken Authentication",
+        "severity": "high",
+        "url_pattern": "",
+        "parameter": "",
+        "description": "JWT weak secret — token signing key is easily crackable, allowing token forgery",
+        "owasp_category": "A07:2021 Identification and Authentication Failures",
+    },
+    {
+        "target_name": "OWASP Juice Shop",
+        "target_url": "http://localhost:3000",
+        "vuln_type": "Broken Authentication",
+        "severity": "critical",
+        "url_pattern": "",
+        "parameter": "",
+        "description": "JWT none algorithm attack — server accepts tokens with alg:none, bypassing signature verification",
+        "owasp_category": "A07:2021 Identification and Authentication Failures",
+    },
+    {
+        "target_name": "OWASP Juice Shop",
+        "target_url": "http://localhost:3000",
+        "vuln_type": "Broken Authentication",
+        "severity": "medium",
+        "url_pattern": "/rest/user/reset-password",
+        "parameter": "",
+        "description": "Weak password reset — security questions are easily guessable for known users",
+        "owasp_category": "A07:2021 Identification and Authentication Failures",
+    },
+
+    # ──────────────────────────────────────────────────────────────────
+    # CATEGORY 5: Sensitive Data Exposure (A02:2021 Cryptographic Failures)
+    # ──────────────────────────────────────────────────────────────────
+    {
+        "target_name": "OWASP Juice Shop",
+        "target_url": "http://localhost:3000",
+        "vuln_type": "Sensitive Data Exposure",
+        "severity": "medium",
+        "url_pattern": "/ftp",
+        "parameter": "",
+        "description": "FTP directory listing exposes sensitive files (acquisitions.md, legal.md, package.json.bak)",
+        "owasp_category": "A02:2021 Cryptographic Failures",
+    },
+    {
+        "target_name": "OWASP Juice Shop",
+        "target_url": "http://localhost:3000",
+        "vuln_type": "Sensitive Data Exposure",
+        "severity": "high",
+        "url_pattern": "/ftp/package.json.bak",
+        "parameter": "",
+        "description": "Backup file exposure — package.json.bak accessible via null byte bypass (%2500.md)",
+        "owasp_category": "A02:2021 Cryptographic Failures",
+    },
+    {
+        "target_name": "OWASP Juice Shop",
+        "target_url": "http://localhost:3000",
+        "vuln_type": "Sensitive Data Exposure",
+        "severity": "high",
+        "url_pattern": "",
+        "parameter": "",
+        "description": "Passwords stored as unsalted MD5 hashes — trivially crackable with rainbow tables",
+        "owasp_category": "A02:2021 Cryptographic Failures",
+    },
+    {
+        "target_name": "OWASP Juice Shop",
+        "target_url": "http://localhost:3000",
+        "vuln_type": "Sensitive Data Exposure",
+        "severity": "medium",
+        "url_pattern": "/main.js",
+        "parameter": "",
+        "description": "Exposed frontend source maps and main.js contain hardcoded API routes, admin paths, and internal logic",
+        "owasp_category": "A02:2021 Cryptographic Failures",
+    },
+
+    # ──────────────────────────────────────────────────────────────────
+    # CATEGORY 6: Security Misconfiguration (A05:2021)
+    # ──────────────────────────────────────────────────────────────────
+    {
+        "target_name": "OWASP Juice Shop",
+        "target_url": "http://localhost:3000",
+        "vuln_type": "Security Misconfiguration",
+        "severity": "info",
+        "url_pattern": "/robots.txt",
+        "parameter": "",
+        "description": "robots.txt exposes hidden paths (/ftp, other sensitive directories)",
+        "owasp_category": "A05:2021 Security Misconfiguration",
+    },
+    {
+        "target_name": "OWASP Juice Shop",
+        "target_url": "http://localhost:3000",
+        "vuln_type": "Security Misconfiguration",
+        "severity": "medium",
+        "url_pattern": "",
+        "parameter": "",
+        "description": "Missing security headers — no Content-Security-Policy, X-Frame-Options, or Strict-Transport-Security",
+        "owasp_category": "A05:2021 Security Misconfiguration",
+    },
+    {
+        "target_name": "OWASP Juice Shop",
+        "target_url": "http://localhost:3000",
+        "vuln_type": "Security Misconfiguration",
+        "severity": "medium",
+        "url_pattern": "/api-docs",
+        "parameter": "",
+        "description": "Swagger/OpenAPI documentation exposed at /api-docs revealing all API endpoints and parameters",
+        "owasp_category": "A05:2021 Security Misconfiguration",
+    },
+    {
+        "target_name": "OWASP Juice Shop",
+        "target_url": "http://localhost:3000",
+        "vuln_type": "Security Misconfiguration",
+        "severity": "low",
+        "url_pattern": "/metrics",
+        "parameter": "",
+        "description": "Prometheus metrics endpoint exposed — reveals internal server metrics and application state",
+        "owasp_category": "A05:2021 Security Misconfiguration",
+    },
+
+    # ──────────────────────────────────────────────────────────────────
+    # CATEGORY 7: Information Disclosure (A05:2021)
+    # ──────────────────────────────────────────────────────────────────
+    {
+        "target_name": "OWASP Juice Shop",
+        "target_url": "http://localhost:3000",
+        "vuln_type": "Information Disclosure",
+        "severity": "info",
+        "url_pattern": "/api/",
+        "parameter": "",
+        "description": "Verbose error pages expose Express.js stack traces, file paths, and internal structure",
+        "owasp_category": "A05:2021 Security Misconfiguration",
+    },
+    {
+        "target_name": "OWASP Juice Shop",
+        "target_url": "http://localhost:3000",
+        "vuln_type": "Information Disclosure",
+        "severity": "medium",
+        "url_pattern": "",
+        "parameter": "",
+        "description": "Server header and X-Powered-By expose Express.js version enabling targeted exploits",
+        "owasp_category": "A05:2021 Security Misconfiguration",
+    },
+    {
+        "target_name": "OWASP Juice Shop",
+        "target_url": "http://localhost:3000",
+        "vuln_type": "Information Disclosure",
+        "severity": "medium",
+        "url_pattern": "/.well-known/security.txt",
+        "parameter": "",
+        "description": "Exposed security.txt and other dotfiles leak organisational information",
+        "owasp_category": "A05:2021 Security Misconfiguration",
+    },
+
+    # ──────────────────────────────────────────────────────────────────
+    # CATEGORY 8: CORS / SSRF / Other Injection (A01/A10:2021)
+    # ──────────────────────────────────────────────────────────────────
     {
         "target_name": "OWASP Juice Shop",
         "target_url": "http://localhost:3000",
@@ -3450,76 +4253,72 @@ JUICE_SHOP_GROUND_TRUTH = [
     {
         "target_name": "OWASP Juice Shop",
         "target_url": "http://localhost:3000",
-        "vuln_type": "Information Disclosure",
-        "severity": "info",
-        "url_pattern": "/api/",
-        "parameter": "",
-        "description": "Verbose error pages expose Express.js framework, stack traces, and file paths",
-        "owasp_category": "A05:2021 Security Misconfiguration",
+        "vuln_type": "SSRF",
+        "severity": "high",
+        "url_pattern": "/profile/image/url",
+        "parameter": "imageUrl",
+        "description": "Server-side request forgery via profile image URL — server fetches attacker-controlled URLs",
+        "owasp_category": "A10:2021 Server-Side Request Forgery",
     },
     {
         "target_name": "OWASP Juice Shop",
         "target_url": "http://localhost:3000",
-        "vuln_type": "Sensitive Data Exposure",
+        "vuln_type": "Open Redirect",
         "severity": "medium",
-        "url_pattern": "/ftp",
-        "parameter": "",
-        "description": "FTP directory listing exposes sensitive files (acquisitions.md, legal.md, etc)",
+        "url_pattern": "/redirect",
+        "parameter": "to",
+        "description": "Allowlist bypass on /redirect endpoint enables open redirect to arbitrary URLs",
         "owasp_category": "A01:2021 Broken Access Control",
     },
     {
         "target_name": "OWASP Juice Shop",
         "target_url": "http://localhost:3000",
-        "vuln_type": "Broken Authentication",
-        "severity": "high",
-        "url_pattern": "/rest/user/login",
+        "vuln_type": "File Upload",
+        "severity": "medium",
+        "url_pattern": "/file-upload",
         "parameter": "",
-        "description": "No rate limiting on login endpoint, weak JWT secret, admin credentials guessable",
-        "owasp_category": "A07:2021 Identification and Authentication Failures",
+        "description": "Unrestricted file upload — type validation bypass via null byte or double extension",
+        "owasp_category": "A04:2021 Insecure Design",
     },
     {
         "target_name": "OWASP Juice Shop",
         "target_url": "http://localhost:3000",
-        "vuln_type": "XSS",
+        "vuln_type": "XXE",
         "severity": "high",
-        "url_pattern": "/rest/products/search",
-        "parameter": "q",
-        "description": "Reflected/DOM-based XSS via search query parameter and product reviews",
-        "owasp_category": "A03:2021 Injection",
-    },
-    {
-        "target_name": "OWASP Juice Shop",
-        "target_url": "http://localhost:3000",
-        "vuln_type": "Broken Access Control",
-        "severity": "high",
-        "url_pattern": "/api/Users",
+        "url_pattern": "/file-upload",
         "parameter": "",
-        "description": "User enumeration and admin API accessible without proper authorization",
-        "owasp_category": "A01:2021 Broken Access Control",
-    },
-    {
-        "target_name": "OWASP Juice Shop",
-        "target_url": "http://localhost:3000",
-        "vuln_type": "Security Misconfiguration",
-        "severity": "info",
-        "url_pattern": "/robots.txt",
-        "parameter": "",
-        "description": "Missing security headers, verbose error messages, default configurations exposed",
+        "description": "XML External Entity injection via crafted XML file upload processing",
         "owasp_category": "A05:2021 Security Misconfiguration",
+    },
+    {
+        "target_name": "OWASP Juice Shop",
+        "target_url": "http://localhost:3000",
+        "vuln_type": "Prototype Pollution",
+        "severity": "medium",
+        "url_pattern": "/api/Users",
+        "parameter": "__proto__",
+        "description": "JavaScript prototype pollution via __proto__ in JSON payloads to user API endpoints",
+        "owasp_category": "A03:2021 Injection",
     },
 ]
 
 
 async def _seed_ground_truth():
-    """Seed Juice Shop ground truth if not already present."""
+    """Seed Juice Shop ground truth — re-seeds if count changed (e.g. after expansion)."""
     db = await get_db()
     try:
         cursor = await db.execute(
             "SELECT COUNT(*) as cnt FROM ground_truth WHERE target_name = 'OWASP Juice Shop'"
         )
         row = await cursor.fetchone()
+        expected_count = len(JUICE_SHOP_GROUND_TRUTH)
+
+        if row["cnt"] == expected_count:
+            return  # already seeded with current version
+
+        # Clear old entries and re-seed with updated ground truth
         if row["cnt"] > 0:
-            return  # already seeded
+            await db.execute("DELETE FROM ground_truth WHERE target_name = 'OWASP Juice Shop'")
 
         for gt in JUICE_SHOP_GROUND_TRUTH:
             await db.execute(
@@ -3533,56 +4332,377 @@ async def _seed_ground_truth():
         await db.close()
 
 
+# ── Tool capability map: which tools can actually find which vuln types ──
+_TOOL_VULN_CAPABILITY = {
+    "sqlmap":    ["sql injection"],
+    "nuclei":    ["sql injection", "xss", "cors misconfiguration", "security misconfiguration",
+                  "information disclosure", "sensitive data exposure", "open redirect", "ssrf",
+                  "broken authentication", "xxe"],
+    "xsstrike":  ["xss"],
+    "dalfox":    ["xss"],
+    "nikto":     ["security misconfiguration", "information disclosure", "sensitive data exposure"],
+    "curl":      ["sql injection", "xss", "cors misconfiguration", "information disclosure",
+                  "broken access control", "broken authentication", "sensitive data exposure",
+                  "security misconfiguration", "open redirect", "ssrf", "file upload"],
+    "hydra":     ["broken authentication"],
+    "jwt_tool":  ["broken authentication"],
+    "commix":    ["command injection"],
+    "zap-cli":   ["sql injection", "xss", "cors misconfiguration", "information disclosure",
+                  "security misconfiguration", "broken access control"],
+    "crlfuzz":   ["security misconfiguration"],
+    "sslyze":    ["security misconfiguration", "sensitive data exposure"],
+    "testssl":   ["security misconfiguration", "sensitive data exposure"],
+    "nmap":      ["information disclosure", "security misconfiguration"],
+    "gobuster":  ["information disclosure", "sensitive data exposure"],
+    "ffuf":      ["information disclosure", "sensitive data exposure"],
+    "dirb":      ["information disclosure", "sensitive data exposure"],
+    "arjun":     ["information disclosure"],
+    "whatweb":   ["information disclosure"],
+    "wafw00f":   ["information disclosure"],
+    "wfuzz":     ["information disclosure", "sensitive data exposure"],
+    "pw-crawl":  [],  # recon only, doesn't find vulns directly
+    "playwright": ["xss", "information disclosure"],
+}
+
+# ── Hard confirmation patterns per vuln type (tool output must contain these) ──
+_HARD_CONFIRMATION_PATTERNS = {
+    "sql injection": {
+        "sqlmap":  [r"is vulnerable", r"injection point", r"back-end DBMS", r"resumed.*injection"],
+        "curl":    [r'"token"\s*:', r"authentication.*bypass", r"SQL.*error"],
+        "nuclei":  [r"\[critical\]", r"\[high\]", r"sqli"],
+        "zap-cli": [r"sql injection", r"SQL Injection"],
+    },
+    "xss": {
+        "xsstrike": [r"vulnerable", r"confirmed", r"WAF.*bypass"],
+        "dalfox":   [r"verified", r"reflected", r"Poc:"],
+        "nuclei":   [r"\[critical\].*xss", r"\[high\].*xss", r"cross-site"],
+        "zap-cli":  [r"Cross Site Scripting", r"XSS"],
+        "curl":     [r"<script", r"alert\(", r"onerror"],
+    },
+    "broken access control": {
+        "curl": [r'"products"', r'"email"', r"user record", r"enumeration", r"basket",
+                 r"order.*data", r'"UserId"', r"feedback.*accept"],
+    },
+    "broken authentication": {
+        "hydra":    [r"host:.*login:", r"password:"],
+        "jwt_tool": [r"secret.*key", r"cracked", r"none.*accept", r"bypass"],
+        "curl":     [r'"token"\s*:', r"JWT", r"weak.*password"],
+    },
+    "cors misconfiguration": {
+        "curl":   [r"access-control-allow-origin:\s*\*", r"reflects.*origin"],
+        "nuclei": [r"cors", r"access-control"],
+    },
+    "sensitive data exposure": {
+        "curl":     [r'"email"', r'"password"', r"ftp.*listing", r"\.bak", r"acquisitions",
+                     r"null byte", r"%2500", r"backup"],
+        "gobuster": [r"/ftp", r"backup", r"\.bak"],
+        "nikto":    [r"backup", r"sensitive"],
+        "nuclei":   [r"exposure", r"sensitive"],
+    },
+    "security misconfiguration": {
+        "curl":   [r"missing.*header", r"x-powered-by", r"swagger", r"openapi",
+                   r"prometheus", r"metrics", r"Content-Security-Policy"],
+        "nikto":  [r"OSVDB", r"outdated", r"server.*header"],
+        "nuclei": [r"misconfig", r"\[medium\]", r"\[info\]"],
+    },
+    "information disclosure": {
+        "curl":     [r"x-powered-by:", r"server:.*express", r"stacktrace", r"stack trace",
+                     r"error.*node", r"express"],
+        "nikto":    [r"server.*header", r"version"],
+        "whatweb":  [r"Express", r"Node\.js"],
+        "nmap":     [r"open.*port", r"http-server-header"],
+    },
+    "open redirect": {
+        "curl": [r"location:.*http", r"302", r"redirect"],
+    },
+    "command injection": {
+        "commix": [r"injectable", r"is vulnerable"],
+    },
+}
+
+
+async def _verify_findings_from_logs(session_id: str, findings: list[dict],
+                                      steps: list[dict]) -> list[dict]:
+    """Post-run verification: check each finding against actual tool output logs.
+    Returns findings enriched with verification status and reason."""
+
+    verified_findings = []
+
+    for f in findings:
+        f_type = (f.get("vuln_type") or "").lower()
+        f_evidence = (f.get("evidence") or "").lower()
+        f_url = (f.get("url") or "").lower()
+
+        verification = {
+            "status": "unverified",
+            "reason": "No matching tool output found",
+            "tool_source": None,
+            "output_snippet": None,
+        }
+
+        # ── Step 1: Find which step(s) could have produced this finding ──
+        candidate_steps = []
+        for s in steps:
+            tool = (s.get("tool_called") or "").lower()
+            output = (s.get("tool_output") or "").lower()
+            cmd = (s.get("tool_input") or "").lower()
+
+            # Check if tool can find this vuln type
+            tool_caps = _TOOL_VULN_CAPABILITY.get(tool, [])
+            type_capable = any(cap in f_type or f_type in cap for cap in tool_caps)
+
+            if not type_capable:
+                continue
+
+            # Check if URL overlaps
+            url_overlap = False
+            if f_url:
+                url_parts = f_url.replace("http://", "").replace("https://", "").split("/")
+                for part in url_parts:
+                    if part and len(part) > 2 and part in cmd:
+                        url_overlap = True
+                        break
+            if not url_overlap and f_url:
+                # Check if the finding URL appears in the tool output
+                if f_url in output or (f_url.split("/")[-1] and f_url.split("/")[-1] in output):
+                    url_overlap = True
+
+            candidate_steps.append({
+                "step": s,
+                "tool": tool,
+                "output": s.get("tool_output") or "",
+                "cmd": s.get("tool_input") or "",
+                "url_overlap": url_overlap,
+            })
+
+        if not candidate_steps:
+            # No tool capable of finding this vuln type was run
+            verification["status"] = "suspicious"
+            verification["reason"] = f"No tool capable of detecting '{f_type}' was executed"
+            f["verification"] = verification
+            verified_findings.append(f)
+            continue
+
+        # ── Step 2: Check hard confirmation patterns in tool output ──
+        best_match = None
+        best_confidence = 0
+
+        for cand in candidate_steps:
+            tool = cand["tool"]
+            output_text = cand["output"]
+            output_lower = output_text.lower()
+            confidence = 0
+            matched_patterns = []
+
+            # Get confirmation patterns for this vuln type + tool combo
+            type_patterns = _HARD_CONFIRMATION_PATTERNS.get(f_type, {})
+            tool_patterns = type_patterns.get(tool, [])
+
+            # Also check generic patterns for the broader category
+            for gt_type, patterns_by_tool in _HARD_CONFIRMATION_PATTERNS.items():
+                if gt_type in f_type or f_type in gt_type:
+                    for pat in patterns_by_tool.get(tool, []):
+                        if pat not in tool_patterns:
+                            tool_patterns.append(pat)
+
+            for pattern in tool_patterns:
+                if re.search(pattern, output_text, re.IGNORECASE):
+                    confidence += 1
+                    matched_patterns.append(pattern)
+
+            # URL overlap bonus
+            if cand["url_overlap"]:
+                confidence += 0.5
+
+            # Evidence text found in output
+            if f_evidence and len(f_evidence) > 20:
+                # Check if key parts of the evidence appear in tool output
+                evidence_words = [w for w in f_evidence.split() if len(w) > 4][:5]
+                matches = sum(1 for w in evidence_words if w in output_lower)
+                if matches >= 2:
+                    confidence += 1
+
+            if confidence > best_confidence:
+                best_confidence = confidence
+                # Extract a snippet around the match
+                snippet = ""
+                if matched_patterns and output_text:
+                    for pat in matched_patterns:
+                        m = re.search(pat, output_text, re.IGNORECASE)
+                        if m:
+                            start = max(0, m.start() - 50)
+                            end = min(len(output_text), m.end() + 100)
+                            snippet = output_text[start:end].strip()
+                            break
+
+                best_match = {
+                    "tool": tool,
+                    "step_number": cand["step"].get("step_number"),
+                    "patterns_matched": matched_patterns,
+                    "snippet": snippet[:300] if snippet else "",
+                    "url_overlap": cand["url_overlap"],
+                }
+
+        # ── Step 3: Assign verification status based on confidence ──
+        if best_confidence >= 2:
+            verification["status"] = "verified"
+            verification["reason"] = (
+                f"Confirmed by {best_match['tool']} (step {best_match['step_number']}): "
+                f"{len(best_match['patterns_matched'])} confirmation patterns matched"
+            )
+        elif best_confidence >= 1:
+            verification["status"] = "likely"
+            verification["reason"] = (
+                f"Partial confirmation by {best_match['tool']} (step {best_match['step_number']}): "
+                f"{len(best_match['patterns_matched'])} pattern(s) matched"
+            )
+        else:
+            verification["status"] = "unverified"
+            verification["reason"] = (
+                f"Tool {candidate_steps[0]['tool']} was run but output lacks confirmation patterns"
+            )
+
+        if best_match:
+            verification["tool_source"] = best_match["tool"]
+            verification["output_snippet"] = best_match["snippet"]
+
+        f["verification"] = verification
+        verified_findings.append(f)
+
+    return verified_findings
+
+
+# ── Evidence keywords that confirm a finding is real (not just "possible") ──
+_EVIDENCE_CONFIRMATION_KEYWORDS = {
+    "sql injection": ["vulnerable", "injection point", "payload", "union", "boolean-based",
+                      "time-based", "error-based", "1=1", "or 1=1", "dbms", "token",
+                      "sqli confirmed", "back-end dbms"],
+    "xss": ["vulnerable", "confirmed", "reflected", "alert(", "<script", "xss",
+            "payload", "dom-based", "stored xss"],
+    "broken access control": ["accessible", "unauthorized", "idor", "products",
+                              "basket", "user record", "enumeration", "without auth"],
+    "broken authentication": ["bypass", "token", "jwt", "brute", "weak password",
+                              "login success", "credential"],
+    "sensitive data exposure": ["email", "password", "user record", "ftp", "backup",
+                                "md5", "hash", "exposed", "api key"],
+    "security misconfiguration": ["missing", "header", "x-frame", "x-content-type",
+                                  "hsts", "csp", "swagger", "api-docs", "debug"],
+    "cors misconfiguration": ["access-control-allow-origin", "wildcard", "cors",
+                              "origin: null", "arbitrary origin"],
+    "ssrf": ["ssrf", "server-side", "internal", "127.0.0.1", "localhost"],
+    "open redirect": ["redirect", "location:", "302", "moved"],
+    "file upload": ["upload", "unrestricted", "file type", "extension"],
+    "xxe": ["xxe", "xml", "entity", "dtd", "external"],
+    "prototype pollution": ["__proto__", "prototype", "pollution", "constructor"],
+}
+
+
 def _match_finding_to_ground_truth(finding: dict, ground_truths: list[dict]) -> bool:
-    """Check if a finding matches any ground truth vulnerability."""
+    """Check if a finding matches any ground truth vulnerability.
+    Uses a scoring system: type match (required) + URL match + param match + evidence confirmation.
+    A finding must score >= 2 to be considered a true positive."""
+    result = _match_finding_to_ground_truth_scored(finding, ground_truths)
+    return result["match"]
+
+
+def _match_finding_to_ground_truth_scored(finding: dict, ground_truths: list[dict]) -> dict:
+    """Scored matching: returns {match: bool, score: int, reason: str, gt_index: int}.
+    Score breakdown: type=1, url=1, param=1, evidence=1. Need >= 2 for TP."""
     f_type = (finding.get("vuln_type") or "").lower()
     f_url = (finding.get("url") or "").lower()
     f_param = (finding.get("parameter") or "").lower()
     f_evidence = (finding.get("evidence") or "").lower()
+    f_all_text = f"{f_type} {f_url} {f_param} {f_evidence}"
 
-    for gt in ground_truths:
+    best_score = 0
+    best_reason = "No type match"
+    best_gt_idx = -1
+
+    for i, gt in enumerate(ground_truths):
         gt_type = gt["vuln_type"].lower()
         gt_url_pattern = (gt.get("url_pattern") or "").lower()
         gt_param = (gt.get("parameter") or "").lower()
 
-        # Type-based matching (fuzzy)
+        score = 0
+        reasons = []
+
+        # ── Type match (required, score +1) ──
         type_match = False
         if gt_type in f_type or f_type in gt_type:
             type_match = True
         # Cross-match common aliases
-        if gt_type == "sql injection" and ("sqli" in f_type or "sql" in f_type or "injection" in f_type):
-            type_match = True
-        if gt_type == "xss" and ("cross-site" in f_type or "xss" in f_type or "script" in f_type):
-            type_match = True
-        if gt_type == "cors misconfiguration" and ("cors" in f_type or "cross-domain" in f_type or "cross domain" in f_type):
-            type_match = True
-        if gt_type == "information disclosure" and ("info" in f_type or "disclosure" in f_type or "error" in f_type):
-            type_match = True
-        if gt_type == "broken access control" and ("access" in f_type or "authorization" in f_type or "idor" in f_type):
-            type_match = True
-        if gt_type == "broken authentication" and ("auth" in f_type or "login" in f_type or "brute" in f_type):
-            type_match = True
-        if gt_type == "sensitive data exposure" and ("sensitive" in f_type or "data" in f_type or "exposure" in f_type or "ftp" in f_type):
-            type_match = True
-        if gt_type == "security misconfiguration" and ("misconfig" in f_type or "header" in f_type or "nikto" in f_type):
-            type_match = True
+        type_aliases = {
+            "sql injection": ["sqli", "sql", "injection"],
+            "xss": ["cross-site", "xss", "script", "dom"],
+            "cors misconfiguration": ["cors", "cross-domain", "cross domain", "origin"],
+            "information disclosure": ["info", "disclosure", "error", "version", "header"],
+            "broken access control": ["access", "authorization", "idor", "privilege", "enumerat"],
+            "broken authentication": ["auth", "login", "brute", "jwt", "credential", "password", "token"],
+            "sensitive data exposure": ["sensitive", "data", "exposure", "ftp", "backup", "crypto", "hash", "md5"],
+            "security misconfiguration": ["misconfig", "header", "nikto", "swagger", "api-doc", "metric", "config"],
+            "ssrf": ["ssrf", "server-side", "request forgery"],
+            "open redirect": ["redirect", "open redirect", "url redirect"],
+            "file upload": ["upload", "file", "unrestricted"],
+            "xxe": ["xxe", "xml", "external entity"],
+            "prototype pollution": ["prototype", "pollution", "__proto__"],
+        }
+        if not type_match:
+            for alias in type_aliases.get(gt_type, []):
+                if alias in f_type:
+                    type_match = True
+                    break
 
         if not type_match:
             continue
 
-        # URL pattern matching (if ground truth specifies one)
-        if gt_url_pattern and gt_url_pattern not in f_url:
-            # Also check evidence for URL patterns
-            if gt_url_pattern not in f_evidence:
-                continue
+        score += 1
+        reasons.append(f"type:{gt_type}")
 
-        # Parameter matching (if ground truth specifies one)
-        if gt_param and gt_param not in f_param and gt_param not in f_evidence:
-            continue
+        # ── URL match (score +1) ──
+        if gt_url_pattern:
+            if gt_url_pattern in f_url or gt_url_pattern in f_evidence:
+                score += 1
+                reasons.append(f"url:{gt_url_pattern}")
+            # If GT has a URL pattern and finding doesn't match it at all,
+            # this is likely a different instance — don't outright reject but don't give URL points
+        else:
+            # No URL pattern in GT = generic vuln, give partial credit
+            score += 0.5
+            reasons.append("url:generic")
 
-        return True
+        # ── Parameter match (score +1) ──
+        if gt_param:
+            if gt_param in f_param or gt_param in f_evidence:
+                score += 1
+                reasons.append(f"param:{gt_param}")
+        else:
+            score += 0.5
+            reasons.append("param:generic")
 
-    return False
+        # ── Evidence confirmation (score +1) ──
+        # Check if the evidence contains keywords that confirm the vuln is real
+        confirm_keywords = _EVIDENCE_CONFIRMATION_KEYWORDS.get(gt_type, [])
+        if confirm_keywords:
+            matched_kw = [kw for kw in confirm_keywords if kw in f_all_text]
+            if matched_kw:
+                score += 1
+                reasons.append(f"evidence:{','.join(matched_kw[:3])}")
+
+        if score > best_score:
+            best_score = score
+            best_reason = " + ".join(reasons)
+            best_gt_idx = i
+
+    # Threshold: need at least 2.0 to be a true positive
+    # (type alone = 1 is not enough — need URL or param or evidence confirmation)
+    is_match = best_score >= 2.0
+
+    return {
+        "match": is_match,
+        "score": best_score,
+        "reason": best_reason if is_match else f"Score {best_score:.1f} < 2.0 threshold ({best_reason})",
+        "gt_index": best_gt_idx if is_match else -1,
+    }
 
 
 async def _compute_benchmark_metrics(session_id: str, ground_truths: list[dict]) -> dict:
@@ -3615,19 +4735,37 @@ async def _compute_benchmark_metrics(session_id: str, ground_truths: list[dict])
         enabled_tools = (session["enabled_tools"] or "").split(",")
         enabled_tools = [t.strip() for t in enabled_tools if t.strip()]
 
-        # True positives: findings that match ground truth
+        # True positives: findings that match ground truth (scored matching)
         true_positives = 0
         matched_gt_indices = set()
+        finding_classifications = []  # track TP/FP reason per finding
         for f in findings:
-            if _match_finding_to_ground_truth(f, ground_truths):
+            result = _match_finding_to_ground_truth_scored(f, ground_truths)
+            if result["match"]:
                 true_positives += 1
+                finding_classifications.append({
+                    "vuln_type": f.get("vuln_type", "Unknown"),
+                    "classification": "TP",
+                    "score": result["score"],
+                    "reason": result["reason"],
+                    "gt_index": result["gt_index"],
+                })
                 # Track which ground truths were matched
+                if result["gt_index"] >= 0:
+                    matched_gt_indices.add(result["gt_index"])
+                # Also check all GTs for multi-match
                 for i, gt in enumerate(ground_truths):
-                    if _match_finding_to_ground_truth({"vuln_type": f.get("vuln_type"),
-                                                        "url": f.get("url"),
-                                                        "parameter": f.get("parameter"),
-                                                        "evidence": f.get("evidence")}, [gt]):
+                    r2 = _match_finding_to_ground_truth_scored(f, [gt])
+                    if r2["match"]:
                         matched_gt_indices.add(i)
+            else:
+                finding_classifications.append({
+                    "vuln_type": f.get("vuln_type", "Unknown"),
+                    "classification": "FP",
+                    "score": result["score"],
+                    "reason": result["reason"],
+                    "gt_index": -1,
+                })
 
         false_positives = total_findings - true_positives
         missed_vulns = len(ground_truths) - len(matched_gt_indices)
@@ -3694,6 +4832,42 @@ async def _compute_benchmark_metrics(session_id: str, ground_truths: list[dict])
         # Vuln types found
         vuln_types = list(set(f.get("vuln_type", "Unknown") for f in findings))
 
+        # Build ordered tool path (step-by-step)
+        tool_path = []
+        for s in steps:
+            t = s.get("tool_called")
+            if t:
+                tool_path.append({"step": s.get("step_number"), "tool": t, "phase": s.get("phase") or ""})
+
+        # ── Post-run verification: check findings against actual tool logs ──
+        verified_findings = await _verify_findings_from_logs(session_id, findings, steps)
+
+        # Build findings detail list with TP/FP classification + verification
+        findings_detail = []
+        for idx, f in enumerate(verified_findings):
+            cls = finding_classifications[idx] if idx < len(finding_classifications) else {}
+            v = f.get("verification", {})
+            findings_detail.append({
+                "vuln_type": f.get("vuln_type", "Unknown"),
+                "severity": (f.get("severity") or "info").lower(),
+                "url": f.get("url", ""),
+                "parameter": f.get("parameter", ""),
+                "evidence": (f.get("evidence") or "")[:200],
+                "classification": cls.get("classification", "?"),
+                "match_score": cls.get("score", 0),
+                "match_reason": cls.get("reason", ""),
+                "verification": v.get("status", "unverified"),
+                "verification_reason": v.get("reason", ""),
+                "verification_tool": v.get("tool_source", ""),
+                "verification_snippet": (v.get("output_snippet") or "")[:200],
+            })
+
+        # Count verification stats
+        verified_count = sum(1 for fd in findings_detail if fd["verification"] == "verified")
+        likely_count = sum(1 for fd in findings_detail if fd["verification"] == "likely")
+        unverified_count = sum(1 for fd in findings_detail if fd["verification"] == "unverified")
+        suspicious_count = sum(1 for fd in findings_detail if fd["verification"] == "suspicious")
+
         return {
             "session_id": session_id,
             "session_type": session.get("session_type") or "cold",
@@ -3709,6 +4883,8 @@ async def _compute_benchmark_metrics(session_id: str, ground_truths: list[dict])
             "findings_per_turn": round(findings_per_turn, 4),
             "tool_coverage": round(tool_coverage, 4),
             "unique_tools_used": len(unique_tools),
+            "tools_used": sorted(list(unique_tools)),
+            "tool_path": tool_path,
             "total_tools_available": len(enabled_tools),
             "time_to_first_finding_ms": time_to_first_finding,
             "time_to_first_high_ms": time_to_first_high,
@@ -3716,7 +4892,14 @@ async def _compute_benchmark_metrics(session_id: str, ground_truths: list[dict])
             "total_steps": total_steps,
             "phases_covered": sorted(list(phases)),
             "vuln_types_found": vuln_types,
+            "findings_detail": findings_detail,
             "severity_distribution": sev_dist,
+            "verification_summary": {
+                "verified": verified_count,
+                "likely": likely_count,
+                "unverified": unverified_count,
+                "suspicious": suspicious_count,
+            },
         }
     finally:
         await db.close()
@@ -3828,7 +5011,7 @@ async def get_benchmark(benchmark_id: str):
         "target_name": bench.get("target_name") or "",
         "status": bench["status"],
         "model": bench.get("model") or "",
-        "max_turns": bench.get("max_turns") or 15,
+        "max_turns": bench.get("max_turns") or 30,
         "cold": None,
         "warm": None,
         "chain": None,
@@ -3968,6 +5151,23 @@ async def get_benchmark(benchmark_id: str):
                 finally:
                     await db4.close()
 
+            # Build tool path and findings detail for chain
+            chain_tool_path = []
+            for s in all_chain_steps:
+                t = s.get("tool_called")
+                if t:
+                    chain_tool_path.append({"step": s.get("step_number"), "tool": t, "phase": s.get("phase") or ""})
+
+            chain_findings_detail = []
+            for f in all_chain_findings:
+                chain_findings_detail.append({
+                    "vuln_type": f.get("vuln_type", "Unknown"),
+                    "severity": (f.get("severity") or "info").lower(),
+                    "url": f.get("url", ""),
+                    "parameter": f.get("parameter", ""),
+                    "evidence": (f.get("evidence") or "")[:200],
+                })
+
             result["chain"] = {
                 "session_id": ",".join(chain_session_ids),
                 "session_type": "chain",
@@ -3983,6 +5183,8 @@ async def get_benchmark(benchmark_id: str):
                 "findings_per_turn": round(findings_per_turn, 4),
                 "tool_coverage": round(tool_coverage, 4),
                 "unique_tools_used": len(all_chain_tools),
+                "tools_used": sorted(list(all_chain_tools)),
+                "tool_path": chain_tool_path,
                 "total_tools_available": len(enabled_tools),
                 "time_to_first_finding_ms": time_to_first_finding,
                 "time_to_first_high_ms": time_to_first_high,
@@ -3990,6 +5192,7 @@ async def get_benchmark(benchmark_id: str):
                 "total_steps": total_chain_steps_count,
                 "phases_covered": sorted(list(all_chain_phases)),
                 "vuln_types_found": vuln_types,
+                "findings_detail": chain_findings_detail,
                 "severity_distribution": sev_dist,
             }
 
@@ -4006,11 +5209,29 @@ async def benchmark_websocket(websocket: WebSocket, benchmark_id: str):
     if benchmark_id not in benchmark_ws_clients:
         benchmark_ws_clients[benchmark_id] = []
     benchmark_ws_clients[benchmark_id].append(websocket)
+
+    # Send an initial "connected" message so the client knows it's alive
+    try:
+        await websocket.send_json({"type": "connected", "benchmark_id": benchmark_id})
+    except Exception:
+        pass
+
     try:
         while True:
-            await websocket.receive_text()
-    except WebSocketDisconnect:
-        benchmark_ws_clients[benchmark_id].remove(websocket)
+            # Use a timeout so we can send keepalive pings
+            try:
+                await asyncio.wait_for(websocket.receive_text(), timeout=30.0)
+            except asyncio.TimeoutError:
+                # Send keepalive ping to prevent browser/proxy disconnects
+                try:
+                    await websocket.send_json({"type": "keepalive"})
+                except Exception:
+                    break
+    except (WebSocketDisconnect, Exception):
+        pass
+    finally:
+        if benchmark_id in benchmark_ws_clients and websocket in benchmark_ws_clients[benchmark_id]:
+            benchmark_ws_clients[benchmark_id].remove(websocket)
 
 
 async def _broadcast_benchmark(benchmark_id: str, data: dict):
@@ -4072,6 +5293,8 @@ async def _wait_for_chain_complete(chain_id: str, benchmark_id: str, timeout: in
 
 async def _run_benchmark_sequence(benchmark_id: str, data: BenchmarkCreate):
     """Run cold → warm → chain benchmark sequentially."""
+    import traceback as _tb
+
     db = await get_db()
     try:
         await db.execute(
@@ -4082,179 +5305,226 @@ async def _run_benchmark_sequence(benchmark_id: str, data: BenchmarkCreate):
     finally:
         await db.close()
 
+    # Wait for the frontend WebSocket to connect before sending any messages
+    # The POST returns immediately, then the frontend calls connectBenchmarkWs()
+    await asyncio.sleep(3)
+
     enabled_tools_str = ",".join(data.enabled_tools)
     effective_max_turns = data.max_turns if data.max_turns > 0 else ABSOLUTE_MAX_TURNS
     effective_max_turns = min(effective_max_turns, ABSOLUTE_MAX_TURNS)
 
-    cold_session_id = None
-    warm_session_id = None
-    chain_id_result = None
+    repeat_n = max(1, min(data.repeat_n, 50))
 
     try:
-        # ========== PHASE 1: COLD START ==========
-        await _broadcast_benchmark(benchmark_id, {
-            "type": "phase_start", "phase": "cold", "message": "Starting cold start session..."
-        })
+        for iteration in range(1, repeat_n + 1):
+            cold_session_id = None
+            warm_session_id = None
+            chain_id_result = None
 
-        cold_session_id = uuid.uuid4().hex[:12]
-        db = await get_db()
-        try:
-            await db.execute(
-                "INSERT INTO sessions (id, target_url, scope_mode, system_prompt, model, enabled_tools, "
-                "session_type, no_timeout, max_turns) VALUES (?, ?, ?, ?, ?, ?, 'cold', ?, ?)",
-                (cold_session_id, data.target_url, "full", data.system_prompt, data.model,
-                 enabled_tools_str, 1 if data.no_timeout else 0, effective_max_turns)
+            # Update current iteration
+            db = await get_db()
+            try:
+                await db.execute(
+                    "UPDATE benchmark_runs SET current_iteration = ? WHERE id = ?",
+                    (iteration, benchmark_id)
+                )
+                await db.commit()
+            finally:
+                await db.close()
+
+            iter_label = f"[{iteration}/{repeat_n}]" if repeat_n > 1 else ""
+
+            await _broadcast_benchmark(benchmark_id, {
+                "type": "iteration_start", "iteration": iteration, "total": repeat_n,
+                "message": f"Starting iteration {iteration} of {repeat_n}..." if repeat_n > 1 else "Starting benchmark...",
+            })
+
+            # ========== PHASE 1: COLD START ==========
+            print(f"[BENCHMARK {benchmark_id}] {iter_label} Starting COLD phase...")
+            await _broadcast_benchmark(benchmark_id, {
+                "type": "phase_start", "phase": "cold",
+                "message": f"{iter_label} Starting cold start session...".strip(),
+                "iteration": iteration,
+            })
+
+            cold_session_id = uuid.uuid4().hex[:12]
+            db = await get_db()
+            try:
+                await db.execute(
+                    "INSERT INTO sessions (id, target_url, scope_mode, system_prompt, model, enabled_tools, "
+                    "session_type, no_timeout, max_turns) VALUES (?, ?, ?, ?, ?, ?, 'cold', ?, ?)",
+                    (cold_session_id, data.target_url, "full", data.system_prompt, data.model,
+                     enabled_tools_str, 1 if data.no_timeout else 0, effective_max_turns)
+                )
+                await db.execute(
+                    "UPDATE benchmark_runs SET cold_session_id = ? WHERE id = ?",
+                    (cold_session_id, benchmark_id)
+                )
+                await db.commit()
+
+                # Read session back
+                row = await db.execute("SELECT * FROM sessions WHERE id = ?", (cold_session_id,))
+                session = await row.fetchone()
+            finally:
+                await db.close()
+
+            # Start agent loop
+            enabled_tools_list = session["enabled_tools"].split(",") if session["enabled_tools"] else []
+            task = asyncio.create_task(
+                agent_loop(
+                    session_id=cold_session_id,
+                    target_url=data.target_url,
+                    scope_mode="full",
+                    system_prompt=data.system_prompt,
+                    enabled_tools=enabled_tools_list,
+                    model=data.model,
+                    session_type="cold",
+                    no_timeout=data.no_timeout,
+                    max_turns=effective_max_turns,
+                )
             )
-            await db.execute(
-                "UPDATE benchmark_runs SET cold_session_id = ? WHERE id = ?",
-                (cold_session_id, benchmark_id)
+            running_tasks[cold_session_id] = task
+
+            # Update session status to running
+            db = await get_db()
+            try:
+                await db.execute(
+                    "UPDATE sessions SET status = 'running', updated_at = datetime('now') WHERE id = ?",
+                    (cold_session_id,)
+                )
+                await db.commit()
+            finally:
+                await db.close()
+
+            # Wait for cold session to complete
+            cold_status = await _wait_for_session_complete(cold_session_id, benchmark_id, "cold")
+
+            await _broadcast_benchmark(benchmark_id, {
+                "type": "phase_complete", "phase": "cold",
+                "session_id": cold_session_id, "status": cold_status,
+                "iteration": iteration,
+            })
+
+            # Small delay between sessions
+            await asyncio.sleep(5)
+
+            # ========== PHASE 2: WARM START (uses cold session as parent) ==========
+            print(f"[BENCHMARK {benchmark_id}] {iter_label} COLD done ({cold_status}). Starting WARM phase...")
+            await _broadcast_benchmark(benchmark_id, {
+                "type": "phase_start", "phase": "warm",
+                "message": f"{iter_label} Starting warm start session (parent: {cold_session_id})...".strip(),
+                "iteration": iteration,
+            })
+
+            warm_session_id = uuid.uuid4().hex[:12]
+            db = await get_db()
+            try:
+                await db.execute(
+                    "INSERT INTO sessions (id, target_url, scope_mode, system_prompt, model, enabled_tools, "
+                    "session_type, parent_session_id, no_timeout, max_turns) VALUES (?, ?, ?, ?, ?, ?, 'warm', ?, ?, ?)",
+                    (warm_session_id, data.target_url, "full", data.system_prompt, data.model,
+                     enabled_tools_str, cold_session_id, 1 if data.no_timeout else 0, effective_max_turns)
+                )
+                await db.execute(
+                    "UPDATE benchmark_runs SET warm_session_id = ? WHERE id = ?",
+                    (warm_session_id, benchmark_id)
+                )
+                await db.commit()
+            finally:
+                await db.close()
+
+            task = asyncio.create_task(
+                agent_loop(
+                    session_id=warm_session_id,
+                    target_url=data.target_url,
+                    scope_mode="full",
+                    system_prompt=data.system_prompt,
+                    enabled_tools=enabled_tools_list,
+                    model=data.model,
+                    session_type="warm",
+                    parent_session_id=cold_session_id,
+                    no_timeout=data.no_timeout,
+                    max_turns=effective_max_turns,
+                )
             )
-            await db.commit()
+            running_tasks[warm_session_id] = task
 
-            # Read session back
-            row = await db.execute("SELECT * FROM sessions WHERE id = ?", (cold_session_id,))
-            session = await row.fetchone()
-        finally:
-            await db.close()
+            db = await get_db()
+            try:
+                await db.execute(
+                    "UPDATE sessions SET status = 'running', updated_at = datetime('now') WHERE id = ?",
+                    (warm_session_id,)
+                )
+                await db.commit()
+            finally:
+                await db.close()
 
-        # Start agent loop
-        enabled_tools_list = session["enabled_tools"].split(",") if session["enabled_tools"] else []
-        task = asyncio.create_task(
-            agent_loop(
-                session_id=cold_session_id,
-                target_url=data.target_url,
-                scope_mode="full",
-                system_prompt=data.system_prompt,
-                enabled_tools=enabled_tools_list,
-                model=data.model,
-                session_type="cold",
-                no_timeout=data.no_timeout,
-                max_turns=effective_max_turns,
-            )
-        )
-        running_tasks[cold_session_id] = task
+            warm_status = await _wait_for_session_complete(warm_session_id, benchmark_id, "warm")
 
-        # Update session status to running
-        db = await get_db()
-        try:
-            await db.execute(
-                "UPDATE sessions SET status = 'running', updated_at = datetime('now') WHERE id = ?",
-                (cold_session_id,)
-            )
-            await db.commit()
-        finally:
-            await db.close()
+            await _broadcast_benchmark(benchmark_id, {
+                "type": "phase_complete", "phase": "warm",
+                "session_id": warm_session_id, "status": warm_status,
+                "iteration": iteration,
+            })
 
-        # Wait for cold session to complete
-        cold_status = await _wait_for_session_complete(cold_session_id, benchmark_id, "cold")
+            await asyncio.sleep(5)
 
-        await _broadcast_benchmark(benchmark_id, {
-            "type": "phase_complete", "phase": "cold",
-            "session_id": cold_session_id, "status": cold_status,
-        })
+            # ========== PHASE 3: CHAIN MODE ==========
+            print(f"[BENCHMARK {benchmark_id}] {iter_label} WARM done ({warm_status}). Starting CHAIN phase...")
+            await _broadcast_benchmark(benchmark_id, {
+                "type": "phase_start", "phase": "chain",
+                "message": f"{iter_label} Starting chain mode (4 phases: recon → vuln_scan → exploitation → reporting)...".strip(),
+                "iteration": iteration,
+            })
 
-        # Small delay between sessions
-        await asyncio.sleep(5)
+            chain_id_result = uuid.uuid4().hex[:12]
+            db = await get_db()
+            try:
+                await db.execute(
+                    "INSERT INTO chains (id, target_url, scope_mode, system_prompt, model, enabled_tools, "
+                    "current_phase, current_position, total_sessions, status, auto_progress, "
+                    "max_turns_per_session, no_timeout) VALUES (?, ?, ?, ?, ?, ?, 'recon', 0, 1, 'running', 1, ?, ?)",
+                    (chain_id_result, data.target_url, "full", data.system_prompt, data.model,
+                     enabled_tools_str, effective_max_turns, 1 if data.no_timeout else 0)
+                )
+                await db.execute(
+                    "UPDATE benchmark_runs SET chain_id = ? WHERE id = ?",
+                    (chain_id_result, benchmark_id)
+                )
+                await db.commit()
 
-        # ========== PHASE 2: WARM START (uses cold session as parent) ==========
-        await _broadcast_benchmark(benchmark_id, {
-            "type": "phase_start", "phase": "warm",
-            "message": f"Starting warm start session (parent: {cold_session_id})..."
-        })
+                row = await db.execute("SELECT * FROM chains WHERE id = ?", (chain_id_result,))
+                chain = await row.fetchone()
+            finally:
+                await db.close()
 
-        warm_session_id = uuid.uuid4().hex[:12]
-        db = await get_db()
-        try:
-            await db.execute(
-                "INSERT INTO sessions (id, target_url, scope_mode, system_prompt, model, enabled_tools, "
-                "session_type, parent_session_id, no_timeout, max_turns) VALUES (?, ?, ?, ?, ?, ?, 'warm', ?, ?, ?)",
-                (warm_session_id, data.target_url, "full", data.system_prompt, data.model,
-                 enabled_tools_str, cold_session_id, 1 if data.no_timeout else 0, effective_max_turns)
-            )
-            await db.execute(
-                "UPDATE benchmark_runs SET warm_session_id = ? WHERE id = ?",
-                (warm_session_id, benchmark_id)
-            )
-            await db.commit()
-        finally:
-            await db.close()
+            # Create and start first chain session
+            first_chain_session = await _create_chain_session(chain_id_result, chain, "recon", 0)
+            await asyncio.sleep(0.5)
+            await _start_chain_session(first_chain_session)
 
-        task = asyncio.create_task(
-            agent_loop(
-                session_id=warm_session_id,
-                target_url=data.target_url,
-                scope_mode="full",
-                system_prompt=data.system_prompt,
-                enabled_tools=enabled_tools_list,
-                model=data.model,
-                session_type="warm",
-                parent_session_id=cold_session_id,
-                no_timeout=data.no_timeout,
-                max_turns=effective_max_turns,
-            )
-        )
-        running_tasks[warm_session_id] = task
+            # Wait for the entire chain to finish
+            chain_status = await _wait_for_chain_complete(chain_id_result, benchmark_id)
 
-        db = await get_db()
-        try:
-            await db.execute(
-                "UPDATE sessions SET status = 'running', updated_at = datetime('now') WHERE id = ?",
-                (warm_session_id,)
-            )
-            await db.commit()
-        finally:
-            await db.close()
+            await _broadcast_benchmark(benchmark_id, {
+                "type": "phase_complete", "phase": "chain",
+                "chain_id": chain_id_result, "status": chain_status,
+                "iteration": iteration,
+            })
 
-        warm_status = await _wait_for_session_complete(warm_session_id, benchmark_id, "warm")
+            await _broadcast_benchmark(benchmark_id, {
+                "type": "iteration_complete", "iteration": iteration, "total": repeat_n,
+                "cold_session_id": cold_session_id,
+                "warm_session_id": warm_session_id,
+                "chain_id": chain_id_result,
+                "message": f"Iteration {iteration}/{repeat_n} complete." if repeat_n > 1 else "Benchmark complete.",
+            })
 
-        await _broadcast_benchmark(benchmark_id, {
-            "type": "phase_complete", "phase": "warm",
-            "session_id": warm_session_id, "status": warm_status,
-        })
+            # Delay between iterations (skip after last)
+            if iteration < repeat_n:
+                await asyncio.sleep(10)
 
-        await asyncio.sleep(5)
-
-        # ========== PHASE 3: CHAIN MODE ==========
-        await _broadcast_benchmark(benchmark_id, {
-            "type": "phase_start", "phase": "chain",
-            "message": "Starting chain mode (4 phases: recon → vuln_scan → exploitation → reporting)..."
-        })
-
-        chain_id_result = uuid.uuid4().hex[:12]
-        db = await get_db()
-        try:
-            await db.execute(
-                "INSERT INTO chains (id, target_url, scope_mode, system_prompt, model, enabled_tools, "
-                "current_phase, current_position, total_sessions, status, auto_progress, "
-                "max_turns_per_session, no_timeout) VALUES (?, ?, ?, ?, ?, ?, 'recon', 0, 1, 'running', 1, ?, ?)",
-                (chain_id_result, data.target_url, "full", data.system_prompt, data.model,
-                 enabled_tools_str, effective_max_turns, 1 if data.no_timeout else 0)
-            )
-            await db.execute(
-                "UPDATE benchmark_runs SET chain_id = ? WHERE id = ?",
-                (chain_id_result, benchmark_id)
-            )
-            await db.commit()
-
-            row = await db.execute("SELECT * FROM chains WHERE id = ?", (chain_id_result,))
-            chain = await row.fetchone()
-        finally:
-            await db.close()
-
-        # Create and start first chain session
-        first_chain_session = await _create_chain_session(chain_id_result, chain, "recon", 0)
-        await asyncio.sleep(0.5)
-        await _start_chain_session(first_chain_session)
-
-        # Wait for the entire chain to finish
-        chain_status = await _wait_for_chain_complete(chain_id_result, benchmark_id)
-
-        await _broadcast_benchmark(benchmark_id, {
-            "type": "phase_complete", "phase": "chain",
-            "chain_id": chain_id_result, "status": chain_status,
-        })
-
-        # ========== BENCHMARK COMPLETE ==========
+        # ========== ALL ITERATIONS COMPLETE ==========
         db = await get_db()
         try:
             await db.execute(
@@ -4268,12 +5538,12 @@ async def _run_benchmark_sequence(benchmark_id: str, data: BenchmarkCreate):
         await _broadcast_benchmark(benchmark_id, {
             "type": "benchmark_complete",
             "benchmark_id": benchmark_id,
-            "cold_session_id": cold_session_id,
-            "warm_session_id": warm_session_id,
-            "chain_id": chain_id_result,
+            "total_iterations": repeat_n,
         })
 
     except Exception as e:
+        print(f"[BENCHMARK {benchmark_id}] ERROR: {e}")
+        print(_tb.format_exc())
         db = await get_db()
         try:
             await db.execute(
@@ -4302,9 +5572,11 @@ async def run_benchmark(data: BenchmarkCreate):
     try:
         await db.execute(
             "INSERT INTO benchmark_runs (id, target_url, target_name, status, model, max_turns, "
-            "no_timeout, system_prompt, enabled_tools) VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, ?)",
+            "no_timeout, repeat_n, current_iteration, system_prompt, enabled_tools) "
+            "VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, 1, ?, ?)",
             (benchmark_id, data.target_url, data.target_name, data.model, data.max_turns,
-             1 if data.no_timeout else 0, data.system_prompt, enabled_tools_str)
+             1 if data.no_timeout else 0, max(1, min(data.repeat_n, 50)),
+             data.system_prompt, enabled_tools_str)
         )
         await db.commit()
     finally:

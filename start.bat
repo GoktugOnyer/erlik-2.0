@@ -6,7 +6,7 @@ echo.
 
 :: 1. Start Docker containers
 echo [1/3] Starting Docker containers...
-cd /d C:\Users\nonec\projects\pentest-agent
+cd /d "%~dp0"
 docker compose up -d
 if %ERRORLEVEL% NEQ 0 (
     echo.
@@ -24,9 +24,9 @@ timeout /t 5 /nobreak >nul
 
 :: 3. Start FastAPI server
 echo [3/3] Starting FastAPI server...
-cd /d C:\Users\nonec\projects\pentest-agent
+cd /d "%~dp0"
 call .venv\Scripts\activate
-start "Erlik Server" cmd /k "cd /d C:\Users\nonec\projects\pentest-agent && .venv\Scripts\activate && python -m uvicorn orchestrator.main:app --host 0.0.0.0 --port 8000 --reload"
+start "Erlik Server" cmd /k ".venv\Scripts\activate && python -m uvicorn orchestrator.main:app --host 0.0.0.0 --port 8000 --reload"
 
 :: 4. Wait and open browser
 timeout /t 4 /nobreak >nul

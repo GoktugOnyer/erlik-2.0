@@ -1,6 +1,6 @@
 @echo off
 echo Stopping Erlik Pentest Agent...
-cd /d C:\Users\nonec\projects\pentest-agent
+cd /d "%~dp0"
 docker compose down
 taskkill /F /IM uvicorn.exe 2>nul
 echo.
