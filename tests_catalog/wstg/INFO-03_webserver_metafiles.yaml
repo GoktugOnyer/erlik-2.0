@@ -1,0 +1,76 @@
+id: WSTG-INFO-03
+name: Review Webserver Metafiles
+category: Information Gathering
+severity: low
+references:
+  - https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/01-Information_Gathering/03-Review_Webserver_Metafiles_for_Information_Leakage
+
+target_schema:
+  required: [url]
+
+steps:
+  - name: robots
+    tool: curl
+    command: >-
+      curl -s -A "Mozilla/5.0" -L --max-time 10 "{{url}}/robots.txt"
+    evaluators:
+      - type: regex
+        pattern: '^Disallow:|^Allow:|^Sitemap:|^User-agent:'
+        emit_finding:
+          vuln_type: robots.txt Discloses Paths
+          severity: info
+
+  - name: sitemap
+    tool: curl
+    command: >-
+      curl -s -A "Mozilla/5.0" -L --max-time 10 "{{url}}/sitemap.xml"
+    evaluators:
+      - type: regex
+        pattern: '<urlset|<sitemapindex|<loc>'
+        emit_finding:
+          vuln_type: sitemap.xml Discloses URLs
+          severity: info
+
+  - name: security_txt
+    tool: curl
+    command: >-
+      curl -s -A "Mozilla/5.0" -L --max-time 10 "{{url}}/.well-known/security.txt"
+    evaluators:
+      - type: regex
+        pattern: '^Contact:|^Policy:|^Expires:'
+        emit_finding:
+          vuln_type: security.txt Present (informational)
+          severity: info
+
+  - name: humans_txt
+    tool: curl
+    command: >-
+      curl -s -A "Mozilla/5.0" -L --max-time 10 "{{url}}/humans.txt"
+    evaluators:
+      - type: regex
+        pattern: '/\* TEAM|/\* SITE'
+        emit_finding:
+          vuln_type: humans.txt Discloses Staff/Stack
+          severity: info
+
+  - name: git_config_leak
+    tool: curl
+    command: >-
+      curl -s -A "Mozilla/5.0" --max-time 10 "{{url}}/.git/config"
+    evaluators:
+      - type: regex
+        pattern: '\[core\]|\[remote |repositoryformatversion'
+        emit_finding:
+          vuln_type: Exposed .git/config (source code disclosure risk)
+          severity: high
+
+  - name: env_file_leak
+    tool: curl
+    command: >-
+      curl -s -A "Mozilla/5.0" --max-time 10 "{{url}}/.env"
+    evaluators:
+      - type: regex
+        pattern: '^[A-Z_]+=\S'
+        emit_finding:
+          vuln_type: Exposed .env File (secrets disclosure)
+          severity: critical

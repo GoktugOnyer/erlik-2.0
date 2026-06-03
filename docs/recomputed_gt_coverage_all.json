@@ -1,0 +1,292 @@
+{
+  "algorithm": "canonical programmatic (score>=2.0, type_aliases, evidence_keywords)",
+  "gt_total": 35,
+  "experiments": {
+    "Apr09 baseline 7B": {
+      "model": "qwen2.5-coder:7b",
+      "sessions": 65,
+      "run_dir": "runs/clean_2026-04-09/7B",
+      "findings": 204,
+      "tp_findings": 197,
+      "fp_findings": 7,
+      "unique_gt_hit": 10,
+      "gt_hit_ids": [
+        1,
+        4,
+        8,
+        17,
+        19,
+        24,
+        25,
+        27,
+        28,
+        30
+      ],
+      "precision": 0.9656862745098039
+    },
+    "Apr09 baseline 32B": {
+      "model": "qwen2.5-coder:32b",
+      "sessions": 65,
+      "run_dir": "runs/clean_2026-04-09/32B",
+      "findings": 339,
+      "tp_findings": 334,
+      "fp_findings": 5,
+      "unique_gt_hit": 12,
+      "gt_hit_ids": [
+        1,
+        2,
+        14,
+        17,
+        19,
+        21,
+        24,
+        25,
+        26,
+        27,
+        28,
+        30
+      ],
+      "precision": 0.9852507374631269
+    },
+    "Apr09 baseline 14B": {
+      "model": "qwen2.5-coder:14b",
+      "sessions": 65,
+      "run_dir": "runs/clean_2026-04-09/14B",
+      "findings": 147,
+      "tp_findings": 146,
+      "fp_findings": 1,
+      "unique_gt_hit": 7,
+      "gt_hit_ids": [
+        1,
+        19,
+        24,
+        25,
+        27,
+        28,
+        30
+      ],
+      "precision": 0.9931972789115646
+    },
+    "Apr15 baseline 7B": {
+      "model": "qwen2.5-coder:7b",
+      "sessions": 61,
+      "run_dir": "runs/cloud_2026-04-15_balanced/2026-04-15_02-48-01",
+      "findings": 131,
+      "tp_findings": 126,
+      "fp_findings": 5,
+      "unique_gt_hit": 11,
+      "gt_hit_ids": [
+        1,
+        15,
+        17,
+        19,
+        24,
+        25,
+        26,
+        27,
+        28,
+        29,
+        30
+      ],
+      "precision": 0.9618320610687023
+    },
+    "Apr15 baseline 32B": {
+      "model": "qwen2.5-coder:32b",
+      "sessions": 65,
+      "run_dir": "runs/cloud_2026-04-15_balanced/2026-04-14_21-17-14",
+      "findings": 190,
+      "tp_findings": 188,
+      "fp_findings": 2,
+      "unique_gt_hit": 13,
+      "gt_hit_ids": [
+        1,
+        4,
+        15,
+        17,
+        19,
+        21,
+        24,
+        25,
+        26,
+        27,
+        28,
+        29,
+        30
+      ],
+      "precision": 0.9894736842105263
+    },
+    "Apr15 FT-v1 32B (pentest-32b)": {
+      "model": "pentest-32b",
+      "sessions": 60,
+      "run_dir": "runs/cloud_2026-04-15_balanced/2026-04-14_23-59-45",
+      "findings": 127,
+      "tp_findings": 126,
+      "fp_findings": 1,
+      "unique_gt_hit": 8,
+      "gt_hit_ids": [
+        1,
+        9,
+        19,
+        24,
+        25,
+        27,
+        28,
+        30
+      ],
+      "precision": 0.9921259842519685
+    },
+    "Apr15 FT-v2 7B (balanced)": {
+      "model": "pentest-7b-balanced",
+      "sessions": 23,
+      "run_dir": "runs/cloud_2026-04-15_balanced/2026-04-15_04-44-17",
+      "findings": 71,
+      "tp_findings": 71,
+      "fp_findings": 0,
+      "unique_gt_hit": 8,
+      "gt_hit_ids": [
+        1,
+        9,
+        15,
+        19,
+        24,
+        27,
+        28,
+        30
+      ],
+      "precision": 1.0
+    },
+    "Apr17 baseline 7B": {
+      "model": "qwen2.5-coder:7b",
+      "sessions": 62,
+      "run_dir": "runs/2026-04-17_00-07-23",
+      "findings": 236,
+      "tp_findings": 235,
+      "fp_findings": 1,
+      "unique_gt_hit": 13,
+      "gt_hit_ids": [
+        1,
+        4,
+        6,
+        8,
+        15,
+        17,
+        19,
+        24,
+        25,
+        26,
+        27,
+        28,
+        30
+      ],
+      "precision": 0.9957627118644068
+    },
+    "Apr17 FT-v3 7B (juicy3)": {
+      "model": "qwen2.5-coder:7b-juicy3",
+      "sessions": 63,
+      "run_dir": "runs/2026-04-17_19-24-01",
+      "findings": 237,
+      "tp_findings": 237,
+      "fp_findings": 0,
+      "unique_gt_hit": 10,
+      "gt_hit_ids": [
+        1,
+        11,
+        12,
+        17,
+        19,
+        21,
+        24,
+        27,
+        28,
+        30
+      ],
+      "precision": 1.0
+    },
+    "Apr17 FT-v3 14B (juicy3)": {
+      "model": "qwen2.5-coder:14b-juicy3",
+      "sessions": 54,
+      "run_dir": "runs/2026-04-17_12-29-10",
+      "findings": 128,
+      "tp_findings": 126,
+      "fp_findings": 2,
+      "unique_gt_hit": 9,
+      "gt_hit_ids": [
+        1,
+        2,
+        4,
+        19,
+        24,
+        26,
+        27,
+        28,
+        30
+      ],
+      "precision": 0.984375
+    }
+  },
+  "combined_analyses": {
+    "apr15_32b_baseline_plus_ftv1": {
+      "coverage": 14,
+      "ids": [
+        1,
+        4,
+        9,
+        15,
+        17,
+        19,
+        21,
+        24,
+        25,
+        26,
+        27,
+        28,
+        29,
+        30
+      ]
+    },
+    "apr15_7b_baseline_plus_ftv2": {
+      "coverage": 12,
+      "ids": [
+        1,
+        9,
+        15,
+        17,
+        19,
+        24,
+        25,
+        26,
+        27,
+        28,
+        29,
+        30
+      ]
+    },
+    "apr17_7b_baseline_plus_ftv3": {
+      "coverage": 16,
+      "ids": [
+        1,
+        4,
+        6,
+        8,
+        11,
+        12,
+        15,
+        17,
+        19,
+        21,
+        24,
+        25,
+        26,
+        27,
+        28,
+        30
+      ]
+    },
+    "all_7b_union": {
+      "coverage": 18
+    },
+    "all_32b_union": {
+      "coverage": 16
+    }
+  }
+}

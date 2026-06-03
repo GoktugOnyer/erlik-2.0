@@ -1,0 +1,62 @@
+id: WSTG-SESS-10
+name: JSON Web Token Flaws
+category: Session Management
+severity: high
+references:
+  - https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/06-Session_Management_Testing/10-Testing_JSON_Web_Tokens
+
+target_schema:
+  required: [url, jwt]
+  optional: [auth_header_name]
+
+steps:
+  - name: alg_none
+    tool: jwt_tool
+    command: >-
+      jwt_tool "{{jwt}}" -X a -t "{{url}}"
+    evaluators:
+      - type: regex
+        pattern: 'alg.*none.*accepted|VULNERABLE.*alg.*none|forged token.*valid'
+        emit_finding:
+          vuln_type: JWT alg=none Accepted
+          severity: high
+
+  - name: key_confusion
+    tool: jwt_tool
+    when: no_finding_yet
+    command: >-
+      jwt_tool "{{jwt}}" -X k -t "{{url}}"
+    evaluators:
+      - type: regex
+        pattern: 'key confusion.*successful|forged token.*valid|RS256.*HS256'
+        emit_finding:
+          vuln_type: JWT Algorithm Confusion (RS256→HS256)
+          severity: high
+
+  - name: weak_secret
+    tool: jwt_tool
+    when: no_finding_yet
+    command: >-
+      jwt_tool "{{jwt}}" -C -d /usr/share/wordlists/jwt.secrets.list
+    evaluators:
+      - type: regex
+        pattern: 'CRACKED!|secret is.*[A-Za-z0-9]'
+        emit_finding:
+          vuln_type: JWT Weak HMAC Secret
+          severity: high
+
+  - name: llm_review
+    tool: jwt_tool
+    when: no_finding_yet
+    command: >-
+      jwt_tool "{{jwt}}" -T
+    evaluators:
+      - type: llm
+        instruction: >-
+          jwt_tool -T prints the decoded header and payload. Set matched=true
+          if you see any of: missing 'exp' claim (no expiry), 'kid' header
+          present (potential kid-injection), 'jku'/'x5u' header (external key
+          fetch — SSRF surface). Otherwise matched=false.
+        emit_finding:
+          vuln_type: JWT Risky Claim/Header (review)
+          severity: medium

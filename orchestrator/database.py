@@ -15,7 +15,7 @@ async def init_db():
                 target_url TEXT NOT NULL,
                 scope_mode TEXT NOT NULL DEFAULT 'full',
                 system_prompt TEXT NOT NULL DEFAULT '',
-                enabled_tools TEXT NOT NULL DEFAULT 'nmap,ffuf,sqlmap,nuclei,nikto,gobuster,dirb,wfuzz,whatweb,wafw00f,hydra,curl,netcat,whois,xsstrike,dalfox,commix,crlfuzz,arjun,john,hashcat,jwt_tool,sslyze,testssl,playwright,zap-cli',
+                enabled_tools TEXT NOT NULL DEFAULT 'nmap,ffuf,sqlmap,nuclei,nikto,gobuster,dirb,wfuzz,whatweb,wafw00f,hydra,curl,netcat,whois,xsstrike,dalfox,commix,crlfuzz,arjun,john,hashcat,jwt_tool,sslyze,testssl,playwright,zap-cli,pw-crawl,login-helper,diff-view,interactive-pw',
                 model TEXT NOT NULL DEFAULT 'qwen2.5-coder:7b-instruct-q4_K_M',
                 status TEXT NOT NULL DEFAULT 'created',
                 created_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -83,6 +83,8 @@ async def init_db():
                 auto_progress INTEGER NOT NULL DEFAULT 1,
                 max_turns_per_session INTEGER NOT NULL DEFAULT 30,
                 no_timeout INTEGER NOT NULL DEFAULT 0,
+                toolset_preset TEXT DEFAULT NULL,
+                disable_stagnation INTEGER DEFAULT 0,
                 created_at TEXT NOT NULL DEFAULT (datetime('now')),
                 updated_at TEXT NOT NULL DEFAULT (datetime('now'))
             );
@@ -148,6 +150,34 @@ async def init_db():
                 created_at TEXT NOT NULL DEFAULT (datetime('now'))
             );
 
+            -- v2: test-case driven runs (replaces freeform sessions as default)
+            CREATE TABLE IF NOT EXISTS v2_runs (
+                id TEXT PRIMARY KEY,
+                test_case_id TEXT NOT NULL,
+                target_json TEXT NOT NULL,
+                provider TEXT,
+                model TEXT,
+                duration_ms INTEGER,
+                stopped_early INTEGER DEFAULT 0,
+                chain_root_run_id TEXT,
+                steps_json TEXT,
+                chain_next_json TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+
+            CREATE TABLE IF NOT EXISTS v2_findings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id TEXT NOT NULL REFERENCES v2_runs(id),
+                test_case_id TEXT NOT NULL,
+                step TEXT,
+                vuln_type TEXT,
+                severity TEXT,
+                url TEXT,
+                parameter TEXT,
+                evidence TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+
             CREATE INDEX IF NOT EXISTS idx_steps_session ON steps(session_id);
             CREATE INDEX IF NOT EXISTS idx_findings_session ON findings(session_id);
             CREATE INDEX IF NOT EXISTS idx_reports_session ON reports(session_id);
@@ -156,6 +186,9 @@ async def init_db():
             CREATE INDEX IF NOT EXISTS idx_ground_truth_target ON ground_truth(target_name);
             CREATE INDEX IF NOT EXISTS idx_benchmark_results_bid ON benchmark_results(benchmark_id);
             CREATE INDEX IF NOT EXISTS idx_benchmark_runs_status ON benchmark_runs(status);
+            CREATE INDEX IF NOT EXISTS idx_v2_findings_run ON v2_findings(run_id);
+            CREATE INDEX IF NOT EXISTS idx_v2_runs_chain_root ON v2_runs(chain_root_run_id);
+            CREATE INDEX IF NOT EXISTS idx_v2_runs_test_case ON v2_runs(test_case_id);
         """)
 
         # Add new columns to sessions (safe migration for existing DBs)
@@ -171,6 +204,8 @@ async def init_db():
             ("chain_id", "TEXT DEFAULT NULL"),
             ("chain_position", "INTEGER DEFAULT NULL"),
             ("chain_phase", "TEXT DEFAULT NULL"),
+            ("toolset_preset", "TEXT DEFAULT NULL"),  # RQ3-b action-space ablation
+            ("disable_stagnation", "INTEGER DEFAULT 0"),  # benchmark opt-out
         ]
         for col_name, col_def in migrations:
             try:
@@ -178,14 +213,37 @@ async def init_db():
             except Exception:
                 pass  # column already exists
 
+        # Migrations for chains table
+        chain_migrations = [
+            ("toolset_preset", "TEXT DEFAULT NULL"),
+            ("disable_stagnation", "INTEGER DEFAULT 0"),
+        ]
+        for col_name, col_def in chain_migrations:
+            try:
+                await db.execute(f"ALTER TABLE chains ADD COLUMN {col_name} {col_def}")
+            except Exception:
+                pass  # column already exists
+
         # Migrations for benchmark_runs table
         bench_migrations = [
             ("repeat_n", "INTEGER NOT NULL DEFAULT 1"),
             ("current_iteration", "INTEGER NOT NULL DEFAULT 1"),
+            ("toolset_preset", "TEXT DEFAULT NULL"),  # which toolset tier this run used
+            ("disable_stagnation", "INTEGER DEFAULT 0"),
         ]
         for col_name, col_def in bench_migrations:
             try:
                 await db.execute(f"ALTER TABLE benchmark_runs ADD COLUMN {col_name} {col_def}")
+            except Exception:
+                pass  # column already exists
+
+        # Migrations for benchmark_results table
+        bench_result_migrations = [
+            ("toolset_preset", "TEXT DEFAULT NULL"),
+        ]
+        for col_name, col_def in bench_result_migrations:
+            try:
+                await db.execute(f"ALTER TABLE benchmark_results ADD COLUMN {col_name} {col_def}")
             except Exception:
                 pass  # column already exists
 

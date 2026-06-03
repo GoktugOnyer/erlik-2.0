@@ -1,18 +1,43 @@
-"""Execute pentest tools inside the kali-tools Docker container."""
+"""Execute pentest tools inside the kali-tools Docker container (or natively via ERLIK_NATIVE)."""
 
 import asyncio
+import os
 import re
 import shutil
 import subprocess
 import time
 
+ERLIK_NATIVE = bool(os.environ.get("ERLIK_NATIVE", ""))
 CONTAINER_NAME = "kali-tools"
 
-# Find docker binary - check common paths if not on PATH
-DOCKER_BIN = shutil.which("docker") or shutil.which("docker", path=r"C:\Program Files\Docker\Docker\resources\bin") or "docker"
+# Find docker binary — check PATH first, then well-known install locations on
+# Windows / macOS / Linux. Without this, the orchestrator silently fails every
+# tool execution with "kali-tools container is not running" because the
+# pre-flight container check can't find `docker` to invoke at all.
+_DOCKER_FALLBACK_PATHS = [
+    r"C:\Program Files\Docker\Docker\resources\bin",  # Docker Desktop (Windows)
+    os.path.expanduser("~/.orbstack/bin"),            # OrbStack (macOS)
+    "/Applications/Docker.app/Contents/Resources/bin",  # Docker Desktop (macOS)
+    "/usr/local/bin",                                  # Homebrew / Linux conventional
+    "/opt/homebrew/bin",                               # Apple Silicon Homebrew
+]
 
-# Target hostname inside Docker network (juice-shop service name)
-DOCKER_TARGET_HOST = "juice-shop"
+def _resolve_docker_bin() -> str:
+    direct = shutil.which("docker")
+    if direct:
+        return direct
+    for p in _DOCKER_FALLBACK_PATHS:
+        found = shutil.which("docker", path=p)
+        if found:
+            return found
+    return "docker"  # last-resort string; will fail loudly if invoked
+
+DOCKER_BIN = _resolve_docker_bin()
+
+# Legacy Docker-network service name used by the original Juice Shop lab.
+# Only consulted when ERLIK_DOCKER_TARGET_HOST is explicitly set OR when a
+# target_url is missing AND the legacy lab compose stack is in use.
+LEGACY_DOCKER_TARGET_HOST = os.environ.get("ERLIK_DOCKER_TARGET_HOST", "")
 
 # Tools that are safe to run and their max execution time (seconds)
 TOOL_TIMEOUTS = {
@@ -45,10 +70,14 @@ TOOL_TIMEOUTS = {
     # Browser & Automation
     "playwright": 180,
     "pw-crawl": 30,
+    "interactive-pw": 180,  # scriptable Playwright recipe runner
     "zap-cli": 300,
     # Utilities
     "curl": 30,
     "netcat": 30,
+    # Capability helpers (2026-04-06) — dumb, deterministic, no detection logic
+    "login-helper": 15,  # generic two-user token fetcher (lab helper)
+    "diff-view": 30,     # HTTP response diff viewer (NOT a detector)
 }
 
 # Commands that are never allowed
@@ -65,34 +94,78 @@ BLOCKED_PATTERNS = [
 ]
 
 
-def _sanitize_command(command: str) -> str:
-    """Rewrite localhost references to docker network hostname and fix URLs."""
-    # Replace localhost/127.0.0.1 with the Docker service name
-    command = re.sub(r'https?://localhost:3000', f'http://{DOCKER_TARGET_HOST}:3000', command)
-    command = re.sub(r'https?://127\.0\.0\.1:3000', f'http://{DOCKER_TARGET_HOST}:3000', command)
-    command = re.sub(r'localhost:3000', f'http://{DOCKER_TARGET_HOST}:3000', command)
-    command = re.sub(r'127\.0\.0\.1:3000', f'http://{DOCKER_TARGET_HOST}:3000', command)
-    command = re.sub(r'localhost', f'{DOCKER_TARGET_HOST}', command)
+def _sanitize_command(command: str, target_url: str = None) -> str:
+    """Rewrite hostname references to point at the actual target.
 
-    # Tools that require http:// scheme — fix bare host:port references
-    # Match tool_name ... juice-shop:3000 where there's no http:// before it
-    TOOLS_NEEDING_SCHEME = ["gobuster", "ffuf", "nikto", "nuclei", "dalfox", "wfuzz",
-                            "sqlmap", "xsstrike", "commix", "crlfuzz", "whatweb", "wafw00f",
-                            "arjun", "curl", "zap-cli"]
+    Two concerns:
+      1. The LLM (especially fine-tuned 7B/14B) frequently emits
+         `juice-shop:3000` from training-data bias. We always rewrite that
+         literal to the real target so commands work against any target.
+      2. When running inside the Docker network, localhost references from
+         the model must be rewritten to the in-network service name, but
+         only if ERLIK_DOCKER_TARGET_HOST is configured for the current lab.
+    """
+    from urllib.parse import urlparse
+
+    target_host = "localhost"
+    target_port = 80
+    target_hp = f"{target_host}:{target_port}"
+
+    if target_url:
+        parsed = urlparse(target_url)
+        target_host = parsed.hostname or "localhost"
+        target_port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        target_hp = f"{target_host}:{target_port}"
+
+        # Strip LLM training-data bias toward juice-shop:3000, but only when
+        # the actual target is NOT juice-shop. When it is, the rewrite would
+        # duplicate path segments (e.g. /rest/products/rest/products/...).
+        if "juice-shop" not in target_host:
+            command = command.replace("http://juice-shop:3000", target_url.rstrip("/"))
+            command = command.replace("https://juice-shop:3000", target_url.rstrip("/"))
+            command = command.replace("juice-shop:3000", target_hp)
+            command = re.sub(r'\bjuice-shop\b', target_host, command)
+
+    # Legacy lab support: ERLIK_DOCKER_TARGET_HOST=juice-shop reproduces old
+    # behaviour where the agent says "localhost" but means the in-network app.
+    if not ERLIK_NATIVE and LEGACY_DOCKER_TARGET_HOST:
+        host = LEGACY_DOCKER_TARGET_HOST
+        port = target_port or 3000
+        command = re.sub(r'https?://localhost:\d+', f'http://{host}:{port}', command)
+        command = re.sub(r'https?://127\.0\.0\.1:\d+', f'http://{host}:{port}', command)
+        command = re.sub(r'\blocalhost\b', host, command)
+        command = re.sub(r'\b127\.0\.0\.1\b', host, command)
+
     tool_name = _extract_tool_name(command)
-    if tool_name in TOOLS_NEEDING_SCHEME:
-        # Add http:// before bare juice-shop:3000 (not already preceded by http://)
-        command = re.sub(
-            r'(?<!http://)(?<!https://)\b' + re.escape(DOCKER_TARGET_HOST) + r':3000\b',
-            f'http://{DOCKER_TARGET_HOST}:3000',
-            command,
-        )
-        # Also fix bare juice-shop without port (for tools like -u juice-shop)
-        command = re.sub(
-            r'(?<!http://)(?<!https://)\b' + re.escape(DOCKER_TARGET_HOST) + r'(?!:)\b',
-            f'http://{DOCKER_TARGET_HOST}:3000',
-            command,
-        )
+    if not ERLIK_NATIVE and LEGACY_DOCKER_TARGET_HOST:
+        # Tools that require an explicit http:// scheme — fix bare host:port.
+        TOOLS_NEEDING_SCHEME = ["gobuster", "ffuf", "nikto", "nuclei", "dalfox", "wfuzz",
+                                "sqlmap", "xsstrike", "commix", "crlfuzz", "whatweb", "wafw00f",
+                                "arjun", "curl", "zap-cli"]
+        if tool_name in TOOLS_NEEDING_SCHEME:
+            host = LEGACY_DOCKER_TARGET_HOST
+            port = target_port or 3000
+            command = re.sub(
+                r'(?<!http://)(?<!https://)\b' + re.escape(host) + r':\d+\b',
+                f'http://{host}:{port}',
+                command,
+            )
+            command = re.sub(
+                r'(?<!http://)(?<!https://)\b' + re.escape(host) + r'(?!:)\b',
+                f'http://{host}:{port}',
+                command,
+            )
+
+    # Coverage fix (2026-04-07): when the agent calls `nuclei` without any
+    # `-tags`/`-t`/`-templates`/`-w`/`-id` selector, it ends up running just
+    # the default template subset which misses A02 (crypto), A07 (auth), A08
+    # (SCA/CVE), A10 (SSRF). Inject a broad tag set so the LLM doesn't have
+    # to know nuclei's flag conventions to get full coverage.
+    if tool_name == "nuclei":
+        has_selector = bool(re.search(r'(?:^|\s)-(?:tags|t|templates|tl|id|w)\b', command))
+        if not has_selector:
+            command += " -tags cve,vuln,sqli,xss,ssrf,jwt,auth,exposure,misconfig,default-login"
+
     return command
 
 
@@ -123,7 +196,9 @@ def _shell_quote(s: str) -> str:
 
 
 async def check_container_running() -> bool:
-    """Check if the kali-tools container is running."""
+    """Check if the kali-tools container is running (or return True in native mode)."""
+    if ERLIK_NATIVE:
+        return True
     try:
         result = await asyncio.get_event_loop().run_in_executor(
             None, _sync_check_container
@@ -147,7 +222,7 @@ def _sync_check_container() -> bool:
         return False
 
 
-async def execute_tool(command: str, enabled_tools: list[str], no_timeout: bool = False) -> dict:
+async def execute_tool(command: str, enabled_tools: list[str], no_timeout: bool = False, target_url: str = None, tool_hint: str = None) -> dict:
     """
     Execute a command in the kali-tools Docker container.
 
@@ -168,7 +243,12 @@ async def execute_tool(command: str, enabled_tools: list[str], no_timeout: bool 
     if error:
         return {"success": False, "output": "", "tool": "blocked", "duration_ms": 0, "error": error}
 
-    tool_name = _extract_tool_name(command)
+    # Test cases (v2) declare the tool explicitly via `tool:`. Trust that
+    # declaration for whitelist checking — commands like `bash -c '... curl ...'`
+    # legitimately need to construct a pipeline whose first token isn't the
+    # logical tool. Fall back to extraction for legacy callers.
+    extracted = _extract_tool_name(command)
+    tool_name = tool_hint or extracted
     if not tool_name:
         return {"success": False, "output": "", "tool": "unknown", "duration_ms": 0, "error": "Could not parse tool name"}
 
@@ -187,7 +267,7 @@ async def execute_tool(command: str, enabled_tools: list[str], no_timeout: bool 
         timeout = TOOL_TIMEOUTS.get(tool_name, 60)
 
     # Rewrite localhost to docker network
-    sanitized = _sanitize_command(command)
+    sanitized = _sanitize_command(command, target_url=target_url)
 
     # Check container is running
     if not await check_container_running():
@@ -233,10 +313,14 @@ async def execute_tool(command: str, enabled_tools: list[str], no_timeout: bool 
 
 
 def _sync_docker_exec(command: str, timeout: int) -> dict:
-    """Run a command in the kali-tools container (synchronous, for thread pool)."""
+    """Run a command in the kali-tools container or natively (synchronous, for thread pool)."""
     try:
+        if ERLIK_NATIVE:
+            cmd = ["bash", "-c", command]
+        else:
+            cmd = [DOCKER_BIN, "exec", CONTAINER_NAME, "bash", "-c", command]
         r = subprocess.run(
-            [DOCKER_BIN, "exec", CONTAINER_NAME, "bash", "-c", command],
+            cmd,
             capture_output=True, text=True, timeout=timeout,
         )
         return {

@@ -1,10 +1,39 @@
+# --- Python ---
 __pycache__/
 *.pyc
 .venv/
 venv/
-data/
-*.db
-.env
 *.egg-info/
 dist/
 build/
+
+# --- Secrets / runtime data ---
+.env
+data/
+*.db
+
+# --- Large binary artefacts (models, training data, evaluation logs) ---
+# These are reproducible from the scripts and are far too large for the repo.
+merged_models/
+checkpoints/
+training_data/
+training_data_*/
+runs/
+*.gguf
+*.safetensors
+*.bin
+*.xz
+
+# --- OS / editor / tooling ---
+.DS_Store
+node_modules/
+
+# --- Office thesis documents (kept locally, not in the code repo) ---
+*.docx
+*.xlsx
+
+# --- Personal working notes (out of scope for the public repo) ---
+THESIS_SPRINT_APR2026.md
+audit.md
+docs/FINETUNE_PLAN_v2_PWNING_BOOK.md
+docs/HANDOFF_PROMPT_FOR_AI.md

@@ -1,0 +1,31 @@
+id: WSTG-ATHN-01
+name: Credentials Transported over Encrypted Channel
+category: Authentication
+severity: high
+references:
+  - https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/04-Authentication_Testing/01-Testing_for_Credentials_Transported_over_an_Encrypted_Channel
+
+target_schema:
+  required: [login_url]
+  optional: [username_field, password_field]
+
+steps:
+  - name: login_url_scheme
+    tool: curl
+    command: >-
+      curl -s -o /dev/null -w "%{http_code} %{url_effective}" "{{login_url}}"
+    evaluators:
+      - type: regex
+        pattern: '^\d+ http://'
+        emit_finding:
+          vuln_type: Login Form Served Over HTTP
+          severity: high
+      - type: llm
+        when: no_finding_yet
+        instruction: >-
+          The output is a status code and effective URL. Set matched=true
+          ONLY if the effective URL uses http:// (cleartext) rather than
+          https://. Otherwise matched=false.
+        emit_finding:
+          vuln_type: Credentials May Be Sent Over Cleartext
+          severity: high

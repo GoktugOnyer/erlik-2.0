@@ -26,7 +26,7 @@ timeout /t 5 /nobreak >nul
 echo [3/3] Starting FastAPI server...
 cd /d "%~dp0"
 call .venv\Scripts\activate
-start "Erlik Server" cmd /k ".venv\Scripts\activate && python -m uvicorn orchestrator.main:app --host 0.0.0.0 --port 8000 --reload"
+start "Erlik Server" cmd /k ".venv\Scripts\activate && python -m uvicorn orchestrator.main:app --host 0.0.0.0 --port 8002 --reload"
 
 :: 4. Wait and open browser
 timeout /t 4 /nobreak >nul
@@ -35,11 +35,11 @@ echo ========================================
 echo   ALL RUNNING! Opening dashboard...
 echo ========================================
 echo.
-echo   Dashboard:  http://localhost:8000
+echo   Dashboard:  http://localhost:8002
 echo   Juice Shop: http://localhost:3000
 echo   ZAP API:    http://localhost:8090
 echo.
 echo   To stop: docker compose down
 echo ========================================
-start http://localhost:8000
+start http://localhost:8002
 pause

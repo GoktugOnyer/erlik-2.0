@@ -1,0 +1,57 @@
+id: WSTG-CONF-07
+name: Transport Layer Security
+category: Configuration & Deployment Management
+severity: high
+references:
+  - https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/02-Configuration_and_Deployment_Management_Testing/07-Test_HTTP_Strict_Transport_Security
+
+target_schema:
+  required: [host]
+  optional: [port]
+
+steps:
+  - name: tls_scan
+    tool: testssl
+    command: >-
+      testssl --quiet --color 0 --severity HIGH --warnings off "{{host}}:{{port}}"
+    evaluators:
+      - type: regex
+        pattern: 'VULNERABLE|HIGH'
+        emit_finding:
+          vuln_type: Weak TLS Configuration
+          severity: high
+      - type: regex
+        pattern: 'SSLv2|SSLv3|TLS 1\.0|TLS 1\.1'
+        emit_finding:
+          vuln_type: Deprecated TLS Protocol Enabled
+          severity: high
+
+  - name: hsts_check
+    tool: curl
+    command: >-
+      curl -sI "https://{{host}}/"
+    evaluators:
+      - type: regex
+        pattern: '^Strict-Transport-Security:'
+        # Presence means OK — emit no finding. Inverted check below.
+      - type: regex
+        pattern: '^Strict-Transport-Security:'
+        when: no_finding_yet
+        # If the above didn't match, this won't either; that's fine — we
+        # use a follow-up step with an LLM judge to make the absence call
+        # explicit rather than fighting regex negation.
+
+  - name: hsts_llm_judge
+    tool: curl
+    when: no_finding_yet
+    command: >-
+      curl -sI "https://{{host}}/"
+    evaluators:
+      - type: llm
+        instruction: >-
+          The output is HTTP response headers. Set matched=true ONLY if the
+          response is missing a Strict-Transport-Security header. If HSTS
+          is present, set matched=false.
+        emit_finding:
+          vuln_type: Missing HSTS
+          severity: medium

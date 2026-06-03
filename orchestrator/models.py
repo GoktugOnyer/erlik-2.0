@@ -3,6 +3,26 @@ from pydantic import BaseModel
 from typing import Optional
 
 
+# Canonical tool catalogue. Referenced by SessionCreate / ChainCreate / BenchmarkCreate
+# defaults AND by the TOOLSET_PRESETS dict in main.py. Single source of truth.
+_DEFAULT_TOOLS: list[str] = [
+    # Recon & Scanning
+    "nmap", "nuclei", "nikto", "whatweb", "wafw00f", "arjun", "whois", "sslyze", "testssl",
+    # Fuzzing & Discovery
+    "ffuf", "gobuster", "dirb", "wfuzz",
+    # Injection & Exploitation
+    "sqlmap", "xsstrike", "dalfox", "commix", "crlfuzz",
+    # Auth & Crypto
+    "hydra", "john", "hashcat", "jwt_tool",
+    # Browser & Automation
+    "playwright", "pw-crawl", "zap-cli",
+    # Utilities
+    "curl", "netcat",
+    # Capability helpers (added 2026-04-06 for RQ3-b action-space ablation)
+    "login-helper", "diff-view", "interactive-pw",
+]
+
+
 class ScopeMode(str, Enum):
     full = "full"
     recon_only = "recon_only"
@@ -16,20 +36,15 @@ class SessionCreate(BaseModel):
     scope_mode: ScopeMode = ScopeMode.full
     system_prompt: str = ""
     model: str = "qwen2.5-coder:7b-instruct-q4_K_M"
-    enabled_tools: list[str] = [
-        "nmap", "ffuf", "sqlmap", "nuclei", "nikto",
-        "gobuster", "dirb", "wfuzz", "whatweb", "wafw00f",
-        "hydra", "curl", "netcat", "whois",
-        "xsstrike", "dalfox", "commix", "crlfuzz", "arjun",
-        "john", "hashcat", "jwt_tool",
-        "sslyze", "testssl",
-        "playwright", "zap-cli", "pw-crawl",
-    ]
+    enabled_tools: list[str] = _DEFAULT_TOOLS
+    toolset_preset: Optional[str] = None  # "core_10" | "standard_20" | "full_30" | None (custom)
     session_type: str = "cold"
     parent_session_id: Optional[str] = None
     vuln_category: Optional[str] = None
     no_timeout: bool = False
     max_turns: int = 30  # 0 = unlimited (capped at 150 for safety)
+    disable_stagnation: bool = False  # benchmark opt-out for the agent-loop stagnation auto-stop
+    extra_system_prompt: str = ""  # injected memory/context appended to system prompt
 
 
 class SessionResponse(BaseModel):
@@ -44,6 +59,7 @@ class SessionResponse(BaseModel):
     session_type: str = "cold"
     parent_session_id: Optional[str] = None
     vuln_category: Optional[str] = None
+    toolset_preset: Optional[str] = None
     total_duration_ms: Optional[int] = None
     total_steps: int = 0
     total_findings: int = 0
@@ -110,18 +126,12 @@ class ChainCreate(BaseModel):
     scope_mode: ScopeMode = ScopeMode.full
     system_prompt: str = ""
     model: str = "qwen2.5-coder:7b-instruct-q4_K_M"
-    enabled_tools: list[str] = [
-        "nmap", "ffuf", "sqlmap", "nuclei", "nikto",
-        "gobuster", "dirb", "wfuzz", "whatweb", "wafw00f",
-        "hydra", "curl", "netcat", "whois",
-        "xsstrike", "dalfox", "commix", "crlfuzz", "arjun",
-        "john", "hashcat", "jwt_tool",
-        "sslyze", "testssl",
-        "playwright", "zap-cli", "pw-crawl",
-    ]
+    enabled_tools: list[str] = _DEFAULT_TOOLS
+    toolset_preset: Optional[str] = None
     max_turns_per_session: int = 30
     no_timeout: bool = False
     auto_progress: bool = True
+    disable_stagnation: bool = False
 
 
 class ChainResponse(BaseModel):
@@ -159,15 +169,11 @@ class BenchmarkCreate(BaseModel):
     repeat_n: int = 1
     model: str = "qwen2.5-coder:7b-instruct-q4_K_M"
     system_prompt: str = ""
-    enabled_tools: list[str] = [
-        "nmap", "ffuf", "sqlmap", "nuclei", "nikto",
-        "gobuster", "dirb", "wfuzz", "whatweb", "wafw00f",
-        "hydra", "curl", "netcat", "whois",
-        "xsstrike", "dalfox", "commix", "crlfuzz", "arjun",
-        "john", "hashcat", "jwt_tool",
-        "sslyze", "testssl",
-        "playwright", "zap-cli", "pw-crawl",
-    ]
+    enabled_tools: list[str] = _DEFAULT_TOOLS
+    # RQ3-b: toolset_presets is a list — benchmark runner iterates across these.
+    # Empty list or None = use enabled_tools as-is (legacy behaviour).
+    toolset_presets: list[str] = []
+    disable_stagnation: bool = False
 
 
 class BenchmarkSessionResult(BaseModel):

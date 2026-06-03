@@ -585,6 +585,11 @@
                 style="font-size: 0.55rem;">
                 &#9881; BENCHMARK
             </button>
+            <button id="nav-monitor" onclick="switchView('monitor')"
+                class="nav-tab font-pixel px-4 py-2 rounded"
+                style="font-size: 0.55rem;">
+                &#9636; MONITOR
+            </button>
         </nav>
         <div class="flex items-center gap-2">
             <span id="health-dot" class="w-3 h-3 rounded-full" style="background:#3a3a4a;"></span>
@@ -736,15 +741,42 @@
                         <span id="tool-config-arrow" style="font-size:0.65rem;">&#9654;</span>
                         <span>TOOLS</span>
                         <span id="tool-count-badge" class="neon-badge ml-2">26/26 enabled</span>
+                        <span id="active-toolset-badge" class="neon-badge ml-2" style="color:var(--neon-pink); border-color:var(--neon-pink);">Full-30</span>
                     </div>
                     <button onclick="testAllTools()" id="test-tools-btn" class="font-pixel px-3 py-1 rounded border text-xs" style="font-size:0.45rem; color:var(--neon-yellow); border-color:var(--neon-yellow); background:transparent; cursor:pointer;">TEST ALL</button>
                     <span id="test-tools-result" class="font-mono" style="font-size:0.8rem; color:#5a5a6a;"></span>
                 </div>
                 <div id="tool-config" class="hidden mt-3 space-y-3">
-                    <!-- Recon & Scanning -->
-                    <div>
-                        <div class="font-pixel mb-2" style="font-size:0.5rem; color:var(--neon-cyan);">RECON &amp; SCANNING</div>
-                        <div class="flex flex-wrap gap-x-5 gap-y-2">
+                    <!-- Toolset Preset Dropdown (RQ3-b action-space ablation) -->
+                    <div class="flex items-end gap-3 pb-2 mb-1" style="border-bottom:1px dashed #2a2a3a;">
+                        <div class="flex-1 max-w-sm">
+                            <label class="block font-pixel mb-2" style="font-size:0.5rem; color:#6a6a8a;">TOOLSET PRESET (RQ3-b)</label>
+                            <select id="toolset-preset-select" onchange="applyToolsetPreset(this.value)" class="cyber-input cyber-select rounded w-full">
+                                <option value="">— Custom —</option>
+                            </select>
+                        </div>
+                        <div class="font-mono" id="toolset-preset-description" style="font-size:0.72rem; color:#5a5a6a; flex:2; padding-bottom:4px;">
+                            Choose a tier to set an experimental condition. Core-10 = minimal. Standard-20 = adds IDOR helpers. Full-30 = everything.
+                        </div>
+                    </div>
+                    <!-- ============================================== -->
+                    <!-- TIER GROUPING (RQ3-b experimental conditions)  -->
+                    <!-- Tools are grouped by the minimum toolset tier   -->
+                    <!-- they belong to. Core-10 ⊂ Standard-20 ⊂ Full-30. -->
+                    <!-- Sub-categories within each tier are functional. -->
+                    <!-- ============================================== -->
+
+                    <!-- ============================================== -->
+                    <!-- ║ CORE-10 · minimal menu, always included     ║ -->
+                    <!-- ============================================== -->
+                    <div class="tier-block" style="border-left:3px solid var(--neon-cyan); padding-left:0.75rem; margin-bottom:0.5rem;">
+                        <div class="flex items-baseline gap-3 mb-2">
+                            <div class="font-pixel" style="font-size:0.55rem; color:var(--neon-cyan); letter-spacing:0.05em;">▍ CORE-10 · MINIMAL MENU</div>
+                            <span class="font-mono" style="font-size:0.7rem; color:#5a5a6a;">one tool per job · no redundancy · fits 7B attention budget</span>
+                        </div>
+
+                        <div class="font-pixel mb-1" style="font-size:0.45rem; color:#6a6a8a;">·· recon ··</div>
+                        <div class="flex flex-wrap gap-x-5 gap-y-2 mb-2">
                             <label class="flex items-center gap-2 cursor-pointer group">
                                 <input type="checkbox" class="tool-toggle" data-tool="nmap" checked onchange="updateToolCount()">
                                 <span class="font-mono text-gray-300 group-hover:text-cyan-400 transition" style="font-size:0.95rem;">nmap</span>
@@ -753,7 +785,79 @@
                             <label class="flex items-center gap-2 cursor-pointer group">
                                 <input type="checkbox" class="tool-toggle" data-tool="nuclei" checked onchange="updateToolCount()">
                                 <span class="font-mono text-gray-300 group-hover:text-cyan-400 transition" style="font-size:0.95rem;">nuclei</span>
-                                <span class="font-mono" style="color:#4a4a5a; font-size:0.8rem;">vuln scanner</span>
+                                <span class="font-mono" style="color:#4a4a5a; font-size:0.8rem;">template scanner</span>
+                            </label>
+                            <label class="flex items-center gap-2 cursor-pointer group">
+                                <input type="checkbox" class="tool-toggle" data-tool="ffuf" checked onchange="updateToolCount()">
+                                <span class="font-mono text-gray-300 group-hover:text-cyan-400 transition" style="font-size:0.95rem;">ffuf</span>
+                                <span class="font-mono" style="color:#4a4a5a; font-size:0.8rem;">fast fuzzer</span>
+                            </label>
+                        </div>
+
+                        <div class="font-pixel mb-1" style="font-size:0.45rem; color:#6a6a8a;">·· exploit ··</div>
+                        <div class="flex flex-wrap gap-x-5 gap-y-2 mb-2">
+                            <label class="flex items-center gap-2 cursor-pointer group">
+                                <input type="checkbox" class="tool-toggle" data-tool="sqlmap" checked onchange="updateToolCount()">
+                                <span class="font-mono text-gray-300 group-hover:text-cyan-400 transition" style="font-size:0.95rem;">sqlmap</span>
+                                <span class="font-mono" style="color:#4a4a5a; font-size:0.8rem;">SQL injection</span>
+                            </label>
+                            <label class="flex items-center gap-2 cursor-pointer group">
+                                <input type="checkbox" class="tool-toggle" data-tool="dalfox" checked onchange="updateToolCount()">
+                                <span class="font-mono text-gray-300 group-hover:text-cyan-400 transition" style="font-size:0.95rem;">dalfox</span>
+                                <span class="font-mono" style="color:#4a4a5a; font-size:0.8rem;">XSS</span>
+                            </label>
+                            <label class="flex items-center gap-2 cursor-pointer group">
+                                <input type="checkbox" class="tool-toggle" data-tool="jwt_tool" checked onchange="updateToolCount()">
+                                <span class="font-mono text-gray-300 group-hover:text-cyan-400 transition" style="font-size:0.95rem;">jwt_tool</span>
+                                <span class="font-mono" style="color:#4a4a5a; font-size:0.8rem;">JWT attacks</span>
+                            </label>
+                            <label class="flex items-center gap-2 cursor-pointer group">
+                                <input type="checkbox" class="tool-toggle" data-tool="hydra" checked onchange="updateToolCount()">
+                                <span class="font-mono text-gray-300 group-hover:text-cyan-400 transition" style="font-size:0.95rem;">hydra</span>
+                                <span class="font-mono" style="color:#4a4a5a; font-size:0.8rem;">brute force</span>
+                            </label>
+                        </div>
+
+                        <div class="font-pixel mb-1" style="font-size:0.45rem; color:#6a6a8a;">·· probe / browser ··</div>
+                        <div class="flex flex-wrap gap-x-5 gap-y-2">
+                            <label class="flex items-center gap-2 cursor-pointer group">
+                                <input type="checkbox" class="tool-toggle" data-tool="curl" checked onchange="updateToolCount()">
+                                <span class="font-mono text-gray-300 group-hover:text-cyan-400 transition" style="font-size:0.95rem;">curl</span>
+                                <span class="font-mono" style="color:#4a4a5a; font-size:0.8rem;">HTTP client</span>
+                            </label>
+                            <label class="flex items-center gap-2 cursor-pointer group">
+                                <input type="checkbox" class="tool-toggle" data-tool="pw-crawl" checked onchange="updateToolCount()">
+                                <span class="font-mono text-gray-300 group-hover:text-cyan-400 transition" style="font-size:0.95rem;">pw-crawl</span>
+                                <span class="font-mono" style="color:#4a4a5a; font-size:0.8rem;">JS crawler</span>
+                            </label>
+                            <label class="flex items-center gap-2 cursor-pointer group">
+                                <input type="checkbox" class="tool-toggle" data-tool="zap-cli" checked onchange="updateToolCount()">
+                                <span class="font-mono text-gray-300 group-hover:text-cyan-400 transition" style="font-size:0.95rem;">zap-cli</span>
+                                <span class="font-mono" style="color:#4a4a5a; font-size:0.8rem;">OWASP ZAP</span>
+                            </label>
+                        </div>
+                    </div>
+
+                    <!-- ============================================== -->
+                    <!-- ║ STANDARD-20 ADDS · specialisation + IDOR    ║ -->
+                    <!-- ============================================== -->
+                    <div class="tier-block" style="border-left:3px solid var(--neon-pink); padding-left:0.75rem; margin-bottom:0.5rem;">
+                        <div class="flex items-baseline gap-3 mb-2">
+                            <div class="font-pixel" style="font-size:0.55rem; color:var(--neon-pink); letter-spacing:0.05em;">▍ STANDARD-20 · +10 TOOLS</div>
+                            <span class="font-mono" style="font-size:0.7rem; color:#5a5a6a;">redundant alternatives, discovery, TLS, + the two IDOR helpers</span>
+                        </div>
+
+                        <div class="font-pixel mb-1" style="font-size:0.45rem; color:#6a6a8a;">·· alt fuzzer / discovery ··</div>
+                        <div class="flex flex-wrap gap-x-5 gap-y-2 mb-2">
+                            <label class="flex items-center gap-2 cursor-pointer group">
+                                <input type="checkbox" class="tool-toggle" data-tool="gobuster" checked onchange="updateToolCount()">
+                                <span class="font-mono text-gray-300 group-hover:text-cyan-400 transition" style="font-size:0.95rem;">gobuster</span>
+                                <span class="font-mono" style="color:#4a4a5a; font-size:0.8rem;">dir brute (alt ffuf)</span>
+                            </label>
+                            <label class="flex items-center gap-2 cursor-pointer group">
+                                <input type="checkbox" class="tool-toggle" data-tool="arjun" checked onchange="updateToolCount()">
+                                <span class="font-mono text-gray-300 group-hover:text-cyan-400 transition" style="font-size:0.95rem;">arjun</span>
+                                <span class="font-mono" style="color:#4a4a5a; font-size:0.8rem;">hidden params</span>
                             </label>
                             <label class="flex items-center gap-2 cursor-pointer group">
                                 <input type="checkbox" class="tool-toggle" data-tool="nikto" checked onchange="updateToolCount()">
@@ -771,41 +875,52 @@
                                 <span class="font-mono" style="color:#4a4a5a; font-size:0.8rem;">WAF detect</span>
                             </label>
                             <label class="flex items-center gap-2 cursor-pointer group">
-                                <input type="checkbox" class="tool-toggle" data-tool="arjun" checked onchange="updateToolCount()">
-                                <span class="font-mono text-gray-300 group-hover:text-cyan-400 transition" style="font-size:0.95rem;">arjun</span>
-                                <span class="font-mono" style="color:#4a4a5a; font-size:0.8rem;">param finder</span>
-                            </label>
-                            <label class="flex items-center gap-2 cursor-pointer group">
-                                <input type="checkbox" class="tool-toggle" data-tool="whois" checked onchange="updateToolCount()">
-                                <span class="font-mono text-gray-300 group-hover:text-cyan-400 transition" style="font-size:0.95rem;">whois</span>
-                                <span class="font-mono" style="color:#4a4a5a; font-size:0.8rem;">domain info</span>
-                            </label>
-                            <label class="flex items-center gap-2 cursor-pointer group">
                                 <input type="checkbox" class="tool-toggle" data-tool="sslyze" checked onchange="updateToolCount()">
                                 <span class="font-mono text-gray-300 group-hover:text-cyan-400 transition" style="font-size:0.95rem;">sslyze</span>
                                 <span class="font-mono" style="color:#4a4a5a; font-size:0.8rem;">TLS scanner</span>
                             </label>
+                        </div>
+
+                        <div class="font-pixel mb-1" style="font-size:0.45rem; color:#6a6a8a;">·· alt exploit ··</div>
+                        <div class="flex flex-wrap gap-x-5 gap-y-2 mb-2">
                             <label class="flex items-center gap-2 cursor-pointer group">
-                                <input type="checkbox" class="tool-toggle" data-tool="testssl" checked onchange="updateToolCount()">
-                                <span class="font-mono text-gray-300 group-hover:text-cyan-400 transition" style="font-size:0.95rem;">testssl</span>
-                                <span class="font-mono" style="color:#4a4a5a; font-size:0.8rem;">SSL audit</span>
+                                <input type="checkbox" class="tool-toggle" data-tool="xsstrike" checked onchange="updateToolCount()">
+                                <span class="font-mono text-gray-300 group-hover:text-cyan-400 transition" style="font-size:0.95rem;">xsstrike</span>
+                                <span class="font-mono" style="color:#4a4a5a; font-size:0.8rem;">XSS (alt dalfox)</span>
+                            </label>
+                            <label class="flex items-center gap-2 cursor-pointer group">
+                                <input type="checkbox" class="tool-toggle" data-tool="commix" checked onchange="updateToolCount()">
+                                <span class="font-mono text-gray-300 group-hover:text-cyan-400 transition" style="font-size:0.95rem;">commix</span>
+                                <span class="font-mono" style="color:#4a4a5a; font-size:0.8rem;">cmd injection</span>
+                            </label>
+                        </div>
+
+                        <div class="font-pixel mb-1" style="font-size:0.45rem; color:#6a6a8a;">·· IDOR / access-control helpers (new) ··</div>
+                        <div class="flex flex-wrap gap-x-5 gap-y-2">
+                            <label class="flex items-center gap-2 cursor-pointer group">
+                                <input type="checkbox" class="tool-toggle" data-tool="login-helper" checked onchange="updateToolCount()">
+                                <span class="font-mono text-gray-300 group-hover:text-cyan-400 transition" style="font-size:0.95rem;">login-helper</span>
+                                <span class="font-mono" style="color:#4a4a5a; font-size:0.8rem;">2-user token fetch</span>
+                            </label>
+                            <label class="flex items-center gap-2 cursor-pointer group">
+                                <input type="checkbox" class="tool-toggle" data-tool="diff-view" checked onchange="updateToolCount()">
+                                <span class="font-mono text-gray-300 group-hover:text-cyan-400 transition" style="font-size:0.95rem;">diff-view</span>
+                                <span class="font-mono" style="color:#4a4a5a; font-size:0.8rem;">response diff</span>
                             </label>
                         </div>
                     </div>
-                    <!-- Fuzzing & Discovery -->
-                    <div>
-                        <div class="font-pixel mb-2" style="font-size:0.5rem; color:var(--neon-magenta);">FUZZING &amp; DISCOVERY</div>
-                        <div class="flex flex-wrap gap-x-5 gap-y-2">
-                            <label class="flex items-center gap-2 cursor-pointer group">
-                                <input type="checkbox" class="tool-toggle" data-tool="ffuf" checked onchange="updateToolCount()">
-                                <span class="font-mono text-gray-300 group-hover:text-cyan-400 transition" style="font-size:0.95rem;">ffuf</span>
-                                <span class="font-mono" style="color:#4a4a5a; font-size:0.8rem;">fast fuzzer</span>
-                            </label>
-                            <label class="flex items-center gap-2 cursor-pointer group">
-                                <input type="checkbox" class="tool-toggle" data-tool="gobuster" checked onchange="updateToolCount()">
-                                <span class="font-mono text-gray-300 group-hover:text-cyan-400 transition" style="font-size:0.95rem;">gobuster</span>
-                                <span class="font-mono" style="color:#4a4a5a; font-size:0.8rem;">dir brute</span>
-                            </label>
+
+                    <!-- ============================================== -->
+                    <!-- ║ FULL-30 ADDS · long-tail specialists        ║ -->
+                    <!-- ============================================== -->
+                    <div class="tier-block" style="border-left:3px solid var(--neon-green); padding-left:0.75rem;">
+                        <div class="flex items-baseline gap-3 mb-2">
+                            <div class="font-pixel" style="font-size:0.55rem; color:var(--neon-green); letter-spacing:0.05em;">▍ FULL-30 · +10 MORE</div>
+                            <span class="font-mono" style="font-size:0.7rem; color:#5a5a6a;">long-tail fuzzers, password crackers, raw + scriptable browser</span>
+                        </div>
+
+                        <div class="font-pixel mb-1" style="font-size:0.45rem; color:#6a6a8a;">·· legacy fuzz / discovery ··</div>
+                        <div class="flex flex-wrap gap-x-5 gap-y-2 mb-2">
                             <label class="flex items-center gap-2 cursor-pointer group">
                                 <input type="checkbox" class="tool-toggle" data-tool="dirb" checked onchange="updateToolCount()">
                                 <span class="font-mono text-gray-300 group-hover:text-cyan-400 transition" style="font-size:0.95rem;">dirb</span>
@@ -816,48 +931,25 @@
                                 <span class="font-mono text-gray-300 group-hover:text-cyan-400 transition" style="font-size:0.95rem;">wfuzz</span>
                                 <span class="font-mono" style="color:#4a4a5a; font-size:0.8rem;">web fuzzer</span>
                             </label>
-                        </div>
-                    </div>
-                    <!-- XSS & Injection -->
-                    <div>
-                        <div class="font-pixel mb-2" style="font-size:0.5rem; color:var(--neon-orange);">XSS &amp; INJECTION</div>
-                        <div class="flex flex-wrap gap-x-5 gap-y-2">
-                            <label class="flex items-center gap-2 cursor-pointer group">
-                                <input type="checkbox" class="tool-toggle" data-tool="sqlmap" checked onchange="updateToolCount()">
-                                <span class="font-mono text-gray-300 group-hover:text-cyan-400 transition" style="font-size:0.95rem;">sqlmap</span>
-                                <span class="font-mono" style="color:#4a4a5a; font-size:0.8rem;">sql injection</span>
-                            </label>
-                            <label class="flex items-center gap-2 cursor-pointer group">
-                                <input type="checkbox" class="tool-toggle" data-tool="xsstrike" checked onchange="updateToolCount()">
-                                <span class="font-mono text-gray-300 group-hover:text-cyan-400 transition" style="font-size:0.95rem;">xsstrike</span>
-                                <span class="font-mono" style="color:#4a4a5a; font-size:0.8rem;">XSS scanner</span>
-                            </label>
-                            <label class="flex items-center gap-2 cursor-pointer group">
-                                <input type="checkbox" class="tool-toggle" data-tool="commix" checked onchange="updateToolCount()">
-                                <span class="font-mono text-gray-300 group-hover:text-cyan-400 transition" style="font-size:0.95rem;">commix</span>
-                                <span class="font-mono" style="color:#4a4a5a; font-size:0.8rem;">cmd injection</span>
-                            </label>
-                            <label class="flex items-center gap-2 cursor-pointer group">
-                                <input type="checkbox" class="tool-toggle" data-tool="dalfox" checked onchange="updateToolCount()">
-                                <span class="font-mono text-gray-300 group-hover:text-cyan-400 transition" style="font-size:0.95rem;">dalfox</span>
-                                <span class="font-mono" style="color:#4a4a5a; font-size:0.8rem;">XSS finder</span>
-                            </label>
                             <label class="flex items-center gap-2 cursor-pointer group">
                                 <input type="checkbox" class="tool-toggle" data-tool="crlfuzz" checked onchange="updateToolCount()">
                                 <span class="font-mono text-gray-300 group-hover:text-cyan-400 transition" style="font-size:0.95rem;">crlfuzz</span>
-                                <span class="font-mono" style="color:#4a4a5a; font-size:0.8rem;">CRLF inject</span>
+                                <span class="font-mono" style="color:#4a4a5a; font-size:0.8rem;">CRLF injection</span>
+                            </label>
+                            <label class="flex items-center gap-2 cursor-pointer group">
+                                <input type="checkbox" class="tool-toggle" data-tool="testssl" checked onchange="updateToolCount()">
+                                <span class="font-mono text-gray-300 group-hover:text-cyan-400 transition" style="font-size:0.95rem;">testssl</span>
+                                <span class="font-mono" style="color:#4a4a5a; font-size:0.8rem;">TLS audit (alt sslyze)</span>
+                            </label>
+                            <label class="flex items-center gap-2 cursor-pointer group">
+                                <input type="checkbox" class="tool-toggle" data-tool="whois" checked onchange="updateToolCount()">
+                                <span class="font-mono text-gray-300 group-hover:text-cyan-400 transition" style="font-size:0.95rem;">whois</span>
+                                <span class="font-mono" style="color:#4a4a5a; font-size:0.8rem;">domain info</span>
                             </label>
                         </div>
-                    </div>
-                    <!-- Auth & Crypto -->
-                    <div>
-                        <div class="font-pixel mb-2" style="font-size:0.5rem; color:var(--neon-purple);">AUTH &amp; CRYPTO</div>
-                        <div class="flex flex-wrap gap-x-5 gap-y-2">
-                            <label class="flex items-center gap-2 cursor-pointer group">
-                                <input type="checkbox" class="tool-toggle" data-tool="hydra" checked onchange="updateToolCount()">
-                                <span class="font-mono text-gray-300 group-hover:text-cyan-400 transition" style="font-size:0.95rem;">hydra</span>
-                                <span class="font-mono" style="color:#4a4a5a; font-size:0.8rem;">brute force</span>
-                            </label>
+
+                        <div class="font-pixel mb-1" style="font-size:0.45rem; color:#6a6a8a;">·· password crackers ··</div>
+                        <div class="flex flex-wrap gap-x-5 gap-y-2 mb-2">
                             <label class="flex items-center gap-2 cursor-pointer group">
                                 <input type="checkbox" class="tool-toggle" data-tool="john" checked onchange="updateToolCount()">
                                 <span class="font-mono text-gray-300 group-hover:text-cyan-400 transition" style="font-size:0.95rem;">john</span>
@@ -868,47 +960,24 @@
                                 <span class="font-mono text-gray-300 group-hover:text-cyan-400 transition" style="font-size:0.95rem;">hashcat</span>
                                 <span class="font-mono" style="color:#4a4a5a; font-size:0.8rem;">GPU cracker</span>
                             </label>
-                            <label class="flex items-center gap-2 cursor-pointer group">
-                                <input type="checkbox" class="tool-toggle" data-tool="jwt_tool" checked onchange="updateToolCount()">
-                                <span class="font-mono text-gray-300 group-hover:text-cyan-400 transition" style="font-size:0.95rem;">jwt_tool</span>
-                                <span class="font-mono" style="color:#4a4a5a; font-size:0.8rem;">JWT attacks</span>
-                            </label>
                         </div>
-                    </div>
-                    <!-- Browser & Automation -->
-                    <div>
-                        <div class="font-pixel mb-2" style="font-size:0.5rem; color:var(--neon-pink);">BROWSER &amp; AUTOMATION</div>
+
+                        <div class="font-pixel mb-1" style="font-size:0.45rem; color:#6a6a8a;">·· raw tcp / browser ··</div>
                         <div class="flex flex-wrap gap-x-5 gap-y-2">
-                            <label class="flex items-center gap-2 cursor-pointer group">
-                                <input type="checkbox" class="tool-toggle" data-tool="playwright" checked onchange="updateToolCount()">
-                                <span class="font-mono text-gray-300 group-hover:text-cyan-400 transition" style="font-size:0.95rem;">playwright</span>
-                                <span class="font-mono" style="color:#4a4a5a; font-size:0.8rem;">browser auto</span>
-                            </label>
-                            <label class="flex items-center gap-2 cursor-pointer group">
-                                <input type="checkbox" class="tool-toggle" data-tool="zap-cli" checked onchange="updateToolCount()">
-                                <span class="font-mono text-gray-300 group-hover:text-cyan-400 transition" style="font-size:0.95rem;">zap-cli</span>
-                                <span class="font-mono" style="color:#4a4a5a; font-size:0.8rem;">OWASP ZAP</span>
-                            </label>
-                            <label class="flex items-center gap-2 cursor-pointer group">
-                                <input type="checkbox" class="tool-toggle" data-tool="pw-crawl" checked onchange="updateToolCount()">
-                                <span class="font-mono text-gray-300 group-hover:text-cyan-400 transition" style="font-size:0.95rem;">pw-crawl</span>
-                                <span class="font-mono" style="color:#4a4a5a; font-size:0.8rem;">JS crawler</span>
-                            </label>
-                        </div>
-                    </div>
-                    <!-- Utilities -->
-                    <div>
-                        <div class="font-pixel mb-2" style="font-size:0.5rem; color:var(--neon-green);">UTILITIES</div>
-                        <div class="flex flex-wrap gap-x-5 gap-y-2">
-                            <label class="flex items-center gap-2 cursor-pointer group">
-                                <input type="checkbox" class="tool-toggle" data-tool="curl" checked onchange="updateToolCount()">
-                                <span class="font-mono text-gray-300 group-hover:text-cyan-400 transition" style="font-size:0.95rem;">curl</span>
-                                <span class="font-mono" style="color:#4a4a5a; font-size:0.8rem;">HTTP client</span>
-                            </label>
                             <label class="flex items-center gap-2 cursor-pointer group">
                                 <input type="checkbox" class="tool-toggle" data-tool="netcat" checked onchange="updateToolCount()">
                                 <span class="font-mono text-gray-300 group-hover:text-cyan-400 transition" style="font-size:0.95rem;">netcat</span>
-                                <span class="font-mono" style="color:#4a4a5a; font-size:0.8rem;">network swiss knife</span>
+                                <span class="font-mono" style="color:#4a4a5a; font-size:0.8rem;">raw TCP</span>
+                            </label>
+                            <label class="flex items-center gap-2 cursor-pointer group">
+                                <input type="checkbox" class="tool-toggle" data-tool="playwright" checked onchange="updateToolCount()">
+                                <span class="font-mono text-gray-300 group-hover:text-cyan-400 transition" style="font-size:0.95rem;">playwright</span>
+                                <span class="font-mono" style="color:#4a4a5a; font-size:0.8rem;">raw browser</span>
+                            </label>
+                            <label class="flex items-center gap-2 cursor-pointer group">
+                                <input type="checkbox" class="tool-toggle" data-tool="interactive-pw" checked onchange="updateToolCount()">
+                                <span class="font-mono text-gray-300 group-hover:text-cyan-400 transition" style="font-size:0.95rem;">interactive-pw</span>
+                                <span class="font-mono" style="color:#4a4a5a; font-size:0.8rem;">scriptable browser</span>
                             </label>
                         </div>
                     </div>
@@ -1198,6 +1267,132 @@
 
         </div><!-- /view-benchmark -->
 
+        <!-- ============================================================ -->
+        <!-- VIEW: MONITOR — read-only live status of the matrix run     -->
+        <!-- ============================================================ -->
+        <div id="view-monitor" class="hidden space-y-5">
+            <section class="cyber-panel cyber-panel-cyan neon-border-cyan rounded-lg p-4">
+                <div class="flex items-center justify-between mb-3">
+                    <span class="font-pixel neon-text-cyan" style="font-size:0.75rem; letter-spacing:0.08em;">
+                        ▣ MATRIX MONITOR
+                    </span>
+                    <span class="font-mono" id="mon-last-refresh" style="font-size:0.75rem; color:#5a5a6a;">—</span>
+                </div>
+                <div class="font-mono mb-3" style="font-size:0.7rem; color:#5a5a6a;">
+                    Polls /api/sessions every 3s · derives matrix state from session metadata · zero impact on the running sweep
+                </div>
+
+                <!-- KPI ROW -->
+                <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+                    <div class="cyber-panel rounded p-3" style="border:1px solid #2a2a3a;">
+                        <div class="font-pixel" style="font-size:0.45rem; color:#6a6a8a; letter-spacing:0.08em;">SESSIONS</div>
+                        <div class="font-mono mt-1" id="mon-kpi-sessions" style="font-size:1.5rem; color:var(--neon-cyan);">—</div>
+                        <div class="font-mono" id="mon-kpi-sessions-sub" style="font-size:0.7rem; color:#5a5a6a;">— completed</div>
+                    </div>
+                    <div class="cyber-panel rounded p-3" style="border:1px solid #2a2a3a;">
+                        <div class="font-pixel" style="font-size:0.45rem; color:#6a6a8a; letter-spacing:0.08em;">FINDINGS</div>
+                        <div class="font-mono mt-1" id="mon-kpi-findings" style="font-size:1.5rem; color:var(--neon-pink);">—</div>
+                        <div class="font-mono" style="font-size:0.7rem; color:#5a5a6a;">total across matrix</div>
+                    </div>
+                    <div class="cyber-panel rounded p-3" style="border:1px solid #2a2a3a;">
+                        <div class="font-pixel" style="font-size:0.45rem; color:#6a6a8a; letter-spacing:0.08em;">RUNNING NOW</div>
+                        <div class="font-mono mt-1" id="mon-kpi-running" style="font-size:1.5rem; color:var(--neon-yellow);">—</div>
+                        <div class="font-mono" id="mon-kpi-running-sub" style="font-size:0.65rem; color:#5a5a6a; word-break:break-all;">—</div>
+                    </div>
+                    <div class="cyber-panel rounded p-3" style="border:1px solid #2a2a3a;">
+                        <div class="font-pixel" style="font-size:0.45rem; color:#6a6a8a; letter-spacing:0.08em;">WALL TIME</div>
+                        <div class="font-mono mt-1" id="mon-kpi-wall" style="font-size:1.5rem; color:var(--neon-green);">—</div>
+                        <div class="font-mono" id="mon-kpi-eta" style="font-size:0.7rem; color:#5a5a6a;">—</div>
+                    </div>
+                </div>
+
+                <!-- TIER PROGRESS -->
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
+                    <div class="cyber-panel rounded p-3" style="border-left:3px solid var(--neon-cyan); background:#0d0d18;">
+                        <div class="font-pixel" style="font-size:0.45rem; color:var(--neon-cyan);">▍ CORE-10</div>
+                        <div class="flex items-baseline gap-3 mt-1">
+                            <span class="font-mono" id="mon-tier-core-f" style="font-size:1.4rem; color:var(--neon-cyan);">—</span>
+                            <span class="font-mono" style="font-size:0.7rem; color:#6a6a8a;">findings</span>
+                        </div>
+                        <div class="font-mono" id="mon-tier-core-s" style="font-size:0.7rem; color:#5a5a6a;">— sessions</div>
+                    </div>
+                    <div class="cyber-panel rounded p-3" style="border-left:3px solid var(--neon-pink); background:#0d0d18;">
+                        <div class="font-pixel" style="font-size:0.45rem; color:var(--neon-pink);">▍ STANDARD-20</div>
+                        <div class="flex items-baseline gap-3 mt-1">
+                            <span class="font-mono" id="mon-tier-std-f" style="font-size:1.4rem; color:var(--neon-pink);">—</span>
+                            <span class="font-mono" style="font-size:0.7rem; color:#6a6a8a;">findings</span>
+                        </div>
+                        <div class="font-mono" id="mon-tier-std-s" style="font-size:0.7rem; color:#5a5a6a;">— sessions</div>
+                    </div>
+                    <div class="cyber-panel rounded p-3" style="border-left:3px solid var(--neon-green); background:#0d0d18;">
+                        <div class="font-pixel" style="font-size:0.45rem; color:var(--neon-green);">▍ FULL-30</div>
+                        <div class="flex items-baseline gap-3 mt-1">
+                            <span class="font-mono" id="mon-tier-full-f" style="font-size:1.4rem; color:var(--neon-green);">—</span>
+                            <span class="font-mono" style="font-size:0.7rem; color:#6a6a8a;">findings</span>
+                        </div>
+                        <div class="font-mono" id="mon-tier-full-s" style="font-size:0.7rem; color:#5a5a6a;">— sessions</div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- FINDINGS → TOOL ATTRIBUTION (current run only) -->
+            <section class="cyber-panel rounded-lg p-4" style="border:1px solid var(--neon-yellow); background:#0a0a14;">
+                <div class="flex items-center justify-between mb-3">
+                    <span class="font-pixel" style="font-size:0.75rem; letter-spacing:0.08em; color:var(--neon-yellow);">
+                        ✦ FINDINGS &rarr; DISCOVERING TOOL
+                    </span>
+                    <span class="font-mono" id="mon-findings-meta" style="font-size:0.65rem; color:#5a5a6a;">— current run only</span>
+                </div>
+                <div class="overflow-auto" style="max-height:340px;">
+                    <table class="w-full font-mono" style="font-size:0.72rem;">
+                        <thead style="position:sticky; top:0; background:#0a0a14;">
+                            <tr style="border-bottom:1px solid #2a2a3a;">
+                                <th class="text-left py-2 px-2" style="color:#6a6a8a; font-weight:normal;">session</th>
+                                <th class="text-left py-2 px-2" style="color:#6a6a8a; font-weight:normal;">tier</th>
+                                <th class="text-left py-2 px-2" style="color:#6a6a8a; font-weight:normal;">vuln</th>
+                                <th class="text-left py-2 px-2" style="color:#6a6a8a; font-weight:normal;">sev</th>
+                                <th class="text-left py-2 px-2" style="color:#6a6a8a; font-weight:normal;">tool</th>
+                                <th class="text-left py-2 px-2" style="color:#6a6a8a; font-weight:normal;">url</th>
+                            </tr>
+                        </thead>
+                        <tbody id="mon-findings-tbody">
+                            <tr><td colspan="6" class="text-center py-4" style="color:#5a5a6a;">loading…</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+
+            <!-- SESSIONS TABLE -->
+            <section class="cyber-panel cyber-panel-magenta neon-border-magenta rounded-lg p-4">
+                <div class="flex items-center justify-between mb-3">
+                    <span class="font-pixel neon-text-magenta" style="font-size:0.75rem; letter-spacing:0.08em;">
+                        ▶ RECENT SESSIONS
+                    </span>
+                    <span class="font-mono" style="font-size:0.65rem; color:#5a5a6a;">latest 25, newest first</span>
+                </div>
+                <div class="overflow-auto">
+                    <table class="w-full font-mono" style="font-size:0.75rem;">
+                        <thead>
+                            <tr style="border-bottom:1px solid #2a2a3a;">
+                                <th class="text-left py-2 px-2" style="color:#6a6a8a; font-weight:normal;">id</th>
+                                <th class="text-left py-2 px-2" style="color:#6a6a8a; font-weight:normal;">type</th>
+                                <th class="text-left py-2 px-2" style="color:#6a6a8a; font-weight:normal;">tier</th>
+                                <th class="text-right py-2 px-2" style="color:#6a6a8a; font-weight:normal;" title="max_turns budget configured for this session">max</th>
+                                <th class="text-left py-2 px-2" style="color:#6a6a8a; font-weight:normal;">status</th>
+                                <th class="text-right py-2 px-2" style="color:#6a6a8a; font-weight:normal;">steps</th>
+                                <th class="text-right py-2 px-2" style="color:#6a6a8a; font-weight:normal;">findings</th>
+                                <th class="text-right py-2 px-2" style="color:#6a6a8a; font-weight:normal;">duration</th>
+                                <th class="text-left py-2 px-2" style="color:#6a6a8a; font-weight:normal;">created</th>
+                            </tr>
+                        </thead>
+                        <tbody id="mon-sessions-tbody">
+                            <tr><td colspan="9" class="text-center py-4" style="color:#5a5a6a;">loading…</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+        </div><!-- /view-monitor -->
+
     </main>
 
     <!-- Scanline Overlay -->
@@ -1216,17 +1411,27 @@
 
         // ===== View Switching =====
         function switchView(view) {
-            const views = ['scanner', 'reports', 'benchmark'];
+            const views = ['scanner', 'reports', 'benchmark', 'monitor'];
             const panels = {
                 scanner: document.getElementById('view-scanner'),
                 reports: document.getElementById('view-reports'),
                 benchmark: document.getElementById('view-benchmark'),
+                monitor: document.getElementById('view-monitor'),
             };
             const navs = {
                 scanner: document.getElementById('nav-scanner'),
                 reports: document.getElementById('nav-reports'),
                 benchmark: document.getElementById('nav-benchmark'),
+                monitor: document.getElementById('nav-monitor'),
             };
+
+            // Start the monitor polling loop the first time the user opens the tab
+            if (view === 'monitor' && !window.__monitorStarted) {
+                window.__monitorStarted = true;
+                window.__monitorStart = Date.now();
+                monitorTick();
+                window.__monitorTimer = setInterval(monitorTick, 3000);
+            }
 
             views.forEach(v => {
                 if (panels[v]) panels[v].classList.toggle('hidden', v !== view);
@@ -1534,6 +1739,9 @@
         }
 
         // ===== Tool Config =====
+        let toolsetPresets = {};
+        let currentToolsetPreset = null;
+
         function getEnabledTools() {
             return Array.from(document.querySelectorAll('.tool-toggle'))
                 .filter(cb => cb.checked)
@@ -1544,6 +1752,81 @@
             const enabled = getEnabledTools();
             const total = document.querySelectorAll('.tool-toggle').length;
             document.getElementById('tool-count-badge').textContent = `${enabled.length}/${total} enabled`;
+            // If the user manually toggles something, the preset no longer applies.
+            detectToolsetPresetMatch();
+        }
+
+        // ===== Toolset Presets (RQ3-b) =====
+        async function loadToolsetPresets() {
+            try {
+                const resp = await fetch('/api/toolset-presets');
+                toolsetPresets = await resp.json();
+                const select = document.getElementById('toolset-preset-select');
+                // Keep the "— Custom —" first option, clear the rest
+                select.innerHTML = '<option value="">— Custom —</option>';
+                const labelOverride = { core_10: 'Core-10', standard_20: 'Standard-20', full_30: 'Full-30' };
+                for (const [key, val] of Object.entries(toolsetPresets)) {
+                    const opt = document.createElement('option');
+                    opt.value = key;
+                    const count = (val.tools || []).length;
+                    opt.textContent = `${labelOverride[key] || val.label} (${count} tools)`;
+                    select.appendChild(opt);
+                }
+                // Default to full_30 so nothing changes for existing users
+                applyToolsetPreset('full_30');
+            } catch (err) {
+                console.error('Failed to load toolset presets:', err);
+            }
+        }
+
+        function applyToolsetPreset(key) {
+            if (!key || !toolsetPresets[key]) {
+                currentToolsetPreset = null;
+                updateToolsetPresetBadge('Custom');
+                document.getElementById('toolset-preset-description').textContent =
+                    'Custom toolset — not a named experimental condition.';
+                document.getElementById('toolset-preset-select').value = '';
+                return;
+            }
+            const preset = toolsetPresets[key];
+            const wanted = new Set(preset.tools);
+            document.querySelectorAll('.tool-toggle').forEach(cb => {
+                cb.checked = wanted.has(cb.dataset.tool);
+            });
+            currentToolsetPreset = key;
+            document.getElementById('toolset-preset-select').value = key;
+            document.getElementById('toolset-preset-description').textContent =
+                preset.description || '';
+            const labelOverride = { core_10: 'Core-10', standard_20: 'Standard-20', full_30: 'Full-30' };
+            updateToolsetPresetBadge(labelOverride[key] || preset.label || key);
+            // Update count WITHOUT recursing into detectToolsetPresetMatch
+            const enabled = getEnabledTools();
+            const total = document.querySelectorAll('.tool-toggle').length;
+            document.getElementById('tool-count-badge').textContent = `${enabled.length}/${total} enabled`;
+        }
+
+        function updateToolsetPresetBadge(text) {
+            const el = document.getElementById('active-toolset-badge');
+            if (el) el.textContent = text;
+        }
+
+        function detectToolsetPresetMatch() {
+            // If the user's current checkbox selection exactly matches a known
+            // preset, keep that preset name. Otherwise mark as Custom.
+            const enabled = new Set(getEnabledTools());
+            for (const [key, val] of Object.entries(toolsetPresets)) {
+                const wanted = new Set(val.tools || []);
+                if (wanted.size === enabled.size && [...wanted].every(t => enabled.has(t))) {
+                    currentToolsetPreset = key;
+                    const labelOverride = { core_10: 'Core-10', standard_20: 'Standard-20', full_30: 'Full-30' };
+                    updateToolsetPresetBadge(labelOverride[key] || val.label || key);
+                    document.getElementById('toolset-preset-select').value = key;
+                    return;
+                }
+            }
+            currentToolsetPreset = null;
+            updateToolsetPresetBadge('Custom');
+            document.getElementById('toolset-preset-select').value = '';
         }
 
         // ===== Session Type & Parent Session =====
@@ -1929,6 +2212,7 @@ ${htmlBody}
                             model: selectedModel,
                             system_prompt: systemPrompt,
                             enabled_tools: enabledTools,
+                            toolset_preset: currentToolsetPreset,
                             max_turns_per_session: parseInt(document.getElementById('max-turns-slider').value) || 0,
                             no_timeout: document.getElementById('no-timeout-toggle').checked,
                             auto_progress: true,
@@ -1966,6 +2250,7 @@ ${htmlBody}
                         model: selectedModel,
                         system_prompt: systemPrompt,
                         enabled_tools: enabledTools,
+                        toolset_preset: currentToolsetPreset,
                         session_type: sessionType,
                         parent_session_id: parentSessionId,
                         vuln_category: vulnCategory,
@@ -2810,10 +3095,357 @@ ${htmlBody}
             }
         }
 
+        // ===========================================================
+        // ===== MONITOR view: live matrix status (zero impact) ======
+        // ===========================================================
+        // Identifies "matrix sessions" by toolset_preset being non-null
+        // and groups by tier. The orchestrator's /api/sessions endpoint
+        // is the single source of truth — no DB access, no file polling.
+
+        const MONITOR_MATRIX_TOTAL = 27;  // matches scripts/sprint_matrix.py (3 turn blocks × 3 toolsets × 3 phases)
+
+        function _monPad(n) { return String(n).padStart(2, '0'); }
+        function _monClock(ms) {
+            const s = Math.floor(ms / 1000);
+            const h = Math.floor(s / 3600);
+            const m = Math.floor((s % 3600) / 60);
+            const sec = s % 60;
+            return (h > 0 ? `${h}:${_monPad(m)}` : `${m}`) + `:${_monPad(sec)}`;
+        }
+        function _monDur(s) {
+            if (!s && s !== 0) return '—';
+            s = Number(s);
+            if (s < 60) return s + 's';
+            return Math.floor(s / 60) + 'm' + _monPad(s % 60) + 's';
+        }
+        function _monStatusColor(st) {
+            if (st === 'completed') return 'var(--neon-green)';
+            if (st === 'running') return 'var(--neon-yellow)';
+            if (st === 'error' || st === 'failed' || st === 'timeout' || st === 'stopped') return 'var(--neon-pink)';
+            return '#5a5a6a';
+        }
+        function _monTierColor(t) {
+            if (t === 'core_10') return 'var(--neon-cyan)';
+            if (t === 'standard_20') return 'var(--neon-pink)';
+            if (t === 'full_30') return 'var(--neon-green)';
+            return '#5a5a6a';
+        }
+        function _monTierLabel(t) {
+            if (t === 'core_10') return 'Core-10';
+            if (t === 'standard_20') return 'Standard-20';
+            if (t === 'full_30') return 'Full-30';
+            return '—';
+        }
+
+        // Cache for full session details (the /api/sessions list endpoint
+        // doesn't include toolset_preset, so we have to fetch each session's
+        // full row from /api/sessions/{id} once and cache it). Completed
+        // sessions never change so they're cached forever; running ones get
+        // re-fetched every tick.
+        if (!window.__monDetailCache) window.__monDetailCache = {};
+
+        async function _monGetDetail(id, status) {
+            const cache = window.__monDetailCache;
+            if (cache[id] && cache[id].status === 'completed') return cache[id];
+            try {
+                const r = await fetch(`/api/sessions/${id}`, { cache: 'no-store' });
+                if (!r.ok) return cache[id] || null;
+                const detail = await r.json();
+                cache[id] = detail;
+                return detail;
+            } catch (e) {
+                return cache[id] || null;
+            }
+        }
+
+        async function monitorTick() {
+            // Pull all sessions from the orchestrator (newest first)
+            let list;
+            try {
+                const r = await fetch('/api/sessions', { cache: 'no-store' });
+                list = await r.json();
+            } catch (e) {
+                document.getElementById('mon-last-refresh').textContent = 'fetch failed';
+                return;
+            }
+            if (!Array.isArray(list)) return;
+
+            // Also pull all chains so we can look up max_turns_per_session
+            // for chain children (whose own session row doesn't return it).
+            let chainMap = window.__monChainMap || {};
+            try {
+                const cr = await fetch('/api/chains', { cache: 'no-store' });
+                const chains = await cr.json();
+                if (Array.isArray(chains)) {
+                    chainMap = {};
+                    chains.forEach(c => { chainMap[c.id] = c; });
+                    window.__monChainMap = chainMap;
+                }
+            } catch (e) { /* keep stale chainMap */ }
+
+            // The list endpoint doesn't include toolset_preset. Hydrate the
+            // top ~30 most recent sessions with their full detail rows so we
+            // know which ones belong to the matrix.
+            const top = list.slice(0, 30);
+            const details = await Promise.all(top.map(s => _monGetDetail(s.id, s.status)));
+            // Merge chain_id from the list view onto the detail rows so we can
+            // look up the parent chain's max_turns_per_session.
+            top.forEach((listRow, i) => {
+                if (details[i] && listRow.chain_id) details[i].chain_id = listRow.chain_id;
+            });
+            const all = details.filter(Boolean);
+
+            // "Matrix sessions" = anything with a non-null toolset_preset.
+            // This catches both the cold/warm/chain rows the matrix driver creates
+            // AND interactive dashboard sessions tagged with a tier.
+            const matrixAll = all.filter(s => s.toolset_preset);
+
+            // Identify the CURRENT matrix run by walking back from the newest
+            // session and stopping at the first gap > 30 minutes between
+            // consecutive created_at timestamps. Anything older than that gap
+            // belongs to a previous matrix run and shouldn't be counted in the
+            // KPI (the recent-sessions table still shows everything).
+            // sessions arrive sorted DESC by created_at from /api/sessions.
+            const sortedDesc = matrixAll.slice().sort((a, b) =>
+                new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+            const GAP_MS = 30 * 60 * 1000;
+            const currentRunIds = new Set();
+            if (sortedDesc.length > 0) {
+                let prevT = new Date(sortedDesc[0].created_at).getTime();
+                currentRunIds.add(sortedDesc[0].id);
+                for (let i = 1; i < sortedDesc.length; i++) {
+                    const t = new Date(sortedDesc[i].created_at).getTime();
+                    if (prevT - t > GAP_MS) break;
+                    currentRunIds.add(sortedDesc[i].id);
+                    prevT = t;
+                }
+            }
+            const matrix = matrixAll.filter(s => currentRunIds.has(s.id));
+
+            // Refresh KPIs.
+            // The matrix driver schedules 27 LOGICAL entries (3 turn × 3 toolset × 3 phase),
+            // but each `chain` entry expands into 4 DB sessions (one per chain phase).
+            // To match the 27 denominator, we collapse chain children: count one
+            // logical entry per (chain_id) instead of per child session.
+            const seenChains = new Set();
+            let logicalCompleted = 0;
+            const completedDb = matrix.filter(s => s.status === 'completed');
+            for (const s of completedDb) {
+                if (s.session_type === 'chain') {
+                    if (s.chain_id && !seenChains.has(s.chain_id)) {
+                        seenChains.add(s.chain_id);
+                        logicalCompleted += 1;  // count this whole chain ONCE
+                    } else if (!s.chain_id) {
+                        logicalCompleted += 1;
+                    }
+                } else {
+                    logicalCompleted += 1;
+                }
+            }
+            // Note: a chain isn't truly "complete" until ALL 4 of its child sessions
+            // are completed. We approximate by counting any chain that has at least
+            // one completed child as "in progress". The matrix driver only writes
+            // a chain row to the CSV after all 4 phases finish, so for the matrix
+            // CSV view this matches; for the DB-derived view it's approximate.
+            const completed = logicalCompleted;
+            const running = matrix.filter(s => s.status === 'running');
+            const totalFindings = matrix.reduce((sum, s) => sum + (s.total_findings || 0), 0);
+
+            document.getElementById('mon-kpi-sessions').textContent = `${completed} / ${MONITOR_MATRIX_TOTAL}`;
+            document.getElementById('mon-kpi-sessions-sub').textContent =
+                `${Math.round(completed / MONITOR_MATRIX_TOTAL * 100)}% complete`;
+            document.getElementById('mon-kpi-findings').textContent = totalFindings;
+
+            if (running.length > 0) {
+                const r = running[0]; // newest
+                document.getElementById('mon-kpi-running').textContent = running.length;
+                document.getElementById('mon-kpi-running-sub').textContent =
+                    `${r.session_type}-${_monTierLabel(r.toolset_preset)}  step ${r.total_steps || 0}`;
+            } else if (completed >= MONITOR_MATRIX_TOTAL) {
+                document.getElementById('mon-kpi-running').textContent = '✓';
+                document.getElementById('mon-kpi-running-sub').textContent = 'matrix complete';
+            } else {
+                document.getElementById('mon-kpi-running').textContent = '—';
+                document.getElementById('mon-kpi-running-sub').textContent = 'idle';
+            }
+
+            // Wall time since user opened the monitor tab
+            const wallMs = Date.now() - (window.__monitorStart || Date.now());
+            document.getElementById('mon-kpi-wall').textContent = _monClock(wallMs);
+            // Crude ETA: avg duration of completed * sessions remaining
+            if (completed > 0 && completed < MONITOR_MATRIX_TOTAL) {
+                const avg = matrix.filter(s => s.status === 'completed' && s.total_duration_ms)
+                    .reduce((sum, s, _, arr) => sum + (s.total_duration_ms / arr.length), 0);
+                if (avg > 0) {
+                    const remaining = MONITOR_MATRIX_TOTAL - completed;
+                    const etaMs = avg * remaining;
+                    document.getElementById('mon-kpi-eta').textContent =
+                        `eta ${_monClock(etaMs)} (avg ${_monClock(avg)}/sess)`;
+                }
+            } else if (completed >= MONITOR_MATRIX_TOTAL) {
+                document.getElementById('mon-kpi-eta').textContent = 'done';
+            }
+
+            // Tier breakdown
+            const tiers = { core_10: { f: 0, s: 0 }, standard_20: { f: 0, s: 0 }, full_30: { f: 0, s: 0 } };
+            matrix.forEach(s => {
+                if (s.status !== 'completed') return;
+                if (!tiers[s.toolset_preset]) return;
+                tiers[s.toolset_preset].f += (s.total_findings || 0);
+                tiers[s.toolset_preset].s += 1;
+            });
+            document.getElementById('mon-tier-core-f').textContent = tiers.core_10.f;
+            document.getElementById('mon-tier-core-s').textContent = `${tiers.core_10.s} sessions`;
+            document.getElementById('mon-tier-std-f').textContent = tiers.standard_20.f;
+            document.getElementById('mon-tier-std-s').textContent = `${tiers.standard_20.s} sessions`;
+            document.getElementById('mon-tier-full-f').textContent = tiers.full_30.f;
+            document.getElementById('mon-tier-full-s').textContent = `${tiers.full_30.s} sessions`;
+
+            // Sessions table — show the latest 25 with toolset_preset
+            const recent = matrix.slice(0, 25);
+            const tbody = document.getElementById('mon-sessions-tbody');
+            if (recent.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="9" class="text-center py-4" style="color:#5a5a6a;">no matrix sessions yet</td></tr>';
+            } else {
+                tbody.innerHTML = recent.map(s => {
+                    const dur = s.total_duration_ms ? _monDur(Math.floor(s.total_duration_ms / 1000)) : '—';
+                    const tierLabel = _monTierLabel(s.toolset_preset);
+                    const tierColor = _monTierColor(s.toolset_preset);
+                    const stColor = _monStatusColor(s.status);
+                    const created = (s.created_at || '').slice(11);
+                    // max_turns derivation:
+                    //   1) if this is a chain child, look up the parent chain's max_turns_per_session
+                    //   2) else, for completed sessions, total_steps == max (disable_stagnation makes runs hit the cap)
+                    //   3) else "?" for running non-chain sessions
+                    let maxTurns = '?';
+                    if (s.chain_id && chainMap[s.chain_id] && chainMap[s.chain_id].max_turns_per_session) {
+                        maxTurns = chainMap[s.chain_id].max_turns_per_session;
+                    } else if (s.status === 'completed' && s.total_steps) {
+                        maxTurns = s.total_steps;
+                    }
+                    return `<tr style="border-bottom:1px solid #14141e;">
+                        <td class="py-1 px-2" style="color:#a8a8c0;">${s.id}</td>
+                        <td class="py-1 px-2">${s.session_type || ''}</td>
+                        <td class="py-1 px-2"><span style="color:${tierColor}; border:1px solid ${tierColor}; padding:1px 6px; border-radius:3px; font-size:0.65rem;">${tierLabel}</span></td>
+                        <td class="py-1 px-2 text-right" style="color:var(--neon-yellow);">${maxTurns}</td>
+                        <td class="py-1 px-2"><span style="color:${stColor}; font-weight:600;">${s.status || '—'}</span></td>
+                        <td class="py-1 px-2 text-right" style="color:#a8a8c0;">${s.total_steps ?? 0}</td>
+                        <td class="py-1 px-2 text-right" style="color:var(--neon-pink); font-weight:600;">${s.total_findings ?? 0}</td>
+                        <td class="py-1 px-2 text-right" style="color:#7a7a8a;">${dur}</td>
+                        <td class="py-1 px-2" style="color:#5a5a6a;">${created}</td>
+                    </tr>`;
+                }).join('');
+            }
+
+            // ====== FINDINGS → TOOL ATTRIBUTION ======
+            // For every completed session in the current run, fetch its
+            // findings + steps and pair each finding with the most recent
+            // step (= tool call) that preceded it. Cache by session id —
+            // completed sessions never change, so each is fetched once.
+            if (!window.__monFindingsCache) window.__monFindingsCache = {};
+            const fcache = window.__monFindingsCache;
+            const matrixCompleted = matrix.filter(s => s.status === 'completed');
+            // Also include running sessions so live findings appear, but
+            // re-fetch them every tick (don't pin in cache).
+            const matrixRunning = matrix.filter(s => s.status === 'running');
+
+            const findingsRows = [];
+            await Promise.all(
+                matrixCompleted.concat(matrixRunning).map(async (s) => {
+                    if (s.status === 'completed' && fcache[s.id]) {
+                        findingsRows.push(...fcache[s.id]);
+                        return;
+                    }
+                    try {
+                        const [fr, sr] = await Promise.all([
+                            fetch(`/api/sessions/${s.id}/findings`, { cache: 'no-store' }),
+                            fetch(`/api/sessions/${s.id}/steps`, { cache: 'no-store' }),
+                        ]);
+                        const findings = await fr.json();
+                        const steps = await sr.json();
+                        if (!Array.isArray(findings) || findings.length === 0) {
+                            if (s.status === 'completed') fcache[s.id] = [];
+                            return;
+                        }
+                        // Sort steps ascending by created_at for the timestamp join
+                        const stepsAsc = (Array.isArray(steps) ? steps : []).slice().sort(
+                            (a, b) => new Date(a.created_at) - new Date(b.created_at));
+                        const rows = findings.map(f => {
+                            const fT = new Date(f.created_at).getTime();
+                            // most-recent step with created_at <= finding's created_at
+                            let bestTool = '?';
+                            let bestStepNum = '';
+                            for (let i = stepsAsc.length - 1; i >= 0; i--) {
+                                const st = stepsAsc[i];
+                                if (new Date(st.created_at).getTime() <= fT && st.tool_called) {
+                                    bestTool = st.tool_called;
+                                    bestStepNum = st.step_number;
+                                    break;
+                                }
+                            }
+                            return {
+                                session_id: s.id,
+                                tier: s.toolset_preset,
+                                vuln_type: f.vuln_type || '?',
+                                severity: (f.severity || '').toLowerCase(),
+                                tool: bestTool,
+                                step_num: bestStepNum,
+                                url: f.url || '',
+                            };
+                        });
+                        if (s.status === 'completed') fcache[s.id] = rows;
+                        findingsRows.push(...rows);
+                    } catch (e) { /* ignore one-off failures */ }
+                })
+            );
+
+            // Render
+            const ftbody = document.getElementById('mon-findings-tbody');
+            const fmeta = document.getElementById('mon-findings-meta');
+            if (findingsRows.length === 0) {
+                ftbody.innerHTML = '<tr><td colspan="6" class="text-center py-4" style="color:#5a5a6a;">no findings in current run yet</td></tr>';
+                fmeta.textContent = '0 findings · current run only';
+            } else {
+                // Group counts per tool for the meta line
+                const byTool = {};
+                findingsRows.forEach(r => { byTool[r.tool] = (byTool[r.tool] || 0) + 1; });
+                const toolSummary = Object.entries(byTool)
+                    .sort((a, b) => b[1] - a[1])
+                    .slice(0, 6)
+                    .map(([t, n]) => `${t}×${n}`)
+                    .join(' · ');
+                fmeta.textContent = `${findingsRows.length} findings · ${toolSummary}`;
+
+                // Render newest sessions first
+                const sevColor = (s) => s === 'critical' ? 'var(--neon-pink)' :
+                                       s === 'high' ? 'var(--neon-pink)' :
+                                       s === 'medium' ? 'var(--neon-yellow)' :
+                                       s === 'low' ? 'var(--neon-cyan)' :
+                                       '#6a6a8a';
+                ftbody.innerHTML = findingsRows.map(r => {
+                    const tierLabel = _monTierLabel(r.tier);
+                    const tierColor = _monTierColor(r.tier);
+                    const url = r.url.length > 70 ? r.url.slice(0, 70) + '…' : r.url;
+                    return `<tr style="border-bottom:1px solid #14141e;">
+                        <td class="py-1 px-2" style="color:#a8a8c0;">${r.session_id}</td>
+                        <td class="py-1 px-2"><span style="color:${tierColor}; border:1px solid ${tierColor}; padding:1px 5px; border-radius:3px; font-size:0.6rem;">${tierLabel}</span></td>
+                        <td class="py-1 px-2" style="color:#d8d8e8;">${r.vuln_type}</td>
+                        <td class="py-1 px-2" style="color:${sevColor(r.severity)}; font-weight:600;">${r.severity || '—'}</td>
+                        <td class="py-1 px-2" style="color:var(--neon-green);">${r.tool}${r.step_num ? `<span style="color:#5a5a6a;"> #${r.step_num}</span>` : ''}</td>
+                        <td class="py-1 px-2" style="color:#7a7a8a; word-break:break-all;">${url}</td>
+                    </tr>`;
+                }).join('');
+            }
+
+            document.getElementById('mon-last-refresh').textContent =
+                'refreshed ' + new Date().toLocaleTimeString();
+        }
+
         // ===== Init =====
         checkHealth();
         setInterval(checkHealth, 15000);
         loadPresets();
+        loadToolsetPresets();
         loadModels();
         updateToolCount();
     </script>

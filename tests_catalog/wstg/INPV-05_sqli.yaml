@@ -1,0 +1,78 @@
+id: WSTG-INPV-05
+name: SQL Injection
+category: Input Validation
+severity: high
+references:
+  - https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/07-Input_Validation_Testing/05-Testing_for_SQL_Injection
+
+target_schema:
+  required: [url, parameter]
+  optional: [method, auth_header, cookie]
+
+steps:
+  - name: baseline
+    tool: curl
+    command: >-
+      curl -s -o /dev/null -w "%{http_code}" "{{url}}?{{parameter}}=1"
+    evaluators:
+      - type: regex
+        pattern: '^[23]\d\d$'
+        # Baseline check only — no finding emitted, just gates next steps.
+      - type: regex
+        pattern: '^[45]\d\d$'
+        when: previous_failure
+        stop_after: true
+
+  - name: error_based_probe
+    tool: curl
+    # Use a string likely to be present in a real table + single quote to
+    # provoke a parse error (q=1' often returns empty data because '1' just
+    # doesn't match any row). The follow-on probes broaden the payload set.
+    command: >-
+      bash -c "curl -s \"{{url}}?{{parameter}}=apple%27\"; echo; curl -s \"{{url}}?{{parameter}}=%27%20OR%20%271%27%3D%271\""
+    evaluators:
+      - type: regex
+        # Broad SQL-error signatures across MySQL, PG, Oracle, MSSQL, SQLite,
+        # plus generic ORM/driver wrappers seen in Node, Python, Ruby, .NET.
+        pattern: >-
+          SQL syntax|mysql_fetch|mysql_num_rows|You have an error in your SQL|ORA-\d+|PostgreSQL.*ERROR|
+          SQLITE_ERROR|sqlite3\.|SQLite3::|SQLSTATE|System\.Data\.SQLClient|ODBC SQL Server Driver|
+          Microsoft OLE DB Provider for SQL Server|Warning.*mysqli?_|Warning.*pg_|near.*syntax error
+        emit_finding:
+          vuln_type: SQL Injection (error-based)
+          severity: high
+
+  - name: sqlmap_scan
+    tool: sqlmap
+    when: no_finding_yet
+    command: >-
+      sqlmap -u "{{url}}?{{parameter}}=1" -p {{parameter}} --batch --level 3 --risk 2
+      --random-agent --technique BEUST --timeout 10 --retries 1
+    evaluators:
+      - type: regex
+        pattern: 'parameter .* is .* vulnerable|appears to be .* injectable'
+        emit_finding:
+          vuln_type: SQL Injection
+          severity: high
+
+  - name: llm_judge
+    tool: curl
+    when: no_finding_yet
+    command: >-
+      curl -s -o /dev/null -w "noop" "{{url}}"
+    evaluators:
+      - type: llm
+        instruction: >-
+          Look at the prior step outputs in this run. sqlmap reported no clear
+          injection, but the baseline probe with a single quote may still hint
+          at instability. Did sqlmap likely miss a real vulnerability (verdict
+          = "missed"), is the endpoint genuinely safe ("safe"), or did a WAF
+          interfere ("waf")? Set matched=true only for "missed" or "waf".
+        emit_finding:
+          vuln_type: SQL Injection (suspected, LLM-flagged)
+          severity: medium
+        chain_to: [WSTG-INPV-05-WAF-BYPASS]
+
+chain:
+  on_finding:
+    - WSTG-AUTHZ-04

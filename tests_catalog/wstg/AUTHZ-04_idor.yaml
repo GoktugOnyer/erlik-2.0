@@ -1,0 +1,40 @@
+id: WSTG-AUTHZ-04
+name: Insecure Direct Object References
+category: Authorization
+severity: high
+references:
+  - https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/05-Authorization_Testing/04-Testing_for_Insecure_Direct_Object_References
+
+# This test case requires two valid auth contexts so we can compare a
+# privileged response against a lower-privileged one. Without both, the
+# step is skipped at the target-validation gate.
+target_schema:
+  required: [url_template, low_priv_token, high_priv_token]
+  optional: [object_ids]
+
+steps:
+  - name: fetch_as_high_priv
+    tool: curl
+    command: >-
+      curl -s -H "Authorization: Bearer {{high_priv_token}}" "{{url_template}}"
+    evaluators:
+      - type: regex
+        pattern: '^[45]\d\d|Unauthorized|Forbidden'
+        when: previous_failure
+        stop_after: true
+
+  - name: fetch_as_low_priv
+    tool: curl
+    command: >-
+      curl -s -H "Authorization: Bearer {{low_priv_token}}" "{{url_template}}"
+    evaluators:
+      - type: llm
+        instruction: >-
+          You are given the response a low-privileged user got when
+          requesting an object identifier that should be visible only to a
+          higher-privileged user. Set matched=true if the response leaks
+          the object (200 with the object's data, sensitive fields, or
+          PII). Set matched=false for clear 401/403/empty/error responses.
+        emit_finding:
+          vuln_type: IDOR (cross-tenant access)
+          severity: high

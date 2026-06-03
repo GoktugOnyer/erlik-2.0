@@ -1,0 +1,39 @@
+id: WSTG-BUSL-04
+name: Process Timing / Race Condition
+category: Business Logic
+severity: high
+references:
+  - https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/10-Business_Logic_Testing/04-Test_for_Process_Timing
+
+# Typical use: redeem a single-use coupon / withdraw funds / apply a discount.
+# `request_template` is a curl command body the user supplies — we fire it
+# `parallel_n` times and the LLM judges whether more than one attempt
+# succeeded when only one should have.
+target_schema:
+  required: [request_template, success_marker]
+  optional: [parallel_n, auth_header]
+
+steps:
+  - name: race_burst
+    tool: curl
+    command: >-
+      bash -c 'for i in $(seq 1 {{parallel_n}}); do ({{request_template}}) & done; wait'
+    evaluators:
+      - type: regex
+        pattern: '({{success_marker}}.*){2,}'
+        emit_finding:
+          vuln_type: Race Condition (multiple successes)
+          severity: high
+      - type: llm
+        when: no_finding_yet
+        instruction: >-
+          We fired the same request N times in parallel against an endpoint
+          that is supposed to succeed at most once (e.g. a coupon redeem or
+          a balance withdrawal). The output is the concatenation of all
+          responses. Set matched=true if you can see the success_marker
+          appearing more than once, OR if you can clearly see two different
+          successful responses (e.g. two different transaction IDs, two
+          confirmed redemptions). Otherwise matched=false.
+        emit_finding:
+          vuln_type: Race Condition (LLM-judged multiple successes)
+          severity: high

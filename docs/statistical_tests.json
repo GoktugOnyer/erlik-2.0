@@ -1,0 +1,139 @@
+{
+  "primary_comparison": "Apr17 baseline 7B vs FT-v3 7B",
+  "alpha": 0.05,
+  "mcnemar_per_gt": {
+    "both": 7,
+    "baseline_only": 6,
+    "ftv3_only": 3,
+    "neither": 19,
+    "p_exact": 0.5078125,
+    "verdict": "not significant"
+  },
+  "wilcoxon_per_session": {
+    "n_pairs": 27,
+    "baseline_mean": 8.703703703703704,
+    "ftv3_mean": 8.777777777777779,
+    "W": 109.0,
+    "p": 0.3760976076188218,
+    "verdict": "not significant"
+  },
+  "fisher_per_category_bh": [
+    {
+      "category": "Broken Access Control",
+      "n_gt": 6,
+      "baseline_hits": 1,
+      "ftv3_hits": 2,
+      "p_raw": 1.0,
+      "p_bh": 1.0,
+      "significant_bh": false
+    },
+    {
+      "category": "Broken Authentication",
+      "n_gt": 5,
+      "baseline_hits": 2,
+      "ftv3_hits": 1,
+      "p_raw": 1.0,
+      "p_bh": 1.0,
+      "significant_bh": false
+    },
+    {
+      "category": "CORS Misconfiguration",
+      "n_gt": 1,
+      "baseline_hits": 1,
+      "ftv3_hits": 1,
+      "p_raw": 1.0,
+      "p_bh": 1.0,
+      "significant_bh": false
+    },
+    {
+      "category": "File Upload",
+      "n_gt": 1,
+      "baseline_hits": 0,
+      "ftv3_hits": 0,
+      "p_raw": 1.0,
+      "p_bh": 1.0,
+      "significant_bh": false
+    },
+    {
+      "category": "Information Disclosure",
+      "n_gt": 3,
+      "baseline_hits": 2,
+      "ftv3_hits": 2,
+      "p_raw": 1.0,
+      "p_bh": 1.0,
+      "significant_bh": false
+    },
+    {
+      "category": "Open Redirect",
+      "n_gt": 1,
+      "baseline_hits": 0,
+      "ftv3_hits": 0,
+      "p_raw": 1.0,
+      "p_bh": 1.0,
+      "significant_bh": false
+    },
+    {
+      "category": "Prototype Pollution",
+      "n_gt": 1,
+      "baseline_hits": 0,
+      "ftv3_hits": 0,
+      "p_raw": 1.0,
+      "p_bh": 1.0,
+      "significant_bh": false
+    },
+    {
+      "category": "SQL Injection",
+      "n_gt": 3,
+      "baseline_hits": 1,
+      "ftv3_hits": 1,
+      "p_raw": 1.0,
+      "p_bh": 1.0,
+      "significant_bh": false
+    },
+    {
+      "category": "SSRF",
+      "n_gt": 1,
+      "baseline_hits": 0,
+      "ftv3_hits": 0,
+      "p_raw": 1.0,
+      "p_bh": 1.0,
+      "significant_bh": false
+    },
+    {
+      "category": "Security Misconfiguration",
+      "n_gt": 4,
+      "baseline_hits": 3,
+      "ftv3_hits": 1,
+      "p_raw": 0.48571428571428565,
+      "p_bh": 1.0,
+      "significant_bh": false
+    },
+    {
+      "category": "Sensitive Data Exposure",
+      "n_gt": 4,
+      "baseline_hits": 1,
+      "ftv3_hits": 2,
+      "p_raw": 1.0,
+      "p_bh": 1.0,
+      "significant_bh": false
+    },
+    {
+      "category": "XSS",
+      "n_gt": 4,
+      "baseline_hits": 2,
+      "ftv3_hits": 0,
+      "p_raw": 0.4285714285714286,
+      "p_bh": 1.0,
+      "significant_bh": false
+    },
+    {
+      "category": "XXE",
+      "n_gt": 1,
+      "baseline_hits": 0,
+      "ftv3_hits": 0,
+      "p_raw": 1.0,
+      "p_bh": 1.0,
+      "significant_bh": false
+    }
+  ]
+}

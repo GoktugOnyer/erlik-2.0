@@ -1,0 +1,49 @@
+id: WSTG-INFO-02
+name: Fingerprint Web Server
+category: Information Gathering
+severity: low
+references:
+  - https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/01-Information_Gathering/02-Fingerprint_Web_Server
+
+target_schema:
+  required: [url]
+
+steps:
+  - name: headers
+    tool: curl
+    command: >-
+      curl -sI -A "Mozilla/5.0" "{{url}}"
+    evaluators:
+      - type: regex
+        pattern: '^(Server|X-Powered-By|X-AspNet-Version|X-Generator):'
+        emit_finding:
+          vuln_type: Server Banner Disclosure
+          severity: low
+
+  - name: whatweb
+    tool: whatweb
+    command: >-
+      whatweb -a 3 --color=never "{{url}}"
+    evaluators:
+      - type: regex
+        # Match any technology bracket, including versioned libs.
+        # whatweb formats as "Stack[Version]" — versioned matches are the
+        # interesting ones because they let an attacker lookup CVEs.
+        pattern: '(Apache|nginx|IIS|Tomcat|Express|WordPress|Drupal|Joomla|PHP|ASP\.NET|JQuery|Node\.js|React|Vue|Angular|Bootstrap)\[[^\]]+\]'
+        emit_finding:
+          vuln_type: Technology Version Disclosed
+          severity: info
+
+  - name: waf_detect
+    tool: wafw00f
+    command: >-
+      wafw00f "{{url}}"
+    evaluators:
+      - type: regex
+        pattern: 'is behind .* WAF'
+        emit_finding:
+          vuln_type: WAF Detected (informational)
+          severity: info
+
+chain:
+  always: []

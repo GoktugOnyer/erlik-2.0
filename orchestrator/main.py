@@ -20,6 +20,14 @@ from orchestrator.models import (
 )
 from orchestrator import llm_client
 from orchestrator.tool_executor import execute_tool, check_container_running
+from orchestrator.testcase import load_catalog, find_by_id, run_test_case, run_chain
+from orchestrator.testcase.loader import CATALOG_ROOT as TESTCASE_CATALOG_ROOT
+from orchestrator.testcase.persistence import (
+    save_run as save_v2_run,
+    save_chain as save_v2_chain,
+    list_runs as list_v2_runs,
+    get_run as get_v2_run,
+)
 
 
 @asynccontextmanager
@@ -30,6 +38,67 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Erlik Pentest Agent", lifespan=lifespan)
 templates = Jinja2Templates(directory="dashboard/templates")
+
+
+# --- Toolset Presets (RQ3-b: action-space overload ablation) ---
+#
+# Three named tiers used as an experimental condition. See
+# docs/METHODOLOGY.md for the full rationale. DO NOT add a 4th tier without
+# updating the methodology documentation + the thesis.
+
+TOOLSET_PRESETS = {
+    "core_10": {
+        "label": "Core-10 (minimal, one tool per job)",
+        "description": (
+            "One tool per job, no redundant pairs, maximum OWASP category coverage "
+            "with minimum cognitive load for small LLMs (7B)."
+        ),
+        "tools": [
+            "curl", "nmap", "nuclei", "sqlmap", "dalfox",
+            "ffuf", "jwt_tool", "hydra", "pw-crawl", "zap-cli",
+        ],
+    },
+    "standard_20": {
+        "label": "Standard-20 (adds specialisation + IDOR helpers)",
+        "description": (
+            "Core-10 plus discovery/fingerprinting, redundant alternatives "
+            "(gobuster/xsstrike) to test tool-selection, and the two deterministic "
+            "capability helpers (login-helper, diff-view) for IDOR probing."
+        ),
+        "tools": [
+            "curl", "nmap", "nuclei", "sqlmap", "dalfox",
+            "ffuf", "jwt_tool", "hydra", "pw-crawl", "zap-cli",
+            "gobuster", "nikto", "whatweb", "wafw00f", "arjun",
+            "xsstrike", "commix", "sslyze",
+            "login-helper", "diff-view",
+        ],
+    },
+    "full_30": {
+        "label": "Full-30 (everything, including interactive Playwright)",
+        "description": (
+            "Standard-20 plus the long-tail tools (legacy fuzzers, password crackers, "
+            "alt TLS/fuzzer/browser) and the interactive Playwright recipe runner. "
+            "Used to test whether a large action space degrades small-model performance."
+        ),
+        "tools": [
+            "curl", "nmap", "nuclei", "sqlmap", "dalfox",
+            "ffuf", "jwt_tool", "hydra", "pw-crawl", "zap-cli",
+            "gobuster", "nikto", "whatweb", "wafw00f", "arjun",
+            "xsstrike", "commix", "sslyze",
+            "login-helper", "diff-view",
+            "dirb", "wfuzz", "crlfuzz", "netcat", "whois",
+            "john", "hashcat", "testssl", "playwright", "interactive-pw",
+        ],
+    },
+}
+
+
+def get_toolset_preset_tools(key: str | None) -> list[str] | None:
+    """Return the tool list for a named preset, or None if key is unknown/empty."""
+    if not key:
+        return None
+    preset = TOOLSET_PRESETS.get(key)
+    return list(preset["tools"]) if preset else None
 
 
 # --- Preset Prompts ---
@@ -155,6 +224,56 @@ PRESET_PROMPTS = {
             "- Cover multiple OWASP categories, don't spend all time on one\n"
             "- Use curl to explore endpoints before heavy scanning\n"
             "- Report findings as you discover them, don't wait until the end"
+        ),
+    },
+    "owasp_juiceshop": {
+        "label": "Mission: OWASP Top 10 — Juice Shop lab (Guided)",
+        "prompt": (
+            "TARGET: This preset is specific to OWASP Juice Shop. It hardcodes\n"
+            "Juice-Shop endpoints and known default credentials. Do NOT use it\n"
+            "against arbitrary real-world targets — use 'owasp_top10' instead.\n\n"
+            "MISSION: Test for OWASP Top 10 with MANDATORY coverage of every category.\n\n"
+            "BASELINE EVIDENCE FROM EARLIER RUNS shows the agent reliably finds:\n"
+            "- A03 Injection (SQLi at /rest/products/search?q)\n"
+            "- A05 Security Misconfiguration (CORS *, missing headers)\n"
+            "- A09 Information Disclosure (Express error pages)\n"
+            "But CONSISTENTLY MISSES A02, A04, A07, A08, A10 — fix that this session.\n\n"
+            "MANDATORY ACTIONS (you MUST attempt every one of these before declaring done):\n\n"
+            "[A02 Cryptographic Failures] — required tests:\n"
+            "  • POST /rest/user/login and capture the JWT from the response 'authentication.token'\n"
+            "  • Run jwt_tool with the captured token: jwt_tool <TOKEN> -X a   (alg:none attack)\n"
+            "  • Run jwt_tool <TOKEN> -X k                                    (key confusion)\n"
+            "  • If any attack succeeds, report as A02 Cryptographic Failures (high)\n\n"
+            "[A07 Authentication Failures] — required tests:\n"
+            "  • Try the well-known Juice Shop default credentials with curl:\n"
+            "      curl -s -X POST -H 'Content-Type: application/json' \\\n"
+            "        -d '{\"email\":\"admin@juice-sh.op\",\"password\":\"admin123\"}' \\\n"
+            "        http://juice-shop:3000/rest/user/login\n"
+            "  • Repeat with jim@juice-sh.op/ncc-1701, bender@juice-sh.op/OhG0d70CertC1f1cates\n"
+            "  • Successful login = A07 finding (high)\n"
+            "  • Run hydra against /rest/user/login with /usr/share/wordlists/rockyou.txt — but cap to top 100\n\n"
+            "[A08 SW/Data Integrity Failures] — required tests:\n"
+            "  • Run nuclei -u http://juice-shop:3000 -tags cve,vuln,exposure  (will find outdated dependencies)\n"
+            "  • Inspect /api-docs/swagger.json and any /package.json or /package-lock.json for known-vuln deps\n\n"
+            "[A10 SSRF] — required tests:\n"
+            "  • For each ?url=, ?redirect=, ?to=, ?fetch= parameter discovered:\n"
+            "      curl -s 'http://juice-shop:3000/redirect?to=http://evil.example.com'\n"
+            "      curl -s 'http://juice-shop:3000/redirect?to=file:///etc/passwd'\n"
+            "  • Run nuclei with -tags ssrf if not already done\n\n"
+            "[A04 Insecure Design / Business Logic] — required tests:\n"
+            "  • After authenticating as a customer (jim@juice-sh.op):\n"
+            "      curl with Authorization: Bearer <token> against /api/Users  (should be admin-only)\n"
+            "      Use diff-view to compare /api/Users responses between jim's token and admin's token\n"
+            "  • Try /api/BasketItems with quantity: -1 (negative quantity logic)\n"
+            "  • Try /api/Feedbacks with rating: 6 (out-of-range rating)\n\n"
+            "AVAILABLE RESOURCES:\n"
+            "- Password list: /usr/share/wordlists/rockyou.txt\n"
+            "- Capability helpers: login-helper, diff-view, interactive-pw\n"
+            "- jwt_tool, hydra, nuclei (run with -tags), curl\n\n"
+            "PRIORITY:\n"
+            "- The 5 mandatory actions above come BEFORE any additional exploration.\n"
+            "- Skipping any of them = incomplete session.\n"
+            "- Report findings as you go, don't batch them at the end."
         ),
     },
     "custom": {
@@ -440,11 +559,21 @@ def _parse_tool_output(tool_name: str, output: str, command: str) -> str:
 
     elif tool_name in ("gobuster", "ffuf", "dirb", "wfuzz"):
         for line in lines:
-            m = re.search(r'(/\S+)\s+\(Status:\s*(\d+)\)', line)
+            # Primary: gobuster v3+ style "path (Status: 200) [Size: ...]"
+            # Slash is now optional — gobuster v3.8.2 emits "api (Status: 500)" without leading /.
+            m = re.search(r'(/?\S+)\s+\(Status:\s*(\d+)\)', line)
             if not m:
+                # ffuf default output: "path                    [Status: 200, ..."
                 m = re.search(r'(\S+)\s+\[Status:\s*(\d+)', line)
-            if m and m.group(2) in ("200", "301", "302", "307"):
-                findings.append(f"  {m.group(1)} (status {m.group(2)})")
+            if not m:
+                # dirb: "+ http://target/path (CODE:200|SIZE:...)"
+                m = re.search(r'(https?://\S+)\s+\(CODE:(\d+)', line)
+            if m and m.group(2) in ("200", "301", "302", "307", "401", "403"):
+                path = m.group(1)
+                # Skip obvious progress/decoration lines
+                if path in ("Progress:", "::", "---", "===") or path.startswith("==="):
+                    continue
+                findings.append(f"  {path} (status {m.group(2)})")
         if findings:
             return f"DISCOVERED PATHS ({len(findings)}):\n" + "\n".join(findings[:15])
 
@@ -468,7 +597,26 @@ def _parse_tool_output(tool_name: str, output: str, command: str) -> str:
 
     elif tool_name == "whatweb":
         techs = re.findall(r'\[([^\]]+)\]', output)
-        useful = [t for t in techs if len(t) < 40 and not t.startswith("1m") and not t.startswith("0m")]
+        # whatweb wraps everything in brackets — HTTP statuses, country codes,
+        # IPs, header values. Filter aggressively to keep only plausible techs.
+        NOISE_EXACT = {"RESERVED", "ZZ", "200 OK", "301", "302", "307", "SAMEORIGIN",
+                       "DENY", "no-cache", "*", "public"}
+        NOISE_PREFIX = ("1m", "0m", "HTTP/", "max-age=", 'W/"', "W/'")
+        def _is_tech(t: str) -> bool:
+            if len(t) >= 40:
+                return False
+            if t in NOISE_EXACT:
+                return False
+            if any(t.startswith(p) for p in NOISE_PREFIX):
+                return False
+            # IP addresses (e.g. "192.168.107.2")
+            if re.match(r'^\d{1,3}(?:\.\d{1,3}){3}$', t):
+                return False
+            # Bare numerics (versions inside a tech name are fine — bare numbers alone aren't)
+            if re.match(r'^\d+(\.\d+)?$', t):
+                return False
+            return True
+        useful = [t for t in techs if _is_tech(t)]
         if useful:
             return "TECHNOLOGIES: " + ", ".join(useful[:10])
 
@@ -824,8 +972,17 @@ def _auto_detect_findings(tool_name: str, output: str, command: str) -> list[dic
             })
 
         # --- Stack trace / error disclosure ---
-        if "stacktrace" in output_lower or "stack trace" in output_lower or \
-                ("error" in output_lower and ("express" in output_lower or "node" in output_lower)):
+        # A 500 Express page by itself is NOT a finding. Require evidence of
+        # actual internal information leakage: stack frames, filesystem paths,
+        # or line-numbered source frames.
+        stacktrace_markers = ("stacktrace", "stack trace", "traceback")
+        filesystem_markers = ("/node_modules/", "/usr/", "/home/", "/root/",
+                              "/app/", "/var/", "/juice-shop/")
+        frame_pattern = re.search(r'\.(?:js|ts|py|rb|php):\d+:\d+', output)
+        has_stacktrace = any(m in output_lower for m in stacktrace_markers)
+        has_fs_path = any(m in output for m in filesystem_markers)
+        has_frame = bool(frame_pattern)
+        if has_stacktrace or has_fs_path or has_frame:
             err_match = re.search(r'<h2><em>\d+</em>\s*(.+?)</h2>', output)
             err_msg = err_match.group(1).strip() if err_match else "Server error with stack trace"
             findings.append({
@@ -947,38 +1104,37 @@ def _auto_detect_findings(tool_name: str, output: str, command: str) -> list[dic
     return findings
 
 
-def _build_chaining_hint(tool_name: str, parsed_output: str, command: str) -> str:
+def _build_chaining_hint(tool_name: str, parsed_output: str, command: str, target_url: str = "http://juice-shop:3000") -> str:
     """Suggest concrete next commands based on what a tool found."""
     hints = []
+    # Use the session's actual target URL for hints (target-agnostic)
+    T = target_url.rstrip("/")
 
     if tool_name == "nmap" and "OPEN PORTS" in parsed_output:
-        hints.append('Consider: whatweb http://juice-shop:3000')
-        hints.append('Consider: gobuster dir -u http://juice-shop:3000 -w /usr/share/dirb/wordlists/common.txt --exclude-length 3748')
+        hints.append(f'Consider: whatweb {T}')
+        hints.append(f'Consider: gobuster dir -u {T} -w /usr/share/dirb/wordlists/common.txt --exclude-length 3748')
 
     elif tool_name in ("gobuster", "ffuf", "dirb") and "DISCOVERED PATHS" in parsed_output:
         paths = re.findall(r'  (/\S+)', parsed_output)
         clean_paths = [p.split(" ")[0] for p in paths]
-        # Prioritize high-value paths that often contain sensitive data
         HIGH_VALUE_KEYWORDS = ["/ftp", "/admin", "/api", "/rest", "/snippets",
                                "/config", "/backup", "/robots", "/profile",
                                "/redirect", "/promotion"]
         high_value = [p for p in clean_paths if any(kw in p.lower() for kw in HIGH_VALUE_KEYWORDS)]
-        # List ALL interesting paths (200/301 status) for LLM to explore
         if high_value:
             for hv in high_value[:4]:
-                hints.append(f'Consider: curl -s http://juice-shop:3000{hv}')
+                hints.append(f'Consider: curl -s {T}{hv}')
         elif clean_paths:
             for cp in clean_paths[:3]:
-                hints.append(f'Consider: curl -s http://juice-shop:3000{cp}')
-        # Also suggest API sub-path enumeration
+                hints.append(f'Consider: curl -s {T}{cp}')
         api_paths = [p for p in clean_paths if '/api' in p.lower() or '/rest' in p.lower()]
         if api_paths:
             target = api_paths[0]
-            hints.append(f'Consider: sqlmap -u "http://juice-shop:3000{target}?q=test" --batch --level=3')
+            hints.append(f'Consider: sqlmap -u "{T}{target}?q=test" --batch --level=3')
 
     elif tool_name == "whatweb" and "TECHNOLOGIES" in parsed_output:
-        hints.append('Consider: gobuster dir -u http://juice-shop:3000 -w /usr/share/dirb/wordlists/common.txt --exclude-length 3748')
-        hints.append('Consider: nikto -h http://juice-shop:3000')
+        hints.append(f'Consider: gobuster dir -u {T} -w /usr/share/dirb/wordlists/common.txt --exclude-length 3748')
+        hints.append(f'Consider: nikto -h {T}')
 
     elif tool_name == "curl":
         url_match = re.search(r'(http\S+)', command)
@@ -1014,17 +1170,16 @@ def _build_chaining_hint(tool_name: str, parsed_output: str, command: str) -> st
             hints.append(f'Consider: curl -s {first_api}')
             hints.append(f'Consider: sqlmap -u "{first_api}?q=test" --batch --level=3')
         else:
-            hints.append('Consider: zap-cli spider http://juice-shop:3000')
+            hints.append(f'Consider: zap-cli spider {T}')
 
     elif tool_name == "zap-cli":
         if "spider" in command:
-            hints.append('MANDATORY NEXT: zap-cli active-scan http://juice-shop:3000')
-            hints.append('THEN: zap-cli alerts http://juice-shop:3000')
+            hints.append(f'MANDATORY NEXT: zap-cli active-scan {T}')
+            hints.append(f'THEN: zap-cli alerts {T}')
         elif "active-scan" in command:
-            hints.append('MANDATORY NEXT: zap-cli alerts http://juice-shop:3000')
+            hints.append(f'MANDATORY NEXT: zap-cli alerts {T}')
         elif "alerts" in command and "ZAP ALERTS" in parsed_output:
-            hints.append('Consider: curl -s http://juice-shop:3000/rest/products/search?q=test')
-            hints.append('Consider: sqlmap -u "http://juice-shop:3000/rest/products/search?q=test" --batch --level=3')
+            hints.append(f'Consider: curl -s {T}/')
 
     if hints:
         return "SUGGESTED NEXT STEPS:\n" + "\n".join(f"  → {h}" for h in hints[:3])
@@ -1039,8 +1194,8 @@ IMPORTANT RULES:
 3. When you find a vulnerability, report it immediately using the "finding" action BEFORE running the next tool.
 4. You MUST NOT call "done" until you have run tools from at least 3 of the 4 testing phases listed below. You will be BLOCKED from finishing if you skip phases.
 
-TARGET: http://juice-shop:3000
-ALWAYS use the full URL "http://juice-shop:3000" as the target. NEVER use bare hostnames without http://.
+TARGET: {target_url}
+ALWAYS use the full URL "{target_url}" as the target. NEVER use bare hostnames without http://.
 
 MANDATORY TESTING PHASES (you must cover at least 3 before calling "done"):
   Phase 1 — RECON: Identify services, technologies, server info, and security headers.
@@ -1055,36 +1210,36 @@ MANDATORY TESTING PHASES (you must cover at least 3 before calling "done"):
 RESPONSE FORMAT — always return exactly one JSON object:
 
 To run a tool:
-{"action": "run_tool", "command": "nmap -sV juice-shop -p 3000", "reason": "Port scan to identify services"}
+{"action": "run_tool", "command": "nmap -sV {target_host} -p {target_port}", "reason": "Port scan to identify services"}
 
 To report a vulnerability:
-{"action": "finding", "vuln_type": "SQL Injection", "severity": "high", "url": "http://juice-shop:3000/rest/products/search?q=test", "parameter": "q", "evidence": "Error message revealed SQL syntax"}
+{"action": "finding", "vuln_type": "SQL Injection", "severity": "high", "url": "{target_url}/endpoint?q=test", "parameter": "q", "evidence": "Error message revealed SQL syntax"}
 
 To finish (ONLY after covering at least 3 phases):
 {"action": "done", "summary": "Completed testing. Found 3 vulnerabilities."}
 
 SEVERITY LEVELS: critical, high, medium, low, info
 
-TOOL USAGE EXAMPLES (use these exact URL formats):
-- nmap -sV juice-shop -p 3000
-- whatweb http://juice-shop:3000
-- gobuster dir -u http://juice-shop:3000 -w /usr/share/dirb/wordlists/common.txt --exclude-length 3748
-- ffuf -u http://juice-shop:3000/FUZZ -w /usr/share/dirb/wordlists/common.txt -fs 3748
-- sqlmap -u "http://juice-shop:3000/endpoint?param=test" --batch --level=3
-- curl -s http://juice-shop:3000/api/
-- curl -sI http://juice-shop:3000  (check response headers)
-- xsstrike -u http://juice-shop:3000/endpoint?param=test
-- dalfox url http://juice-shop:3000/endpoint?param=test
-- nuclei -u http://juice-shop:3000
-- arjun -u http://juice-shop:3000/api/endpoint
+TOOL USAGE EXAMPLES (use the target URL {target_url} — NEVER use any other hostname):
+- nmap -sV {target_host} -p {target_port}
+- whatweb {target_url}
+- gobuster dir -u {target_url} -w /usr/share/dirb/wordlists/common.txt --exclude-length 3748
+- ffuf -u {target_url}/FUZZ -w /usr/share/dirb/wordlists/common.txt -fs 3748
+- sqlmap -u "{target_url}/endpoint?param=test" --batch --level=3
+- curl -s {target_url}/api/
+- curl -sI {target_url}  (check response headers)
+- xsstrike -u {target_url}/endpoint?param=test
+- dalfox url {target_url}/endpoint?param=test
+- nuclei -u {target_url}
+- arjun -u {target_url}/api/endpoint
 - hydra -l user -P /usr/share/wordlists/rockyou.txt target http-post-form "/login:user=^USER^&pass=^PASS^:Invalid"
 - jwt_tool <token> -C -d /usr/share/wordlists/rockyou.txt
 - jwt_tool <token> -X a
-- zap-cli spider http://juice-shop:3000
-- zap-cli active-scan http://juice-shop:3000
-- zap-cli alerts http://juice-shop:3000
-- pw-crawl http://juice-shop:3000  (JS-rendered crawl — finds SPA routes and API calls that static tools miss)
-- nikto -h http://juice-shop:3000
+- zap-cli spider {target_url}
+- zap-cli active-scan {target_url}
+- zap-cli alerts {target_url}
+- pw-crawl {target_url}  (JS-rendered crawl — finds SPA routes and API calls that static tools miss)
+- nikto -h {target_url}
 
 AVAILABLE RESOURCES ON THIS SYSTEM:
 - Wordlists: /usr/share/dirb/wordlists/common.txt, /usr/share/wordlists/rockyou.txt
@@ -2115,17 +2270,23 @@ async def _create_chain_session(chain_id: str, chain_row, phase: str, position: 
     enabled_tools_str = chain_row["enabled_tools"]
     max_turns = int(chain_row["max_turns_per_session"]) if chain_row["max_turns_per_session"] else DEFAULT_MAX_TURNS
     no_timeout = bool(chain_row["no_timeout"]) if chain_row["no_timeout"] else False
+    # Forward toolset_preset and disable_stagnation if the chain row carries them
+    # (defensive: older chain rows from before the migration may not have these columns)
+    toolset_preset = chain_row["toolset_preset"] if "toolset_preset" in chain_row.keys() else None
+    disable_stagnation = bool(chain_row["disable_stagnation"]) if "disable_stagnation" in chain_row.keys() and chain_row["disable_stagnation"] else False
 
     db = await get_db()
     try:
         await db.execute(
             "INSERT INTO sessions (id, target_url, scope_mode, system_prompt, model, enabled_tools, "
-            "session_type, no_timeout, max_turns, chain_id, chain_position, chain_phase) "
-            "VALUES (?, ?, ?, ?, ?, ?, 'chain', ?, ?, ?, ?, ?)",
+            "session_type, no_timeout, max_turns, chain_id, chain_position, chain_phase, "
+            "toolset_preset, disable_stagnation) "
+            "VALUES (?, ?, ?, ?, ?, ?, 'chain', ?, ?, ?, ?, ?, ?, ?)",
             (session_id, chain_row["target_url"], chain_row["scope_mode"],
              chain_row["system_prompt"], chain_row["model"], enabled_tools_str,
              1 if no_timeout else 0, max_turns,
-             chain_id, position, phase),
+             chain_id, position, phase,
+             toolset_preset, 1 if disable_stagnation else 0),
         )
         await db.commit()
     finally:
@@ -2298,6 +2459,21 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
     full_steps_data = []      # full untruncated data for file report
     full_findings_data = []   # full untruncated findings for file report
 
+    # Read the disable_stagnation flag from the session row (set by benchmark
+    # runs that don't want the auto-stop). Defaults to False for dashboard runs.
+    disable_stagnation = False
+    try:
+        _db = await get_db()
+        try:
+            _row = await _db.execute("SELECT disable_stagnation FROM sessions WHERE id = ?", (session_id,))
+            _r = await _row.fetchone()
+            if _r and "disable_stagnation" in _r.keys() and _r["disable_stagnation"]:
+                disable_stagnation = True
+        finally:
+            await _db.close()
+    except Exception:
+        pass  # column may not exist on very old DBs; default to enabled stagnation
+
     # Scale min-turns-before-done proportionally to max_turns
     # Default: 8 min out of 30 max (~50%). Scale same ratio for higher limits.
     min_turns_before_done = max(DEFAULT_MIN_TURNS_BEFORE_DONE, int(max_turns * 0.5))
@@ -2392,11 +2568,41 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
         # ===== Phase 2: SCAN — build initial prompt & start agent loop =====
         await manager.broadcast(session_id, {"type": "phase", "active": "scan"})
 
-        # Build message history
-        combined_system = TOOL_USE_SYSTEM_PROMPT
+        # Build message history. Extract host+port for template substitution.
+        from urllib.parse import urlparse
+        _pu = urlparse(target_url)
+        _target_host = _pu.hostname or "target"
+        _target_port = str(_pu.port) if _pu.port else ("443" if _pu.scheme == "https" else "80")
+        combined_system = (TOOL_USE_SYSTEM_PROMPT
+                           .replace("{target_url}", target_url)
+                           .replace("{target_host}", _target_host)
+                           .replace("{target_port}", _target_port)
+                           .replace("http://juice-shop:3000", target_url)
+                           .replace("juice-shop", _target_host))
         guided_mode = system_prompt and system_prompt.startswith("MISSION:")
         if system_prompt:
             combined_system += f"\n\nADDITIONAL INSTRUCTIONS:\n{system_prompt}"
+
+        # Inject memory/extra context if system_prompt contains accumulated knowledge
+        if system_prompt and "ACCUMULATED TARGET KNOWLEDGE" in system_prompt:
+            combined_system += f"\n\n{system_prompt}"
+
+        # Inject exploit playbooks for the 6 hard vulnerability classes when enabled
+        # (ERLIK_PLAYBOOKS=1). Target-detected by hostname/port — see orchestrator/playbooks.py.
+        try:
+            from orchestrator.playbooks import get_playbook_context
+        except ImportError:
+            from playbooks import get_playbook_context
+        _pb_ctx = get_playbook_context(target_url)
+        if _pb_ctx:
+            combined_system += f"\n\n{_pb_ctx}"
+            print(f"[playbooks {session_id[:8]}] injected {len(_pb_ctx)} chars (target={target_url})", flush=True)
+            await manager.broadcast(session_id, {
+                "type": "log", "phase": "recon",
+                "message": f"PLAYBOOKS: Injected {len(_pb_ctx)} chars of exploit playbooks",
+            })
+        else:
+            print(f"[playbooks {session_id[:8]}] skipped (ERLIK_PLAYBOOKS={'set' if os.environ.get('ERLIK_PLAYBOOKS') else 'unset'}, target={target_url})", flush=True)
 
         # Inject warm-start context if applicable
         if session_type == "warm" and parent_session_id:
@@ -2508,15 +2714,17 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
                 break
 
             # === Stagnation detection: stop if no new findings in last N turns ===
-            # Kicks in after the first 40% of turns, triggers after 5 consecutive dry turns
-            stagnation_start = max(5, int(max_turns * 0.4))
-            stagnation_threshold = max(5, int(max_turns * 0.35))
-            if turn >= stagnation_start and turns_since_last_finding >= stagnation_threshold:
-                await manager.broadcast(session_id, {
-                    "type": "log", "phase": "system",
-                    "message": f"⚠ No new findings in {turns_since_last_finding} turns. Auto-stopping to save resources.",
-                })
-                break
+            # Kicks in after the first 40% of turns, triggers after ~35% dry turns.
+            # Disabled when the session row sets disable_stagnation=1 (benchmark runs).
+            if not disable_stagnation:
+                stagnation_start = max(5, int(max_turns * 0.4))
+                stagnation_threshold = max(5, int(max_turns * 0.35))
+                if turn >= stagnation_start and turns_since_last_finding >= stagnation_threshold:
+                    await manager.broadcast(session_id, {
+                        "type": "log", "phase": "system",
+                        "message": f"⚠ No new findings in {turns_since_last_finding} turns. Auto-stopping to save resources.",
+                    })
+                    break
 
             # Trim messages to fit context window (prevents Ollama silent truncation)
             messages = _trim_messages(messages, recent_commands=recent_commands,
@@ -2524,11 +2732,29 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
                                       discoveries=sticky_discoveries)
 
             # Call LLM
+            # Diagnostic prints + hard 5-min asyncio ceiling so a hung ollama
+            # can't freeze the agent loop indefinitely. The httpx-level retry
+            # in llm_client gives 540s of internal budget; if even that hangs,
+            # asyncio.wait_for kills it cleanly and the session reports error.
             start_time = time.time()
+            print(f"[agent {session_id[:8]}] turn {turn+1}/{max_turns} → LLM call (msgs={len(messages)})", flush=True)
             try:
-                response = await llm_client.chat(messages, model=model)
+                response = await asyncio.wait_for(
+                    llm_client.chat(messages, model=model),
+                    timeout=300.0,  # 5-minute absolute ceiling per LLM call
+                )
                 duration = int((time.time() - start_time) * 1000)
+                print(f"[agent {session_id[:8]}] turn {turn+1}/{max_turns} ← LLM ok ({duration}ms)", flush=True)
+            except asyncio.TimeoutError:
+                print(f"[agent {session_id[:8]}] turn {turn+1}/{max_turns} ← LLM TIMEOUT after 300s", flush=True)
+                await manager.broadcast(session_id, {
+                    "type": "log", "phase": "error",
+                    "message": f"LLM call exceeded 300s ceiling on turn {turn+1} — aborting session",
+                })
+                await _finish_session(session_id, "error")
+                return
             except Exception as e:
+                print(f"[agent {session_id[:8]}] turn {turn+1}/{max_turns} ← LLM error: {e}", flush=True)
                 await manager.broadcast(session_id, {
                     "type": "log", "phase": "error",
                     "message": f"LLM error: {e}",
@@ -2559,7 +2785,14 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
                 turns_since_last_finding += 1
 
             # Parse action from LLM response
-            action = _parse_llm_action(response)
+            print(f"[agent {session_id[:8]}] parsing LLM response ({len(response)} chars): {response[:100]}...", flush=True)
+            try:
+                action = _parse_llm_action(response)
+                print(f"[agent {session_id[:8]}] parsed action: {action}", flush=True)
+            except Exception as parse_err:
+                print(f"[agent {session_id[:8]}] PARSE CRASH: {parse_err}", flush=True)
+                import traceback; traceback.print_exc()
+                action = None
 
             if not action:
                 # LLM didn't return valid JSON — log its text and nudge it
@@ -2648,7 +2881,7 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
 
                 # Execute the tool
                 if kali_running:
-                    result = await execute_tool(command, enabled_tools, no_timeout=no_timeout)
+                    result = await execute_tool(command, enabled_tools, no_timeout=no_timeout, target_url=target_url)
 
                     tool_name = result["tool"]
                     tools_executed.add(tool_name)  # track for phase enforcement
@@ -2685,7 +2918,7 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
 
                     # Parse key findings from output
                     parsed_findings = _parse_tool_output(tool_name, tool_output, command)
-                    chaining_hint = _build_chaining_hint(tool_name, parsed_findings, command) if parsed_findings else ""
+                    chaining_hint = _build_chaining_hint(tool_name, parsed_findings, command, target_url) if parsed_findings else ""
 
                     # === Populate sticky discoveries for context persistence ===
                     if parsed_findings:
@@ -3071,11 +3304,14 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
                 if len(completed_phases) < min_phases and uncovered and turn < max_turns - 2:
                     first_missing = uncovered[0]
                     first_phase_name = first_missing.split(" (")[0]
+                    from urllib.parse import urlparse as _up
+                    _h = _up(target_url).hostname or "target"
+                    _p = str(_up(target_url).port) if _up(target_url).port else ("443" if target_url.startswith("https") else "80")
                     suggestion_cmds = {
-                        "recon": '{"action": "run_tool", "command": "nmap -sV juice-shop -p 3000", "reason": "Port scan to identify services"}',
-                        "discovery": '{"action": "run_tool", "command": "gobuster dir -u http://juice-shop:3000 -w /usr/share/dirb/wordlists/common.txt --exclude-length 3748", "reason": "Directory enumeration to find hidden paths"}',
-                        "vuln_scan": '{"action": "run_tool", "command": "nuclei -u http://juice-shop:3000 -severity medium,high,critical", "reason": "Scanning for known vulnerabilities"}',
-                        "exploitation": '{"action": "run_tool", "command": "curl -s http://juice-shop:3000/api/Products", "reason": "Probing API endpoints for data exposure"}',
+                        "recon": f'{{"action": "run_tool", "command": "nmap -sV {_h} -p {_p}", "reason": "Port scan to identify services"}}',
+                        "discovery": f'{{"action": "run_tool", "command": "gobuster dir -u {target_url} -w /usr/share/dirb/wordlists/common.txt --exclude-length 3748", "reason": "Directory enumeration to find hidden paths"}}',
+                        "vuln_scan": f'{{"action": "run_tool", "command": "nuclei -u {target_url} -severity medium,high,critical", "reason": "Scanning for known vulnerabilities"}}',
+                        "exploitation": f'{{"action": "run_tool", "command": "curl -s {target_url}/api/", "reason": "Probing API endpoints for data exposure"}}',
                     }
                     suggested = suggestion_cmds.get(first_phase_name, "")
 
@@ -3249,6 +3485,7 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
                     "type": "log", "phase": "error",
                     "message": f"Chain auto-progression failed: {e}",
                 })
+                await _fail_parent_chain(session_id, "auto-progress error")
 
     except asyncio.CancelledError:
         await manager.broadcast(session_id, {
@@ -3256,18 +3493,64 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
             "message": "Agent stopped by user",
         })
         await _finish_session(session_id, "stopped")
+        # If this is a chain session, mark the parent chain stopped too — otherwise
+        # any external poller (matrix driver, dashboard) waits forever for terminal status.
+        if session_type == "chain":
+            await _fail_parent_chain(session_id, "child cancelled", terminal_status="stopped")
 
     except Exception as e:
+        import traceback; traceback.print_exc()
+        print(f"[AGENT CRASH] {session_id}: {e}", flush=True)
         await manager.broadcast(session_id, {
             "type": "log", "phase": "error",
             "message": f"Unexpected error: {e}",
         })
         await _finish_session(session_id, "error")
+        # Same fix for the error path: a failed chain child must propagate up to
+        # the chain row so poll_chain can return. Otherwise the matrix gets stuck.
+        if session_type == "chain":
+            await _fail_parent_chain(session_id, f"child error: {e}")
 
     finally:
         if db:
             await db.close()
         running_tasks.pop(session_id, None)
+
+
+async def _fail_parent_chain(session_id: str, reason: str, terminal_status: str = "failed"):
+    """Mark this session's parent chain as failed/stopped and emit a broadcast.
+
+    Called when a chain child errors or is cancelled, so that:
+      1. External pollers (matrix driver, dashboard MONITOR) can return
+      2. The chain doesn't sit in 'running' state forever
+      3. The other completed phases of the chain are still preserved in the DB
+    """
+    db = await get_db()
+    try:
+        row = await db.execute(
+            "SELECT chain_id FROM sessions WHERE id = ?", (session_id,)
+        )
+        s = await row.fetchone()
+        if not s or not s["chain_id"]:
+            return
+        chain_id = s["chain_id"]
+        await db.execute(
+            "UPDATE chains SET status = ?, updated_at = datetime('now') "
+            "WHERE id = ? AND status = 'running'",
+            (terminal_status, chain_id),
+        )
+        await db.commit()
+    except Exception as e:
+        print(f"[_fail_parent_chain] {e}", flush=True)
+    finally:
+        await db.close()
+    try:
+        await manager.broadcast(session_id, {
+            "type": "log", "phase": "error",
+            "message": f"Parent chain {chain_id} marked '{terminal_status}' ({reason})",
+        })
+    except Exception:
+        pass
 
 
 async def _finish_session(session_id: str, status: str):
@@ -3299,10 +3582,139 @@ async def get_presets():
     return PRESET_PROMPTS
 
 
+@app.get("/api/toolset-presets")
+async def get_toolset_presets():
+    """Return the three toolset tiers used for the RQ3-b action-space ablation.
+
+    Shape: { "core_10": {label, description, tools: [...]}, ... }
+    """
+    return TOOLSET_PRESETS
+
+
 @app.get("/api/models")
 async def get_models():
     models = await llm_client.list_models()
     return {"models": models, "default": llm_client.DEFAULT_MODEL}
+
+
+# --- v2: test-case driven automation (replaces freeform sessions) ---
+
+@app.get("/api/v2/providers")
+async def list_providers():
+    """Available LLM providers the user can pick at run-time."""
+    return {
+        "providers": ["ollama", "openai"],
+        "current": llm_client.PROVIDER,
+        "default_model": llm_client.DEFAULT_MODEL,
+    }
+
+
+@app.get("/api/v2/testcases")
+async def list_test_cases():
+    """List every YAML test case in tests_catalog/."""
+    catalog = load_catalog()
+    return {
+        "catalog_root": str(TESTCASE_CATALOG_ROOT),
+        "count": len(catalog),
+        "test_cases": [
+            {
+                "id": tc.id,
+                "name": tc.name,
+                "category": tc.category,
+                "severity": tc.severity,
+                "target_schema": tc.target_schema.model_dump(),
+                "steps": [s.name for s in tc.steps],
+            }
+            for tc in catalog.values()
+        ],
+    }
+
+
+@app.get("/api/v2/testcases/{test_case_id}")
+async def get_test_case(test_case_id: str):
+    tc = find_by_id(test_case_id)
+    if not tc:
+        raise HTTPException(status_code=404, detail=f"Test case '{test_case_id}' not found")
+    return tc.model_dump()
+
+
+@app.post("/api/v2/testcases/{test_case_id}/run")
+async def run_v2_test_case(test_case_id: str, body: dict):
+    """Execute one test case.
+
+    Request body:
+      {
+        "target": { "url": "...", "parameter": "...", ... },
+        "provider": "ollama" | "openai" (optional),
+        "model":    "..." (optional override)
+      }
+    """
+    tc = find_by_id(test_case_id)
+    if not tc:
+        raise HTTPException(status_code=404, detail=f"Test case '{test_case_id}' not found")
+
+    target = body.get("target") or {}
+    provider = body.get("provider")
+    model = body.get("model")
+
+    try:
+        result = await run_test_case(tc, target, provider=provider, model=model)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    run_id = await save_v2_run(result, provider=provider, model=model)
+    out = result.model_dump()
+    out["run_id"] = run_id
+    return out
+
+
+@app.get("/api/v2/runs")
+async def list_v2_runs_endpoint(limit: int = 50):
+    return {"runs": await list_v2_runs(limit=limit)}
+
+
+@app.get("/api/v2/runs/{run_id}")
+async def get_v2_run_endpoint(run_id: str):
+    row = await get_v2_run(run_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return row
+
+
+@app.post("/api/v2/runs")
+async def run_v2_chain(body: dict):
+    """Execute a root test case + auto-follow its chain.
+
+    Body:
+      {
+        "test_case_id": "WSTG-INPV-05",
+        "target": { "url": "...", "parameter": "...", "scope": {...} },
+        "provider": "...", "model": "...",
+        "max_depth": 3,        # optional
+        "max_runs": 12         # optional
+      }
+    """
+    test_case_id = body.get("test_case_id")
+    if not test_case_id:
+        raise HTTPException(status_code=400, detail="test_case_id required")
+    if not find_by_id(test_case_id):
+        raise HTTPException(status_code=404, detail=f"Test case '{test_case_id}' not found")
+
+    target = body.get("target") or {}
+    provider = body.get("provider")
+    model = body.get("model")
+    max_depth = int(body.get("max_depth", 3))
+    max_runs = int(body.get("max_runs", 12))
+
+    chain_result = await run_chain(
+        test_case_id, target,
+        provider=provider, model=model,
+        max_depth=max_depth, max_runs=max_runs,
+    )
+    saved = await save_v2_chain(chain_result, provider=provider, model=model)
+    out = chain_result.model_dump()
+    out["root_run_id"] = saved["root_run_id"]
+    out["run_ids"] = saved["run_ids"]
+    return out
 
 
 @app.get("/api/sessions")
@@ -3325,7 +3737,16 @@ async def list_sessions():
 @app.post("/api/sessions", response_model=SessionResponse)
 async def create_session(data: SessionCreate):
     session_id = uuid.uuid4().hex[:12]
-    enabled_tools_str = ",".join(data.enabled_tools)
+
+    # RQ3-b: if client passed a named toolset_preset, its tool list WINS over
+    # any explicit enabled_tools (except when client explicitly shrunk the list).
+    # Precedence:
+    #   1) If toolset_preset is a known key, use that preset's tool list.
+    #   2) Otherwise use data.enabled_tools as provided.
+    preset_tools = get_toolset_preset_tools(data.toolset_preset)
+    effective_tools = preset_tools if preset_tools is not None else data.enabled_tools
+    enabled_tools_str = ",".join(effective_tools)
+
     db = await get_db()
     try:
         # Resolve max_turns: 0 = unlimited (use ABSOLUTE_MAX_TURNS safety cap)
@@ -3334,10 +3755,13 @@ async def create_session(data: SessionCreate):
 
         await db.execute(
             "INSERT INTO sessions (id, target_url, scope_mode, system_prompt, model, enabled_tools, "
-            "session_type, parent_session_id, vuln_category, no_timeout, max_turns) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "session_type, parent_session_id, vuln_category, no_timeout, max_turns, "
+            "toolset_preset, disable_stagnation) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (session_id, data.target_url, data.scope_mode.value, data.system_prompt, data.model,
              enabled_tools_str, data.session_type, data.parent_session_id, data.vuln_category,
-             1 if data.no_timeout else 0, effective_max_turns),
+             1 if data.no_timeout else 0, effective_max_turns, data.toolset_preset,
+             1 if data.disable_stagnation else 0),
         )
         await db.commit()
         row = await db.execute("SELECT * FROM sessions WHERE id = ?", (session_id,))
@@ -3354,6 +3778,7 @@ async def create_session(data: SessionCreate):
             session_type=session["session_type"] or "cold",
             parent_session_id=session["parent_session_id"],
             vuln_category=session["vuln_category"],
+            toolset_preset=session["toolset_preset"] if "toolset_preset" in session.keys() else None,
             total_duration_ms=session["total_duration_ms"],
             total_steps=session["total_steps"] or 0,
             total_findings=session["total_findings"] or 0,
@@ -3382,6 +3807,7 @@ async def get_session(session_id: str):
             session_type=session["session_type"] or "cold",
             parent_session_id=session["parent_session_id"],
             vuln_category=session["vuln_category"],
+            toolset_preset=session["toolset_preset"] if "toolset_preset" in session.keys() else None,
             total_duration_ms=session["total_duration_ms"],
             total_steps=session["total_steps"] or 0,
             total_findings=session["total_findings"] or 0,
@@ -3646,7 +4072,11 @@ async def thesis_export():
 async def create_chain(data: ChainCreate):
     """Create a new chain and auto-start the first (recon) session."""
     chain_id = uuid.uuid4().hex[:12]
-    enabled_tools_str = ",".join(data.enabled_tools)
+
+    # RQ3-b: if client passed a named toolset_preset, its tool list wins.
+    preset_tools = get_toolset_preset_tools(data.toolset_preset)
+    effective_tools = preset_tools if preset_tools is not None else data.enabled_tools
+    enabled_tools_str = ",".join(effective_tools)
 
     # Resolve max_turns
     effective_max_turns = data.max_turns_per_session if data.max_turns_per_session > 0 else ABSOLUTE_MAX_TURNS
@@ -3657,10 +4087,12 @@ async def create_chain(data: ChainCreate):
         await db.execute(
             "INSERT INTO chains (id, target_url, scope_mode, system_prompt, model, enabled_tools, "
             "current_phase, current_position, total_sessions, status, auto_progress, "
-            "max_turns_per_session, no_timeout) VALUES (?, ?, ?, ?, ?, ?, 'recon', 0, 1, 'running', ?, ?, ?)",
+            "max_turns_per_session, no_timeout, toolset_preset, disable_stagnation) "
+            "VALUES (?, ?, ?, ?, ?, ?, 'recon', 0, 1, 'running', ?, ?, ?, ?, ?)",
             (chain_id, data.target_url, data.scope_mode.value, data.system_prompt, data.model,
              enabled_tools_str, 1 if data.auto_progress else 0, effective_max_turns,
-             1 if data.no_timeout else 0),
+             1 if data.no_timeout else 0, data.toolset_preset,
+             1 if data.disable_stagnation else 0),
         )
         await db.commit()
 
@@ -4303,30 +4735,147 @@ JUICE_SHOP_GROUND_TRUTH = [
 ]
 
 
+DVWA_GROUND_TRUTH = [
+    # ── A03: Injection — SQL Injection ──
+    {"target_name": "DVWA", "target_url": "http://dvwa:8080",
+     "vuln_type": "SQL Injection", "severity": "high",
+     "url_pattern": "/vulnerabilities/sqli/", "parameter": "id",
+     "description": "SQL injection on user ID lookup — extractable via UNION or boolean-based blind",
+     "owasp_category": "A03:2021 Injection"},
+    {"target_name": "DVWA", "target_url": "http://dvwa:8080",
+     "vuln_type": "SQL Injection", "severity": "high",
+     "url_pattern": "/vulnerabilities/sqli_blind/", "parameter": "id",
+     "description": "Blind SQL injection — boolean-based, no direct output",
+     "owasp_category": "A03:2021 Injection"},
+    # ── A03: Injection — XSS ──
+    {"target_name": "DVWA", "target_url": "http://dvwa:8080",
+     "vuln_type": "XSS", "severity": "high",
+     "url_pattern": "/vulnerabilities/xss_r/", "parameter": "name",
+     "description": "Reflected XSS via name parameter",
+     "owasp_category": "A03:2021 Injection"},
+    {"target_name": "DVWA", "target_url": "http://dvwa:8080",
+     "vuln_type": "XSS", "severity": "high",
+     "url_pattern": "/vulnerabilities/xss_s/", "parameter": "txtName",
+     "description": "Stored XSS via guestbook name field",
+     "owasp_category": "A03:2021 Injection"},
+    {"target_name": "DVWA", "target_url": "http://dvwa:8080",
+     "vuln_type": "XSS", "severity": "medium",
+     "url_pattern": "/vulnerabilities/xss_d/", "parameter": "default",
+     "description": "DOM-based XSS via language select parameter",
+     "owasp_category": "A03:2021 Injection"},
+    # ── A03: Injection — Command Injection ──
+    {"target_name": "DVWA", "target_url": "http://dvwa:8080",
+     "vuln_type": "Command Injection", "severity": "critical",
+     "url_pattern": "/vulnerabilities/exec/", "parameter": "ip",
+     "description": "OS command injection via ping IP input — semicolon/pipe chaining",
+     "owasp_category": "A03:2021 Injection"},
+    # ── A01: Broken Access Control — File Inclusion ──
+    {"target_name": "DVWA", "target_url": "http://dvwa:8080",
+     "vuln_type": "File Inclusion", "severity": "critical",
+     "url_pattern": "/vulnerabilities/fi/", "parameter": "page",
+     "description": "Local/remote file inclusion via page parameter",
+     "owasp_category": "A01:2021 Broken Access Control"},
+    # ── A01: File Upload ──
+    {"target_name": "DVWA", "target_url": "http://dvwa:8080",
+     "vuln_type": "File Upload", "severity": "high",
+     "url_pattern": "/vulnerabilities/upload/", "parameter": "uploaded",
+     "description": "Unrestricted file upload — PHP shell upload possible",
+     "owasp_category": "A01:2021 Broken Access Control"},
+    # ── A04: CSRF ──
+    {"target_name": "DVWA", "target_url": "http://dvwa:8080",
+     "vuln_type": "CSRF", "severity": "medium",
+     "url_pattern": "/vulnerabilities/csrf/", "parameter": "password_new",
+     "description": "Cross-site request forgery on password change — no anti-CSRF token",
+     "owasp_category": "A01:2021 Broken Access Control"},
+    # ── A07: Brute Force ──
+    {"target_name": "DVWA", "target_url": "http://dvwa:8080",
+     "vuln_type": "Broken Authentication", "severity": "high",
+     "url_pattern": "/vulnerabilities/brute/", "parameter": "username",
+     "description": "Login brute force — no rate limiting or account lockout",
+     "owasp_category": "A07:2021 Identification and Authentication Failures"},
+    # ── A05: Security Misconfiguration ──
+    {"target_name": "DVWA", "target_url": "http://dvwa:8080",
+     "vuln_type": "Security Misconfiguration", "severity": "medium",
+     "url_pattern": "/", "parameter": "",
+     "description": "DVWA running with default credentials (admin/password) and low security setting",
+     "owasp_category": "A05:2021 Security Misconfiguration"},
+    {"target_name": "DVWA", "target_url": "http://dvwa:8080",
+     "vuln_type": "Information Disclosure", "severity": "info",
+     "url_pattern": "/phpinfo.php", "parameter": "",
+     "description": "PHP info page exposed — reveals PHP version, modules, server configuration",
+     "owasp_category": "A05:2021 Security Misconfiguration"},
+    {"target_name": "DVWA", "target_url": "http://dvwa:8080",
+     "vuln_type": "Security Misconfiguration", "severity": "info",
+     "url_pattern": "/robots.txt", "parameter": "",
+     "description": "robots.txt exposes hidden paths",
+     "owasp_category": "A05:2021 Security Misconfiguration"},
+    # ── A05: Weak Session IDs ──
+    {"target_name": "DVWA", "target_url": "http://dvwa:8080",
+     "vuln_type": "Broken Authentication", "severity": "medium",
+     "url_pattern": "/vulnerabilities/weak_id/", "parameter": "dvwaSession",
+     "description": "Predictable session IDs — sequential or timestamp-based",
+     "owasp_category": "A07:2021 Identification and Authentication Failures"},
+    # ── A02: Insecure CAPTCHA ──
+    {"target_name": "DVWA", "target_url": "http://dvwa:8080",
+     "vuln_type": "Broken Authentication", "severity": "medium",
+     "url_pattern": "/vulnerabilities/captcha/", "parameter": "step",
+     "description": "CAPTCHA bypass by manipulating step parameter — skips validation",
+     "owasp_category": "A07:2021 Identification and Authentication Failures"},
+    # ── A05: Missing Headers ──
+    {"target_name": "DVWA", "target_url": "http://dvwa:8080",
+     "vuln_type": "Security Misconfiguration", "severity": "medium",
+     "url_pattern": "", "parameter": "",
+     "description": "Missing security headers — no CSP, X-Frame-Options, HSTS",
+     "owasp_category": "A05:2021 Security Misconfiguration"},
+    # ── A05: Server Info ──
+    {"target_name": "DVWA", "target_url": "http://dvwa:8080",
+     "vuln_type": "Information Disclosure", "severity": "low",
+     "url_pattern": "", "parameter": "",
+     "description": "Server header discloses Apache/PHP version",
+     "owasp_category": "A05:2021 Security Misconfiguration"},
+    # ── A10: Open HTTP Redirect (via Authorisation Bypass) ──
+    {"target_name": "DVWA", "target_url": "http://dvwa:8080",
+     "vuln_type": "Open Redirect", "severity": "medium",
+     "url_pattern": "/vulnerabilities/authbypass/", "parameter": "",
+     "description": "Authorisation bypass allowing access to restricted content",
+     "owasp_category": "A01:2021 Broken Access Control"},
+    # ── JavaScript Attacks ──
+    {"target_name": "DVWA", "target_url": "http://dvwa:8080",
+     "vuln_type": "Security Misconfiguration", "severity": "medium",
+     "url_pattern": "/vulnerabilities/javascript/", "parameter": "token",
+     "description": "Client-side JavaScript validation bypass — token generated in browser",
+     "owasp_category": "A05:2021 Security Misconfiguration"},
+]
+
+
 async def _seed_ground_truth():
-    """Seed Juice Shop ground truth — re-seeds if count changed (e.g. after expansion)."""
+    """Seed ground truth for both Juice Shop and DVWA — re-seeds if count changed."""
     db = await get_db()
     try:
-        cursor = await db.execute(
-            "SELECT COUNT(*) as cnt FROM ground_truth WHERE target_name = 'OWASP Juice Shop'"
-        )
-        row = await cursor.fetchone()
-        expected_count = len(JUICE_SHOP_GROUND_TRUTH)
-
-        if row["cnt"] == expected_count:
-            return  # already seeded with current version
-
-        # Clear old entries and re-seed with updated ground truth
-        if row["cnt"] > 0:
-            await db.execute("DELETE FROM ground_truth WHERE target_name = 'OWASP Juice Shop'")
-
-        for gt in JUICE_SHOP_GROUND_TRUTH:
-            await db.execute(
-                "INSERT INTO ground_truth (target_name, target_url, vuln_type, severity, "
-                "url_pattern, parameter, description, owasp_category) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (gt["target_name"], gt["target_url"], gt["vuln_type"], gt["severity"],
-                 gt["url_pattern"], gt["parameter"], gt["description"], gt["owasp_category"])
+        for target_name, gt_list in [("OWASP Juice Shop", JUICE_SHOP_GROUND_TRUTH),
+                                      ("DVWA", DVWA_GROUND_TRUTH)]:
+            cursor = await db.execute(
+                "SELECT COUNT(*) as cnt FROM ground_truth WHERE target_name = ?",
+                (target_name,)
             )
+            row = await cursor.fetchone()
+            expected_count = len(gt_list)
+
+            if row["cnt"] == expected_count:
+                continue  # already seeded with current version
+
+            # Clear old entries and re-seed with updated ground truth
+            if row["cnt"] > 0:
+                await db.execute("DELETE FROM ground_truth WHERE target_name = ?",
+                                 (target_name,))
+
+            for gt in gt_list:
+                await db.execute(
+                    "INSERT INTO ground_truth (target_name, target_url, vuln_type, severity, "
+                    "url_pattern, parameter, description, owasp_category) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (gt["target_name"], gt["target_url"], gt["vuln_type"], gt["severity"],
+                     gt["url_pattern"], gt["parameter"], gt["description"], gt["owasp_category"])
+                )
         await db.commit()
     finally:
         await db.close()

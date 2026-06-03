@@ -1,0 +1,125 @@
+{
+  "algorithm": "canonical programmatic matcher (orchestrator/main.py _match_finding_to_ground_truth_scored, threshold>=2.0)",
+  "gt_total": 35,
+  "results": {
+    "baseline_7b_apr17": {
+      "sessions": 62,
+      "model": "qwen2.5-coder:7b",
+      "findings": 236,
+      "tp_findings": 235,
+      "fp_findings": 1,
+      "unique_gt_hit": 13,
+      "gt_hit_ids": [
+        1,
+        4,
+        6,
+        8,
+        15,
+        17,
+        19,
+        24,
+        25,
+        26,
+        27,
+        28,
+        30
+      ],
+      "precision": 0.9957627118644068
+    },
+    "baseline_7b_juicy1": {
+      "sessions": 0,
+      "model": "qwen2.5-coder:7b",
+      "findings": 0,
+      "tp_findings": 0,
+      "fp_findings": 0,
+      "unique_gt_hit": 0,
+      "gt_hit_ids": [],
+      "precision": 0.0
+    },
+    "ft_v3_7b_apr17": {
+      "sessions": 63,
+      "model": "qwen2.5-coder:7b-juicy3",
+      "findings": 237,
+      "tp_findings": 237,
+      "fp_findings": 0,
+      "unique_gt_hit": 10,
+      "gt_hit_ids": [
+        1,
+        11,
+        12,
+        17,
+        19,
+        21,
+        24,
+        27,
+        28,
+        30
+      ],
+      "precision": 1.0
+    },
+    "ft_v3_14b_apr17": {
+      "sessions": 54,
+      "model": "qwen2.5-coder:14b-juicy3",
+      "findings": 128,
+      "tp_findings": 126,
+      "fp_findings": 2,
+      "unique_gt_hit": 9,
+      "gt_hit_ids": [
+        1,
+        2,
+        4,
+        19,
+        24,
+        26,
+        27,
+        28,
+        30
+      ],
+      "precision": 0.984375
+    }
+  },
+  "combined_7b": {
+    "unique_gt_hit": 16,
+    "gt_hit_ids": [
+      1,
+      4,
+      6,
+      8,
+      11,
+      12,
+      15,
+      17,
+      19,
+      21,
+      24,
+      25,
+      26,
+      27,
+      28,
+      30
+    ],
+    "coverage_pct": 45.714285714285715,
+    "unique_to_baseline": [
+      4,
+      6,
+      8,
+      15,
+      25,
+      26
+    ],
+    "unique_to_ft_v3": [
+      11,
+      12,
+      21
+    ],
+    "overlap": [
+      1,
+      17,
+      19,
+      24,
+      27,
+      28,
+      30
+    ]
+  }
+}

@@ -21,6 +21,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates git unzip \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
+# ===== nuclei templates =====
+# Required for nuclei to do anything; the apt package only installs the binary.
+# Templates land in /root/.local/nuclei-templates by default.
+RUN nuclei -update-templates -silent 2>/dev/null || true
+
 # ===== Wordlists =====
 RUN mkdir -p /usr/share/wordlists && \
     wget -q "https://github.com/brannondorsey/naive-hashcat/releases/download/data/rockyou.txt" \
@@ -119,6 +124,24 @@ esac' > /usr/local/bin/zap-cli && chmod +x /usr/local/bin/zap-cli
 COPY scripts/pw-crawl.js /usr/local/bin/pw-crawl.js
 RUN printf '#!/bin/bash\nNODE_PATH=/usr/local/lib/node_modules node /usr/local/bin/pw-crawl.js "$@"\n' > /usr/local/bin/pw-crawl && \
     chmod +x /usr/local/bin/pw-crawl
+
+# ===== Capability helpers (RQ3-b / IDOR-UI action space) =====
+# Three deterministic scripts that extend what the LLM agent can DO
+# without adding any detection logic. See scripts/*.sh and
+# scripts/interactive-pw.js for full docs.
+
+# interactive-pw: scriptable Playwright recipe runner (accepts JSON on stdin)
+COPY scripts/interactive-pw.js /usr/local/bin/interactive-pw.js
+RUN printf '#!/bin/bash\nNODE_PATH=/usr/local/lib/node_modules node /usr/local/bin/interactive-pw.js "$@"\n' > /usr/local/bin/interactive-pw && \
+    chmod +x /usr/local/bin/interactive-pw
+
+# login-helper: fetch two Juice Shop sessions (user + admin) as JSON
+COPY scripts/login-helper.sh /usr/local/bin/login-helper
+RUN chmod +x /usr/local/bin/login-helper
+
+# diff-view: dumb HTTP response diff viewer for differential IDOR probes
+COPY scripts/diff-view.sh /usr/local/bin/diff-view
+RUN chmod +x /usr/local/bin/diff-view
 
 WORKDIR /work
 CMD ["tail", "-f", "/dev/null"]
