@@ -63,22 +63,49 @@ docs/                Methodology + evaluation documentation
 | WSTG-INPV-19 | Server-Side Request Forgery |
 | WSTG-BUSL-04 | Process timing / race condition |
 
-## Quick start
+## Prerequisites
+
+- **Docker** — runs the lab (target application, OWASP ZAP, and the Kali tools container)
+- **Python 3.10+** — runs the orchestrator
+- **Ollama** *(optional)* — local LLM for the model-judge steps. The deterministic
+  checks work without it. Install from [ollama.com](https://ollama.com), then pull a
+  model: `ollama pull qwen2.5-coder:7b-instruct-q4_K_M`
+
+## Setup
 
 ```bash
-# 1. Bring up the lab (target + ZAP + Kali tools + orchestrator)
-docker compose up -d
+git clone https://github.com/GoktugOnyer/erlik-2.0.git
+cd erlik-2.0
 
-# 2. List the test catalogue
+# Scripted (Linux/macOS): virtualenv + dependencies + containers
+./setup.sh
+
+# ...or manually:
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+docker compose up -d        # first run builds the Kali tools image (~10–20 min)
+
+# Start the orchestrator — dashboard at http://localhost:8002
+./run.sh                    # or: uvicorn orchestrator.main:app --host 0.0.0.0 --port 8002
+```
+
+> **Note:** the first `docker compose up` builds the Kali tools container — it pulls
+> the Kali base image and installs the toolset (nmap, sqlmap, nuclei, dalfox,
+> jwt_tool, …). This needs internet and takes a while; later runs start instantly.
+
+## Usage
+
+```bash
+# List the test catalogue
 python -m orchestrator.testcase.cli list
 
-# 3. Run a single test case against an authorised target
+# Run a single test case against an authorised target
 python -m orchestrator.testcase.cli run WSTG-INPV-05 \
     --target url=http://localhost:3000/rest/products/search \
     --target parameter=q \
     --scope localhost
 
-# 4. Run a test case and auto-follow its chain
+# Run a test case and auto-follow its chain
 python -m orchestrator.testcase.cli chain WSTG-INPV-05 \
     --target url=http://localhost:3000/rest/products/search \
     --target parameter=q \
