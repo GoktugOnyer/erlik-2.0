@@ -1,9 +1,11 @@
-fastapi==0.115.0
-uvicorn[standard]==0.30.0
-websockets==12.0
-aiosqlite==0.20.0
-httpx==0.27.0
-pydantic==2.9.0
-jinja2==3.1.4
-python-multipart==0.0.9
-pyyaml==6.0.2
+# Minimum versions — kept loose so pip installs wheels compatible with the
+# user's Python (pinned-exact versions fail to build on newer Python releases).
+fastapi>=0.115
+uvicorn[standard]>=0.30
+websockets>=12.0
+aiosqlite>=0.20
+httpx>=0.27
+pydantic>=2.9,<3
+jinja2>=3.1
+python-multipart>=0.0.9
+pyyaml>=6.0
