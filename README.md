@@ -104,6 +104,30 @@ Every run requires an explicit `--scope` allow-list. The framework refuses to
 execute any tool against a host that is not on that list. **Only test systems
 you are authorised to assess.**
 
+## Reproducing the evaluation
+
+The evaluation campaigns were run with local Ollama inference against two
+Dockerised targets, scored against a fixed ground-truth catalogue.
+
+```bash
+# 1. Bring up the lab and pull the evaluation model
+docker compose up -d
+ollama pull qwen2.5-coder:7b-instruct-q4_K_M      # also 14b / 32b
+
+# 2. Point tool execution at the in-network target container
+export ERLIK_DOCKER_TARGET_HOST=juice-shop        # reproduces the lab wiring
+
+# 3. Launch the orchestrator
+uvicorn orchestrator.main:app --host 0.0.0.0 --port 8002
+```
+
+- Targets: OWASP Juice Shop (ground truth = 35) and DVWA (ground truth = 19).
+- Models: `qwen2.5-coder` 7B / 14B / 32B (baseline and LoRA fine-tuned variants).
+- Findings are scored by the canonical programmatic ground-truth matcher.
+
+Because inference runs at non-zero temperature, individual session findings vary
+between runs; aggregate coverage is stable across repeats.
+
 ## Status
 
 Active development. The deterministic engine and WSTG catalogue are
