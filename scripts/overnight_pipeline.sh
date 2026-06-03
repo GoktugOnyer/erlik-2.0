@@ -5,8 +5,8 @@
 set -u
 cd "$(dirname "$0")/.."
 
-SSH_PORT=REDACTED_PORT
-SSH_HOST=REDACTED_HOST
+SSH_PORT="${CLOUD_SSH_PORT:?Set CLOUD_SSH_PORT to your GPU pod SSH port}"
+SSH_HOST="${CLOUD_SSH_HOST:?Set CLOUD_SSH_HOST to your GPU pod IP/host}"
 OLLAMA_REMOTE_PORT=11434
 OLLAMA_LOCAL_PORT=11434
 LOG_DIR="/tmp/overnight_$(date +%Y%m%d_%H%M%S)"

@@ -1,6 +1,6 @@
 #!/bin/bash
 # Stage 4: Merge adapter → f16 GGUF → Q4_K_M → Ollama import.
-# Run on CLOUD: ssh -p REDACTED_PORT root@REDACTED_HOST "bash -s" < scripts/deploy_juicy3.sh
+# Run on CLOUD: ssh -p "$CLOUD_SSH_PORT" root@"$CLOUD_SSH_HOST" "bash -s" < scripts/deploy_juicy3.sh
 set -euo pipefail
 
 cd /root

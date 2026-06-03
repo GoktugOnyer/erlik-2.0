@@ -15,8 +15,8 @@ cd "$(dirname "$0")/.."
 LOG=/tmp/overnight_seed_variance.log
 : > "$LOG"
 
-CLOUD_IP=REDACTED_HOST
-CLOUD_PORT=REDACTED_PORT
+CLOUD_IP="${CLOUD_SSH_HOST:?Set CLOUD_SSH_HOST to your GPU pod IP/host}"
+CLOUD_PORT="${CLOUD_SSH_PORT:?Set CLOUD_SSH_PORT to your GPU pod SSH port}"
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG"; }
 

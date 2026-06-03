@@ -14,7 +14,7 @@ log() { echo "[$(date '+%H:%M:%S')] $1" | tee -a "$RUN_DIR/pipeline.log"; }
 if ! curl -s --max-time 3 http://localhost:11434/api/tags > /dev/null 2>&1; then
     log "Tunnel down — restarting"
     pkill -f "ssh.*11434:localhost:11434" 2>/dev/null || true
-    nohup ssh -N -L 11434:localhost:11434 -p REDACTED_PORT root@REDACTED_HOST > /tmp/tunnel_juicy3.log 2>&1 &
+    nohup ssh -N -L 11434:localhost:11434 -p "${CLOUD_SSH_PORT:?Set CLOUD_SSH_PORT}" root@"${CLOUD_SSH_HOST:?Set CLOUD_SSH_HOST}" > /tmp/tunnel_juicy3.log 2>&1 &
     sleep 5
 fi
 
