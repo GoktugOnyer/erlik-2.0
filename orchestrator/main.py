@@ -398,8 +398,8 @@ _ANSI_RE = re.compile(r'\x1b\[[0-9;]*[a-zA-Z]|\x1b\[\??\d+[a-zA-Z]')
 
 
 def _strip_ansi(text: str) -> str:
-    """Remove ANSI escape codes from tool output."""
-    return _ANSI_RE.sub('', text)
+    """Remove ANSI escape codes from tool output. Null-safe."""
+    return _ANSI_RE.sub('', text or '')
 
 
 # --- Semantic Loop Detection ---
@@ -2885,7 +2885,7 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
 
                     tool_name = result["tool"]
                     tools_executed.add(tool_name)  # track for phase enforcement
-                    raw_output = result["output"] or result.get("error", "No output")
+                    raw_output = result.get("output") or result.get("error") or "No output"
                     tool_output = _strip_ansi(raw_output)  # clean ANSI codes
                     tool_duration = result["duration_ms"]
 
