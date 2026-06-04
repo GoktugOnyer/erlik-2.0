@@ -166,6 +166,33 @@ def _sanitize_command(command: str, target_url: str = None) -> str:
         if not has_selector:
             command += " -tags cve,vuln,sqli,xss,ssrf,jwt,auth,exposure,misconfig,default-login"
 
+    # Bounded brute force (2026-06): hydra against a full wordlist (rockyou is
+    # ~14M entries) runs for hours and rarely finishes. A time-boxed engagement
+    # tries common/default credentials, not the whole list. So we automatically:
+    #   - cap the password list (-P) to its top-N entries (real bounded file)
+    #   - stop on the first valid credential (-f)
+    #   - use a web-friendly thread count if none was specified (-t)
+    # This makes hydra complete in seconds with the realistic win (weak/default
+    # creds) instead of blocking forever. Configurable via ERLIK_HYDRA_PASS_CAP
+    # (number of entries); set it to 0 to disable bounding entirely.
+    if tool_name == "hydra":
+        try:
+            cap = int(os.environ.get("ERLIK_HYDRA_PASS_CAP", "300"))
+        except ValueError:
+            cap = 300
+        if cap > 0:
+            if not re.search(r'(?:^|\s)-f\b', command):
+                command += " -f"          # stop on first valid credential
+            if not re.search(r'(?:^|\s)-t\s+\d+', command):
+                command += " -t 8"        # sane thread count for web logins
+            m = re.search(r'-P\s+(\S+)', command)
+            if m and not m.group(1).startswith("/tmp/erlik_"):
+                wl = m.group(1)
+                bounded = "/tmp/erlik_hydra_pw.txt"
+                command = command.replace(f"-P {wl}", f"-P {bounded}", 1)
+                # build the bounded list first, then run hydra against it
+                command = f"head -n {cap} {wl} > {bounded} 2>/dev/null; {command}"
+
     return command
 
 
