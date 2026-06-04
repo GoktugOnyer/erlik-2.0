@@ -222,7 +222,7 @@ def _sync_check_container() -> bool:
         return False
 
 
-async def execute_tool(command: str, enabled_tools: list[str], no_timeout: bool = False, target_url: str = None, tool_hint: str = None) -> dict:
+async def execute_tool(command: str, enabled_tools: list[str], no_timeout: bool = False, target_url: str = None, tool_hint: str = None, custom_timeout: int = None) -> dict:
     """
     Execute a command in the kali-tools Docker container.
 
@@ -260,9 +260,16 @@ async def execute_tool(command: str, enabled_tools: list[str], no_timeout: bool 
         return {"success": False, "output": "", "tool": tool_name, "duration_ms": 0,
                 "error": f"Tool '{tool_name}' is not enabled for this session"}
 
-    # Get timeout — no_timeout mode uses 10 minutes max (safety cap)
+    # Resolve timeout (seconds). Precedence:
+    #   no_timeout=True       -> truly unlimited (None). Optional ERLIK_NO_TIMEOUT_CAP>0
+    #                            re-imposes a cap for safety-conscious deployments.
+    #   custom_timeout given  -> that exact value applies to every tool
+    #   otherwise             -> per-tool default
     if no_timeout:
-        timeout = 600  # 10 minutes max even in no-timeout mode
+        _cap = int(os.environ.get("ERLIK_NO_TIMEOUT_CAP", "0"))  # 0 = truly unlimited (default)
+        timeout = None if _cap <= 0 else _cap
+    elif custom_timeout and int(custom_timeout) > 0:
+        timeout = int(custom_timeout)
     else:
         timeout = TOOL_TIMEOUTS.get(tool_name, 60)
 

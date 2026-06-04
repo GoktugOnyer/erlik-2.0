@@ -200,6 +200,7 @@ async def init_db():
             ("total_steps", "INTEGER DEFAULT 0"),
             ("total_findings", "INTEGER DEFAULT 0"),
             ("no_timeout", "INTEGER DEFAULT 0"),
+            ("tool_timeout", "INTEGER DEFAULT NULL"),
             ("max_turns", "INTEGER DEFAULT 30"),
             ("chain_id", "TEXT DEFAULT NULL"),
             ("chain_position", "INTEGER DEFAULT NULL"),

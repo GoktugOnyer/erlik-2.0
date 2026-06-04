@@ -2450,7 +2450,7 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
                      system_prompt: str, enabled_tools: list[str], model: str,
                      session_type: str = "cold", parent_session_id: str = None,
                      vuln_category: str = None, no_timeout: bool = False,
-                     max_turns: int = DEFAULT_MAX_TURNS):
+                     max_turns: int = DEFAULT_MAX_TURNS, tool_timeout: int = None):
     """Multi-turn agent loop: LLM plans tools, we execute them, feed results back."""
     db = None
     step_number = 0
@@ -2881,7 +2881,7 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
 
                 # Execute the tool
                 if kali_running:
-                    result = await execute_tool(command, enabled_tools, no_timeout=no_timeout, target_url=target_url)
+                    result = await execute_tool(command, enabled_tools, no_timeout=no_timeout, target_url=target_url, custom_timeout=tool_timeout)
 
                     tool_name = result["tool"]
                     tools_executed.add(tool_name)  # track for phase enforcement
@@ -3756,12 +3756,12 @@ async def create_session(data: SessionCreate):
         await db.execute(
             "INSERT INTO sessions (id, target_url, scope_mode, system_prompt, model, enabled_tools, "
             "session_type, parent_session_id, vuln_category, no_timeout, max_turns, "
-            "toolset_preset, disable_stagnation) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "toolset_preset, disable_stagnation, tool_timeout) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (session_id, data.target_url, data.scope_mode.value, data.system_prompt, data.model,
              enabled_tools_str, data.session_type, data.parent_session_id, data.vuln_category,
              1 if data.no_timeout else 0, effective_max_turns, data.toolset_preset,
-             1 if data.disable_stagnation else 0),
+             1 if data.disable_stagnation else 0, data.tool_timeout),
         )
         await db.commit()
         row = await db.execute("SELECT * FROM sessions WHERE id = ?", (session_id,))
@@ -3842,6 +3842,7 @@ async def start_session(session_id: str):
     # Launch the agent loop as a background task
     no_timeout = bool(session["no_timeout"]) if session["no_timeout"] else False
     max_turns = int(session["max_turns"]) if session["max_turns"] else DEFAULT_MAX_TURNS
+    tool_timeout = int(session["tool_timeout"]) if session["tool_timeout"] else None
     task = asyncio.create_task(
         agent_loop(
             session_id=session_id,
@@ -3855,6 +3856,7 @@ async def start_session(session_id: str):
             vuln_category=session["vuln_category"],
             no_timeout=no_timeout,
             max_turns=max_turns,
+            tool_timeout=tool_timeout,
         )
     )
     running_tasks[session_id] = task

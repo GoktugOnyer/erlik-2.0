@@ -674,10 +674,19 @@
                 </div>
                 <div class="flex items-center gap-2" style="padding-bottom:4px;">
                     <label class="flex items-center gap-2 cursor-pointer group">
-                        <input type="checkbox" id="no-timeout-toggle" class="accent-cyan-400" style="width:16px;height:16px;">
+                        <input type="checkbox" id="no-timeout-toggle" class="accent-cyan-400" style="width:16px;height:16px;"
+                            onchange="document.getElementById('tool-timeout-input').disabled = this.checked;">
                         <span class="font-pixel" style="font-size:0.55rem; color:#6a6a8a;">NO TIMEOUT</span>
                     </label>
-                    <span class="font-mono" style="color:#4a4a5a; font-size:0.7rem;" title="Tools wait up to 10 min instead of default limits">&#9432;</span>
+                    <span class="font-mono" style="color:#4a4a5a; font-size:0.7rem;" title="Tools run with NO time limit at all (truly unlimited). Overrides the manual timeout.">&#9432;</span>
+                </div>
+                <div>
+                    <label class="block font-pixel mb-2" style="font-size:0.55rem; color:#6a6a8a;">TOOL TIMEOUT (s)</label>
+                    <div class="flex items-center gap-2">
+                        <input type="number" id="tool-timeout-input" min="0" step="30" placeholder="default"
+                            class="cyber-input rounded px-2 py-1" style="width:90px; font-size:0.8rem;">
+                        <span class="font-mono" style="color:#4a4a5a; font-size:0.7rem;" title="Manual per-tool timeout in seconds applied to every tool. Blank = sensible per-tool defaults. Ignored when NO TIMEOUT is on.">&#9432;</span>
+                    </div>
                 </div>
             </div>
 
@@ -2255,6 +2264,7 @@ ${htmlBody}
                         parent_session_id: parentSessionId,
                         vuln_category: vulnCategory,
                         no_timeout: document.getElementById('no-timeout-toggle').checked,
+                        tool_timeout: parseInt(document.getElementById('tool-timeout-input').value) || null,
                         max_turns: parseInt(document.getElementById('max-turns-slider').value) || 0,
                     }),
                 });

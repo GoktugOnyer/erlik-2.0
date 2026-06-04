@@ -41,7 +41,8 @@ class SessionCreate(BaseModel):
     session_type: str = "cold"
     parent_session_id: Optional[str] = None
     vuln_category: Optional[str] = None
-    no_timeout: bool = False
+    no_timeout: bool = False  # True = truly unlimited per-tool execution time
+    tool_timeout: Optional[int] = None  # manual per-tool timeout (seconds); overrides defaults
     max_turns: int = 30  # 0 = unlimited (capped at 150 for safety)
     disable_stagnation: bool = False  # benchmark opt-out for the agent-loop stagnation auto-stop
     extra_system_prompt: str = ""  # injected memory/context appended to system prompt
