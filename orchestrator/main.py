@@ -20,6 +20,7 @@ from orchestrator.models import (
     ReportFinding, PentestReport,
 )
 from orchestrator import llm_client
+from orchestrator.bench import classify_llm_error, request_abort, abort_requested, clear_abort
 from orchestrator.enrichment import enrichment_enabled, find_cve_ids, lookup_cve
 from orchestrator.enrichment.nvd import severity_label as cvss_severity_label
 from orchestrator.tool_executor import execute_tool, check_container_running
@@ -3029,10 +3030,19 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
                 await _finish_session(session_id, "error")
                 return
             except Exception as e:
-                print(f"[agent {session_id[:8]}] turn {turn+1}/{max_turns} ← LLM error: {e}", flush=True)
+                # Classify rate/usage/auth failures as fatal so an overnight
+                # benchmark sweep aborts instead of failing every session the
+                # same way. Transient errors stay per-session.
+                _cls = classify_llm_error(e)
+                if _cls and _cls.is_fatal:
+                    request_abort(f"{_cls.kind}: {_cls.message}")
+                    err_msg = f"FATAL LLM error ({_cls.kind}) — aborting sweep: {e}"
+                else:
+                    err_msg = f"LLM error: {e}"
+                print(f"[agent {session_id[:8]}] turn {turn+1}/{max_turns} ← {err_msg}", flush=True)
                 await manager.broadcast(session_id, {
                     "type": "log", "phase": "error",
-                    "message": f"LLM error: {e}",
+                    "message": err_msg,
                 })
                 await _finish_session(session_id, "error")
                 return
@@ -6171,8 +6181,23 @@ async def _run_benchmark_sequence(benchmark_id: str, data: BenchmarkCreate):
 
     repeat_n = max(1, min(data.repeat_n, 50))
 
+    # Clear any stale fatal-abort signal from a prior run in this process.
+    clear_abort()
+
     try:
         for iteration in range(1, repeat_n + 1):
+            # A fatal LLM error (rate/usage/auth) in a prior session aborts the
+            # whole sweep — the remaining iterations would fail identically.
+            _abort = abort_requested()
+            if _abort:
+                await _broadcast_benchmark(benchmark_id, {
+                    "type": "log", "phase": "error",
+                    "message": f"Benchmark aborted after fatal LLM error ({_abort}) — "
+                               f"stopped at iteration {iteration}/{repeat_n}.",
+                })
+                print(f"[BENCHMARK {benchmark_id}] aborting sweep: {_abort}")
+                break
+
             cold_session_id = None
             warm_session_id = None
             chain_id_result = None
@@ -6260,6 +6285,16 @@ async def _run_benchmark_sequence(benchmark_id: str, data: BenchmarkCreate):
                 "session_id": cold_session_id, "status": cold_status,
                 "iteration": iteration,
             })
+
+            # Fatal LLM error during the cold session → skip warm/chain and stop.
+            _abort = abort_requested()
+            if _abort:
+                await _broadcast_benchmark(benchmark_id, {
+                    "type": "log", "phase": "error",
+                    "message": f"Benchmark aborted after fatal LLM error ({_abort}).",
+                })
+                print(f"[BENCHMARK {benchmark_id}] aborting sweep after cold: {_abort}")
+                break
 
             # Small delay between sessions
             await asyncio.sleep(5)
