@@ -9,7 +9,10 @@ system prompt. This generalises erlik off the Juice-Shop-only
 Discipline mirrors the upstream "router picks 1-2, never load all": selection
 is keyword-scored and hard-capped by a character budget.
 
-Gated by ``ERLIK_SKILLS`` (default off): unset / "" → disabled.
+Inside erlik this is gated by ``ERLIK_SKILLS`` (default off). The selection +
+composition logic is provider-agnostic, though: ``render_skills()`` and the
+``python -m orchestrator.skills`` CLI return plain text usable with ANY model
+or API (Ollama, OpenAI-compatible gateways, Anthropic, …), not just erlik.
 
 Corpus vendored from transilienceai/communitytools (MIT); see
 ``skills_catalog/NOTICE.md`` and ``THIRD_PARTY_LICENSES.md``.
@@ -125,10 +128,12 @@ def select_skill_files(hint: str, max_files: int = 3, max_chars: int = 14000) ->
     return chosen
 
 
-def get_skills_context(target_url: str, hint: str, max_chars: int = 14000) -> str:
-    """Composed knowledge block to inject, or "" when disabled / no match."""
-    if not skills_enabled():
-        return ""
+def render_skills(hint: str, max_chars: int = 14000) -> str:
+    """Compose the selected knowledge block for a hint — WITHOUT the
+    ``ERLIK_SKILLS`` gate. Provider-agnostic: the result is plain text you can
+    drop into the system prompt of ANY model or API (local Ollama, an
+    OpenAI-compatible gateway, Anthropic, etc.). Returns "" when nothing matches.
+    """
     files = select_skill_files(hint, max_chars=max_chars)
     if not files:
         return ""
@@ -146,3 +151,46 @@ def get_skills_context(target_url: str, hint: str, max_chars: int = 14000) -> st
         body = p.read_text(encoding="utf-8", errors="replace").strip()
         parts.append(f"\n----- skill: {rel.parent.name} / {p.stem} -----\n{body}")
     return "\n".join(parts) + "\n"
+
+
+def get_skills_context(target_url: str, hint: str, max_chars: int = 14000) -> str:
+    """Composed knowledge block to inject into erlik's agent loop, or "" when
+    disabled (ERLIK_SKILLS) / no match. Thin gate over ``render_skills``.
+    """
+    if not skills_enabled():
+        return ""
+    return render_skills(hint, max_chars=max_chars)
+
+
+def _cli(argv: list[str] | None = None) -> int:
+    """Standalone selector so the corpus is usable outside erlik, with any model.
+
+        python -m orchestrator.skills "sql injection"        # print context
+        python -m orchestrator.skills --files "jwt auth"     # just the paths
+    """
+    import argparse
+
+    ap = argparse.ArgumentParser(
+        prog="orchestrator.skills",
+        description="Select and print relevant pentest skill knowledge for a hint "
+                    "(model-agnostic — pipe into any model/API system prompt).",
+    )
+    ap.add_argument("hint", nargs="+", help="vuln class / mission keywords, e.g. 'sql injection'")
+    ap.add_argument("--max-chars", type=int, default=14000)
+    ap.add_argument("--files", action="store_true", help="print only the selected file paths")
+    ns = ap.parse_args(argv)
+    hint = " ".join(ns.hint)
+    if ns.files:
+        for p in select_skill_files(hint, max_files=3, max_chars=ns.max_chars):
+            print(p.relative_to(SKILLS_ROOT))
+        return 0
+    out = render_skills(hint, max_chars=ns.max_chars)
+    if out:
+        print(out)
+        return 0
+    print(f"(no skill matched hint: {hint!r})")
+    return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(_cli())
