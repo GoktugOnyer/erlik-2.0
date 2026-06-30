@@ -2880,6 +2880,61 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
                 "message": f"SKILLS: injected {len(_sk_ctx)} chars of relevant pentest knowledge",
             })
 
+        # Deterministic pre-scan (OWASP Nettacker) — seed the agent with verified
+        # recon (open ports, tech, paths, header/TLS/CVE hits) so it explores less.
+        # Gated by ERLIK_NETTACKER (default off). See orchestrator/integrations/nettacker.py.
+        try:
+            from orchestrator.integrations import nettacker as _nt_mod
+            _nt_on = _nt_mod.nettacker_enabled()
+        except Exception:  # noqa: BLE001
+            _nt_on = False
+        if _nt_on:
+            await manager.broadcast(session_id, {
+                "type": "log", "phase": "recon",
+                "message": "Nettacker pre-scan running (deterministic recon)…",
+            })
+            _nt = await _nt_mod.run_nettacker(target_url)
+            if _nt.get("error"):
+                print(f"[nettacker {session_id[:8]}] {_nt['error']}", flush=True)
+                await manager.broadcast(session_id, {
+                    "type": "log", "phase": "recon",
+                    "message": f"Nettacker pre-scan skipped: {_nt['error']}",
+                })
+            else:
+                _parsed = _nt_mod.parse_events(_nt["events"], target_url=target_url)
+                _nt_ctx = _nt_mod.summarize_for_agent(_parsed)
+                if _nt_ctx:
+                    combined_system += f"\n\n{_nt_ctx}"
+                    print(f"[nettacker {session_id[:8]}] injected {len(_nt_ctx)} chars "
+                          f"({len(_parsed['open_ports'])} ports, {len(_parsed['findings'])} pre-findings)", flush=True)
+                    await manager.broadcast(session_id, {
+                        "type": "log", "phase": "recon",
+                        "message": f"Nettacker: injected deterministic recon "
+                                   f"({len(_parsed['open_ports'])} ports, {len(_parsed['findings'])} pre-findings)",
+                    })
+                # Optionally persist deterministic findings (opt-in — keeps the
+                # research metrics clean unless ERLIK_NETTACKER_FINDINGS is set).
+                if _nt_mod.findings_enabled() and _parsed["findings"]:
+                    try:
+                        _db = await get_db()
+                        try:
+                            for _f in _parsed["findings"]:
+                                await _db.execute(
+                                    "INSERT INTO findings (session_id, vuln_type, severity, url, parameter, evidence) "
+                                    "VALUES (?, ?, ?, ?, ?, ?)",
+                                    (session_id, _f["vuln_type"], _f["severity"], _f["url"],
+                                     _f["parameter"], _f["evidence"][:2000]),
+                                )
+                            await _db.commit()
+                        finally:
+                            await _db.close()
+                        await manager.broadcast(session_id, {
+                            "type": "log", "phase": "recon",
+                            "message": f"Nettacker: persisted {len(_parsed['findings'])} deterministic findings",
+                        })
+                    except Exception as _pe:  # noqa: BLE001
+                        print(f"[nettacker {session_id[:8]}] persist failed: {_pe}", flush=True)
+
         # Inject warm-start context if applicable
         if session_type == "warm" and parent_session_id:
             warm_context = await _get_warm_start_context(parent_session_id)

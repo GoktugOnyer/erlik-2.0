@@ -160,6 +160,32 @@ between runs; aggregate coverage is stable across repeats.
 Active development. The deterministic engine and WSTG catalogue are
 operational; the catalogue is being expanded toward broader WSTG coverage.
 
+## Deterministic pre-scan (OWASP Nettacker)
+
+To reduce reliance on the LLM, erlik can run a **deterministic** OWASP Nettacker
+scan before the agent loop and inject the verified results (open ports, detected
+tech, exposed paths, header/TLS/CVE hits) as a starting point — so the model
+confirms/exploits rather than blindly re-discovers.
+
+```bash
+pip install nettacker            # or use the owasp/nettacker Docker image
+export ERLIK_NETTACKER=1         # enable the pre-scan (default off)
+# optional:
+#   ERLIK_NETTACKER_CMD="python -m nettacker.main"   # custom launcher
+#   ERLIK_NETTACKER_MODULES="port_scan,dir_scan,..." # override module set
+#   ERLIK_NETTACKER_FINDINGS=1                        # also persist deterministic findings
+```
+
+Standalone (any pipeline/model, no erlik session needed):
+
+```bash
+python -m orchestrator.integrations.nettacker http://target        # prints recon block
+python -m orchestrator.integrations.nettacker http://target --json # parsed buckets
+```
+
+Nettacker is Apache-2.0 and is **invoked, not bundled** — see
+[THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).
+
 ## License & third-party code
 
 Erlik 2.0 is released under the [MIT License](LICENSE).

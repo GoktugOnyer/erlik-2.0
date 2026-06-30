@@ -23,3 +23,12 @@ Code in erlik-2.0 adapted from this project:
 The MIT license requires that the copyright notice and permission notice be
 retained in copies or substantial portions. Adapted source files carry an
 attribution header pointing here.
+
+## Runtime tools (invoked, not vendored)
+
+erlik can shell out to external scanners it does not bundle. Their code is not
+included or redistributed here; you install them yourself.
+
+| Tool | License | Used by | Notes |
+|------|---------|---------|-------|
+| [OWASP Nettacker](https://github.com/OWASP/Nettacker) | Apache-2.0 | `orchestrator/integrations/nettacker.py` | Optional deterministic pre-scan. erlik builds a CLI invocation and parses Nettacker's JSON output; no Nettacker source is vendored. Enable with `ERLIK_NETTACKER=1`. |
