@@ -24,7 +24,7 @@ import os
 import re
 from pathlib import Path
 
-SKILLS_ROOT = Path(__file__).resolve().parents[1] / "skills_catalog"
+SKILLS_ROOT = Path(__file__).resolve().parents[1] / "skills_catalog" / "skills"
 
 # Expand erlik's short vuln-category / jargon tokens into the corpus vocabulary
 # so a preset like "sqli_focused" matches the sql-injection references.
@@ -87,7 +87,7 @@ def _catalog() -> list[tuple[Path, set[str]]]:
         return []
     files: list[tuple[Path, set[str]]] = []
     for p in sorted(SKILLS_ROOT.rglob("*.md")):
-        if p.name in ("NOTICE.md", "INDEX.md"):
+        if p.name in ("NOTICE.md", "INDEX.md", "SKILL.md"):
             continue
         rel = p.relative_to(SKILLS_ROOT)
         files.append((p, _tokens(f"{rel.parent.name} {p.stem}")))

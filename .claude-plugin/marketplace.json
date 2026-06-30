@@ -1,0 +1,13 @@
+{
+  "name": "erlik",
+  "owner": { "name": "Goktug Onyer" },
+  "description": "Erlik 2.0 security tooling for Claude Code — pentest knowledge skills (and see mcp_servers/ for the CVE enrichment MCP server).",
+  "plugins": [
+    {
+      "name": "erlik-security-skills",
+      "source": "./skills_catalog",
+      "description": "Pentest knowledge skills: injection, server-side, client-side, API, authentication, web-app-logic, reconnaissance.",
+      "version": "1.0.0"
+    }
+  ]
+}
