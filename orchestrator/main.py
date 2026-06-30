@@ -2858,6 +2858,27 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
         else:
             print(f"[playbooks {session_id[:8]}] skipped (ERLIK_PLAYBOOKS={'set' if os.environ.get('ERLIK_PLAYBOOKS') else 'unset'}, target={target_url})", flush=True)
 
+        # Inject auto-selected skill knowledge (ERLIK_SKILLS=1). Unlike the
+        # Juice-Shop playbooks, this is target-agnostic: it picks 1-3 references
+        # from skills_catalog/ by the mission's vuln class. See orchestrator/skills.py.
+        try:
+            from orchestrator.skills import get_skills_context
+        except ImportError:
+            from skills import get_skills_context
+        try:
+            _sk_hint = " ".join(filter(None, [vuln_category or "", system_prompt or ""]))
+            _sk_ctx = get_skills_context(target_url, _sk_hint)
+        except Exception as _sk_err:  # noqa: BLE001 — never break the loop over knowledge injection
+            _sk_ctx = ""
+            print(f"[skills {session_id[:8]}] error (non-fatal): {_sk_err}", flush=True)
+        if _sk_ctx:
+            combined_system += f"\n\n{_sk_ctx}"
+            print(f"[skills {session_id[:8]}] injected {len(_sk_ctx)} chars (hint={_sk_hint[:60]!r})", flush=True)
+            await manager.broadcast(session_id, {
+                "type": "log", "phase": "recon",
+                "message": f"SKILLS: injected {len(_sk_ctx)} chars of relevant pentest knowledge",
+            })
+
         # Inject warm-start context if applicable
         if session_type == "warm" and parent_session_id:
             warm_context = await _get_warm_start_context(parent_session_id)
