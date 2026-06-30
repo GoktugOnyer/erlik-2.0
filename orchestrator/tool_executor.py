@@ -1,11 +1,14 @@
 """Execute pentest tools inside the kali-tools Docker container (or natively via ERLIK_NATIVE)."""
 
 import asyncio
+import fnmatch
+import ipaddress
 import os
 import re
 import shutil
 import subprocess
 import time
+from urllib.parse import urlparse
 
 ERLIK_NATIVE = bool(os.environ.get("ERLIK_NATIVE", ""))
 CONTAINER_NAME = "kali-tools"
@@ -204,6 +207,76 @@ def _validate_command(command: str) -> str | None:
     return None
 
 
+# --- Scope enforcement (safety floor for the live agent loop) --------------- #
+# Lenient by design so SSRF/IMDS/local testing still works: the session TARGET,
+# plus localhost/RFC1918/link-local (169.254 metadata)/reserved IPs and OAST
+# collaborator domains, are always allowed. Only an UNRELATED PUBLIC host is
+# refused (e.g. the LLM wandering off to scan google.com). A refusal blocks just
+# that one command — the session continues. Disable with ERLIK_SCOPE_ENFORCE=0;
+# broaden with ERLIK_SCOPE_EXTRA_HOSTS=glob,glob (e.g. your OAST domain).
+
+_SCOPE_URL_RX = re.compile(r"https?://[^\s'\"\\<>|]+", re.IGNORECASE)
+_SCOPE_BARE_HOST_RX = re.compile(
+    r"(?<![\w./-])(?:[a-z0-9-]+\.)+[a-z]{2,}(?::\d{1,5})?(?![\w./])", re.IGNORECASE)
+_OAST_MARKERS = ("oast.", "interactsh", "burpcollaborator", "oastify", "canarytokens")
+
+
+def _scope_enforced() -> bool:
+    return os.environ.get("ERLIK_SCOPE_ENFORCE", "1").strip().lower() not in ("0", "false", "no", "off")
+
+
+def _host_is_local_or_private(host: str) -> bool:
+    h = host.lower()
+    if h in ("localhost",) or h.endswith(".internal") or h.endswith(".local") or h.endswith(".lan"):
+        return True
+    try:
+        ip = ipaddress.ip_address(host)
+        return ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_unspecified
+    except ValueError:
+        return False
+
+
+def _scope_allows(host: str, target_host: str, extra: list[str]) -> bool:
+    h = (host or "").lower().rstrip(".")
+    if not h:
+        return True
+    if target_host and (h == target_host or h.endswith("." + target_host)):
+        return True
+    if _host_is_local_or_private(h):
+        return True
+    if any(m in h for m in _OAST_MARKERS):
+        return True
+    if any(fnmatch.fnmatchcase(h, g.lower()) for g in extra):
+        return True
+    return False
+
+
+def _scope_violation(command: str, target_url: str | None) -> str | None:
+    """Return a reason string if the command targets an unrelated public host."""
+    if not _scope_enforced() or not target_url:
+        return None
+    target_host = (urlparse(target_url if "://" in target_url else f"http://{target_url}").hostname or "").lower()
+    extra = [g.strip() for g in os.environ.get("ERLIK_SCOPE_EXTRA_HOSTS", "").split(",") if g.strip()]
+    if os.environ.get("ERLIK_DOCKER_TARGET_HOST"):
+        extra.append(os.environ["ERLIK_DOCKER_TARGET_HOST"].lower())
+
+    candidates: list[str] = []
+    for m in _SCOPE_URL_RX.finditer(command):
+        candidates.append(urlparse(m.group(0)).hostname or "")
+    masked = _SCOPE_URL_RX.sub(" ", command)
+    for m in _SCOPE_BARE_HOST_RX.finditer(masked):
+        tok = m.group(0)
+        # skip filesystem paths / wordlist filenames that look host-ish
+        if "/" in tok or tok.endswith((".txt", ".json", ".yaml", ".yml", ".html", ".php", ".js", ".csv")):
+            continue
+        candidates.append(tok.split(":")[0])
+
+    for host in candidates:
+        if host and not _scope_allows(host, target_host, extra):
+            return f"out-of-scope host {host!r} (target {target_host!r}); set ERLIK_SCOPE_EXTRA_HOSTS to allow, or ERLIK_SCOPE_ENFORCE=0 to disable"
+    return None
+
+
 def _extract_tool_name(command: str) -> str | None:
     """Extract the base tool name from a shell command."""
     # Strip leading env vars, sudo, timeout wrappers
@@ -302,6 +375,12 @@ async def execute_tool(command: str, enabled_tools: list[str], no_timeout: bool 
 
     # Rewrite localhost to docker network
     sanitized = _sanitize_command(command, target_url=target_url)
+
+    # Scope enforcement: refuse commands that target an unrelated public host.
+    scope_err = _scope_violation(sanitized, target_url)
+    if scope_err:
+        return {"success": False, "output": "", "tool": tool_name, "duration_ms": 0,
+                "error": f"SCOPE: {scope_err}"}
 
     # Check container is running
     if not await check_container_running():
