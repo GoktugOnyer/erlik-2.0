@@ -263,6 +263,25 @@ async def init_db():
                 except Exception:
                     pass  # column already exists
 
+        # Structured finding columns (Phase 2). Populated at report time by the
+        # calibration pass in main.py:_generate_report. Additive + nullable — the
+        # report renders identically when these stay NULL.
+        structured_columns = [
+            ("calibrated_severity", "TEXT DEFAULT NULL"),
+            ("owasp_category", "TEXT DEFAULT NULL"),
+            ("mitre", "TEXT DEFAULT NULL"),
+            ("impact", "TEXT DEFAULT NULL"),
+            ("remediation", "TEXT DEFAULT NULL"),
+            ("confidence", "TEXT DEFAULT NULL"),
+            ("ref_links", "TEXT DEFAULT NULL"),
+        ]
+        for table in ("findings", "v2_findings"):
+            for col_name, col_def in structured_columns:
+                try:
+                    await db.execute(f"ALTER TABLE {table} ADD COLUMN {col_name} {col_def}")
+                except Exception:
+                    pass  # column already exists
+
         await db.commit()
 
 

@@ -17,6 +17,7 @@ from orchestrator.models import (
     SessionCreate, SessionResponse, ReportResponse, SessionMetrics,
     ChainCreate, ChainResponse, ChainSessionSummary,
     BenchmarkCreate, BenchmarkSessionResult, BenchmarkResponse,
+    ReportFinding, PentestReport,
 )
 from orchestrator import llm_client
 from orchestrator.enrichment import enrichment_enabled, find_cve_ids, lookup_cve
@@ -1331,7 +1332,7 @@ REPORT_LLM_PROMPT = """You are a senior penetration tester writing a brief analy
 You will ONLY provide:
 1. An executive summary (exactly 3 sentences)
 2. A risk level (CRITICAL / HIGH / MEDIUM / LOW / INFO) with 1 sentence justification
-3. For each finding below, provide ONE concrete remediation sentence
+3. For each finding below, a short structured block (severity, classification, impact, fix)
 4. 2-3 suggested next steps for deeper testing
 
 TARGET: {target_url}
@@ -1345,6 +1346,19 @@ FINDINGS:
 PHASES COMPLETED: {phases_completed}
 PHASES MISSED: {phases_missed}
 
+SEVERITY CALIBRATION (apply when setting CALIBRATED_SEVERITY):
+- Score the CONFIRMED root cause, not only the sub-impact you happened to demonstrate.
+  If the root cause is confirmed (missing tenant/ownership filter, unauthenticated
+  state-changing endpoint, unvalidated server-fetched URL), rate impact from what that
+  root cause WOULD yield against a normal, populated target.
+- A transient or reversible DATA STATE is NOT mitigating (empty table, deleted records,
+  a toggled-off feature, a created-then-deleted resource) — an attacker or normal
+  operation restores it. Record what you physically demonstrated in CONFIDENCE, not as a
+  severity reduction.
+- Only DURABLE, defender-controlled conditions mitigate (port genuinely closed, control
+  genuinely enforced, exposure genuinely internal-only with no pivot). Aggravate for
+  payment/PII context, chained impact, or regulatory exposure.
+
 Respond in this EXACT format (nothing else):
 
 EXECUTIVE_SUMMARY: <3 sentences about what was tested, what was found, overall risk>
@@ -1352,7 +1366,7 @@ EXECUTIVE_SUMMARY: <3 sentences about what was tested, what was found, overall r
 RISK_LEVEL: <CRITICAL|HIGH|MEDIUM|LOW|INFO>
 RISK_REASON: <1 sentence why>
 
-{remediation_prompts}
+{finding_blocks}
 
 NEXT_STEPS:
 - <suggestion 1>
@@ -1668,7 +1682,7 @@ async def _generate_report(session_id: str, model: str, target_url: str,
 
         # Fetch findings — convert to dicts immediately
         cursor = await db.execute(
-            "SELECT vuln_type, severity, url, parameter, evidence, "
+            "SELECT id, vuln_type, severity, url, parameter, evidence, "
             "cve_id, cvss_score, cvss_vector, cwe "
             "FROM findings WHERE session_id = ? ORDER BY id", (session_id,)
         )
@@ -1676,15 +1690,16 @@ async def _generate_report(session_id: str, model: str, target_url: str,
         findings = []
         for row in raw_findings:
             findings.append({
-                "vuln_type": row[0] or "Unknown",
-                "severity": row[1] or "info",
-                "url": row[2] or "N/A",
-                "parameter": row[3] or "N/A",
-                "evidence": row[4] or "N/A",
-                "cve_id": row[5],
-                "cvss_score": row[6],
-                "cvss_vector": row[7],
-                "cwe": row[8],
+                "id": row[0],
+                "vuln_type": row[1] or "Unknown",
+                "severity": row[2] or "info",
+                "url": row[3] or "N/A",
+                "parameter": row[4] or "N/A",
+                "evidence": row[5] or "N/A",
+                "cve_id": row[6],
+                "cvss_score": row[7],
+                "cvss_vector": row[8],
+                "cwe": row[9],
             })
     finally:
         await db.close()
@@ -1712,30 +1727,13 @@ async def _generate_report(session_id: str, model: str, target_url: str,
     report_lines.append(f"| **Date** | {timestamp} |")
     report_lines.append("")
 
-    # ─── Findings table (includes NVD CVE enrichment when available) ───
+    # ─── Findings table placeholder ───
+    # Built after the calibration pass (PART 3) so it reflects calibrated
+    # severity / OWASP / CWE. Single placeholder line spliced in later.
+    findings_table_index = None
     if findings:
-        has_cve = any(f.get("cve_id") for f in findings)
-        report_lines.append("## Findings")
-        report_lines.append("")
-        if has_cve:
-            report_lines.append("| # | Type | Severity | CVE | CVSS | CWE | URL |")
-            report_lines.append("|---|------|----------|-----|------|-----|-----|")
-            for i, f in enumerate(findings, 1):
-                cvss = f.get("cvss_score")
-                cvss_str = f"{cvss} ({cvss_severity_label(cvss)})" if cvss is not None else "—"
-                report_lines.append(
-                    f"| {i} | {f['vuln_type']} | {f['severity']} | "
-                    f"{f.get('cve_id') or '—'} | {cvss_str} | {f.get('cwe') or '—'} | "
-                    f"`{f['url']}` |"
-                )
-        else:
-            report_lines.append("| # | Type | Severity | URL | Parameter |")
-            report_lines.append("|---|------|----------|-----|-----------|")
-            for i, f in enumerate(findings, 1):
-                report_lines.append(
-                    f"| {i} | {f['vuln_type']} | {f['severity']} | "
-                    f"`{f['url']}` | {f['parameter']} |"
-                )
+        report_lines.append("__FINDINGS_TABLE__")
+        findings_table_index = len(report_lines) - 1
         report_lines.append("")
 
     # Placeholder for LLM sections (filled in later)
@@ -1919,15 +1917,26 @@ async def _generate_report(session_id: str, model: str, target_url: str,
 
     # Build findings text for LLM
     findings_for_llm = []
-    remediation_prompts = []
+    block_prompts = []
     for i, f in enumerate(findings, 1):
+        cve_hint = f" [enriched: {f['cve_id']} CVSS {f['cvss_score']}]" if f.get("cve_id") else ""
         findings_for_llm.append(
-            f"FINDING {i}: [{f['severity'].upper()}] {f['vuln_type']} at {f['url']} (param: {f['parameter']})"
+            f"FINDING {i}: [{f['severity'].upper()}] {f['vuln_type']} at {f['url']} "
+            f"(param: {f['parameter']}){cve_hint}"
         )
-        remediation_prompts.append(f"REMEDIATION_{i}: <one sentence fix for {f['vuln_type']} at {f['url']}>")
+        # Structured per-finding block the model fills in (Phase 2).
+        block_prompts.append(
+            f"FINDING_{i}:\n"
+            f"CALIBRATED_SEVERITY: <CRITICAL|HIGH|MEDIUM|LOW|INFO>\n"
+            f"OWASP: <e.g. A03:2021 - Injection, or NONE>\n"
+            f"CWE: <e.g. CWE-89, or NONE>\n"
+            f"IMPACT: <one line: confidentiality/integrity/availability + business impact>\n"
+            f"CONFIDENCE: <confirmed|demonstrated|potential>\n"
+            f"REMEDIATION: <one concrete fix sentence>"
+        )
 
     findings_text = "\n".join(findings_for_llm) if findings_for_llm else "No vulnerabilities found."
-    remediation_text = "\n".join(remediation_prompts) if remediation_prompts else ""
+    finding_blocks_text = "\n\n".join(block_prompts) if block_prompts else ""
 
     prompt = REPORT_LLM_PROMPT.format(
         target_url=target_url,
@@ -1937,7 +1946,7 @@ async def _generate_report(session_id: str, model: str, target_url: str,
         findings_text=findings_text,
         phases_completed=phases_completed_str,
         phases_missed=phases_missed_str,
-        remediation_prompts=remediation_text,
+        finding_blocks=finding_blocks_text,
     )
 
     # Call LLM for analysis only
@@ -1965,10 +1974,94 @@ async def _generate_report(session_id: str, model: str, target_url: str,
     risk_reason_match = re.search(r'RISK_REASON:\s*(.+?)(?=\nREMEDIATION_|\nNEXT_STEPS:|\Z)', llm_analysis, re.DOTALL)
     risk_reason = risk_reason_match.group(1).strip() if risk_reason_match else ""
 
-    # Extract remediations
-    remediations = {}
-    for m in re.finditer(r'REMEDIATION_(\d+):\s*(.+?)(?=\nREMEDIATION_|\nNEXT_STEPS:|\Z)', llm_analysis, re.DOTALL):
-        remediations[int(m.group(1))] = m.group(2).strip()
+    # Extract structured per-finding blocks (Phase 2). Back-compatible: if the
+    # model emits nothing parseable, `structured` stays empty and the report
+    # renders exactly as before.
+    def _parse_finding_blocks(text: str) -> dict[int, dict]:
+        out: dict[int, dict] = {}
+        # Split into FINDING_N sections; each runs until the next FINDING_N /
+        # NEXT_STEPS / end of text.
+        for m in re.finditer(
+            r'FINDING_(\d+):\s*(.+?)(?=\nFINDING_\d+:|\nNEXT_STEPS:|\Z)',
+            text, re.DOTALL,
+        ):
+            idx = int(m.group(1))
+            block = m.group(2)
+            fields: dict[str, str] = {}
+            for key in ("CALIBRATED_SEVERITY", "OWASP", "CWE", "IMPACT",
+                        "CONFIDENCE", "REMEDIATION"):
+                fm = re.search(rf'{key}:\s*(.+)', block)
+                if fm:
+                    val = fm.group(1).strip()
+                    # Drop placeholder echoes and explicit NONE markers.
+                    if val and not val.startswith("<") and val.upper() != "NONE":
+                        fields[key] = val
+            if fields:
+                out[idx] = fields
+        return out
+
+    structured = _parse_finding_blocks(llm_analysis)
+
+    # Back-compat alias: remediation text keyed by index (used below).
+    remediations = {i: fb["REMEDIATION"] for i, fb in structured.items() if "REMEDIATION" in fb}
+
+    # Persist structured fields back onto the finding rows.
+    if structured:
+        db2 = await get_db()
+        try:
+            for i, f in enumerate(findings, 1):
+                fb = structured.get(i)
+                if not fb or not f.get("id"):
+                    continue
+                await db2.execute(
+                    "UPDATE findings SET calibrated_severity = ?, owasp_category = ?, "
+                    "mitre = ?, impact = ?, remediation = ?, confidence = ?, "
+                    "cwe = COALESCE(cwe, ?) WHERE id = ?",
+                    (fb.get("CALIBRATED_SEVERITY"), fb.get("OWASP"), None,
+                     fb.get("IMPACT"), fb.get("REMEDIATION"), fb.get("CONFIDENCE"),
+                     fb.get("CWE"), f["id"]),
+                )
+                # Reflect into the in-memory dict so the table below renders fresh data.
+                f["calibrated_severity"] = fb.get("CALIBRATED_SEVERITY")
+                f["owasp_category"] = fb.get("OWASP")
+                f["impact"] = fb.get("IMPACT")
+                f["confidence"] = fb.get("CONFIDENCE")
+                if fb.get("CWE") and not f.get("cwe"):
+                    f["cwe"] = fb.get("CWE")
+            await db2.commit()
+        finally:
+            await db2.close()
+
+    # Render the Findings table now that calibration has populated the rows.
+    if findings_table_index is not None:
+        has_cve = any(f.get("cve_id") for f in findings)
+        has_calib = any(f.get("calibrated_severity") for f in findings)
+        tbl = ["## Findings", ""]
+        if has_cve or has_calib:
+            tbl.append("| # | Type | Severity | CVE | CVSS | CWE | OWASP | URL |")
+            tbl.append("|---|------|----------|-----|------|-----|-------|-----|")
+            for i, f in enumerate(findings, 1):
+                cvss = f.get("cvss_score")
+                cvss_str = f"{cvss} ({cvss_severity_label(cvss)})" if cvss is not None else "—"
+                calib = f.get("calibrated_severity")
+                raw = (f.get("severity") or "info")
+                # §7: show both when they differ.
+                sev_str = (f"{calib} (raw {raw})" if calib and calib.upper() != raw.upper()
+                           else (calib or raw))
+                tbl.append(
+                    f"| {i} | {f['vuln_type']} | {sev_str} | "
+                    f"{f.get('cve_id') or '—'} | {cvss_str} | {f.get('cwe') or '—'} | "
+                    f"{f.get('owasp_category') or '—'} | `{f['url']}` |"
+                )
+        else:
+            tbl.append("| # | Type | Severity | URL | Parameter |")
+            tbl.append("|---|------|----------|-----|-----------|")
+            for i, f in enumerate(findings, 1):
+                tbl.append(
+                    f"| {i} | {f['vuln_type']} | {f['severity']} | "
+                    f"`{f['url']}` | {f['parameter']} |"
+                )
+        report_lines[findings_table_index] = "\n".join(tbl)
 
     # Extract next steps
     next_steps = []
@@ -2016,6 +2109,68 @@ async def _generate_report(session_id: str, model: str, target_url: str,
         await db.close()
 
     return report_md, executive_summary, gen_duration
+
+
+_SEV_STAT_KEY = {
+    "CRITICAL": "critical", "HIGH": "high", "MEDIUM": "medium",
+    "LOW": "low", "INFO": "informational", "INFORMATIONAL": "informational",
+}
+
+
+async def _build_report_json(session_id: str) -> dict:
+    """Assemble the validated pentest-report.json (Phase 2) from the (enriched,
+    calibrated) finding rows. Source of truth for GET /report.json and the
+    on-disk artifact. Uses calibrated_severity when present, else the raw label.
+    """
+    db = await get_db()
+    try:
+        srow = await (await db.execute(
+            "SELECT * FROM sessions WHERE id = ?", (session_id,))).fetchone()
+        session = dict(srow) if srow else {}
+        cur = await db.execute(
+            "SELECT vuln_type, severity, url, evidence, cve_id, cvss_score, cvss_vector, "
+            "cwe, calibrated_severity, owasp_category, impact, remediation, confidence, "
+            "ref_links FROM findings WHERE session_id = ? ORDER BY id", (session_id,)
+        )
+        rows = [dict(r) for r in await cur.fetchall()]
+    finally:
+        await db.close()
+
+    stats = {"total": 0, "critical": 0, "high": 0, "medium": 0, "low": 0,
+             "informational": 0}
+    report_findings = []
+    for i, r in enumerate(rows, 1):
+        sev = (r.get("calibrated_severity") or r.get("severity") or "INFO").upper()
+        refs = [x.strip() for x in (r.get("ref_links") or "").split(",") if x.strip()]
+        report_findings.append(ReportFinding(
+            id=f"F-{i:03d}",
+            title=r.get("vuln_type") or "Unknown",
+            severity=sev,
+            cvss_score=r.get("cvss_score"),
+            cvss_vector=r.get("cvss_vector"),
+            cwe=r.get("cwe"),
+            owasp=r.get("owasp_category"),
+            affected_url=r.get("url"),
+            description=(r.get("evidence") or None),
+            impact=r.get("impact"),
+            confidence=r.get("confidence"),
+            remediation=r.get("remediation"),
+            references=refs,
+        ))
+        stats["total"] += 1
+        stats[_SEV_STAT_KEY.get(sev, "informational")] += 1
+
+    report = PentestReport(
+        engagement={
+            "name": f"erlik session {session_id[:8]}",
+            "target": session.get("target_url") or "",
+            "dates": session.get("created_at") or "",
+            "status": session.get("status") or "complete",
+        },
+        statistics=stats,
+        findings=report_findings,
+    )
+    return report.model_dump()
 
 
 # --- File-Based Report Saving ---
@@ -3540,6 +3695,15 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
                     "message": f"Failed to save report file: {e}",
                 })
 
+            # Write the validated pentest-report.json artifact (Phase 2).
+            try:
+                report_json = await _build_report_json(session_id)
+                REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+                (REPORTS_DIR / f"{session_id}.pentest-report.json").write_text(
+                    json.dumps(report_json, indent=2), encoding="utf-8")
+            except Exception as e:
+                print(f"[report.json {session_id[:8]}] skipped: {e}")
+
         except Exception as e:
             report_md = None
             await manager.broadcast(session_id, {
@@ -4012,6 +4176,16 @@ async def list_findings(session_id: str):
         return [dict(r) for r in rows]
     finally:
         await db.close()
+
+
+@app.get("/api/sessions/{session_id}/report.json")
+async def get_report_json(session_id: str):
+    """Validated pentest-report.json for a session (Phase 2 structured schema).
+
+    Rebuilt live from the (enriched, calibrated) finding rows — the JSON is the
+    source of truth from which the markdown report is rendered.
+    """
+    return await _build_report_json(session_id)
 
 
 @app.get("/api/sessions/{session_id}/report")

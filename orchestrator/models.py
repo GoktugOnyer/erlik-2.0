@@ -97,7 +97,46 @@ class Finding(BaseModel):
     cvss_score: Optional[float] = None
     cvss_vector: Optional[str] = None
     cwe: Optional[str] = None
+    # Structured fields (Phase 2; populated at report time by the calibration pass)
+    calibrated_severity: Optional[str] = None
+    owasp_category: Optional[str] = None
+    mitre: Optional[str] = None
+    impact: Optional[str] = None
+    remediation: Optional[str] = None
+    confidence: Optional[str] = None
+    ref_links: Optional[str] = None
     created_at: str
+
+
+class ReportFinding(BaseModel):
+    """A single finding in the validated pentest-report.json (Phase 2).
+
+    Pragmatic subset of communitytools formats/data.md (pentest-report.json).
+    """
+    id: str                              # F-NNN
+    title: str
+    severity: str                        # calibrated if available, else as-emitted
+    cvss_score: Optional[float] = None
+    cvss_vector: Optional[str] = None
+    cwe: Optional[str] = None
+    owasp: Optional[str] = None
+    affected_url: Optional[str] = None
+    description: Optional[str] = None
+    impact: Optional[str] = None
+    confidence: Optional[str] = None
+    remediation: Optional[str] = None
+    references: list[str] = []
+
+
+class PentestReport(BaseModel):
+    """Validated source-of-truth report object (Phase 2).
+
+    Written to data/reports/{session_id}.pentest-report.json and served by
+    GET /api/sessions/{session_id}/report.json.
+    """
+    engagement: dict                     # {name, target, dates, status}
+    statistics: dict                     # {total, critical, high, medium, low, informational}
+    findings: list[ReportFinding] = []
 
 
 class ReportResponse(BaseModel):
