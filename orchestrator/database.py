@@ -290,4 +290,14 @@ async def init_db():
 async def get_db():
     db = await aiosqlite.connect(DB_PATH)
     db.row_factory = aiosqlite.Row
+    # WAL + a busy timeout so concurrent per-step writes from parallel sessions
+    # WAIT for the writer lock instead of failing immediately with
+    # "database is locked". Pure reliability win, no behavior change.
+    # (FK enforcement is intentionally NOT enabled here — it would require
+    # auditing every insert order first; tracked as a separate change.)
+    try:
+        await db.execute("PRAGMA journal_mode=WAL")
+        await db.execute("PRAGMA busy_timeout=5000")
+    except Exception:
+        pass  # never let PRAGMA setup block opening the DB
     return db

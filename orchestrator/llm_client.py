@@ -59,6 +59,13 @@ async def _ollama_chat(messages: list[dict], model: str, max_retries: int) -> st
                 resp = await client.post(f"{OLLAMA_BASE}/api/chat", json=body)
                 resp.raise_for_status()
                 return resp.json()["message"]["content"]
+        except httpx.HTTPStatusError as e:
+            # Retry transient server errors (5xx); surface 4xx immediately.
+            last_error = e
+            if e.response.status_code >= 500 and attempt < max_retries - 1:
+                await asyncio.sleep(2 ** attempt)
+                continue
+            raise
         except (httpx.TimeoutException, httpx.ConnectError) as e:
             last_error = e
             if attempt < max_retries - 1:
@@ -121,6 +128,13 @@ async def _openai_chat(messages: list[dict], model: str, max_retries: int) -> st
                 resp.raise_for_status()
                 data = resp.json()
                 return data["choices"][0]["message"]["content"] or ""
+        except httpx.HTTPStatusError as e:
+            # Retry transient server errors (5xx); surface 4xx (incl. 401/429) immediately.
+            last_error = e
+            if e.response.status_code >= 500 and attempt < max_retries - 1:
+                await asyncio.sleep(2 ** attempt)
+                continue
+            raise
         except (httpx.TimeoutException, httpx.ConnectError) as e:
             last_error = e
             if attempt < max_retries - 1:
