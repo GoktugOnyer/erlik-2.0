@@ -45,6 +45,31 @@ app = FastAPI(title="Erlik Pentest Agent", lifespan=lifespan)
 templates = Jinja2Templates(directory="dashboard/templates")
 
 
+@app.middleware("http")
+async def _api_token_guard(request: Request, call_next):
+    """Optional shared-secret guard for state-changing API calls.
+
+    Off by default (no behavior change). When ERLIK_API_TOKEN is set, every
+    state-changing request (POST/PUT/PATCH/DELETE) to /api/* must present the
+    token via `X-API-Token: <t>` or `Authorization: Bearer <t>`. GET/HEAD
+    (the dashboard + read endpoints) and /api/health stay open so the page
+    loads; pair this with ERLIK_HOST=127.0.0.1 for a safe default posture.
+    """
+    from fastapi.responses import JSONResponse
+    token = os.environ.get("ERLIK_API_TOKEN", "").strip()
+    if token and request.method in ("POST", "PUT", "PATCH", "DELETE") \
+            and request.url.path.startswith("/api/") \
+            and request.url.path != "/api/health":
+        provided = request.headers.get("x-api-token", "")
+        if not provided:
+            auth = request.headers.get("authorization", "")
+            if auth.lower().startswith("bearer "):
+                provided = auth[7:].strip()
+        if provided != token:
+            return JSONResponse({"detail": "missing or invalid API token"}, status_code=401)
+    return await call_next(request)
+
+
 # --- Toolset Presets (RQ3-b: action-space overload ablation) ---
 #
 # Three named tiers used as an experimental condition. See

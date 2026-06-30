@@ -8,6 +8,40 @@
     <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&family=Share+Tech+Mono&display=swap" rel="stylesheet">
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
+    <script>
+        // --- XSS-safe helpers (LLM- and target-controlled content is untrusted) ---
+        function escapeHtml(s) {
+            return String(s == null ? '' : s)
+                .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+        }
+        // Render markdown, then sanitize the resulting HTML (strips <script>, on*=, etc.).
+        function renderMarkdown(md) {
+            const html = marked.parse(md || '');
+            return (window.DOMPurify ? DOMPurify.sanitize(html) : escapeHtml(md));
+        }
+
+        // --- Optional API-token attachment (when ERLIK_API_TOKEN is set server-side) ---
+        (function () {
+            const _f = window.fetch;
+            window.fetch = async function (url, opts) {
+                try {
+                    const t = localStorage.getItem('erlik_api_token');
+                    if (t && typeof url === 'string' && url.indexOf('/api/') === 0) {
+                        opts = opts || {};
+                        opts.headers = Object.assign({}, opts.headers || {}, { 'X-API-Token': t });
+                    }
+                } catch (e) { /* ignore */ }
+                const resp = await _f(url, opts);
+                if (resp.status === 401 && typeof url === 'string' && url.indexOf('/api/') === 0) {
+                    const t = prompt('API token required (ERLIK_API_TOKEN). Enter it to continue:');
+                    if (t) { try { localStorage.setItem('erlik_api_token', t); } catch (e) {} location.reload(); }
+                }
+                return resp;
+            };
+        })();
+    </script>
     <style>
         /* ===== CSS Custom Properties ===== */
         :root {
@@ -1665,7 +1699,7 @@
                 }
 
                 // Show full report
-                content.innerHTML = marked.parse(report.report_markdown || '*Report content is empty.*');
+                content.innerHTML = renderMarkdown(report.report_markdown || '*Report content is empty.*');
 
             } catch (err) {
                 content.innerHTML = '<p style="color:var(--neon-red);">Error loading report: ' + err.message + '</p>';
@@ -2011,7 +2045,7 @@
             const panel = document.getElementById('report-panel');
             const content = document.getElementById('report-content');
             // Render markdown to styled HTML via marked.js
-            content.innerHTML = marked.parse(markdown);
+            content.innerHTML = renderMarkdown(markdown);
             panel.classList.remove('hidden');
             panel.scrollIntoView({ behavior: 'smooth' });
         }
@@ -2033,7 +2067,7 @@
                 mime = 'text/markdown';
             } else {
                 // Convert markdown to styled HTML via marked.js
-                const htmlBody = marked.parse(currentReportMarkdown);
+                const htmlBody = renderMarkdown(currentReportMarkdown);
                 content = buildStandaloneHtml(sessionId, htmlBody);
                 filename = `pentest-report-${sessionId || 'unknown'}.html`;
                 mime = 'text/html';
@@ -2134,10 +2168,10 @@ ${htmlBody}
             div.style.cssText = 'background: rgba(13,13,21,0.8); border: 1px solid var(--panel-border);';
             div.innerHTML = `
                 <div class="flex items-center justify-between mb-1">
-                    <span class="font-bold" style="color:#e0e0e0; font-size:0.9rem;">${data.vuln_type || 'Unknown'}</span>
-                    <span class="px-2 py-0.5 rounded font-pixel ${sevClass}" style="font-size:0.5rem;">${(data.severity || '?').toUpperCase()}</span>
+                    <span class="font-bold" style="color:#e0e0e0; font-size:0.9rem;">${escapeHtml(data.vuln_type || 'Unknown')}</span>
+                    <span class="px-2 py-0.5 rounded font-pixel ${sevClass}" style="font-size:0.5rem;">${escapeHtml((data.severity || '?').toUpperCase())}</span>
                 </div>
-                <div class="font-mono" style="color:#5a5a6a; font-size:0.85rem;">${data.url || ''}</div>
+                <div class="font-mono" style="color:#5a5a6a; font-size:0.85rem;">${escapeHtml(data.url || '')}</div>
             `;
             panel.appendChild(div);
             const count = panel.querySelectorAll('[class*="rounded p-3"]').length;
@@ -3065,11 +3099,11 @@ ${htmlBody}
 
                         findingsHtml += `<tr style="border-bottom:1px solid #0a0a1a;">
                             <td style="padding:3px 8px;"><span style="color:${clsColor}; font-weight:bold; font-size:0.7rem;">${clsLabel}${scoreStr}</span></td>
-                            <td style="padding:3px 8px;" title="${vTooltip}\n\nSnippet: ${vSnippet}"><span style="color:${vColor}; font-size:0.7rem; cursor:help;">${vIcon} ${vStatus}${vTool}</span></td>
-                            <td style="padding:3px 8px;"><span style="color:${sColor}; font-weight:bold; text-transform:uppercase;">${f.severity}</span></td>
-                            <td style="padding:3px 8px; color:#c0c0d0;">${f.vuln_type}</td>
-                            <td style="padding:3px 8px; color:#8a8a9a; font-size:0.7rem; max-width:160px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${f.url || '---'}</td>
-                            <td style="padding:3px 8px; color:#5a5a6a; font-size:0.65rem; max-width:200px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${f.match_reason || ''}">${f.match_reason || '---'}</td>
+                            <td style="padding:3px 8px;" title="${escapeHtml(vTooltip)}\n\nSnippet: ${escapeHtml(vSnippet)}"><span style="color:${vColor}; font-size:0.7rem; cursor:help;">${vIcon} ${escapeHtml(vStatus)}${escapeHtml(vTool)}</span></td>
+                            <td style="padding:3px 8px;"><span style="color:${sColor}; font-weight:bold; text-transform:uppercase;">${escapeHtml(f.severity)}</span></td>
+                            <td style="padding:3px 8px; color:#c0c0d0;">${escapeHtml(f.vuln_type)}</td>
+                            <td style="padding:3px 8px; color:#8a8a9a; font-size:0.7rem; max-width:160px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${escapeHtml(f.url || '---')}</td>
+                            <td style="padding:3px 8px; color:#5a5a6a; font-size:0.65rem; max-width:200px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${escapeHtml(f.match_reason || '')}">${escapeHtml(f.match_reason || '---')}</td>
                         </tr>`;
                     });
                     findingsHtml += '</table>';
@@ -3134,7 +3168,7 @@ ${htmlBody}
                         </div>`;
                     document.body.appendChild(modal);
                 }
-                document.getElementById('bench-report-content').innerHTML = marked.parse(md);
+                document.getElementById('bench-report-content').innerHTML = renderMarkdown(md);
                 modal.style.display = 'flex';
             } catch (err) {
                 alert('Failed to load report: ' + err.message);
@@ -3510,19 +3544,19 @@ ${htmlBody}
                 ftbody.innerHTML = findingsRows.map(r => {
                     const tierLabel = _monTierLabel(r.tier);
                     const tierColor = _monTierColor(r.tier);
-                    const url = r.url.length > 70 ? r.url.slice(0, 70) + '…' : r.url;
+                    const url = escapeHtml(r.url.length > 70 ? r.url.slice(0, 70) + '…' : r.url);
                     // §7: flag when calibrated severity differs from the raw label.
                     const sevCell = (r.raw_severity && r.raw_severity !== r.severity)
-                        ? `${r.severity || '—'}<span style="color:#5a5a6a;"> (raw ${r.raw_severity})</span>`
-                        : (r.severity || '—');
+                        ? `${escapeHtml(r.severity || '—')}<span style="color:#5a5a6a;"> (raw ${escapeHtml(r.raw_severity)})</span>`
+                        : escapeHtml(r.severity || '—');
                     return `<tr style="border-bottom:1px solid #14141e;">
                         <td class="py-1 px-2" style="color:#a8a8c0;">${r.session_id}</td>
                         <td class="py-1 px-2"><span style="color:${tierColor}; border:1px solid ${tierColor}; padding:1px 5px; border-radius:3px; font-size:0.6rem;">${tierLabel}</span></td>
-                        <td class="py-1 px-2" style="color:#d8d8e8;">${r.vuln_type}</td>
+                        <td class="py-1 px-2" style="color:#d8d8e8;">${escapeHtml(r.vuln_type)}</td>
                         <td class="py-1 px-2" style="color:${sevColor(r.severity)}; font-weight:600;">${sevCell}</td>
-                        <td class="py-1 px-2" style="color:#9a9ab0;">${r.cve_id || '—'}</td>
-                        <td class="py-1 px-2" style="color:${r.cvss_score !== '' ? sevColor(r.severity) : '#5a5a6a'}; font-weight:600;">${r.cvss_score !== '' ? r.cvss_score : '—'}</td>
-                        <td class="py-1 px-2" style="color:var(--neon-green);">${r.tool}${r.step_num ? `<span style="color:#5a5a6a;"> #${r.step_num}</span>` : ''}</td>
+                        <td class="py-1 px-2" style="color:#9a9ab0;">${escapeHtml(r.cve_id || '—')}</td>
+                        <td class="py-1 px-2" style="color:${r.cvss_score !== '' ? sevColor(r.severity) : '#5a5a6a'}; font-weight:600;">${r.cvss_score !== '' ? escapeHtml(String(r.cvss_score)) : '—'}</td>
+                        <td class="py-1 px-2" style="color:var(--neon-green);">${escapeHtml(r.tool)}${r.step_num ? `<span style="color:#5a5a6a;"> #${escapeHtml(String(r.step_num))}</span>` : ''}</td>
                         <td class="py-1 px-2" style="color:#7a7a8a; word-break:break-all;">${url}</td>
                     </tr>`;
                 }).join('');
