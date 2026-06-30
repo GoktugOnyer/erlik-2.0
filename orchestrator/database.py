@@ -248,6 +248,21 @@ async def init_db():
             except Exception:
                 pass  # column already exists
 
+        # CVE enrichment columns (populated by orchestrator/enrichment/nvd.py
+        # when ERLIK_ENRICH_CVE is set). Additive + nullable — no-op when unused.
+        cve_columns = [
+            ("cve_id", "TEXT DEFAULT NULL"),
+            ("cvss_score", "REAL DEFAULT NULL"),
+            ("cvss_vector", "TEXT DEFAULT NULL"),
+            ("cwe", "TEXT DEFAULT NULL"),
+        ]
+        for table in ("findings", "v2_findings"):
+            for col_name, col_def in cve_columns:
+                try:
+                    await db.execute(f"ALTER TABLE {table} ADD COLUMN {col_name} {col_def}")
+                except Exception:
+                    pass  # column already exists
+
         await db.commit()
 
 

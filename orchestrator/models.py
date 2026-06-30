@@ -92,6 +92,11 @@ class Finding(BaseModel):
     evidence: Optional[str] = None
     verified: bool = False
     false_positive: bool = False
+    # CVE enrichment (populated when ERLIK_ENRICH_CVE is set; see enrichment/nvd.py)
+    cve_id: Optional[str] = None
+    cvss_score: Optional[float] = None
+    cvss_vector: Optional[str] = None
+    cwe: Optional[str] = None
     created_at: str
 
 

@@ -19,6 +19,8 @@ from orchestrator.models import (
     BenchmarkCreate, BenchmarkSessionResult, BenchmarkResponse,
 )
 from orchestrator import llm_client
+from orchestrator.enrichment import enrichment_enabled, find_cve_ids, lookup_cve
+from orchestrator.enrichment.nvd import severity_label as cvss_severity_label
 from orchestrator.tool_executor import execute_tool, check_container_running
 from orchestrator.testcase import load_catalog, find_by_id, run_test_case, run_chain
 from orchestrator.testcase.loader import CATALOG_ROOT as TESTCASE_CATALOG_ROOT
@@ -1573,6 +1575,72 @@ def _build_discovery_chain(finding: dict, steps: list[dict]) -> list[dict]:
     return chain
 
 
+async def enrich_session_findings(session_id: str) -> int:
+    """Enrich a session's findings with NVD CVE data (CVSS / severity / CWE).
+
+    No-op unless ERLIK_ENRICH_CVE is set. Runs once at session end (batched),
+    not inside the agent loop, because NVD without an API key is ~6s/request.
+    Returns the number of findings updated. Never raises — enrichment failures
+    must not break report generation.
+    """
+    if not enrichment_enabled():
+        return 0
+    updated = 0
+    try:
+        db = await get_db()
+        try:
+            cursor = await db.execute(
+                "SELECT id, vuln_type, evidence, url FROM findings WHERE session_id = ? "
+                "AND cve_id IS NULL", (session_id,),
+            )
+            rows = [dict(r) for r in await cursor.fetchall()]
+
+            # Map each finding to the CVE ids referenced in its text.
+            per_finding: list[tuple[int, list[str]]] = []
+            unique_ids: dict[str, None] = {}
+            for r in rows:
+                ids = find_cve_ids(r.get("vuln_type") or "", r.get("evidence") or "",
+                                   r.get("url") or "")
+                if ids:
+                    per_finding.append((r["id"], ids))
+                    for cid in ids:
+                        unique_ids[cid] = None
+            if not unique_ids:
+                return 0
+
+            # Look up each unique CVE once (cache dedupes across findings).
+            lookups: dict[str, dict] = {}
+            for cid in unique_ids:
+                lookups[cid] = await lookup_cve(cid)
+
+            for finding_id, ids in per_finding:
+                # Pick the highest-scoring CVE for this finding.
+                best = None
+                for cid in ids:
+                    info = lookups.get(cid) or {}
+                    score = info.get("cvss_score")
+                    if score is None:
+                        continue
+                    if best is None or score > (best.get("cvss_score") or -1):
+                        best = info
+                if not best or best.get("cvss_score") is None:
+                    continue
+                await db.execute(
+                    "UPDATE findings SET cve_id = ?, cvss_score = ?, cvss_vector = ?, "
+                    "cwe = ? WHERE id = ?",
+                    (best.get("cve_id"), best.get("cvss_score"),
+                     best.get("cvss_vector"), ", ".join(best.get("cwes") or []),
+                     finding_id),
+                )
+                updated += 1
+            await db.commit()
+        finally:
+            await db.close()
+    except Exception as e:  # noqa: BLE001
+        print(f"[enrich {session_id[:8]}] CVE enrichment failed (non-fatal): {e}")
+    return updated
+
+
 async def _generate_report(session_id: str, model: str, target_url: str,
                            session_type: str, vuln_category: str,
                            total_steps: int, total_findings: int,
@@ -1600,7 +1668,8 @@ async def _generate_report(session_id: str, model: str, target_url: str,
 
         # Fetch findings — convert to dicts immediately
         cursor = await db.execute(
-            "SELECT vuln_type, severity, url, parameter, evidence "
+            "SELECT vuln_type, severity, url, parameter, evidence, "
+            "cve_id, cvss_score, cvss_vector, cwe "
             "FROM findings WHERE session_id = ? ORDER BY id", (session_id,)
         )
         raw_findings = await cursor.fetchall()
@@ -1612,6 +1681,10 @@ async def _generate_report(session_id: str, model: str, target_url: str,
                 "url": row[2] or "N/A",
                 "parameter": row[3] or "N/A",
                 "evidence": row[4] or "N/A",
+                "cve_id": row[5],
+                "cvss_score": row[6],
+                "cvss_vector": row[7],
+                "cwe": row[8],
             })
     finally:
         await db.close()
@@ -1638,6 +1711,32 @@ async def _generate_report(session_id: str, model: str, target_url: str,
     report_lines.append(f"| **Findings** | {total_findings} |")
     report_lines.append(f"| **Date** | {timestamp} |")
     report_lines.append("")
+
+    # ─── Findings table (includes NVD CVE enrichment when available) ───
+    if findings:
+        has_cve = any(f.get("cve_id") for f in findings)
+        report_lines.append("## Findings")
+        report_lines.append("")
+        if has_cve:
+            report_lines.append("| # | Type | Severity | CVE | CVSS | CWE | URL |")
+            report_lines.append("|---|------|----------|-----|------|-----|-----|")
+            for i, f in enumerate(findings, 1):
+                cvss = f.get("cvss_score")
+                cvss_str = f"{cvss} ({cvss_severity_label(cvss)})" if cvss is not None else "—"
+                report_lines.append(
+                    f"| {i} | {f['vuln_type']} | {f['severity']} | "
+                    f"{f.get('cve_id') or '—'} | {cvss_str} | {f.get('cwe') or '—'} | "
+                    f"`{f['url']}` |"
+                )
+        else:
+            report_lines.append("| # | Type | Severity | URL | Parameter |")
+            report_lines.append("|---|------|----------|-----|-----------|")
+            for i, f in enumerate(findings, 1):
+                report_lines.append(
+                    f"| {i} | {f['vuln_type']} | {f['severity']} | "
+                    f"`{f['url']}` | {f['parameter']} |"
+                )
+        report_lines.append("")
 
     # Placeholder for LLM sections (filled in later)
     report_lines.append("## Executive Summary")
@@ -3380,6 +3479,17 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
         finally:
             await db.close()
             db = None
+
+        # Enrich findings with NVD CVE data (no-op unless ERLIK_ENRICH_CVE set).
+        try:
+            n_enriched = await enrich_session_findings(session_id)
+            if n_enriched:
+                await manager.broadcast(session_id, {
+                    "type": "log", "phase": "report",
+                    "message": f"CVE enrichment: {n_enriched} finding(s) scored via NVD",
+                })
+        except Exception as _enrich_err:  # noqa: BLE001
+            print(f"[enrich {session_id[:8]}] skipped: {_enrich_err}")
 
         # Generate report
         try:

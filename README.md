@@ -159,3 +159,13 @@ between runs; aggregate coverage is stable across repeats.
 
 Active development. The deterministic engine and WSTG catalogue are
 operational; the catalogue is being expanded toward broader WSTG coverage.
+
+## License & third-party code
+
+Erlik 2.0 is released under the [MIT License](LICENSE).
+
+Some components are adapted from other open-source projects (e.g. NVD CVE
+enrichment from the MIT-licensed
+[transilienceai/communitytools](https://github.com/transilienceai/communitytools)).
+See [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md) for attribution and the
+bundled license texts under [`licenses/`](licenses/).
