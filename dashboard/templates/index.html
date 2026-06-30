@@ -699,15 +699,18 @@
                     <span id="rc-preset-desc" class="font-mono" style="font-size:0.65rem; color:#5a5a6a;"></span>
                 </div>
                 <div class="flex items-center gap-4 flex-wrap" style="font-size:0.7rem;">
-                    <label class="flex items-center gap-1.5 cursor-pointer">
+                    <label class="flex items-center gap-1.5 cursor-pointer"
+                        title="Enrich CVE references in findings with NVD CVSS score / severity / CWE at session end (free, no key).">
                         <input type="checkbox" id="rc-cve" class="accent-purple-400" style="width:14px;height:14px;" onchange="markCustomPreset()">
                         <span class="font-pixel" style="font-size:0.5rem; color:#8a8aa0;">CVE ENRICH</span>
                     </label>
-                    <label class="flex items-center gap-1.5 cursor-pointer">
+                    <label class="flex items-center gap-1.5 cursor-pointer"
+                        title="Inject the 1-3 most relevant pentest knowledge references (payloads/techniques) into the agent prompt for this mission's vuln class.">
                         <input type="checkbox" id="rc-skills" class="accent-purple-400" style="width:14px;height:14px;" onchange="markCustomPreset()">
                         <span class="font-pixel" style="font-size:0.5rem; color:#8a8aa0;">SKILLS</span>
                     </label>
-                    <label class="flex items-center gap-1.5 cursor-pointer">
+                    <label class="flex items-center gap-1.5 cursor-pointer"
+                        title="Run a deterministic OWASP Nettacker scan BEFORE the agent and seed it with verified recon (open ports, tech, paths, header/TLS/CVE hits). Requires nettacker installed.">
                         <input type="checkbox" id="rc-nettacker" class="accent-purple-400" style="width:14px;height:14px;"
                             onchange="markCustomPreset(); toggleNettackerOpts();">
                         <span class="font-pixel" style="font-size:0.5rem; color:#8a8aa0;">NETTACKER PRE-SCAN</span>
@@ -1136,9 +1139,10 @@
             <div id="report-detail-panel" class="hidden cyber-panel neon-border-magenta rounded-lg">
                 <div class="px-4 py-2.5 flex items-center justify-between"
                     style="border-bottom: 1px solid var(--panel-border);">
-                    <div class="flex items-center gap-3">
+                    <div class="flex items-center gap-3 flex-wrap">
                         <h3 class="font-pixel neon-text-magenta" style="font-size: 0.6rem;">REPORT DETAIL</h3>
                         <span id="report-detail-session" class="font-mono neon-text-cyan" style="font-size:0.85rem;"></span>
+                        <span id="report-detail-runcfg" class="flex items-center gap-1.5"></span>
                     </div>
                     <div class="flex gap-2">
                         <button onclick="downloadReportFromList()" class="font-pixel px-3 py-1 rounded border text-xs"
@@ -1608,6 +1612,8 @@
             panel.classList.remove('hidden');
             panel.scrollIntoView({ behavior: 'smooth' });
 
+            renderRunConfigBadges(sid);  // reproducibility: which automation flow this session used
+
             try {
                 const [reportResp, findingsResp] = await Promise.all([
                     fetch(`/api/sessions/${sid}/report`),
@@ -1629,12 +1635,14 @@
                     summaryPanel.classList.remove('hidden');
                 }
 
-                // Show findings severity bar
+                // Show findings severity bar (prefer §7 calibrated severity when present)
                 if (findings.length > 0) {
                     const sevCounts = { critical: 0, high: 0, medium: 0, low: 0, info: 0 };
+                    let cveCount = 0;
                     findings.forEach(f => {
-                        const sev = (f.severity || 'info').toLowerCase();
+                        const sev = (f.calibrated_severity || f.severity || 'info').toLowerCase();
                         if (sev in sevCounts) sevCounts[sev]++;
+                        if (f.cve_id) cveCount++;
                     });
                     findingsBar.innerHTML = '';
                     for (const [sev, count] of Object.entries(sevCounts)) {
@@ -1645,6 +1653,13 @@
                             badge.textContent = `${sev.toUpperCase()}: ${count}`;
                             findingsBar.appendChild(badge);
                         }
+                    }
+                    if (cveCount > 0) {
+                        const badge = document.createElement('span');
+                        badge.className = 'px-2 py-0.5 rounded font-pixel';
+                        badge.style.cssText = 'font-size:0.45rem; color:#9a9ab0; border:1px solid #3a3a4a;';
+                        badge.textContent = `CVE-LINKED: ${cveCount}`;
+                        findingsBar.appendChild(badge);
                     }
                     findingsBar.classList.remove('hidden');
                 }
@@ -2133,7 +2148,10 @@ ${htmlBody}
         const SETTINGS_INPUT_IDS = [
             'target-url', 'scope-mode', 'model-select', 'session-type',
             'parent-session', 'vuln-category', 'max-turns-slider',
-            'no-timeout-toggle', 'system-prompt', 'preset-select'
+            'no-timeout-toggle', 'system-prompt', 'preset-select',
+            // Run Configuration panel
+            'rc-preset', 'rc-cve', 'rc-skills', 'rc-nettacker',
+            'rc-nettacker-scenario', 'rc-nettacker-findings'
         ];
 
         function lockSettings() {
@@ -3603,6 +3621,33 @@ ${htmlBody}
                 nettacker_findings: document.getElementById('rc-nettacker-findings').checked,
                 nettacker_scenario: document.getElementById('rc-nettacker-scenario').value || 'recon',
             };
+        }
+
+        async function renderRunConfigBadges(sid) {
+            const el = document.getElementById('report-detail-runcfg');
+            if (!el) return;
+            el.innerHTML = '';
+            try {
+                const r = await fetch(`/api/sessions/${sid}/run-config`);
+                if (!r.ok) return;
+                const eff = (await r.json()).resolved || {};
+                const mk = (txt, on, title) => {
+                    const b = document.createElement('span');
+                    b.className = 'px-1.5 py-0.5 rounded font-pixel';
+                    b.style.cssText = `font-size:0.4rem; border:1px solid ${on ? '#a05cff' : '#2a2a3a'}; color:${on ? '#c79bff' : '#4a4a5a'};`;
+                    b.textContent = txt; b.title = title || '';
+                    return b;
+                };
+                if (eff.preset && eff.preset !== 'custom') {
+                    const p = document.createElement('span');
+                    p.className = 'font-pixel'; p.style.cssText = 'font-size:0.4rem; color:#7a7a8a;';
+                    p.textContent = `preset:${eff.preset}`; el.appendChild(p);
+                }
+                el.appendChild(mk('CVE', eff.cve_enrich, 'CVE enrichment was ' + (eff.cve_enrich ? 'on' : 'off')));
+                el.appendChild(mk('SKILLS', eff.skills, 'Skill knowledge injection was ' + (eff.skills ? 'on' : 'off')));
+                el.appendChild(mk(eff.nettacker ? `NETTACKER:${eff.nettacker_scenario}` : 'NETTACKER',
+                                  eff.nettacker, 'Deterministic Nettacker pre-scan was ' + (eff.nettacker ? 'on' : 'off')));
+            } catch (e) { /* non-fatal */ }
         }
 
         // ===== Init =====

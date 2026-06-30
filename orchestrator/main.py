@@ -4131,6 +4131,23 @@ async def get_nettacker_scenarios():
     return {"scenarios": list_scenarios(), "default": DEFAULT_SCENARIO}
 
 
+@app.get("/api/sessions/{session_id}/run-config")
+async def get_session_run_config(session_id: str):
+    """The automation config a session ran with (raw + resolved) — for reproducibility."""
+    db = await get_db()
+    try:
+        cur = await db.execute("SELECT run_config FROM sessions WHERE id = ?", (session_id,))
+        row = await cur.fetchone()
+    finally:
+        await db.close()
+    raw = row[0] if row else None
+    try:
+        parsed = json.loads(raw) if raw else None
+    except (ValueError, TypeError):
+        parsed = None
+    return {"raw": parsed, "resolved": runconfig.resolve(raw)}
+
+
 @app.post("/api/sessions", response_model=SessionResponse)
 async def create_session(data: SessionCreate):
     session_id = uuid.uuid4().hex[:12]
