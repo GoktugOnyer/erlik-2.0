@@ -1112,6 +1112,11 @@
                             style="font-size:0.45rem; color:var(--neon-green); border-color:var(--neon-green); background:transparent; cursor:pointer;">
                             DOWNLOAD .MD
                         </button>
+                        <button onclick="viewReportJsonFromList()" class="font-pixel px-3 py-1 rounded border text-xs"
+                            style="font-size:0.45rem; color:var(--neon-cyan); border-color:var(--neon-cyan); background:transparent; cursor:pointer;"
+                            title="Open the validated pentest-report.json (structured findings: CVSS, CWE, OWASP, impact, remediation)">
+                            REPORT .JSON
+                        </button>
                         <button onclick="closeReportDetail()" class="font-pixel px-3 py-1 rounded border text-xs"
                             style="font-size:0.45rem; color:var(--neon-red); border-color:var(--neon-red); background:transparent; cursor:pointer;">
                             &#10005; CLOSE
@@ -1360,12 +1365,14 @@
                                 <th class="text-left py-2 px-2" style="color:#6a6a8a; font-weight:normal;">tier</th>
                                 <th class="text-left py-2 px-2" style="color:#6a6a8a; font-weight:normal;">vuln</th>
                                 <th class="text-left py-2 px-2" style="color:#6a6a8a; font-weight:normal;">sev</th>
+                                <th class="text-left py-2 px-2" style="color:#6a6a8a; font-weight:normal;" title="NVD CVE (when a finding references one; populated at session end)">cve</th>
+                                <th class="text-left py-2 px-2" style="color:#6a6a8a; font-weight:normal;" title="NVD CVSS base score">cvss</th>
                                 <th class="text-left py-2 px-2" style="color:#6a6a8a; font-weight:normal;">tool</th>
                                 <th class="text-left py-2 px-2" style="color:#6a6a8a; font-weight:normal;">url</th>
                             </tr>
                         </thead>
                         <tbody id="mon-findings-tbody">
-                            <tr><td colspan="6" class="text-center py-4" style="color:#5a5a6a;">loading…</td></tr>
+                            <tr><td colspan="8" class="text-center py-4" style="color:#5a5a6a;">loading…</td></tr>
                         </tbody>
                     </table>
                 </div>
@@ -1622,6 +1629,12 @@
             a.href = `/api/sessions/${sid}/report/download`;
             a.download = `pentest-report-${sid}.md`;
             a.click();
+        }
+
+        function viewReportJsonFromList() {
+            if (reportDetailSessionId) {
+                window.open(`/api/sessions/${reportDetailSessionId}/report.json`, '_blank');
+            }
         }
 
         function downloadReportFromList() {
@@ -3397,7 +3410,10 @@ ${htmlBody}
                                 session_id: s.id,
                                 tier: s.toolset_preset,
                                 vuln_type: f.vuln_type || '?',
-                                severity: (f.severity || '').toLowerCase(),
+                                severity: (f.calibrated_severity || f.severity || '').toLowerCase(),
+                                raw_severity: (f.severity || '').toLowerCase(),
+                                cve_id: f.cve_id || '',
+                                cvss_score: (f.cvss_score === null || f.cvss_score === undefined) ? '' : f.cvss_score,
                                 tool: bestTool,
                                 step_num: bestStepNum,
                                 url: f.url || '',
@@ -3413,7 +3429,7 @@ ${htmlBody}
             const ftbody = document.getElementById('mon-findings-tbody');
             const fmeta = document.getElementById('mon-findings-meta');
             if (findingsRows.length === 0) {
-                ftbody.innerHTML = '<tr><td colspan="6" class="text-center py-4" style="color:#5a5a6a;">no findings in current run yet</td></tr>';
+                ftbody.innerHTML = '<tr><td colspan="8" class="text-center py-4" style="color:#5a5a6a;">no findings in current run yet</td></tr>';
                 fmeta.textContent = '0 findings · current run only';
             } else {
                 // Group counts per tool for the meta line
@@ -3436,11 +3452,17 @@ ${htmlBody}
                     const tierLabel = _monTierLabel(r.tier);
                     const tierColor = _monTierColor(r.tier);
                     const url = r.url.length > 70 ? r.url.slice(0, 70) + '…' : r.url;
+                    // §7: flag when calibrated severity differs from the raw label.
+                    const sevCell = (r.raw_severity && r.raw_severity !== r.severity)
+                        ? `${r.severity || '—'}<span style="color:#5a5a6a;"> (raw ${r.raw_severity})</span>`
+                        : (r.severity || '—');
                     return `<tr style="border-bottom:1px solid #14141e;">
                         <td class="py-1 px-2" style="color:#a8a8c0;">${r.session_id}</td>
                         <td class="py-1 px-2"><span style="color:${tierColor}; border:1px solid ${tierColor}; padding:1px 5px; border-radius:3px; font-size:0.6rem;">${tierLabel}</span></td>
                         <td class="py-1 px-2" style="color:#d8d8e8;">${r.vuln_type}</td>
-                        <td class="py-1 px-2" style="color:${sevColor(r.severity)}; font-weight:600;">${r.severity || '—'}</td>
+                        <td class="py-1 px-2" style="color:${sevColor(r.severity)}; font-weight:600;">${sevCell}</td>
+                        <td class="py-1 px-2" style="color:#9a9ab0;">${r.cve_id || '—'}</td>
+                        <td class="py-1 px-2" style="color:${r.cvss_score !== '' ? sevColor(r.severity) : '#5a5a6a'}; font-weight:600;">${r.cvss_score !== '' ? r.cvss_score : '—'}</td>
                         <td class="py-1 px-2" style="color:var(--neon-green);">${r.tool}${r.step_num ? `<span style="color:#5a5a6a;"> #${r.step_num}</span>` : ''}</td>
                         <td class="py-1 px-2" style="color:#7a7a8a; word-break:break-all;">${url}</td>
                     </tr>`;
