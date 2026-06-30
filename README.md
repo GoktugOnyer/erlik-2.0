@@ -170,10 +170,32 @@ confirms/exploits rather than blindly re-discovers.
 ```bash
 pip install nettacker            # or use the owasp/nettacker Docker image
 export ERLIK_NETTACKER=1         # enable the pre-scan (default off)
+export ERLIK_NETTACKER_SCENARIO=recon   # run mode (default: recon)
 # optional:
-#   ERLIK_NETTACKER_CMD="python -m nettacker.main"   # custom launcher
-#   ERLIK_NETTACKER_MODULES="port_scan,dir_scan,..." # override module set
+#   ERLIK_NETTACKER_CMD="python -m nettacker.main"   # custom launcher / docker wrapper
+#   ERLIK_NETTACKER_PROFILE="scan,info"              # raw Nettacker --profile (overrides scenario)
+#   ERLIK_NETTACKER_MODULES="port_scan,dir_scan"     # raw -m module list (advanced)
 #   ERLIK_NETTACKER_FINDINGS=1                        # also persist deterministic findings
+```
+
+**Scenarios (run modes)** map to Nettacker's stable scan *profiles*:
+
+| Scenario | Covers |
+|----------|--------|
+| `recon` *(default)* | ports, dirs, tech, subdomains, versions, WAF — fast & safe |
+| `info` | recon + information gathering |
+| `web` | all HTTP/HTTPS checks |
+| `tls` | TLS/SSL certificate, cipher, version |
+| `cves` | all CVE checks (~61 modules) |
+| `kev` | CISA Known-Exploited-Vulnerabilities subset |
+| `critical` | only critical-severity modules |
+| `wordpress` | WordPress core/plugin/theme |
+| `brute` | credential brute-force (needs `-u/-p`; can lock accounts) |
+| `full` | every module (slow & noisy) |
+
+```bash
+python -m orchestrator.integrations.nettacker --scenarios          # list them
+python -m orchestrator.integrations.nettacker http://target --scenario tls
 ```
 
 Standalone (any pipeline/model, no erlik session needed):

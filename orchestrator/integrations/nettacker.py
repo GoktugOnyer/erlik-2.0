@@ -15,12 +15,14 @@ Config (env):
   ERLIK_NETTACKER            "1"/"true" to enable injection in the agent loop
   ERLIK_NETTACKER_CMD        launch prefix (default "nettacker"); e.g.
                              "python -m nettacker.main", or a docker wrapper
-  ERLIK_NETTACKER_MODULES    comma-separated module list (default: a fast,
-                             non-bruteforce recon+headers+tls+cve-lite set)
-  ERLIK_NETTACKER_PROFILE    use --profile X instead of -m (overrides MODULES)
+  ERLIK_NETTACKER_SCENARIO   named run mode (see SCENARIOS); default "recon"
+  ERLIK_NETTACKER_PROFILE    raw Nettacker --profile X (overrides SCENARIO)
+  ERLIK_NETTACKER_MODULES    raw -m module list (overrides SCENARIO; advanced)
   ERLIK_NETTACKER_OUTDIR     dir for the JSON output file (default: temp)
   ERLIK_NETTACKER_TIMEOUT    seconds before the scan is killed (default 300)
   ERLIK_NETTACKER_FINDINGS   "1" to also persist deterministic findings
+
+Selection precedence: PROFILE > MODULES > SCENARIO > default("recon").
 """
 
 from __future__ import annotations
@@ -35,13 +37,28 @@ import time
 from pathlib import Path
 from urllib.parse import urlparse
 
-# Fast, safe default: recon + tech detection + security-header / TLS / common-CVE
-# checks. NO brute-force modules (avoid lockouts / noise). Override via env.
-DEFAULT_MODULES = (
-    "port_scan,http_status_scan,http_html_title,dir_scan,config_file,"
-    "server_version,http_cors,clickjacking,content_security_policy,"
-    "strict_transport_security,x_powered_by,x_xss_protection,subdomain_takeover"
-)
+# Named run modes ("scenarios"), each mapping to a stable Nettacker --profile
+# (profile names are version-stable; raw module names carry a category suffix and
+# drift between releases). Pick one with ERLIK_NETTACKER_SCENARIO, or override
+# entirely with ERLIK_NETTACKER_PROFILE / ERLIK_NETTACKER_MODULES.
+SCENARIOS: dict[str, dict] = {
+    "recon":     {"profile": "scan",             "desc": "Ports, dirs, tech, subdomains, versions, WAF — fast & safe. DEFAULT."},
+    "info":      {"profile": "scan,info",        "desc": "Recon plus information gathering."},
+    "web":       {"profile": "http",             "desc": "All HTTP/HTTPS checks (broad, heavier)."},
+    "tls":       {"profile": "ssl",              "desc": "TLS/SSL certificate, cipher and version checks."},
+    "cves":      {"profile": "cve",              "desc": "All CVE vulnerability checks (~61 modules)."},
+    "kev":       {"profile": "cisa_kev",         "desc": "CISA Known-Exploited-Vulnerabilities subset."},
+    "critical":  {"profile": "critical_severity","desc": "Only critical-severity modules."},
+    "wordpress": {"profile": "wordpress",        "desc": "WordPress core / plugin / theme checks."},
+    "brute":     {"profile": "brute",            "desc": "Credential brute-force — needs -u/-p; CAN LOCK ACCOUNTS."},
+    "full":      {"profile": "all",              "desc": "Every module — slow and noisy."},
+}
+DEFAULT_SCENARIO = "recon"
+
+
+def list_scenarios() -> dict[str, str]:
+    """Friendly run modes → one-line description (for UIs / the CLI)."""
+    return {k: v["desc"] for k, v in SCENARIOS.items()}
 
 
 def nettacker_enabled() -> bool:
@@ -66,10 +83,18 @@ def _build_command(target_url: str, outfile: str) -> list[str]:
     base = shlex.split(os.environ.get("ERLIK_NETTACKER_CMD", "nettacker"))
     cmd = base + ["-i", _target_arg(target_url)]
     profile = os.environ.get("ERLIK_NETTACKER_PROFILE", "").strip()
-    if profile:
+    modules = os.environ.get("ERLIK_NETTACKER_MODULES", "").strip()
+    if profile:                                   # explicit profile wins
         cmd += ["--profile", profile]
-    else:
-        cmd += ["-m", os.environ.get("ERLIK_NETTACKER_MODULES", DEFAULT_MODULES)]
+    elif modules:                                 # explicit module list
+        cmd += ["-m", modules]
+    else:                                         # named scenario (default recon)
+        scen = os.environ.get("ERLIK_NETTACKER_SCENARIO", "").strip().lower() or DEFAULT_SCENARIO
+        sc = SCENARIOS.get(scen, SCENARIOS[DEFAULT_SCENARIO])
+        if sc.get("profile"):
+            cmd += ["--profile", sc["profile"]]
+        else:
+            cmd += ["-m", sc["modules"]]
     cmd += ["-o", outfile]
     return cmd
 
@@ -291,9 +316,22 @@ def _cli(argv: list[str] | None = None) -> int:
         description="Run an OWASP Nettacker pre-scan and print deterministic recon "
                     "data (usable by erlik or any other pipeline/model).",
     )
-    ap.add_argument("target", help="target host or URL")
+    ap.add_argument("target", nargs="?", help="target host or URL")
+    ap.add_argument("--scenario", help="run mode (see --scenarios), default 'recon'")
+    ap.add_argument("--scenarios", action="store_true", help="list available scenarios and exit")
     ap.add_argument("--json", action="store_true", help="print raw parsed buckets as JSON")
     ns = ap.parse_args(argv)
+
+    if ns.scenarios:
+        print("Nettacker scenarios (ERLIK_NETTACKER_SCENARIO):")
+        for name, desc in list_scenarios().items():
+            mark = "  (default)" if name == DEFAULT_SCENARIO else ""
+            print(f"  {name:10} {desc}{mark}")
+        return 0
+    if not ns.target:
+        ap.error("target is required (or use --scenarios)")
+    if ns.scenario:
+        os.environ["ERLIK_NETTACKER_SCENARIO"] = ns.scenario
 
     res = asyncio.run(run_nettacker(ns.target))
     if res.get("error"):
