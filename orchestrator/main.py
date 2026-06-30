@@ -20,6 +20,7 @@ from orchestrator.models import (
     ReportFinding, PentestReport,
 )
 from orchestrator import llm_client
+from orchestrator import runconfig
 from orchestrator.bench import classify_llm_error, request_abort, abort_requested, clear_abort
 from orchestrator.enrichment import enrichment_enabled, find_cve_ids, lookup_cve
 from orchestrator.enrichment.nvd import severity_label as cvss_severity_label
@@ -1590,15 +1591,15 @@ def _build_discovery_chain(finding: dict, steps: list[dict]) -> list[dict]:
     return chain
 
 
-async def enrich_session_findings(session_id: str) -> int:
+async def enrich_session_findings(session_id: str, force: bool | None = None) -> int:
     """Enrich a session's findings with NVD CVE data (CVSS / severity / CWE).
 
-    No-op unless ERLIK_ENRICH_CVE is set. Runs once at session end (batched),
-    not inside the agent loop, because NVD without an API key is ~6s/request.
-    Returns the number of findings updated. Never raises — enrichment failures
-    must not break report generation.
+    Off unless enabled — by the per-session run config (`force`) or, when
+    `force` is None, the ERLIK_ENRICH_CVE env var. Runs once at session end
+    (batched), not inside the agent loop, because NVD without an API key is
+    ~6s/request. Returns the number of findings updated. Never raises.
     """
-    if not enrichment_enabled():
+    if not (force if force is not None else enrichment_enabled()):
         return 0
     updated = 0
     try:
@@ -2842,13 +2843,32 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
         if system_prompt and "ACCUMULATED TARGET KNOWLEDGE" in system_prompt:
             combined_system += f"\n\n{system_prompt}"
 
+        # Resolve the per-session run configuration (preset + overrides + env
+        # fallback). Decides which deterministic / knowledge stages run below.
+        _rc_raw = None
+        try:
+            _rc_db = await get_db()
+            try:
+                _rc_cur = await _rc_db.execute(
+                    "SELECT run_config FROM sessions WHERE id = ?", (session_id,))
+                _rc_row = await _rc_cur.fetchone()
+                _rc_raw = _rc_row[0] if _rc_row else None
+            finally:
+                await _rc_db.close()
+        except Exception:
+            _rc_raw = None
+        runcfg = runconfig.resolve(_rc_raw)
+        print(f"[runconfig {session_id[:8]}] preset={runcfg['preset']} "
+              f"skills={runcfg['skills']} nettacker={runcfg['nettacker']}"
+              f"({runcfg['nettacker_scenario']}) cve={runcfg['cve_enrich']}", flush=True)
+
         # Inject exploit playbooks for the 6 hard vulnerability classes when enabled
-        # (ERLIK_PLAYBOOKS=1). Target-detected by hostname/port — see orchestrator/playbooks.py.
+        # (per-session run config or ERLIK_PLAYBOOKS). See orchestrator/playbooks.py.
         try:
             from orchestrator.playbooks import get_playbook_context
         except ImportError:
             from playbooks import get_playbook_context
-        _pb_ctx = get_playbook_context(target_url)
+        _pb_ctx = get_playbook_context(target_url, mode=runcfg["playbooks"])
         if _pb_ctx:
             combined_system += f"\n\n{_pb_ctx}"
             print(f"[playbooks {session_id[:8]}] injected {len(_pb_ctx)} chars (target={target_url})", flush=True)
@@ -2863,12 +2883,12 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
         # Juice-Shop playbooks, this is target-agnostic: it picks 1-3 references
         # from skills_catalog/ by the mission's vuln class. See orchestrator/skills.py.
         try:
-            from orchestrator.skills import get_skills_context
+            from orchestrator.skills import render_skills
         except ImportError:
-            from skills import get_skills_context
+            from skills import render_skills
         try:
             _sk_hint = " ".join(filter(None, [vuln_category or "", system_prompt or ""]))
-            _sk_ctx = get_skills_context(target_url, _sk_hint)
+            _sk_ctx = render_skills(_sk_hint) if runcfg["skills"] else ""
         except Exception as _sk_err:  # noqa: BLE001 — never break the loop over knowledge injection
             _sk_ctx = ""
             print(f"[skills {session_id[:8]}] error (non-fatal): {_sk_err}", flush=True)
@@ -2885,15 +2905,15 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
         # Gated by ERLIK_NETTACKER (default off). See orchestrator/integrations/nettacker.py.
         try:
             from orchestrator.integrations import nettacker as _nt_mod
-            _nt_on = _nt_mod.nettacker_enabled()
+            _nt_on = runcfg["nettacker"]
         except Exception:  # noqa: BLE001
             _nt_on = False
         if _nt_on:
             await manager.broadcast(session_id, {
                 "type": "log", "phase": "recon",
-                "message": "Nettacker pre-scan running (deterministic recon)…",
+                "message": f"Nettacker pre-scan running (deterministic recon, scenario={runcfg['nettacker_scenario']})…",
             })
-            _nt = await _nt_mod.run_nettacker(target_url)
+            _nt = await _nt_mod.run_nettacker(target_url, scenario=runcfg["nettacker_scenario"])
             if _nt.get("error"):
                 print(f"[nettacker {session_id[:8]}] {_nt['error']}", flush=True)
                 await manager.broadcast(session_id, {
@@ -2913,8 +2933,8 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
                                    f"({len(_parsed['open_ports'])} ports, {len(_parsed['findings'])} pre-findings)",
                     })
                 # Optionally persist deterministic findings (opt-in — keeps the
-                # research metrics clean unless ERLIK_NETTACKER_FINDINGS is set).
-                if _nt_mod.findings_enabled() and _parsed["findings"]:
+                # research metrics clean unless the run config enables it).
+                if runcfg["nettacker_findings"] and _parsed["findings"]:
                     try:
                         _db = await get_db()
                         try:
@@ -3721,9 +3741,9 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
             await db.close()
             db = None
 
-        # Enrich findings with NVD CVE data (no-op unless ERLIK_ENRICH_CVE set).
+        # Enrich findings with NVD CVE data (driven by the per-session run config).
         try:
-            n_enriched = await enrich_session_findings(session_id)
+            n_enriched = await enrich_session_findings(session_id, force=runcfg["cve_enrich"])
             if n_enriched:
                 await manager.broadcast(session_id, {
                     "type": "log", "phase": "report",
@@ -4094,6 +4114,19 @@ async def list_sessions():
         await db.close()
 
 
+@app.get("/api/run-presets")
+async def get_run_presets():
+    """Pre-selectable automation setups for the session-create UI."""
+    return {"presets": runconfig.presets_for_api(), "default": runconfig.DEFAULT_PRESET}
+
+
+@app.get("/api/nettacker-scenarios")
+async def get_nettacker_scenarios():
+    """Available Nettacker run modes (name → description) for the UI dropdown."""
+    from orchestrator.integrations.nettacker import list_scenarios, DEFAULT_SCENARIO
+    return {"scenarios": list_scenarios(), "default": DEFAULT_SCENARIO}
+
+
 @app.post("/api/sessions", response_model=SessionResponse)
 async def create_session(data: SessionCreate):
     session_id = uuid.uuid4().hex[:12]
@@ -4113,15 +4146,16 @@ async def create_session(data: SessionCreate):
         effective_max_turns = data.max_turns if data.max_turns > 0 else ABSOLUTE_MAX_TURNS
         effective_max_turns = min(effective_max_turns, ABSOLUTE_MAX_TURNS)  # enforce cap
 
+        _run_config_json = json.dumps(data.run_config) if data.run_config else None
         await db.execute(
             "INSERT INTO sessions (id, target_url, scope_mode, system_prompt, model, enabled_tools, "
             "session_type, parent_session_id, vuln_category, no_timeout, max_turns, "
-            "toolset_preset, disable_stagnation, tool_timeout) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "toolset_preset, disable_stagnation, tool_timeout, run_config) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (session_id, data.target_url, data.scope_mode.value, data.system_prompt, data.model,
              enabled_tools_str, data.session_type, data.parent_session_id, data.vuln_category,
              1 if data.no_timeout else 0, effective_max_turns, data.toolset_preset,
-             1 if data.disable_stagnation else 0, data.tool_timeout),
+             1 if data.disable_stagnation else 0, data.tool_timeout, _run_config_json),
         )
         await db.commit()
         row = await db.execute("SELECT * FROM sessions WHERE id = ?", (session_id,))

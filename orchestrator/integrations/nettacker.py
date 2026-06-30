@@ -79,7 +79,7 @@ def _target_arg(target_url: str) -> str:
 # Runner
 # --------------------------------------------------------------------------- #
 
-def _build_command(target_url: str, outfile: str) -> list[str]:
+def _build_command(target_url: str, outfile: str, scenario: str | None = None) -> list[str]:
     base = shlex.split(os.environ.get("ERLIK_NETTACKER_CMD", "nettacker"))
     cmd = base + ["-i", _target_arg(target_url)]
     profile = os.environ.get("ERLIK_NETTACKER_PROFILE", "").strip()
@@ -88,8 +88,8 @@ def _build_command(target_url: str, outfile: str) -> list[str]:
         cmd += ["--profile", profile]
     elif modules:                                 # explicit module list
         cmd += ["-m", modules]
-    else:                                         # named scenario (default recon)
-        scen = os.environ.get("ERLIK_NETTACKER_SCENARIO", "").strip().lower() or DEFAULT_SCENARIO
+    else:                                         # named scenario (per-session arg, then env, then default)
+        scen = (scenario or os.environ.get("ERLIK_NETTACKER_SCENARIO", "")).strip().lower() or DEFAULT_SCENARIO
         sc = SCENARIOS.get(scen, SCENARIOS[DEFAULT_SCENARIO])
         if sc.get("profile"):
             cmd += ["--profile", sc["profile"]]
@@ -99,7 +99,7 @@ def _build_command(target_url: str, outfile: str) -> list[str]:
     return cmd
 
 
-def _run_sync(target_url: str) -> dict:
+def _run_sync(target_url: str, scenario: str | None = None) -> dict:
     outdir = os.environ.get("ERLIK_NETTACKER_OUTDIR") or tempfile.mkdtemp(prefix="erlik_nettacker_")
     Path(outdir).mkdir(parents=True, exist_ok=True)
     outfile = str(Path(outdir) / "nettacker_scan.json")
@@ -107,7 +107,7 @@ def _run_sync(target_url: str) -> dict:
         timeout = int(os.environ.get("ERLIK_NETTACKER_TIMEOUT", "300"))
     except ValueError:
         timeout = 300
-    cmd = _build_command(target_url, outfile)
+    cmd = _build_command(target_url, outfile, scenario=scenario)
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     except FileNotFoundError:
@@ -132,10 +132,15 @@ def _run_sync(target_url: str) -> dict:
     return {"error": None, "events": events, "returncode": proc.returncode}
 
 
-async def run_nettacker(target_url: str) -> dict:
-    """Run a Nettacker scan and return {error, events:[...]}. Never raises."""
+async def run_nettacker(target_url: str, scenario: str | None = None) -> dict:
+    """Run a Nettacker scan and return {error, events:[...]}. Never raises.
+
+    `scenario` (a key of SCENARIOS) overrides ERLIK_NETTACKER_SCENARIO for this
+    call — used to thread a per-session run config through.
+    """
     try:
-        return await asyncio.get_event_loop().run_in_executor(None, _run_sync, target_url)
+        return await asyncio.get_event_loop().run_in_executor(
+            None, _run_sync, target_url, scenario)
     except Exception as e:  # noqa: BLE001
         return {"error": f"nettacker runner error: {e}", "events": []}
 
