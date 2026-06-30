@@ -2531,18 +2531,22 @@ async def _create_chain_session(chain_id: str, chain_row, phase: str, position: 
     toolset_preset = chain_row["toolset_preset"] if "toolset_preset" in chain_row.keys() else None
     disable_stagnation = bool(chain_row["disable_stagnation"]) if "disable_stagnation" in chain_row.keys() and chain_row["disable_stagnation"] else False
 
+    # Carry the chain's run_config onto every sub-session (defensive: older chain
+    # rows from before the migration may not have the column).
+    _chain_run_config = chain_row["run_config"] if "run_config" in chain_row.keys() else None
+
     db = await get_db()
     try:
         await db.execute(
             "INSERT INTO sessions (id, target_url, scope_mode, system_prompt, model, enabled_tools, "
             "session_type, no_timeout, max_turns, chain_id, chain_position, chain_phase, "
-            "toolset_preset, disable_stagnation) "
-            "VALUES (?, ?, ?, ?, ?, ?, 'chain', ?, ?, ?, ?, ?, ?, ?)",
+            "toolset_preset, disable_stagnation, run_config) "
+            "VALUES (?, ?, ?, ?, ?, ?, 'chain', ?, ?, ?, ?, ?, ?, ?, ?)",
             (session_id, chain_row["target_url"], chain_row["scope_mode"],
              chain_row["system_prompt"], chain_row["model"], enabled_tools_str,
              1 if no_timeout else 0, max_turns,
              chain_id, position, phase,
-             toolset_preset, 1 if disable_stagnation else 0),
+             toolset_preset, 1 if disable_stagnation else 0, _chain_run_config),
         )
         await db.commit()
     finally:
@@ -4493,12 +4497,13 @@ async def create_chain(data: ChainCreate):
         await db.execute(
             "INSERT INTO chains (id, target_url, scope_mode, system_prompt, model, enabled_tools, "
             "current_phase, current_position, total_sessions, status, auto_progress, "
-            "max_turns_per_session, no_timeout, toolset_preset, disable_stagnation) "
-            "VALUES (?, ?, ?, ?, ?, ?, 'recon', 0, 1, 'running', ?, ?, ?, ?, ?)",
+            "max_turns_per_session, no_timeout, toolset_preset, disable_stagnation, run_config) "
+            "VALUES (?, ?, ?, ?, ?, ?, 'recon', 0, 1, 'running', ?, ?, ?, ?, ?, ?)",
             (chain_id, data.target_url, data.scope_mode.value, data.system_prompt, data.model,
              enabled_tools_str, 1 if data.auto_progress else 0, effective_max_turns,
              1 if data.no_timeout else 0, data.toolset_preset,
-             1 if data.disable_stagnation else 0),
+             1 if data.disable_stagnation else 0,
+             json.dumps(data.run_config) if data.run_config else None),
         )
         await db.commit()
 
@@ -6322,9 +6327,10 @@ async def _run_benchmark_sequence(benchmark_id: str, data: BenchmarkCreate):
             try:
                 await db.execute(
                     "INSERT INTO sessions (id, target_url, scope_mode, system_prompt, model, enabled_tools, "
-                    "session_type, no_timeout, max_turns) VALUES (?, ?, ?, ?, ?, ?, 'cold', ?, ?)",
+                    "session_type, no_timeout, max_turns, run_config) VALUES (?, ?, ?, ?, ?, ?, 'cold', ?, ?, ?)",
                     (cold_session_id, data.target_url, "full", data.system_prompt, data.model,
-                     enabled_tools_str, 1 if data.no_timeout else 0, effective_max_turns)
+                     enabled_tools_str, 1 if data.no_timeout else 0, effective_max_turns,
+                     json.dumps(data.run_config) if data.run_config else None)
                 )
                 await db.execute(
                     "UPDATE benchmark_runs SET cold_session_id = ? WHERE id = ?",
@@ -6401,9 +6407,10 @@ async def _run_benchmark_sequence(benchmark_id: str, data: BenchmarkCreate):
             try:
                 await db.execute(
                     "INSERT INTO sessions (id, target_url, scope_mode, system_prompt, model, enabled_tools, "
-                    "session_type, parent_session_id, no_timeout, max_turns) VALUES (?, ?, ?, ?, ?, ?, 'warm', ?, ?, ?)",
+                    "session_type, parent_session_id, no_timeout, max_turns, run_config) VALUES (?, ?, ?, ?, ?, ?, 'warm', ?, ?, ?, ?)",
                     (warm_session_id, data.target_url, "full", data.system_prompt, data.model,
-                     enabled_tools_str, cold_session_id, 1 if data.no_timeout else 0, effective_max_turns)
+                     enabled_tools_str, cold_session_id, 1 if data.no_timeout else 0, effective_max_turns,
+                     json.dumps(data.run_config) if data.run_config else None)
                 )
                 await db.execute(
                     "UPDATE benchmark_runs SET warm_session_id = ? WHERE id = ?",
@@ -6463,9 +6470,10 @@ async def _run_benchmark_sequence(benchmark_id: str, data: BenchmarkCreate):
                 await db.execute(
                     "INSERT INTO chains (id, target_url, scope_mode, system_prompt, model, enabled_tools, "
                     "current_phase, current_position, total_sessions, status, auto_progress, "
-                    "max_turns_per_session, no_timeout) VALUES (?, ?, ?, ?, ?, ?, 'recon', 0, 1, 'running', 1, ?, ?)",
+                    "max_turns_per_session, no_timeout, run_config) VALUES (?, ?, ?, ?, ?, ?, 'recon', 0, 1, 'running', 1, ?, ?, ?)",
                     (chain_id_result, data.target_url, "full", data.system_prompt, data.model,
-                     enabled_tools_str, effective_max_turns, 1 if data.no_timeout else 0)
+                     enabled_tools_str, effective_max_turns, 1 if data.no_timeout else 0,
+                     json.dumps(data.run_config) if data.run_config else None)
                 )
                 await db.execute(
                     "UPDATE benchmark_runs SET chain_id = ? WHERE id = ?",

@@ -178,6 +178,7 @@ class ChainCreate(BaseModel):
     no_timeout: bool = False
     auto_progress: bool = True
     disable_stagnation: bool = False
+    run_config: Optional[dict] = None  # per-session automation flow (applied to every chain sub-session)
 
 
 class ChainResponse(BaseModel):
@@ -220,6 +221,7 @@ class BenchmarkCreate(BaseModel):
     # Empty list or None = use enabled_tools as-is (legacy behaviour).
     toolset_presets: list[str] = []
     disable_stagnation: bool = False
+    run_config: Optional[dict] = None  # per-session automation flow (applied to cold/warm/chain sessions)
 
 
 class BenchmarkSessionResult(BaseModel):

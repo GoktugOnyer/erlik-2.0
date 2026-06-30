@@ -1222,6 +1222,11 @@
                         </label>
                     </div>
                     <div>
+                        <label class="block font-pixel mb-2" style="font-size:0.5rem; color:#a05cff;">RUN CONFIG</label>
+                        <select id="bench-preset" class="cyber-input rounded px-3 py-2" style="font-size:0.85rem;"
+                            title="Automation preset applied to every cold/warm/chain session in the sweep (CVE enrichment, skills, Nettacker pre-scan)."></select>
+                    </div>
+                    <div>
                         <button id="bench-start-btn" onclick="startBenchmark()"
                             class="font-pixel px-6 py-2 rounded font-bold"
                             style="font-size:0.55rem; background: linear-gradient(135deg, rgba(0,255,245,0.2), rgba(139,92,246,0.2)); border: 1px solid var(--neon-cyan); color: var(--neon-cyan); cursor:pointer;">
@@ -2271,6 +2276,7 @@ ${htmlBody}
                             max_turns_per_session: parseInt(document.getElementById('max-turns-slider').value) || 0,
                             no_timeout: document.getElementById('no-timeout-toggle').checked,
                             auto_progress: true,
+                            run_config: buildRunConfig(),
                         }),
                     });
                     const chain = await resp.json();
@@ -2620,6 +2626,7 @@ ${htmlBody}
                         no_timeout: noTimeout,
                         repeat_n: repeatN,
                         model: document.getElementById('model-select').value || 'qwen2.5-coder:7b-instruct-q4_K_M',
+                        run_config: (function(){ const s=document.getElementById('bench-preset'); return s && s.value ? {preset: s.value} : null; })(),
                     }),
                 });
                 const data = await resp.json();
@@ -3538,6 +3545,19 @@ ${htmlBody}
 
                 presetSel.value = pData.default || (RUN_PRESETS_CACHE[0] || {}).name || 'custom';
                 applyRunPreset();
+
+                // Benchmark form: a single preset dropdown (sessions in a sweep
+                // share one automation preset).
+                const benchSel = document.getElementById('bench-preset');
+                if (benchSel) {
+                    benchSel.innerHTML = '';
+                    RUN_PRESETS_CACHE.forEach(p => {
+                        const o = document.createElement('option');
+                        o.value = p.name; o.textContent = p.label; o.title = p.desc || '';
+                        benchSel.appendChild(o);
+                    });
+                    benchSel.value = pData.default || (RUN_PRESETS_CACHE[0] || {}).name;
+                }
             } catch (e) { /* non-fatal: the form still works without a run config */ }
         }
 

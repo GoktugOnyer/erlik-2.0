@@ -219,6 +219,7 @@ async def init_db():
         chain_migrations = [
             ("toolset_preset", "TEXT DEFAULT NULL"),
             ("disable_stagnation", "INTEGER DEFAULT 0"),
+            ("run_config", "TEXT DEFAULT NULL"),  # per-session automation flow (JSON)
         ]
         for col_name, col_def in chain_migrations:
             try:
