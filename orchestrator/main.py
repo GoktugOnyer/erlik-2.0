@@ -5707,6 +5707,50 @@ def _match_finding_to_ground_truth_scored(finding: dict, ground_truths: list[dic
     }
 
 
+def _sound_confusion_matrix(findings: list[dict], ground_truths: list[dict],
+                            threshold: float = 2.0) -> dict:
+    """A SOUND confusion matrix (added alongside the legacy fuzzy scorer).
+
+    Unlike the legacy metrics — which use mismatched precision/recall numerators
+    and let one finding satisfy many ground-truths — this does a one-to-one
+    greedy assignment (each finding matched at most once, each GT matched at most
+    once, best score first). Precision/recall/F1 are therefore derived from a
+    single, internally-consistent matrix. Exposed under `sound_metrics`; the
+    legacy keys are left untouched so prior runs stay reproducible.
+    """
+    pairs = []
+    for fi, f in enumerate(findings):
+        for gj, gt in enumerate(ground_truths):
+            r = _match_finding_to_ground_truth_scored(f, [gt])
+            if r.get("score", 0) >= threshold:
+                pairs.append((r["score"], fi, gj))
+    pairs.sort(key=lambda x: -x[0])
+    used_f: set[int] = set()
+    used_g: set[int] = set()
+    tp = 0
+    for _score, fi, gj in pairs:
+        if fi in used_f or gj in used_g:
+            continue
+        used_f.add(fi)
+        used_g.add(gj)
+        tp += 1
+    total_f = len(findings)
+    total_g = len(ground_truths)
+    fp = total_f - tp
+    fn = total_g - tp
+    precision = tp / (tp + fp) if (tp + fp) else 0.0
+    recall = tp / (tp + fn) if (tp + fn) else 0.0
+    f1 = (2 * precision * recall / (precision + recall)) if (precision + recall) else 0.0
+    return {
+        "tp": tp, "fp": fp, "fn": fn,
+        "precision": round(precision, 4),
+        "recall": round(recall, 4),
+        "f1": round(f1, 4),
+        "threshold": threshold,
+        "note": "one-to-one greedy assignment; consistent P/R/F1",
+    }
+
+
 async def _compute_benchmark_metrics(session_id: str, ground_truths: list[dict]) -> dict:
     """Compute all benchmark metrics for a single session."""
     db = await get_db()
@@ -5902,6 +5946,9 @@ async def _compute_benchmark_metrics(session_id: str, ground_truths: list[dict])
                 "unverified": unverified_count,
                 "suspicious": suspicious_count,
             },
+            # Sound, internally-consistent confusion matrix (parallel to the
+            # legacy precision/recall above, which are kept for reproducibility).
+            "sound_metrics": _sound_confusion_matrix(findings, ground_truths),
         }
     finally:
         await db.close()
