@@ -31,7 +31,15 @@ from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import TextContent, Tool
 
-from orchestrator.enrichment.nvd import CVE_RE, lookup_cve
+# Make `orchestrator` importable regardless of the launcher's working directory
+# (Claude Code's MCP config has no cwd option), so this server can be registered
+# by absolute path from any project: python /abs/path/mcp_servers/cve/server.py
+import sys  # noqa: E402
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from orchestrator.enrichment.nvd import CVE_RE, lookup_cve  # noqa: E402
 
 log = logging.getLogger("erlik-cve-mcp")
 

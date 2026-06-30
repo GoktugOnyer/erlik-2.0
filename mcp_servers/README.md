@@ -36,15 +36,51 @@ Config (all optional):
 - `ERLIK_CVE_RATE_LIMIT` — requests/min (default `8`)
 - `NVD_API_KEY` — raises the NVD rate limit (never required)
 
-Example Claude Desktop entry (`claude_desktop_config.json`):
+The server inserts the repo root onto `sys.path` at startup, so it can be
+launched **by absolute path from any working directory** — handy because MCP
+clients have no `cwd` option.
+
+### Use from Claude Code CLI
+
+```bash
+# project scope (writes .mcp.json in the repo, shareable):
+cd /path/to/erlik-2.0
+claude mcp add --scope project erlik-cve -- python /path/to/erlik-2.0/mcp_servers/cve/server.py
+
+# optional NVD key for a higher rate limit:
+claude mcp add --scope project --env NVD_API_KEY=xxxx erlik-cve -- python /path/to/erlik-2.0/mcp_servers/cve/server.py
+
+claude mcp list          # ✓ Connected  erlik-cve (stdio)
+# inside a session:  /mcp   → inspect tools / status
+```
+
+Equivalent project-scoped `.mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "erlik-cve": {
+      "type": "stdio",
+      "command": "python",
+      "args": ["/path/to/erlik-2.0/mcp_servers/cve/server.py"],
+      "env": { "NVD_API_KEY": "xxxx" }
+    }
+  }
+}
+```
+
+> Note: `claude mcp add` and `.mcp.json` have no `cwd` key — the absolute path to
+> `server.py` (above) is what makes it work from any project. The `python -m
+> mcp_servers.cve.server` form also works, but only when launched from the repo root.
+
+### Use from Claude Desktop
 
 ```json
 {
   "mcpServers": {
     "erlik-cve": {
       "command": "python",
-      "args": ["-m", "mcp_servers.cve.server"],
-      "cwd": "/path/to/erlik-2.0"
+      "args": ["/path/to/erlik-2.0/mcp_servers/cve/server.py"]
     }
   }
 }
