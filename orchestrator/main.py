@@ -1682,6 +1682,72 @@ async def enrich_session_findings(session_id: str, force: bool | None = None) ->
     return updated
 
 
+async def poc_reverify_session(session_id: str, target_url: str, enabled_tools: list,
+                               force: bool | None = None) -> int:
+    """Re-run a lightweight PoC for high/critical findings and confirm by signature.
+
+    Off unless enabled (run-config `poc_verify` / ERLIK_POC_VERIFY). For each
+    high/critical finding with a URL, re-fetches the URL with curl (through
+    execute_tool, so scope + timeouts apply) and checks the fresh response
+    against the curl confirmation signatures for that vuln class. On a match the
+    finding's `verified` flag is set to 1 and a re-verification note is appended;
+    findings are never dropped. Returns the number newly confirmed. Never raises.
+
+    This catches reflected/header/exposure classes and payload-in-URL cases; it
+    does not (yet) reproduce blind/multi-step exploits.
+    """
+    if not (force if force is not None else
+            os.environ.get("ERLIK_POC_VERIFY", "").strip().lower() in ("1", "true", "yes", "on")):
+        return 0
+    if "curl" not in (enabled_tools or []):
+        print(f"[poc-verify {session_id[:8]}] skipped (curl not enabled)", flush=True)
+        return 0
+
+    confirmed = 0
+    try:
+        db = await get_db()
+        try:
+            cur = await db.execute(
+                "SELECT id, vuln_type, severity, calibrated_severity, url, evidence "
+                "FROM findings WHERE session_id = ?", (session_id,))
+            rows = [dict(r) for r in await cur.fetchall()]
+        finally:
+            await db.close()
+
+        for r in rows:
+            sev = (r.get("calibrated_severity") or r.get("severity") or "").lower()
+            url = (r.get("url") or "").strip()
+            if sev not in ("high", "critical") or not url or not url.startswith("http"):
+                continue
+            vt = (r.get("vuln_type") or "").lower()
+            # signatures for this class (curl tool), plus a generic evidence token
+            sigs = []
+            for gt_type, by_tool in _HARD_CONFIRMATION_PATTERNS.items():
+                if gt_type in vt or vt in gt_type:
+                    sigs.extend(by_tool.get("curl", []))
+            quoted = "'" + url.replace("'", "'\\''") + "'"  # POSIX single-quote escape
+            res = await execute_tool(f"curl -sS -i -m 15 {quoted}",
+                                     enabled_tools, target_url=target_url,
+                                     tool_hint="curl", custom_timeout=20)
+            out = (res.get("output") or "")
+            out_l = out.lower()
+            hit = next((s for s in sigs if re.search(s, out_l, re.IGNORECASE)), None)
+            if hit:
+                note = f" [PoC re-verified {datetime.now():%Y-%m-%d %H:%M}: curl matched /{hit}/]"
+                db2 = await get_db()
+                try:
+                    await db2.execute(
+                        "UPDATE findings SET verified = 1, evidence = ? WHERE id = ?",
+                        (((r.get("evidence") or "") + note)[:2000], r["id"]))
+                    await db2.commit()
+                finally:
+                    await db2.close()
+                confirmed += 1
+    except Exception as e:  # noqa: BLE001
+        print(f"[poc-verify {session_id[:8]}] failed (non-fatal): {e}", flush=True)
+    return confirmed
+
+
 async def _generate_report(session_id: str, model: str, target_url: str,
                            session_type: str, vuln_category: str,
                            total_steps: int, total_findings: int,
@@ -3780,6 +3846,18 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
                 })
         except Exception as _enrich_err:  # noqa: BLE001
             print(f"[enrich {session_id[:8]}] skipped: {_enrich_err}")
+
+        # Re-run PoCs for high/critical findings (driven by run config; default off).
+        try:
+            n_pocv = await poc_reverify_session(session_id, target_url, enabled_tools,
+                                                force=runcfg["poc_verify"])
+            if n_pocv:
+                await manager.broadcast(session_id, {
+                    "type": "log", "phase": "report",
+                    "message": f"PoC re-verification: {n_pocv} high/critical finding(s) confirmed",
+                })
+        except Exception as _pv_err:  # noqa: BLE001
+            print(f"[poc-verify {session_id[:8]}] skipped: {_pv_err}")
 
         # Generate report
         try:
