@@ -1,0 +1,28 @@
+id: WSTG-SESS-02
+name: Cookie Attributes
+category: Session Management
+severity: medium
+references:
+  - https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/06-Session_Management_Testing/02-Testing_for_Cookies_Attributes
+
+target_schema:
+  required: [url]
+  optional: [cookie, auth_header]
+
+steps:
+  - name: fetch_headers
+    tool: curl
+    command: >-
+      curl -s -i "{{url}}"
+    evaluators:
+      - type: llm
+        instruction: >-
+          Examine the Set-Cookie response headers. If a cookie that looks like a
+          session/auth token (e.g. session, sid, token, jwt, connect.sid) is
+          missing the HttpOnly flag, the Secure flag (on an https target), or a
+          SameSite attribute, set matched=true and name the cookie + the missing
+          attribute(s). If there are no cookies, or all session cookies are
+          properly flagged, set matched=false.
+        emit_finding:
+          vuln_type: Insecure Cookie Attributes
+          severity: medium

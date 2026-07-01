@@ -1,0 +1,37 @@
+id: WSTG-CONF-06
+name: HTTP Methods
+category: Configuration & Deployment Management
+severity: medium
+references:
+  - https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/02-Configuration_and_Deployment_Management_Testing/06-Test_HTTP_Methods
+
+target_schema:
+  required: [url]
+  optional: [cookie, auth_header]
+
+steps:
+  - name: options
+    tool: curl
+    # Ask the server which methods it allows.
+    command: >-
+      curl -s -i -X OPTIONS "{{url}}"
+    evaluators:
+      - type: regex
+        # Dangerous write/diagnostic methods advertised in the Allow header.
+        pattern: 'Allow:.*(PUT|DELETE|TRACE|CONNECT|PATCH)'
+        emit_finding:
+          vuln_type: Dangerous HTTP Method Enabled
+          severity: medium
+
+  - name: put_probe
+    tool: curl
+    when: no_finding_yet
+    # A successful PUT of an arbitrary file is a serious upload/deploy flaw.
+    command: >-
+      curl -s -i -X PUT --data "erlik-put-probe" "{{url}}/erlik_put_test.txt"
+    evaluators:
+      - type: regex
+        pattern: 'HTTP/[0-9.]+ (200|201|204)'
+        emit_finding:
+          vuln_type: HTTP PUT Method Allows File Write
+          severity: high
