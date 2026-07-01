@@ -35,6 +35,7 @@ _BOOL_KEYS = {
     "nettacker": "ERLIK_NETTACKER",
     "nettacker_findings": "ERLIK_NETTACKER_FINDINGS",
     "poc_verify": "ERLIK_POC_VERIFY",
+    "primitives": "ERLIK_PRIMITIVES",
 }
 
 # Sensible pre-selectable setups. Keys map to the flag bundle a preset turns on;
@@ -95,7 +96,7 @@ def resolve(run_config=None) -> dict:
 
     # Explicit per-key values in the session config override the preset.
     for k in ("cve_enrich", "skills", "nettacker", "nettacker_findings",
-              "nettacker_scenario", "playbooks", "poc_verify"):
+              "nettacker_scenario", "playbooks", "poc_verify", "primitives"):
         if k in cfg and cfg[k] is not None:
             base[k] = cfg[k]
 
@@ -120,6 +121,7 @@ def resolve(run_config=None) -> dict:
         "nettacker": tri("nettacker"),
         "nettacker_findings": tri("nettacker_findings"),
         "poc_verify": tri("poc_verify"),
+        "primitives": tri("primitives"),
         "nettacker_scenario": scenario,
         "playbooks": playbooks,
     }

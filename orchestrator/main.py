@@ -1682,6 +1682,38 @@ async def enrich_session_findings(session_id: str, force: bool | None = None) ->
     return updated
 
 
+async def _store_primitives(session_id: str, tool_name: str, output: str) -> list:
+    """Extract reusable primitives from tool output, persist new ones, return them.
+
+    Never raises. Dedupes against what's already stored for the session so the
+    same token isn't re-announced every turn.
+    """
+    try:
+        from orchestrator.primitives import extract_primitives
+        found = extract_primitives(output or "", tool_name)
+        if not found:
+            return []
+        db = await get_db()
+        try:
+            cur = await db.execute(
+                "SELECT value FROM session_primitives WHERE session_id = ?", (session_id,))
+            existing = {row[0] for row in await cur.fetchall()}
+            fresh = [p for p in found if p["value"] not in existing]
+            for p in fresh:
+                await db.execute(
+                    "INSERT INTO session_primitives (session_id, kind, value, hint, source_tool) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (session_id, p["kind"], p["value"], p.get("hint"), p.get("tool")))
+            if fresh:
+                await db.commit()
+            return fresh
+        finally:
+            await db.close()
+    except Exception as e:  # noqa: BLE001
+        print(f"[primitives {session_id[:8]}] store failed (non-fatal): {e}", flush=True)
+        return []
+
+
 async def poc_reverify_session(session_id: str, target_url: str, enabled_tools: list,
                                force: bool | None = None) -> int:
     """Re-run a lightweight PoC for high/critical findings and confirm by signature.
@@ -3558,6 +3590,20 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
                         if uncovered:
                             tool_feedback += f"Move to an uncovered phase: {uncovered[0]}\n"
                         tool_feedback += "Respond with a JSON action."
+
+                    # Stateful primitives: capture tokens/cookies/creds from this
+                    # output and surface them for reuse on later steps. Off by
+                    # default; driven by the per-session run config.
+                    if runcfg.get("primitives"):
+                        _new_prims = await _store_primitives(session_id, tool_name, tool_output)
+                        if _new_prims:
+                            from orchestrator.primitives import format_for_agent
+                            tool_feedback += "\n\n" + format_for_agent(_new_prims) + "\n"
+                            await manager.broadcast(session_id, {
+                                "type": "log", "phase": "test",
+                                "message": f"PRIMITIVES: captured {len(_new_prims)} "
+                                           f"({', '.join(sorted({p['kind'] for p in _new_prims}))}) for reuse",
+                            })
                     messages.append({"role": "user", "content": tool_feedback})
 
                     # Save step to DB (cleaned output, larger truncation)

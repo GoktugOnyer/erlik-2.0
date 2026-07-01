@@ -284,6 +284,20 @@ async def init_db():
                 except Exception:
                     pass  # column already exists
 
+        # Stateful exploit-primitive store (captured tokens/cookies/creds per session).
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS session_primitives (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                value TEXT NOT NULL,
+                hint TEXT,
+                source_tool TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+        """)
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_session_primitives_sid ON session_primitives(session_id);")
+
         # Operator triage columns (accept/reject + severity override) — additive.
         triage_columns = [
             ("triage_status", "TEXT DEFAULT NULL"),      # accepted | rejected | NULL
