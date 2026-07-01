@@ -54,21 +54,25 @@ RUN_PRESETS: dict[str, dict] = {
     },
     "recon_first": {
         "label": "Recon-first (recommended)",
-        "desc": "Deterministic Nettacker recon seeds the agent, then skills + CVE enrichment.",
+        "desc": "Deterministic Nettacker recon seeds the agent, then skills + CVE enrichment. "
+                "Reuses durable per-target memory from prior runs.",
         "config": {"nettacker": True, "nettacker_scenario": "recon",
-                   "skills": True, "cve_enrich": True},
+                   "skills": True, "cve_enrich": True, "target_memory": True},
     },
     "deterministic_heavy": {
         "label": "Deterministic-heavy",
         "desc": "Broad Nettacker web/vuln pre-scan with findings persisted; lighter AI reliance.",
         "config": {"nettacker": True, "nettacker_scenario": "web",
-                   "nettacker_findings": True, "skills": True, "cve_enrich": True},
+                   "nettacker_findings": True, "skills": True, "cve_enrich": True,
+                   "poc_verify": True},
     },
     "full_assessment": {
         "label": "Full assessment",
-        "desc": "Everything on; Nettacker full scan. Slow & thorough.",
+        "desc": "Everything on; Nettacker full scan; PoC re-verification, primitive reuse "
+                "and per-target memory enabled. Slow & thorough.",
         "config": {"nettacker": True, "nettacker_scenario": "full",
-                   "nettacker_findings": True, "skills": True, "cve_enrich": True},
+                   "nettacker_findings": True, "skills": True, "cve_enrich": True,
+                   "poc_verify": True, "primitives": True, "target_memory": True},
     },
 }
 
