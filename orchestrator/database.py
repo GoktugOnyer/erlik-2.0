@@ -284,6 +284,19 @@ async def init_db():
                 except Exception:
                     pass  # column already exists
 
+        # Operator triage columns (accept/reject + severity override) — additive.
+        triage_columns = [
+            ("triage_status", "TEXT DEFAULT NULL"),      # accepted | rejected | NULL
+            ("severity_override", "TEXT DEFAULT NULL"),
+            ("triage_note", "TEXT DEFAULT NULL"),
+        ]
+        for table in ("findings", "v2_findings"):
+            for col_name, col_def in triage_columns:
+                try:
+                    await db.execute(f"ALTER TABLE {table} ADD COLUMN {col_name} {col_def}")
+                except Exception:
+                    pass  # column already exists
+
         await db.commit()
 
 

@@ -1227,6 +1227,11 @@
                     style="border-bottom: 1px solid var(--panel-border);">
                 </div>
 
+                <!-- Findings triage (accept / reject / severity override) -->
+                <div id="report-detail-triage" class="px-4 py-2 hidden"
+                    style="border-bottom: 1px solid var(--panel-border);">
+                </div>
+
                 <!-- Full Report Markdown -->
                 <div id="report-detail-content" class="p-4 overflow-y-auto report-rendered"
                     style="max-height: 700px;">
@@ -1667,6 +1672,7 @@
             panel.scrollIntoView({ behavior: 'smooth' });
 
             renderRunConfigBadges(sid);  // reproducibility: which automation flow this session used
+            renderTriageTable(sid);      // accept / reject / severity-override controls
 
             try {
                 const [reportResp, findingsResp] = await Promise.all([
@@ -3708,6 +3714,57 @@ ${htmlBody}
                 el.appendChild(mk(eff.nettacker ? `NETTACKER:${eff.nettacker_scenario}` : 'NETTACKER',
                                   eff.nettacker, 'Deterministic Nettacker pre-scan was ' + (eff.nettacker ? 'on' : 'off')));
             } catch (e) { /* non-fatal */ }
+        }
+
+        // ===== Findings triage (accept / reject / severity override) =====
+        function _sevColorName(s) {
+            return ({ critical: '#ff3b6b', high: '#ff3b6b', medium: '#ffcc00',
+                      low: '#00d0ff', info: '#6a6a8a' }[String(s).toLowerCase()] || '#6a6a8a');
+        }
+
+        async function renderTriageTable(sid) {
+            const el = document.getElementById('report-detail-triage');
+            if (!el) return;
+            el.classList.add('hidden'); el.innerHTML = '';
+            try {
+                const r = await fetch(`/api/sessions/${sid}/findings`);
+                if (!r.ok) return;
+                const findings = await r.json();
+                if (!findings.length) return;
+                const sevOpts = ['', 'critical', 'high', 'medium', 'low', 'info'];
+                const rows = findings.map(f => {
+                    const rejected = f.triage_status === 'rejected';
+                    const accepted = f.triage_status === 'accepted';
+                    const eff = (f.severity_override || f.calibrated_severity || f.severity || 'info');
+                    const opts = sevOpts.map(o =>
+                        `<option value="${o}" ${(f.severity_override || '') === o ? 'selected' : ''}>${o ? escapeHtml(o) : '— override —'}</option>`).join('');
+                    return `<tr style="opacity:${rejected ? 0.4 : 1}; border-bottom:1px solid #14141e;">
+                        <td class="py-1 px-2" style="color:#d8d8e8;">${escapeHtml(f.vuln_type || '?')}</td>
+                        <td class="py-1 px-2" style="color:${_sevColorName(eff)}; font-weight:600;">${escapeHtml(String(eff).toUpperCase())}</td>
+                        <td class="py-1 px-2" style="color:#7a7a8a; max-width:220px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${escapeHtml(f.url || '')}</td>
+                        <td class="py-1 px-2" style="white-space:nowrap;">
+                            <button onclick="triageFinding('${sid}',${f.id},{status:'accepted'})" title="Accept" style="color:${accepted ? '#00ff88' : '#5a5a6a'}; cursor:pointer; background:none; border:none; font-size:0.9rem;">&#10004;</button>
+                            <button onclick="triageFinding('${sid}',${f.id},{status:'rejected'})" title="Reject (false positive — excluded from report)" style="color:${rejected ? '#ff4466' : '#5a5a6a'}; cursor:pointer; background:none; border:none; font-size:0.9rem;">&#10008;</button>
+                            <select onchange="triageFinding('${sid}',${f.id},{severity_override:this.value})" class="cyber-input rounded" style="font-size:0.62rem;">${opts}</select>
+                        </td>
+                    </tr>`;
+                }).join('');
+                el.innerHTML = `<div class="font-pixel mb-1" style="font-size:0.5rem; color:#a05cff;">TRIAGE &mdash; accept / reject / override severity (rejected are excluded from the report + exports)</div>
+                    <div style="max-height:180px; overflow:auto;"><table style="width:100%; font-size:0.72rem; border-collapse:collapse;">
+                    <thead><tr style="color:#6a6a8a;"><th class="text-left px-2">vuln</th><th class="text-left px-2">sev</th><th class="text-left px-2">url</th><th class="text-left px-2">triage</th></tr></thead>
+                    <tbody>${rows}</tbody></table></div>`;
+                el.classList.remove('hidden');
+            } catch (e) { /* non-fatal */ }
+        }
+
+        async function triageFinding(sid, id, patch) {
+            try {
+                await fetch(`/api/findings/${id}/triage`, {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(patch),
+                });
+            } catch (e) { /* non-fatal */ }
+            renderTriageTable(sid);  // reflect new state (report.json/html/sarif honor it live)
         }
 
         // ===== Init =====

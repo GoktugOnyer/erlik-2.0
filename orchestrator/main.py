@@ -7,7 +7,7 @@ import os
 from datetime import datetime
 from contextlib import asynccontextmanager
 from pathlib import Path
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request, Body
 from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.templating import Jinja2Templates
 import httpx
@@ -2223,7 +2223,8 @@ async def _build_report_json(session_id: str) -> dict:
         cur = await db.execute(
             "SELECT vuln_type, severity, url, evidence, cve_id, cvss_score, cvss_vector, "
             "cwe, calibrated_severity, owasp_category, impact, remediation, confidence, "
-            "ref_links FROM findings WHERE session_id = ? ORDER BY id", (session_id,)
+            "ref_links, triage_status, severity_override "
+            "FROM findings WHERE session_id = ? ORDER BY id", (session_id,)
         )
         rows = [dict(r) for r in await cur.fetchall()]
     finally:
@@ -2232,8 +2233,15 @@ async def _build_report_json(session_id: str) -> dict:
     stats = {"total": 0, "critical": 0, "high": 0, "medium": 0, "low": 0,
              "informational": 0}
     report_findings = []
-    for i, r in enumerate(rows, 1):
-        sev = (r.get("calibrated_severity") or r.get("severity") or "INFO").upper()
+    i = 0
+    for r in rows:
+        # Operator triage: rejected findings are excluded from the deliverable;
+        # a severity override wins over calibrated/raw.
+        if r.get("triage_status") == "rejected":
+            continue
+        i += 1
+        sev = (r.get("severity_override") or r.get("calibrated_severity")
+               or r.get("severity") or "INFO").upper()
         refs = [x.strip() for x in (r.get("ref_links") or "").split(",") if x.strip()]
         report_findings.append(ReportFinding(
             id=f"F-{i:03d}",
@@ -4418,6 +4426,44 @@ async def list_findings(session_id: str):
         )
         rows = await cursor.fetchall()
         return [dict(r) for r in rows]
+    finally:
+        await db.close()
+
+
+@app.post("/api/findings/{finding_id}/triage")
+async def triage_finding(finding_id: int, body: dict = Body(...)):
+    """Operator triage: accept/reject a finding + optional severity override.
+
+    Body: {status?: 'accepted'|'rejected'|null, severity_override?: str|null,
+    note?: str}. 'rejected' also sets false_positive=1 so it's excluded from the
+    deliverable; 'accepted' clears it. Mutating — gated by the API token when set.
+    """
+    status = body.get("status")
+    if status not in (None, "", "accepted", "rejected"):
+        raise HTTPException(400, "status must be 'accepted', 'rejected', or null")
+    sets, vals = [], []
+    if "status" in body:
+        sets.append("triage_status = ?"); vals.append(status or None)
+        if status == "rejected":
+            sets.append("false_positive = 1")
+        elif status == "accepted":
+            sets.append("false_positive = 0")
+    if "severity_override" in body:
+        sets.append("severity_override = ?"); vals.append(body.get("severity_override") or None)
+    if "note" in body:
+        sets.append("triage_note = ?"); vals.append(body.get("note") or None)
+    if not sets:
+        raise HTTPException(400, "nothing to update")
+    db = await get_db()
+    try:
+        vals.append(finding_id)
+        await db.execute(f"UPDATE findings SET {', '.join(sets)} WHERE id = ?", vals)
+        await db.commit()
+        cur = await db.execute("SELECT * FROM findings WHERE id = ?", (finding_id,))
+        row = await cur.fetchone()
+        if not row:
+            raise HTTPException(404, "finding not found")
+        return dict(row)
     finally:
         await db.close()
 
