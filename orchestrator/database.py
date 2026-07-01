@@ -284,6 +284,17 @@ async def init_db():
                 except Exception:
                     pass  # column already exists
 
+        # Per-target memory: key recon_context by normalized target so knowledge
+        # accumulates across unrelated runs against the same target (additive).
+        try:
+            await db.execute("ALTER TABLE recon_context ADD COLUMN target_key TEXT DEFAULT NULL")
+        except Exception:
+            pass
+        try:
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_recon_context_target ON recon_context(target_key)")
+        except Exception:
+            pass
+
         # Stateful exploit-primitive store (captured tokens/cookies/creds per session).
         await db.execute("""
             CREATE TABLE IF NOT EXISTS session_primitives (

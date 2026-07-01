@@ -2379,10 +2379,24 @@ async def _save_report_file(session_id: str, target_url: str, session_type: str,
 
 # --- Recon Context Extraction & Injection ---
 
+def _target_key(target_url: str) -> str:
+    """Normalized host:port used to accumulate memory across runs of one target."""
+    from urllib.parse import urlparse
+    p = urlparse(target_url if "://" in (target_url or "") else f"http://{target_url}")
+    host = (p.hostname or "").lower()
+    if not host:
+        return ""
+    port = p.port or (443 if p.scheme == "https" else 80)
+    return f"{host}:{port}"
+
+
 async def _extract_recon_context(session_id: str):
     """Parse tool outputs from a completed session and store structured recon data."""
     db = await get_db()
     try:
+        srow = await (await db.execute(
+            "SELECT target_url FROM sessions WHERE id = ?", (session_id,))).fetchone()
+        target_key = _target_key(srow["target_url"]) if srow else ""
         cursor = await db.execute(
             "SELECT tool_called, tool_input, tool_output FROM steps "
             "WHERE session_id = ? AND tool_output IS NOT NULL",
@@ -2503,15 +2517,86 @@ async def _extract_recon_context(session_id: str):
         db = await get_db()
         try:
             await db.executemany(
-                "INSERT INTO recon_context (session_id, context_type, key, value, source_tool) "
-                "VALUES (?, ?, ?, ?, ?)",
-                [(session_id, ct, k, v, st) for ct, k, v, st in context_entries],
+                "INSERT INTO recon_context (session_id, context_type, key, value, source_tool, target_key) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                [(session_id, ct, k, v, st, target_key) for ct, k, v, st in context_entries],
             )
             await db.commit()
         finally:
             await db.close()
 
     return len(context_entries)
+
+
+async def _get_target_memory_context(session_id: str, target_url: str, max_chars: int = 1600) -> str:
+    """Durable per-TARGET knowledge compiled from ALL prior runs against the same
+    target (not just an explicit parent). Lets even a cold session start from what
+    earlier runs already learned. Returns "" if nothing prior. Never raises.
+    """
+    tk = _target_key(target_url)
+    if not tk:
+        return ""
+    try:
+        db = await get_db()
+        try:
+            cur = await db.execute(
+                "SELECT DISTINCT context_type, key, value FROM recon_context "
+                "WHERE target_key = ? AND session_id != ? "
+                "ORDER BY context_type, key LIMIT 300", (tk, session_id))
+            rows = [dict(r) for r in await cur.fetchall()]
+            cur2 = await db.execute(
+                "SELECT f.vuln_type, f.severity, f.url, s.target_url FROM findings f "
+                "JOIN sessions s ON f.session_id = s.id "
+                "WHERE f.session_id != ? AND (f.false_positive IS NULL OR f.false_positive = 0)",
+                (session_id,))
+            allf = [dict(r) for r in await cur2.fetchall()]
+            cur3 = await db.execute(
+                "SELECT COUNT(DISTINCT session_id) FROM recon_context WHERE target_key = ? AND session_id != ?",
+                (tk, session_id))
+            n_runs = (await cur3.fetchone())[0]
+        finally:
+            await db.close()
+    except Exception as e:  # noqa: BLE001
+        print(f"[target-mem {session_id[:8]}] {e}", flush=True)
+        return ""
+
+    prior_findings = [f for f in allf if _target_key(f.get("target_url") or "") == tk]
+    if not rows and not prior_findings:
+        return ""
+
+    buckets: dict[str, list] = {}
+    for r in rows:
+        buckets.setdefault(r["context_type"], [])
+        key = r["key"]
+        if key and key not in buckets[r["context_type"]]:
+            buckets[r["context_type"]].append(key)
+
+    label = {"directory": "Known paths", "endpoint": "Known endpoints",
+             "technology": "Detected tech", "service": "Services",
+             "parameter": "Parameters", "finding": "Prior scan hits"}
+    lines = [
+        "═══════════════════════════════════════════════════════════════",
+        f"PRIOR KNOWLEDGE FOR THIS TARGET (accumulated from {n_runs} earlier run(s))",
+        "═══════════════════════════════════════════════════════════════",
+        "START from these verified facts — do NOT re-discover them. Re-check the "
+        "prior findings and go deeper / test what earlier runs missed.",
+    ]
+    for ctype in ("technology", "service", "directory", "endpoint", "parameter", "finding"):
+        vals = buckets.get(ctype)
+        if vals:
+            lines.append(f"{label.get(ctype, ctype)}: " + ", ".join(vals[:25]))
+    if prior_findings:
+        seen = set()
+        fl = []
+        for f in prior_findings:
+            k = (f.get("vuln_type"), f.get("url"))
+            if k in seen:
+                continue
+            seen.add(k)
+            fl.append(f"{f.get('vuln_type')} @ {f.get('url')} ({f.get('severity')})")
+        lines.append("Previously confirmed findings: " + "; ".join(fl[:20]))
+    out = "\n".join(lines)
+    return out[:max_chars] + ("\n" if len(out) <= max_chars else " …\n")
 
 
 async def _get_warm_start_context(parent_session_id: str) -> str:
@@ -3089,6 +3174,19 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
                         })
                     except Exception as _pe:  # noqa: BLE001
                         print(f"[nettacker {session_id[:8]}] persist failed: {_pe}", flush=True)
+
+        # Inject durable per-TARGET memory (from all prior runs against this target).
+        # Unlike warm-start (explicit parent lineage), this applies to any session,
+        # incl. cold. Gated by the run config; default off. See _get_target_memory_context.
+        if runcfg.get("target_memory"):
+            _tm = await _get_target_memory_context(session_id, target_url)
+            if _tm:
+                combined_system += f"\n\n{_tm}"
+                print(f"[target-mem {session_id[:8]}] injected {len(_tm)} chars", flush=True)
+                await manager.broadcast(session_id, {
+                    "type": "log", "phase": "recon",
+                    "message": f"TARGET MEMORY: injected {len(_tm)} chars from prior runs on this target",
+                })
 
         # Inject warm-start context if applicable
         if session_type == "warm" and parent_session_id:
