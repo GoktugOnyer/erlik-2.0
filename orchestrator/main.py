@@ -4432,6 +4432,20 @@ async def get_report_json(session_id: str):
     return await _build_report_json(session_id)
 
 
+@app.get("/api/sessions/{session_id}/report.html", response_class=HTMLResponse)
+async def get_report_html(session_id: str):
+    """Client-ready HTML report (print-to-PDF in a browser), from report.json."""
+    from orchestrator.reporting import report_to_html
+    return HTMLResponse(report_to_html(await _build_report_json(session_id)))
+
+
+@app.get("/api/sessions/{session_id}/report.sarif")
+async def get_report_sarif(session_id: str):
+    """SARIF 2.1.0 for CI / security-tool ingestion, from report.json."""
+    from orchestrator.reporting import report_to_sarif
+    return report_to_sarif(await _build_report_json(session_id), session_id)
+
+
 @app.get("/api/sessions/{session_id}/report")
 async def get_report(session_id: str):
     """Get the generated report for a session."""

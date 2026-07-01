@@ -1188,6 +1188,16 @@
                             title="Open the validated pentest-report.json (structured findings: CVSS, CWE, OWASP, impact, remediation)">
                             REPORT .JSON
                         </button>
+                        <button onclick="viewReportFormat('report.html')" class="font-pixel px-3 py-1 rounded border text-xs"
+                            style="font-size:0.45rem; color:var(--neon-cyan); border-color:var(--neon-cyan); background:transparent; cursor:pointer;"
+                            title="Open the client-ready HTML report (print to PDF from the browser)">
+                            .HTML
+                        </button>
+                        <button onclick="viewReportFormat('report.sarif')" class="font-pixel px-3 py-1 rounded border text-xs"
+                            style="font-size:0.45rem; color:var(--neon-cyan); border-color:var(--neon-cyan); background:transparent; cursor:pointer;"
+                            title="Open SARIF 2.1.0 (CI / security-tool ingestion)">
+                            SARIF
+                        </button>
                         <button onclick="closeReportDetail()" class="font-pixel px-3 py-1 rounded border text-xs"
                             style="font-size:0.45rem; color:var(--neon-red); border-color:var(--neon-red); background:transparent; cursor:pointer;">
                             &#10005; CLOSE
@@ -1721,6 +1731,12 @@
         function viewReportJsonFromList() {
             if (reportDetailSessionId) {
                 window.open(`/api/sessions/${reportDetailSessionId}/report.json`, '_blank');
+            }
+        }
+
+        function viewReportFormat(fmt) {
+            if (reportDetailSessionId) {
+                window.open(`/api/sessions/${reportDetailSessionId}/${fmt}`, '_blank');
             }
         }
 
