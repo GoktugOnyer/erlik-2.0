@@ -4446,6 +4446,23 @@ async def get_report_sarif(session_id: str):
     return report_to_sarif(await _build_report_json(session_id), session_id)
 
 
+@app.get("/api/sessions/{session_id}/report.defectdojo.json")
+async def get_report_defectdojo(session_id: str):
+    """DefectDojo 'Generic Findings Import' JSON, from report.json."""
+    from orchestrator.reporting import report_to_defectdojo
+    return report_to_defectdojo(await _build_report_json(session_id))
+
+
+@app.get("/api/sessions/{session_id}/report.jira.csv")
+async def get_report_jira_csv(session_id: str):
+    """CSV for Jira CSV issue import, from report.json."""
+    from fastapi.responses import PlainTextResponse
+    from orchestrator.reporting import report_to_jira_csv
+    csv_text = report_to_jira_csv(await _build_report_json(session_id))
+    return PlainTextResponse(csv_text, media_type="text/csv", headers={
+        "Content-Disposition": f'attachment; filename="erlik-{session_id}.jira.csv"'})
+
+
 @app.get("/api/sessions/{session_id}/report")
 async def get_report(session_id: str):
     """Get the generated report for a session."""

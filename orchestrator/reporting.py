@@ -12,7 +12,10 @@ finding fields are LLM/target-controlled and must not be trusted in a deliverabl
 
 from __future__ import annotations
 
+import csv
 import html
+import io
+import re
 from datetime import datetime
 
 _SEV_ORDER = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFORMATIONAL", "UNKNOWN"]
@@ -171,3 +174,71 @@ def report_to_sarif(report: dict, session_id: str = "") -> dict:
             "results": results,
         }],
     }
+
+
+# --------------------------------------------------------------------------- #
+# Tracker imports — DefectDojo (generic JSON) and Jira (CSV)
+# --------------------------------------------------------------------------- #
+
+_DD_SEV = {"CRITICAL": "Critical", "HIGH": "High", "MEDIUM": "Medium",
+           "LOW": "Low", "INFORMATIONAL": "Info", "UNKNOWN": "Info"}
+_JIRA_PRIORITY = {"CRITICAL": "Highest", "HIGH": "High", "MEDIUM": "Medium",
+                  "LOW": "Low", "INFORMATIONAL": "Lowest", "UNKNOWN": "Lowest"}
+
+
+def _cwe_int(cwe) -> int | None:
+    m = re.search(r"(\d+)", str(cwe or ""))
+    return int(m.group(1)) if m else None
+
+
+def report_to_defectdojo(report: dict) -> dict:
+    """DefectDojo 'Generic Findings Import' JSON (upload under that scan type)."""
+    out = []
+    for f in report.get("findings", []) or []:
+        sev = _sev(f)
+        out.append({
+            "title": f.get("title") or "Finding",
+            "description": f.get("description") or "",
+            "severity": _DD_SEV.get(sev, "Info"),
+            "cwe": _cwe_int(f.get("cwe")),
+            "cvssv3": f.get("cvss_vector") or None,
+            "cvssv3_score": f.get("cvss_score"),
+            "mitigation": f.get("remediation") or "",
+            "impact": f.get("impact") or "",
+            "references": "\n".join(f.get("references") or []),
+            "vuln_id_from_tool": f.get("id"),
+            "unique_id_from_tool": f.get("id"),
+            "endpoints": [f["affected_url"]] if f.get("affected_url") else [],
+            "static_finding": False,
+            "dynamic_finding": True,
+            "active": True,
+            "verified": (f.get("confidence") == "confirmed"),
+        })
+    return {"findings": out}
+
+
+def report_to_jira_csv(report: dict) -> str:
+    """CSV for Jira's CSV issue import (map the columns during import)."""
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["Summary", "Priority", "Labels", "Description", "URL", "CVSS", "CWE", "OWASP"])
+    for f in report.get("findings", []) or []:
+        sev = _sev(f)
+        parts = [f.get("description") or ""]
+        if f.get("impact"):
+            parts.append("Impact: " + f["impact"])
+        if f.get("remediation"):
+            parts.append("Remediation: " + f["remediation"])
+        cvss = (f"{f.get('cvss_score')} {f.get('cvss_vector') or ''}".strip()
+                if f.get("cvss_score") is not None else "")
+        w.writerow([
+            f"[{sev}] {f.get('title') or 'Finding'}",
+            _JIRA_PRIORITY.get(sev, "Lowest"),
+            ("erlik " + (f.get("owasp") or "")).strip(),
+            "\n\n".join(p for p in parts if p),
+            f.get("affected_url") or "",
+            cvss,
+            f.get("cwe") or "",
+            f.get("owasp") or "",
+        ])
+    return buf.getvalue()

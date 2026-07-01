@@ -1198,6 +1198,16 @@
                             title="Open SARIF 2.1.0 (CI / security-tool ingestion)">
                             SARIF
                         </button>
+                        <button onclick="viewReportFormat('report.defectdojo.json')" class="font-pixel px-3 py-1 rounded border text-xs"
+                            style="font-size:0.45rem; color:var(--neon-purple); border-color:var(--neon-purple); background:transparent; cursor:pointer;"
+                            title="DefectDojo Generic Findings Import JSON">
+                            DEFECTDOJO
+                        </button>
+                        <button onclick="viewReportFormat('report.jira.csv')" class="font-pixel px-3 py-1 rounded border text-xs"
+                            style="font-size:0.45rem; color:var(--neon-purple); border-color:var(--neon-purple); background:transparent; cursor:pointer;"
+                            title="Jira CSV issue import">
+                            JIRA CSV
+                        </button>
                         <button onclick="closeReportDetail()" class="font-pixel px-3 py-1 rounded border text-xs"
                             style="font-size:0.45rem; color:var(--neon-red); border-color:var(--neon-red); background:transparent; cursor:pointer;">
                             &#10005; CLOSE
