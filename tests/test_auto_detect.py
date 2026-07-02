@@ -330,6 +330,86 @@ class TestDetectorNegatives:
         assert detect("commix", "No injection point found.", 'commix -u "http://x?x=1"') == []
 
 
+# ── content discovery (gobuster / ffuf / dirb / wfuzz) ──────────────────────
+class TestContentDiscovery:
+    def test_gobuster_sensitive_paths(self):
+        out = (
+            "===============================================================\n"
+            "/ftp                  (Status: 200) [Size: 1234]\n"
+            "/api-docs             (Status: 200) [Size: 5678]\n"
+            "/metrics              (Status: 200) [Size: 900]\n"
+            "/about                (Status: 200) [Size: 100]\n"
+            "/admin                (Status: 403) [Size: 50]\n"
+        )
+        findings = detect("gobuster", out, "gobuster dir -u http://juice-shop:3000 -w /w.txt")
+        by_type = {f["vuln_type"]: f for f in findings}
+        assert set(by_type) == {"Sensitive Data Exposure", "Security Misconfiguration"}
+        # /ftp + /api-docs + /metrics = 3 findings; /about not sensitive, /admin 403 skipped
+        assert len(findings) == 3
+        assert by_type["Sensitive Data Exposure"]["url"] == "http://juice-shop:3000/ftp"
+        metrics = next(f for f in findings if "/metrics" in f["url"])
+        assert metrics["severity"] == "low"
+
+    def test_ffuf_format(self):
+        out = "ftp                     [Status: 200, Size: 1234, Words: 10, Lines: 5]"
+        findings = detect("ffuf", out, "ffuf -u http://juice-shop:3000/FUZZ -w /w.txt")
+        assert findings[0]["vuln_type"] == "Sensitive Data Exposure"
+        assert findings[0]["url"] == "http://juice-shop:3000/ftp"
+
+    def test_dirb_full_url_format(self):
+        out = "+ http://juice-shop:3000/ftp (CODE:200|SIZE:1234)"
+        findings = detect("dirb", out, "dirb http://juice-shop:3000 /w.txt")
+        assert findings[0]["vuln_type"] == "Sensitive Data Exposure"
+        assert findings[0]["url"] == "http://juice-shop:3000/ftp"
+
+    def test_robots_txt_is_info_misconfig(self):
+        out = "/robots.txt           (Status: 200) [Size: 200]"
+        findings = detect("gobuster", out, "gobuster dir -u http://juice-shop:3000 -w /w.txt")
+        assert findings[0]["vuln_type"] == "Security Misconfiguration"
+        assert findings[0]["severity"] == "info"
+
+    def test_source_map_exposed(self):
+        out = "/main-es2015.abc.js.map   (Status: 200) [Size: 99999]"
+        findings = detect("gobuster", out, "gobuster dir -u http://juice-shop:3000 -w /w.txt")
+        assert findings[0]["vuln_type"] == "Sensitive Data Exposure"
+        assert ".map" in findings[0]["evidence"]
+
+    def test_protected_and_nonsensitive_paths_ignored(self):
+        out = (
+            "/ftp        (Status: 403) [Size: 50]\n"     # protected -> not an exposure
+            "/login      (Status: 200) [Size: 100]\n"    # not sensitive
+            "/ftpfiles   (Status: 200) [Size: 100]\n"    # segment guard: not '/ftp'
+        )
+        assert detect("gobuster", out, "gobuster dir -u http://juice-shop:3000 -w /w.txt") == []
+
+    def test_decoration_line_with_status_is_skipped(self):
+        # Defensive: a banner token that happens to be followed by a status
+        # must not become a finding, but a real hit on the same run still does.
+        out = "=== (Status: 200) ===\n/ftp        (Status: 200) [Size: 1]"
+        findings = detect("gobuster", out, "gobuster dir -u http://x -w /w.txt")
+        assert len(findings) == 1
+        assert findings[0]["vuln_type"] == "Sensitive Data Exposure"
+
+    def test_duplicate_paths_deduped(self):
+        out = (
+            "/ftp    (Status: 200) [Size: 1]\n"
+            "/ftp    (Status: 200) [Size: 1]\n"
+        )
+        assert len(detect("gobuster", out, "gobuster dir -u http://x -w /w.txt")) == 1
+
+    def test_findings_match_ground_truth(self):
+        """The point of the detector: its findings score as true positives
+        against the seeded ground truth (previously a silent miss). robots.txt
+        here is GT #23 — one of the never-caught vulns."""
+        out = ("/ftp        (Status: 200) [Size: 1]\n"
+               "/robots.txt (Status: 200) [Size: 1]\n")
+        findings = detect("gobuster", out, "gobuster dir -u http://localhost:3000 -w /w.txt")
+        assert len(findings) == 2
+        for f in findings:
+            r = m._match_finding_to_ground_truth_scored(f, m.JUICE_SHOP_GROUND_TRUTH)
+            assert r["match"], f"{f['vuln_type']} {f['url']} did not match GT"
+
+
 # ── unhandled tools / empty output ──────────────────────────────────────────
 class TestNoOp:
     def test_unregistered_tool_returns_empty(self):

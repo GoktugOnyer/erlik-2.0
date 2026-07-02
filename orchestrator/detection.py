@@ -467,6 +467,97 @@ def _detect_zap_cli(ctx: DetectContext) -> list[Finding]:
     return findings
 
 
+# ── content discovery (gobuster / ffuf / dirb / wfuzz) ──────────────────────
+# These tools discover paths but previously emitted no findings — a live 200 on
+# a known-sensitive path was surfaced to the LLM only as text, so unless the
+# agent followed up with an exact-matching curl the exposure was a silent miss.
+# We map a small allowlist of sensitive paths to findings. Matching is on the
+# path SEGMENT (not a loose substring) and only for status 200/301/302, so a
+# hit is a real exposure, not a guess — precision-safe.
+#
+# Each entry: (marker, is_dir, vuln_type, severity, note). Directory markers
+# match the exact segment ("/ftp", "/ftp/…"); filename markers match the path
+# suffix ("…/robots.txt", "….map").
+_SENSITIVE_PATHS = (
+    ("security.txt", False, "Information Disclosure", "info",
+     "security.txt policy file exposed"),
+    ("/api-docs", True, "Security Misconfiguration", "medium",
+     "Swagger/OpenAPI documentation endpoint exposed"),
+    ("/metrics", True, "Security Misconfiguration", "low",
+     "Prometheus metrics endpoint exposed"),
+    ("robots.txt", False, "Security Misconfiguration", "info",
+     "robots.txt exposed (may reveal hidden paths)"),
+    ("/ftp", True, "Sensitive Data Exposure", "medium",
+     "FTP file directory exposed"),
+    (".map", False, "Sensitive Data Exposure", "medium",
+     "JavaScript source map exposed (leaks application source)"),
+)
+
+
+def _content_discovery_pairs(output: str):
+    """Yield (raw_path, status) from gobuster/ffuf/dirb/wfuzz output.
+
+    Mirrors main._parse_tool_output's extraction so the detector and the LLM
+    summary agree on what was discovered.
+    """
+    for line in output.split("\n"):
+        m = (re.search(r'(/?\S+)\s+\(Status:\s*(\d+)\)', line)          # gobuster
+             or re.search(r'(\S+)\s+\[Status:\s*(\d+)', line)           # ffuf
+             or re.search(r'(https?://\S+)\s+\(CODE:(\d+)', line))      # dirb
+        if not m:
+            continue
+        path = m.group(1)
+        if path in ("Progress:", "::", "---", "===") or path.startswith("==="):
+            continue
+        yield path, m.group(2)
+
+
+def _normalize_disc_path(path: str) -> str:
+    """Reduce a discovered path (possibly a full dirb URL) to a lowercase,
+    leading-slash path component."""
+    url_m = re.match(r'https?://[^/]+(/\S*)', path)
+    if url_m:
+        path = url_m.group(1)
+    path = path.split("?", 1)[0].lower()
+    if not path.startswith("/"):
+        path = "/" + path
+    return path
+
+
+def _path_hits(norm_path: str, marker: str, is_dir: bool) -> bool:
+    if is_dir:
+        return norm_path == marker or norm_path.startswith(marker + "/")
+    return norm_path.endswith(marker) or ("/" + marker.lstrip("/")) in norm_path
+
+
+def _detect_content_discovery(ctx: DetectContext) -> list[Finding]:
+    # Discovered paths are relative to the target root, so anchor the finding
+    # URL to the origin (scheme://host) — the command URL may carry a path or a
+    # FUZZ placeholder (e.g. ffuf's `-u http://host/FUZZ`).
+    origin_m = re.match(r'(https?://[^/]+)', ctx.url)
+    base = origin_m.group(1) if origin_m else ""
+    findings: list[Finding] = []
+    seen = set()
+    for raw_path, status in _content_discovery_pairs(ctx.output):
+        if status not in ("200", "301", "302"):
+            continue
+        norm = _normalize_disc_path(raw_path)
+        for marker, is_dir, vuln_type, severity, note in _SENSITIVE_PATHS:
+            if not _path_hits(norm, marker, is_dir):
+                continue
+            key = (vuln_type, norm)
+            if key in seen:
+                break
+            seen.add(key)
+            findings.append({
+                "vuln_type": vuln_type, "severity": severity,
+                "url": (base + norm) if base else norm, "parameter": "",
+                "evidence": f"Content discovery: {norm} (HTTP {status}) — {note}",
+            })
+            break  # one finding per discovered path
+    return findings
+
+
 # ── dispatch ─────────────────────────────────────────────────────────────────
 _DETECTORS = {
     "sqlmap": _detect_sqlmap,
@@ -479,6 +570,10 @@ _DETECTORS = {
     "nikto": _detect_nikto,
     "commix": _detect_commix,
     "zap-cli": _detect_zap_cli,
+    "gobuster": _detect_content_discovery,
+    "ffuf": _detect_content_discovery,
+    "dirb": _detect_content_discovery,
+    "wfuzz": _detect_content_discovery,
 }
 
 
