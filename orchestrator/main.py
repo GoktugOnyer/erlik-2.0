@@ -793,10 +793,17 @@ def _auto_detect_findings(tool_name: str, output: str, command: str) -> list[dic
 
     # --- xsstrike/dalfox: confirmed XSS ---
     elif tool_name in ("xsstrike", "dalfox"):
+        # dalfox/xsstrike confirm a hit with explicit success markers ([POC],
+        # [VULN], "triggered", "poc:") or by stating the payload is
+        # vulnerable/confirmed. The reflected+xss pair is kept as a secondary
+        # signal (parenthesised so it is not swallowed by the leading ORs).
+        # All are strong, evidence-gated tokens, so precision is preserved.
+        xss_markers = ("[poc]", "[vuln]", "triggered", "poc:",
+                       "vulnerable", "confirmed")
         for line in output.split("\n"):
             line_lower = line.lower()
-            if ("vulnerable" in line_lower or "confirmed" in line_lower or
-                    "reflected" in line_lower and "xss" in line_lower):
+            if (any(tok in line_lower for tok in xss_markers) or
+                    ("reflected" in line_lower and "xss" in line_lower)):
                 url_match = re.search(r'-u\s+"?([^"\s]+)', command) or re.search(r'url\s+"?([^"\s]+)', command)
                 url = url_match.group(1) if url_match else ""
                 findings.append({
@@ -855,7 +862,7 @@ def _auto_detect_findings(tool_name: str, output: str, command: str) -> list[dic
                 })
 
         # --- IDOR: accessing other users' orders ---
-        if "/api/orders" in url.lower() and ('"totalPrice"' in output_lower or '"products"' in output_lower):
+        if "/api/orders" in url.lower() and ('"totalprice"' in output_lower or '"products"' in output_lower):
             order_id = re.search(r'/api/orders/(\w+)', url, re.IGNORECASE)
             if order_id:
                 findings.append({
@@ -1026,8 +1033,11 @@ def _auto_detect_findings(tool_name: str, output: str, command: str) -> list[dic
     # --- jwt_tool: JWT vulnerabilities ---
     elif tool_name == "jwt_tool":
         output_lower = output.lower()
-        # JWT secret cracked
-        if "secret key" in output_lower or "cracked" in output_lower or "found" in output_lower:
+        # JWT secret cracked. Require an explicit crack signal — a bare "found"
+        # matches ordinary banner text ("Token found in header") and emitted a
+        # phantom finding, so it is intentionally excluded.
+        if ("secret key" in output_lower or "cracked" in output_lower
+                or "correct key" in output_lower):
             secret_match = re.search(r'(?:secret|key|found)[:\s]+["\']?(\S+)', output, re.IGNORECASE)
             findings.append({
                 "vuln_type": "Broken Authentication",

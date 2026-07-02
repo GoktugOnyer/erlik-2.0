@@ -6,14 +6,14 @@ lost (a tool whose output has no matching pattern emits nothing). These tests
 lock the per-tool behaviour so the planned refactor into a declarative rule
 table cannot change what counts as a finding.
 
-Two KNOWN DEFECTS surfaced by the recall audit are encoded as strict xfail:
-they express the DESIRED behaviour, currently fail (so the suite stays green),
-and will flip to xpass — failing the strict marker and prompting removal — the
-moment the recall roadmap fixes them.
+Three defects surfaced by the recall audit have now been fixed and are pinned
+here as regression tests (dalfox [POC]/[VULN]/'triggered' markers detected;
+jwt_tool no longer fires on a bare 'found'; the /api/orders totalPrice clause
+is case-correct). Each fix keeps a companion precision-guard test so the
+broadened/tightened trigger cannot regress in the other direction.
 """
 
 import json
-import pytest
 
 import orchestrator.main as m
 
@@ -95,16 +95,19 @@ class TestXssTools:
         findings = detect("dalfox", out, 'dalfox url "http://x?q=1"')
         assert len(findings) == 1
 
-    @pytest.mark.xfail(strict=True, reason=(
-        "Known recall bug (recall roadmap Wave 1 #3): dalfox/xsstrike report "
-        "confirmed XSS with [POC]/[VULN]/[G] markers and by echoing the fired "
-        "payload, none of which contain the literal words 'vulnerable'/"
-        "'confirmed'. These real success signatures are silently dropped. When "
-        "the trigger set is broadened this test flips to xpass."))
-    def test_poc_marker_should_be_detected(self):
+    def test_poc_marker_is_detected(self):
+        """Fixed (recall roadmap Wave 1 #3): dalfox confirms hits with [POC]/
+        [VULN]/'triggered' markers, which are now recognised."""
         out = "[POC][G] http://juice-shop:3000/?q=<svg/onload=alert(1)>  grep-verified"
         findings = detect("dalfox", out, 'dalfox url "http://juice-shop:3000/?q=1"')
-        assert len(findings) == 1  # DESIRED: a confirmed XSS finding.
+        assert len(findings) == 1
+        assert findings[0]["vuln_type"] == "Cross-Site Scripting (XSS)"
+
+    def test_benign_output_still_does_not_trigger(self):
+        """Precision guard: the broadened marker set must not fire on ordinary
+        scan chatter that carries none of the success tokens."""
+        out = "Scanning parameter q ...\n0 potential issues after analysis"
+        assert detect("dalfox", out, 'dalfox url "http://x?q=1"') == []
 
 
 # ── curl (multi-pattern) ───────────────────────────────────────────────────
@@ -170,15 +173,18 @@ class TestJwtTool:
         findings = detect("jwt_tool", out)
         assert any("none algorithm" in f["evidence"].lower() for f in findings)
 
-    @pytest.mark.xfail(strict=True, reason=(
-        "Known precision risk (recall roadmap Wave 1 #11): the weak-secret "
-        "branch fires on a bare 'found' anywhere in output, so ordinary banner "
-        "text like 'Token found in header' emits a false Broken Authentication "
-        "finding. Desired behaviour: no finding without an actual crack. When "
-        "the trigger is tightened this flips to xpass."))
-    def test_banner_found_should_not_emit(self):
+    def test_banner_found_does_not_emit(self):
+        """Fixed (recall roadmap Wave 1 #11): a bare 'found' in banner text no
+        longer triggers a phantom Broken Authentication finding."""
         out = "Token found in header. Analysing claims..."
-        assert detect("jwt_tool", out) == []  # DESIRED: no false positive.
+        assert detect("jwt_tool", out) == []
+
+    def test_correct_key_crack_is_detected(self):
+        """The tightened trigger still catches a real crack via 'correct key'."""
+        out = "[+] secretkey123 is the CORRECT key!"
+        findings = detect("jwt_tool", out)
+        assert len(findings) == 1
+        assert findings[0]["vuln_type"] == "Broken Authentication"
 
 
 # ── hydra / nikto / commix ──────────────────────────────────────────────────
@@ -247,16 +253,12 @@ class TestCurlAccessControl:
         findings = detect("curl", out, "curl http://juice-shop:3000/api/orders/abc")
         assert "Broken Access Control" in types(findings)
 
-    @pytest.mark.xfail(strict=True, reason=(
-        "Latent bug (main.py:858): the clause `'\"totalPrice\"' in output_lower` "
-        "compares a mixed-case literal against output that was already "
-        "lowercased at line 813, so it can never match — an order response whose "
-        "only IDOR signal is totalPrice is silently missed; only a '\"products\"' "
-        "key triggers the finding. Flips to xpass when the literal is lowercased."))
     def test_idor_order_via_totalprice_only(self):
+        """Fixed (main.py:858): the totalPrice clause is now lowercased, so an
+        order response whose only IDOR signal is totalPrice is detected."""
         out = '{"orderId":"abc","totalPrice":42.5}'
         findings = detect("curl", out, "curl http://juice-shop:3000/api/orders/abc")
-        assert "Broken Access Control" in types(findings)  # DESIRED
+        assert "Broken Access Control" in types(findings)
 
     def test_sql_injection_login_bypass(self):
         out = '{"authentication":{"token":"eyJ0eXA00000000000000000000abcDEF","bid":1}}'

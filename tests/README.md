@@ -28,22 +28,25 @@ python -m coverage run -m pytest && python -m coverage report --include="*/orche
 templates object with a path relative to the working directory (`conftest.py`
 anchors CWD at the root so imports work regardless of where you invoke it).
 
-## Documented defects (strict `xfail`)
+## Defects found by the suite — now fixed (regression tests)
 
-Three real defects found while writing the suite are encoded as
-`@pytest.mark.xfail(strict=True)`. They assert the **desired** behaviour, so
-they xfail today (suite stays green) and will xpass — failing the strict marker
-and prompting removal of the marker — the moment the bug is fixed:
+Three real defects surfaced while writing the suite. They have been fixed in
+`_auto_detect_findings`, and each is pinned by a regression test plus a
+companion guard so the change cannot regress in the opposite direction:
 
-1. **dalfox/xsstrike `[POC]`/`[VULN]`/`[G]` markers ignored** — confirmed XSS is
-   dropped unless the output literally contains `vulnerable`/`confirmed`
-   (recall-roadmap Wave 1 #3).
-2. **jwt_tool bare `found` false positive** — ordinary banner text like
-   "Token found in header" emits a phantom Broken Authentication finding
-   (Wave 1 #11).
-3. **`/api/orders` `totalPrice` dead clause** — `main.py:858` compares the
+1. **dalfox/xsstrike `[POC]`/`[VULN]`/`triggered` markers ignored** — confirmed
+   XSS used to be dropped unless the output literally said `vulnerable`/
+   `confirmed`. Now recognised (recall win, Wave 1 #3). Guard:
+   `test_benign_output_still_does_not_trigger`.
+2. **jwt_tool bare `found` false positive** — banner text like "Token found in
+   header" emitted a phantom Broken Authentication finding. The trigger now
+   requires a real crack signal (precision win, Wave 1 #11). Guard:
+   `test_correct_key_crack_is_detected`.
+3. **`/api/orders` `totalPrice` dead clause** — `main.py:858` compared the
    mixed-case literal `"totalPrice"` against already-lowercased output, so that
-   IDOR signal never fires; only a `"products"` key works.
+   IDOR signal never fired. The literal is now lowercased (recall win).
 
-These are the first fixes the recall roadmap should land — each flips its test
-from xfail to pass.
+> Note: fixes #1 and #3 make the detector emit *more* findings and #2 emits
+> *fewer* false ones. They change detection behaviour intentionally, so runs
+> produced after this commit are not directly comparable to the recorded
+> pre-fix baselines — re-run baselines before comparing.
