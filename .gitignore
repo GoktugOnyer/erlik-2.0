@@ -7,6 +7,12 @@ venv/
 dist/
 build/
 
+# --- Test / coverage tooling ---
+.coverage
+.coverage.*
+.pytest_cache/
+htmlcov/
+
 # --- Secrets / runtime data ---
 .env
 data/
