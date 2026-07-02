@@ -15,5 +15,24 @@ fi
 # network. Override with ERLIK_HOST=0.0.0.0 only behind auth / on a trusted net.
 # Set ERLIK_API_TOKEN to require a token on state-changing API calls.
 ERLIK_HOST="${ERLIK_HOST:-127.0.0.1}"
-echo "[+] Starting Erlik Pentest Agent on http://${ERLIK_HOST}:8002"
-uvicorn orchestrator.main:app --host "${ERLIK_HOST}" --port 8002 --reload
+ERLIK_PORT="${ERLIK_PORT:-8002}"
+
+# Stop any previous erlik server still holding the port. A leftover instance
+# (common after repeated restarts, and worsened by --reload's parent/child
+# processes) keeps serving stale code and breaks the WebSocket live view — the
+# browser connects to a dead/old server and logs "WebSocket error".
+STALE=$(lsof -ti:"${ERLIK_PORT}" 2>/dev/null || true)
+if [ -n "$STALE" ]; then
+    echo "[!] Port ${ERLIK_PORT} already in use — stopping the old server (pids: $(echo $STALE))..."
+    echo "$STALE" | xargs kill -9 2>/dev/null || true
+    sleep 1
+fi
+
+echo "[+] Starting Erlik Pentest Agent on http://${ERLIK_HOST}:${ERLIK_PORT}"
+# Single clean process by default (reliable Ctrl+C, no zombie children). Set
+# ERLIK_RELOAD=1 for dev auto-reload on code changes.
+if [ -n "${ERLIK_RELOAD}" ]; then
+    exec uvicorn orchestrator.main:app --host "${ERLIK_HOST}" --port "${ERLIK_PORT}" --reload
+else
+    exec uvicorn orchestrator.main:app --host "${ERLIK_HOST}" --port "${ERLIK_PORT}"
+fi

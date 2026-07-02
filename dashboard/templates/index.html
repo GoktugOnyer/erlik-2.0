@@ -2446,7 +2446,8 @@ ${htmlBody}
 
         function connectToSession(sid) {
             const wsProtocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-            ws = new WebSocket(`${wsProtocol}//${location.host}/ws/${sid}`);
+            const wsUrl = `${wsProtocol}//${location.host}/ws/${sid}`;
+            ws = new WebSocket(wsUrl);
 
             ws.onmessage = (event) => {
                 try {
@@ -2456,14 +2457,15 @@ ${htmlBody}
                     addLog(`[ws] ${event.data}`);
                 }
             };
-            ws.onclose = () => addLog('[system] WebSocket disconnected', 'log-system');
-            ws.onerror = () => addLog('[system] WebSocket error', 'log-error');
+            ws.onclose = (e) => addLog(`[system] WebSocket disconnected (code ${e.code})`, 'log-system');
+            ws.onerror = () => addLog(`[system] WebSocket error → ${wsUrl} (is the server still running on this host:port?)`, 'log-error');
         }
 
         function connectToChainSession(sid) {
             const wsProtocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
             if (ws) { try { ws.close(); } catch {} }
-            ws = new WebSocket(`${wsProtocol}//${location.host}/ws/${sid}`);
+            const wsUrl = `${wsProtocol}//${location.host}/ws/${sid}`;
+            ws = new WebSocket(wsUrl);
 
             ws.onmessage = (event) => {
                 try {
@@ -2498,8 +2500,8 @@ ${htmlBody}
                     addLog(`[ws] ${event.data}`);
                 }
             };
-            ws.onclose = () => {};
-            ws.onerror = () => addLog('[system] WebSocket error', 'log-error');
+            ws.onclose = (e) => { if (e && e.code && e.code !== 1000) addLog(`[system] WebSocket closed (code ${e.code})`, 'log-system'); };
+            ws.onerror = () => addLog(`[system] WebSocket error → ${wsUrl} (is the server still running on this host:port?)`, 'log-error');
         }
 
         function handleWsMessage(data) {
