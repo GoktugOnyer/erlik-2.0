@@ -305,6 +305,31 @@ class TestCurlExposure:
         assert f["severity"] == "high"
 
 
+# ── precision fall-throughs (a matched outer condition that must NOT emit) ──
+class TestDetectorNegatives:
+    def test_cors_specific_origin_not_flagged(self):
+        """ACAO present but reflecting a specific, non-evil origin is not the
+        wildcard/arbitrary-reflection bug — no finding."""
+        out = "Access-Control-Allow-Origin: https://trusted.example.com\n"
+        findings = detect("curl", out, 'curl http://juice-shop:3000/ -H "Origin: y"')
+        assert "CORS Misconfiguration" not in types(findings)
+
+    def test_all_security_headers_present_no_finding(self):
+        out = ("HTTP/1.1 200 OK\nContent-Security-Policy: default-src 'self'\n"
+               "X-Frame-Options: DENY\nStrict-Transport-Security: max-age=1\n"
+               "X-Content-Type-Options: nosniff\n")
+        assert detect("curl", out, "curl -s -I http://juice-shop:3000/") == []
+
+    def test_redirect_to_internal_not_flagged(self):
+        """A 302 to an in-scope juice-shop location is not an open redirect."""
+        out = "HTTP/1.1 302 Found\nLocation: http://juice-shop:3000/#/\n"
+        findings = detect("curl", out, 'curl "http://juice-shop:3000/redirect?to=/"')
+        assert "Open Redirect" not in types(findings)
+
+    def test_commix_no_injection(self):
+        assert detect("commix", "No injection point found.", 'commix -u "http://x?x=1"') == []
+
+
 # ── unhandled tools / empty output ──────────────────────────────────────────
 class TestNoOp:
     def test_unregistered_tool_returns_empty(self):
