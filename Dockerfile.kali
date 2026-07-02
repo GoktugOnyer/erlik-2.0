@@ -81,12 +81,18 @@ RUN ARCH=$(dpkg --print-architecture) && \
 
 # ===== OWASP Nettacker (deterministic pre-scan automation, Apache-2.0) =====
 # Invoked (not vendored) by orchestrator/integrations/nettacker.py via
-# `docker exec kali-tools nettacker ...`. Nettacker resolves modules/config
-# relative to its own dir, so the wrapper cd's into it first.
-RUN git clone --depth 1 https://github.com/OWASP/Nettacker.git /opt/Nettacker && \
-    pip3 install --no-cache-dir --break-system-packages -r /opt/Nettacker/requirements.txt && \
-    printf '#!/bin/bash\ncd /opt/Nettacker && exec python3 nettacker.py "$@"\n' > /usr/local/bin/nettacker && \
-    chmod +x /usr/local/bin/nettacker
+# `docker exec kali-tools nettacker ...`. Installed from PyPI (newer Nettacker
+# uses Poetry, so there is no root requirements.txt to pip -r). The `nettacker`
+# CLI is exposed by a wrapper running it as a module.
+#
+# Nettacker is OFF by default (ERLIK_NETTACKER), so this step is BEST-EFFORT: a
+# failure here must never break the image (which carries every other tool). If
+# it fails, ERLIK_NETTACKER simply degrades to an empty result at runtime.
+RUN ( pip3 install --no-cache-dir --break-system-packages nettacker \
+      && printf '#!/bin/bash\nexec python3 -m nettacker "$@"\n' > /usr/local/bin/nettacker \
+      && chmod +x /usr/local/bin/nettacker \
+      && echo "[erlik] nettacker installed" ) \
+    || echo "[erlik] WARN: nettacker install failed — ERLIK_NETTACKER unavailable until fixed"
 
 # ===== ZAP CLI helper script =====
 RUN echo '#!/bin/bash\n\
