@@ -79,6 +79,15 @@ RUN ARCH=$(dpkg --print-architecture) && \
         rm /tmp/crlfuzz.tar.gz; \
     fi
 
+# ===== OWASP Nettacker (deterministic pre-scan automation, Apache-2.0) =====
+# Invoked (not vendored) by orchestrator/integrations/nettacker.py via
+# `docker exec kali-tools nettacker ...`. Nettacker resolves modules/config
+# relative to its own dir, so the wrapper cd's into it first.
+RUN git clone --depth 1 https://github.com/OWASP/Nettacker.git /opt/Nettacker && \
+    pip3 install --no-cache-dir --break-system-packages -r /opt/Nettacker/requirements.txt && \
+    printf '#!/bin/bash\ncd /opt/Nettacker && exec python3 nettacker.py "$@"\n' > /usr/local/bin/nettacker && \
+    chmod +x /usr/local/bin/nettacker
+
 # ===== ZAP CLI helper script =====
 RUN echo '#!/bin/bash\n\
 # Wrapper to call ZAP API from kali container\n\

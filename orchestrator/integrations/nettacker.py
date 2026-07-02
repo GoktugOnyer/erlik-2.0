@@ -13,8 +13,11 @@ failures degrade to an empty result.
 
 Config (env):
   ERLIK_NETTACKER            "1"/"true" to enable injection in the agent loop
-  ERLIK_NETTACKER_CMD        launch prefix (default "nettacker"); e.g.
-                             "python -m nettacker.main", or a docker wrapper
+  ERLIK_NETTACKER_CMD        custom host launch prefix; overrides the default.
+                             Default backend runs nettacker INSIDE the
+                             kali-tools container via `docker exec` (same as
+                             every other tool). Set ERLIK_NATIVE=1 to run a
+                             host-installed `nettacker` instead.
   ERLIK_NETTACKER_SCENARIO   named run mode (see SCENARIOS); default "recon"
   ERLIK_NETTACKER_PROFILE    raw Nettacker --profile X (overrides SCENARIO)
   ERLIK_NETTACKER_MODULES    raw -m module list (overrides SCENARIO; advanced)
@@ -31,6 +34,7 @@ import asyncio
 import json
 import os
 import shlex
+import shutil
 import subprocess
 import tempfile
 import time
@@ -79,24 +83,54 @@ def _target_arg(target_url: str) -> str:
 # Runner
 # --------------------------------------------------------------------------- #
 
-def _build_command(target_url: str, outfile: str, scenario: str | None = None) -> list[str]:
-    base = shlex.split(os.environ.get("ERLIK_NETTACKER_CMD", "nettacker"))
-    cmd = base + ["-i", _target_arg(target_url)]
+# Execution backend — mirror tool_executor: run inside the kali-tools container
+# by default, or on the host when ERLIK_NATIVE is set. Decoupled (no import of
+# tool_executor) so the integration stays standalone.
+ERLIK_NATIVE = bool(os.environ.get("ERLIK_NATIVE", ""))
+CONTAINER_NAME = os.environ.get("ERLIK_KALI_CONTAINER", "kali-tools")
+DOCKER_BIN = shutil.which("docker") or "docker"
+
+
+def _nettacker_argv(target_url: str, outfile: str, scenario: str | None = None) -> list[str]:
+    """Build the nettacker argument vector (scan selection + output), without
+    the launcher. Precedence: PROFILE env > MODULES env > per-session scenario
+    > ERLIK_NETTACKER_SCENARIO env > DEFAULT_SCENARIO."""
+    args = ["-i", _target_arg(target_url)]
     profile = os.environ.get("ERLIK_NETTACKER_PROFILE", "").strip()
     modules = os.environ.get("ERLIK_NETTACKER_MODULES", "").strip()
-    if profile:                                   # explicit profile wins
-        cmd += ["--profile", profile]
-    elif modules:                                 # explicit module list
-        cmd += ["-m", modules]
-    else:                                         # named scenario (per-session arg, then env, then default)
+    if profile:
+        args += ["--profile", profile]
+    elif modules:
+        args += ["-m", modules]
+    else:
         scen = (scenario or os.environ.get("ERLIK_NETTACKER_SCENARIO", "")).strip().lower() or DEFAULT_SCENARIO
         sc = SCENARIOS.get(scen, SCENARIOS[DEFAULT_SCENARIO])
         if sc.get("profile"):
-            cmd += ["--profile", sc["profile"]]
+            args += ["--profile", sc["profile"]]
         else:
-            cmd += ["-m", sc["modules"]]
-    cmd += ["-o", outfile]
-    return cmd
+            args += ["-m", sc["modules"]]
+    args += ["-o", outfile]
+    return args
+
+
+def _launch_cmd(target_url: str, outfile: str, scenario: str | None) -> tuple[list[str], bool]:
+    """Return (argv, reads_stdout). Three backends:
+
+    1. ERLIK_NETTACKER_CMD set  -> custom launcher on the host (reads outfile).
+    2. ERLIK_NATIVE             -> `nettacker` on the host PATH (reads outfile).
+    3. default                  -> `docker exec kali-tools` (reads JSON from
+       stdout: run nettacker to a container-side file, then cat it — avoids the
+       host/container filesystem mismatch entirely).
+    """
+    custom = os.environ.get("ERLIK_NETTACKER_CMD", "").strip()
+    if custom:
+        return shlex.split(custom) + _nettacker_argv(target_url, outfile, scenario), False
+    if ERLIK_NATIVE:
+        return ["nettacker"] + _nettacker_argv(target_url, outfile, scenario), False
+    argv = _nettacker_argv(target_url, "/tmp/erlik_nettacker_scan.json", scenario)
+    inner = ("nettacker " + " ".join(shlex.quote(a) for a in argv) +
+             " >/dev/null 2>&1; cat /tmp/erlik_nettacker_scan.json")
+    return [DOCKER_BIN, "exec", CONTAINER_NAME, "bash", "-c", inner], True
 
 
 def _run_sync(target_url: str, scenario: str | None = None) -> dict:
@@ -107,26 +141,38 @@ def _run_sync(target_url: str, scenario: str | None = None) -> dict:
         timeout = int(os.environ.get("ERLIK_NETTACKER_TIMEOUT", "300"))
     except ValueError:
         timeout = 300
-    cmd = _build_command(target_url, outfile, scenario=scenario)
+
+    cmd, reads_stdout = _launch_cmd(target_url, outfile, scenario)
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     except FileNotFoundError:
-        return {"error": f"nettacker not found (cmd={cmd[0]!r}); install it or set "
-                         f"ERLIK_NETTACKER_CMD", "events": []}
+        missing = cmd[0]
+        hint = ("is Docker/OrbStack running and the kali-tools container up "
+                "(docker compose up -d kali-tools)?" if reads_stdout
+                else "install nettacker or set ERLIK_NETTACKER_CMD")
+        return {"error": f"nettacker launcher not found ({missing!r}); {hint}", "events": []}
     except subprocess.TimeoutExpired:
         return {"error": f"nettacker timed out after {timeout}s", "events": []}
     except Exception as e:  # noqa: BLE001
         return {"error": f"nettacker failed: {e}", "events": []}
 
-    # Nettacker writes a JSON array to the -o file. Read it back.
+    # Get the JSON array — from stdout (docker mode) or the output file (host mode).
+    if reads_stdout:
+        raw = (proc.stdout or "").strip()
+        if not raw:
+            return {"error": "nettacker produced no output — is it installed in the "
+                             "kali-tools image? (rebuild: docker compose build kali-tools)",
+                    "events": [], "stderr": (proc.stderr or "")[-500:]}
+    else:
+        try:
+            raw = Path(outfile).read_text(encoding="utf-8", errors="replace").strip()
+        except FileNotFoundError:
+            return {"error": "nettacker produced no output file",
+                    "events": [], "stderr": (proc.stderr or "")[-500:]}
     try:
-        raw = Path(outfile).read_text(encoding="utf-8", errors="replace").strip()
         events = json.loads(raw) if raw else []
         if not isinstance(events, list):
             events = []
-    except FileNotFoundError:
-        return {"error": "nettacker produced no output file",
-                "events": [], "stderr": (proc.stderr or "")[-500:]}
     except json.JSONDecodeError as e:
         return {"error": f"could not parse nettacker JSON: {e}", "events": []}
     return {"error": None, "events": events, "returncode": proc.returncode}
