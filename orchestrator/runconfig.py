@@ -43,36 +43,48 @@ _BOOL_KEYS = {
 # anything a preset omits falls back to env. `custom` = no preset, user decides.
 RUN_PRESETS: dict[str, dict] = {
     "ai_only": {
-        "label": "AI only",
-        "desc": "Pure LLM agent — no deterministic pre-scan or knowledge injection.",
-        "config": {"cve_enrich": False, "skills": False, "nettacker": False},
+        "label": "AI Solo — raw model, no help (baseline)",
+        "desc": "Pure LLM agent. No skill injection, no target playbook, no pre-scan, "
+                "no memory, no primitive reuse. Measures the model's OWN capability — "
+                "use this as the unguided baseline. Everything is forced OFF, so a "
+                "stray env var can't leak help into the measurement.",
+        # Every knowledge/help lever explicitly False so the baseline is clean.
+        "config": {"cve_enrich": False, "skills": False, "nettacker": False,
+                   "playbooks": "", "primitives": False, "target_memory": False,
+                   "poc_verify": False},
     },
     "guided_ai": {
-        "label": "Guided AI",
-        "desc": "LLM agent + injected skill knowledge + CVE enrichment. No external scanner.",
-        "config": {"skills": True, "cve_enrich": True, "nettacker": False},
+        "label": "Guided AI — skills + target playbook (most effective)",
+        "desc": "LLM agent + injected skill knowledge + the target's exploit playbook "
+                "(real endpoints & payloads) + primitive reuse + CVE enrichment. No "
+                "external scanner. The most effective setup for finding the most vulns.",
+        "config": {"skills": True, "cve_enrich": True, "nettacker": False,
+                   "playbooks": "juiceshop", "primitives": True},
     },
     "recon_first": {
-        "label": "Recon-first (recommended)",
-        "desc": "Deterministic Nettacker recon seeds the agent, then skills + CVE enrichment. "
-                "Reuses durable per-target memory from prior runs.",
+        "label": "Recon-first — Nettacker seeds the agent",
+        "desc": "Deterministic Nettacker recon seeds the agent, then skills + target "
+                "playbook + CVE enrichment. Reuses durable per-target memory.",
         "config": {"nettacker": True, "nettacker_scenario": "recon",
-                   "skills": True, "cve_enrich": True, "target_memory": True},
+                   "skills": True, "cve_enrich": True, "playbooks": "juiceshop",
+                   "primitives": True, "target_memory": True},
     },
     "deterministic_heavy": {
-        "label": "Deterministic-heavy",
-        "desc": "Broad Nettacker web/vuln pre-scan with findings persisted; lighter AI reliance.",
+        "label": "Deterministic-heavy — broad pre-scan",
+        "desc": "Broad Nettacker web/vuln pre-scan with findings persisted; skills + "
+                "target playbook; lighter AI reliance.",
         "config": {"nettacker": True, "nettacker_scenario": "web",
                    "nettacker_findings": True, "skills": True, "cve_enrich": True,
-                   "poc_verify": True},
+                   "playbooks": "juiceshop", "poc_verify": True},
     },
     "full_assessment": {
-        "label": "Full assessment",
-        "desc": "Everything on; Nettacker full scan; PoC re-verification, primitive reuse "
-                "and per-target memory enabled. Slow & thorough.",
+        "label": "Full assessment — everything on (slow)",
+        "desc": "Everything: Nettacker full scan, skills, target playbook, PoC "
+                "re-verification, primitive reuse and per-target memory. Slow & thorough.",
         "config": {"nettacker": True, "nettacker_scenario": "full",
                    "nettacker_findings": True, "skills": True, "cve_enrich": True,
-                   "poc_verify": True, "primitives": True, "target_memory": True},
+                   "playbooks": "juiceshop", "poc_verify": True, "primitives": True,
+                   "target_memory": True},
     },
 }
 
