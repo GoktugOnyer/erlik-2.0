@@ -4009,6 +4009,50 @@ async def get_nettacker_scenarios():
     return {"scenarios": list_scenarios(), "default": DEFAULT_SCENARIO}
 
 
+# ── Skills library (browse in the SKILLS tab) ──────────────────────────────
+@app.get("/api/skills")
+async def get_skills_catalog():
+    """List the skill knowledge library: categories → reference files."""
+    from orchestrator.skills import SKILLS_ROOT, skills_enabled
+    cats = []
+    if SKILLS_ROOT.exists():
+        for cat_dir in sorted(p for p in SKILLS_ROOT.iterdir() if p.is_dir()):
+            files = sorted(f.name for f in cat_dir.glob("*.md"))
+            desc = ""
+            skill_md = cat_dir / "SKILL.md"
+            if skill_md.exists():
+                dm = re.search(r'description:\s*(.+)', skill_md.read_text(encoding="utf-8", errors="replace"))
+                if dm:
+                    desc = dm.group(1).strip()
+            cats.append({"category": cat_dir.name, "description": desc,
+                         "files": files, "count": len(files)})
+    return {"root": str(SKILLS_ROOT), "enabled": skills_enabled(), "categories": cats}
+
+
+@app.get("/api/skills-preview")
+async def preview_skills(hint: str = "injection"):
+    """Which reference sheets the router would inject for a given hint."""
+    from orchestrator.skills import select_skill_files, SKILLS_ROOT
+    files = select_skill_files(hint)
+    return {"hint": hint,
+            "selected": [str(f.relative_to(SKILLS_ROOT)) for f in files]}
+
+
+@app.get("/api/skills/{category}/{filename}")
+async def get_skill_file(category: str, filename: str):
+    """Return one skill reference file's markdown (path-traversal guarded)."""
+    from orchestrator.skills import SKILLS_ROOT
+    if not filename.endswith(".md") or "/" in category or "/" in filename \
+            or ".." in category or ".." in filename:
+        raise HTTPException(status_code=400, detail="invalid path")
+    root = SKILLS_ROOT.resolve()
+    path = (root / category / filename).resolve()
+    if not str(path).startswith(str(root)) or not path.is_file():
+        raise HTTPException(status_code=404, detail="skill file not found")
+    return {"category": category, "filename": filename,
+            "content": path.read_text(encoding="utf-8", errors="replace")}
+
+
 @app.get("/api/sessions/{session_id}/run-config")
 async def get_session_run_config(session_id: str):
     """The automation config a session ran with (raw + resolved) — for reproducibility."""

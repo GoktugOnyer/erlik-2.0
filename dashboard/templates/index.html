@@ -647,6 +647,11 @@
                 style="font-size: 0.55rem;">
                 &#9636; MONITOR
             </button>
+            <button id="nav-skills" onclick="switchView('skills')"
+                class="nav-tab font-pixel px-4 py-2 rounded"
+                style="font-size: 0.55rem;">
+                &#9670; SKILLS
+            </button>
         </nav>
         <div class="flex items-center gap-2">
             <span id="health-dot" class="w-3 h-3 rounded-full" style="background:#3a3a4a;"></span>
@@ -1542,6 +1547,42 @@
             </section>
         </div><!-- /view-monitor -->
 
+        <!-- ============================================================= -->
+        <!-- VIEW: SKILLS — browse the pentest knowledge library            -->
+        <!-- ============================================================= -->
+        <div id="view-skills" class="hidden space-y-5">
+            <div class="cyber-border rounded-lg p-5" style="background:rgba(10,10,26,0.6);">
+                <div class="flex items-center justify-between mb-3">
+                    <span class="font-pixel neon-text-purple" style="font-size:0.7rem;">&#9670; SKILLS LIBRARY</span>
+                    <span id="skills-meta" class="font-mono" style="font-size:0.6rem; color:#6a6a8a;"></span>
+                </div>
+                <p class="font-mono" style="font-size:0.68rem; color:#8a8aa0; line-height:1.65;">
+                    Reusable pentest knowledge — payloads, detection probes, exploitation steps. When the
+                    <b style="color:#a05cff;">SKILLS</b> toggle is on, a router injects the 1&ndash;3 most relevant
+                    sheets for your target's tech&nbsp;+&nbsp;<b>VULN CATEGORY</b> into the agent's prompt (this is
+                    generic technique knowledge, not target-specific endpoints &mdash; that's what the playbook adds).
+                    Files live in <code style="color:#9ad;">skills_catalog/skills/</code>.
+                </p>
+                <div class="flex items-center gap-2 mt-3 flex-wrap">
+                    <span class="font-pixel" style="font-size:0.5rem; color:#6a6a8a;">PREVIEW WHAT GETS INJECTED FOR:</span>
+                    <input id="skills-hint" class="cyber-input rounded px-2 py-1" style="font-size:0.7rem; width:220px;"
+                        placeholder="e.g. sql injection, xss, jwt" value="sql injection"
+                        onkeydown="if(event.key==='Enter')previewSkills()">
+                    <button onclick="previewSkills()" class="font-pixel px-3 py-1 rounded border"
+                        style="font-size:0.5rem; color:#00ff88; border-color:#00ff88; background:transparent; cursor:pointer;">SHOW</button>
+                    <span id="skills-preview-out" class="font-mono" style="font-size:0.62rem; color:#00ff88;"></span>
+                </div>
+            </div>
+            <div style="display:grid; grid-template-columns:260px 1fr; gap:16px;">
+                <div class="cyber-border rounded-lg p-3" id="skills-cats" style="background:rgba(10,10,26,0.6); align-self:start;">
+                    <div class="font-mono" style="color:#5a5a6a; font-size:0.7rem;">loading…</div>
+                </div>
+                <div class="cyber-border rounded-lg p-4" id="skills-content" style="background:rgba(10,10,26,0.6); min-height:320px;">
+                    <div class="font-mono" style="color:#5a5a6a; font-size:0.7rem;">Select a category on the left, then a file to read it.</div>
+                </div>
+            </div>
+        </div><!-- /view-skills -->
+
     </main>
 
     <!-- Scanline Overlay -->
@@ -1560,18 +1601,20 @@
 
         // ===== View Switching =====
         function switchView(view) {
-            const views = ['scanner', 'reports', 'benchmark', 'monitor'];
+            const views = ['scanner', 'reports', 'benchmark', 'monitor', 'skills'];
             const panels = {
                 scanner: document.getElementById('view-scanner'),
                 reports: document.getElementById('view-reports'),
                 benchmark: document.getElementById('view-benchmark'),
                 monitor: document.getElementById('view-monitor'),
+                skills: document.getElementById('view-skills'),
             };
             const navs = {
                 scanner: document.getElementById('nav-scanner'),
                 reports: document.getElementById('nav-reports'),
                 benchmark: document.getElementById('nav-benchmark'),
                 monitor: document.getElementById('nav-monitor'),
+                skills: document.getElementById('nav-skills'),
             };
 
             // Start the monitor polling loop the first time the user opens the tab
@@ -1589,6 +1632,70 @@
 
             if (view === 'reports') loadReportsList();
             if (view === 'benchmark') loadBenchmarkHistory();
+            if (view === 'skills') loadSkills();
+        }
+
+        // ===== Skills library browser =====
+        let __skillsData = null;
+        async function loadSkills() {
+            if (__skillsData) { renderSkillCats(); return; }
+            try {
+                const r = await fetch('/api/skills');
+                __skillsData = await r.json();
+            } catch (e) {
+                document.getElementById('skills-cats').innerHTML =
+                    '<div class="font-mono" style="color:#ff4466; font-size:0.65rem;">Failed to load skills.</div>';
+                return;
+            }
+            const total = __skillsData.categories.reduce((a, c) => a + c.count, 0);
+            document.getElementById('skills-meta').textContent =
+                `${__skillsData.categories.length} categories · ${total} sheets · SKILLS ${__skillsData.enabled ? 'ON' : 'OFF'} by default`;
+            renderSkillCats();
+        }
+        function renderSkillCats() {
+            const el = document.getElementById('skills-cats');
+            el.innerHTML = __skillsData.categories.map(c => `
+                <button onclick="showSkillCat('${encodeURIComponent(c.category)}')"
+                    class="font-mono block w-full text-left px-2 py-1.5 rounded mb-1"
+                    style="font-size:0.7rem; color:#c9b8f0; background:#0e0e22; border:1px solid #1a1a2e; cursor:pointer;">
+                    ${escapeHtml(c.category)} <span style="color:#5a5a6a;">(${c.count})</span>
+                </button>`).join('');
+        }
+        function showSkillCat(catEnc) {
+            const cat = decodeURIComponent(catEnc);
+            const c = __skillsData.categories.find(x => x.category === cat);
+            if (!c) return;
+            const el = document.getElementById('skills-content');
+            el.innerHTML =
+                `<div class="font-pixel mb-2" style="font-size:0.62rem; color:#a05cff;">${escapeHtml(cat)}</div>` +
+                (c.description ? `<p class="font-mono mb-3" style="font-size:0.66rem; color:#8a8aa0; line-height:1.55;">${escapeHtml(c.description)}</p>` : '') +
+                `<div class="flex flex-wrap gap-1.5">` +
+                c.files.map(f => `<button onclick="viewSkillFile('${encodeURIComponent(cat)}','${encodeURIComponent(f)}')"
+                    class="font-mono px-2 py-1 rounded" style="font-size:0.62rem; color:#9ad; background:#0e0e22; border:1px solid #1a1a2e; cursor:pointer;">${escapeHtml(f)}</button>`).join('') +
+                `</div><div id="skill-file-view" class="mt-4"></div>`;
+        }
+        async function viewSkillFile(catEnc, fnEnc) {
+            const view = document.getElementById('skill-file-view');
+            view.innerHTML = '<div class="font-mono" style="color:#5a5a6a; font-size:0.65rem;">loading…</div>';
+            try {
+                const r = await fetch(`/api/skills/${catEnc}/${fnEnc}`);
+                const d = await r.json();
+                view.innerHTML =
+                    `<div class="font-pixel mb-2" style="font-size:0.55rem; color:#00fff5;">${escapeHtml(d.filename)}</div>` +
+                    `<div style="background:#08081a; border:1px solid #1a1a2e; border-radius:6px; padding:14px; max-height:62vh; overflow:auto; font-size:0.72rem; line-height:1.6; color:#c7d3e6;">${renderMarkdown(d.content)}</div>`;
+            } catch (e) {
+                view.innerHTML = '<div class="font-mono" style="color:#ff4466; font-size:0.65rem;">Failed to load file.</div>';
+            }
+        }
+        async function previewSkills() {
+            const hint = document.getElementById('skills-hint').value || 'injection';
+            const out = document.getElementById('skills-preview-out');
+            out.textContent = '…';
+            try {
+                const r = await fetch('/api/skills-preview?hint=' + encodeURIComponent(hint));
+                const d = await r.json();
+                out.textContent = d.selected.length ? '→ ' + d.selected.join('  ·  ') : '(nothing matches — no skills injected)';
+            } catch (e) { out.textContent = '(preview failed)'; }
         }
 
         // ===== Reports List =====
