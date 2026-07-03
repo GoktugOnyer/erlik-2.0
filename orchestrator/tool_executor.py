@@ -5,6 +5,7 @@ import fnmatch
 import ipaddress
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import time
@@ -241,6 +242,30 @@ def _sanitize_command(command: str, target_url: str = None) -> str:
         r"'\1'",
         command,
     )
+
+    # A lone single-quote SQLi probe (…?param=test') left the shell waiting for
+    # a matching quote ("unexpected EOF"), so the tool never ran. Wrap an
+    # UNquoted URL that contains a ' in DOUBLE quotes so the ' is preserved
+    # literally and the command executes.
+    command = re.sub(
+        r'''(?<![\'"])(https?://[^\s"]*'[^\s"]*)''',
+        r'"\1"',
+        command,
+    )
+
+    # Final safety net: if quotes are still unbalanced (e.g. the model opened a
+    # double quote but never closed it — `dalfox url "http://…test'`), append
+    # the missing closer so the command parses instead of dying on EOF.
+    try:
+        shlex.split(command)
+    except ValueError:
+        for _close in ('"', "'"):
+            try:
+                shlex.split(command + _close)
+                command += _close
+                break
+            except ValueError:
+                continue
 
     return command
 

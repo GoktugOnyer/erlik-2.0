@@ -92,3 +92,20 @@ class TestUrlQuoting:
     def test_plain_url_unchanged(self, monkeypatch):
         out = _s(monkeypatch, "curl -s http://localhost:3000/robots.txt")
         assert "'" not in out
+
+
+class TestQuoteBalance:
+    def test_lone_single_quote_url_wrapped(self, monkeypatch):
+        import shlex
+        out = _s(monkeypatch, "curl -s http://localhost:3000/api/products?param=test'")
+        shlex.split(out)  # must not raise
+        assert out.count('"') == 2 and out.endswith("test'\"")
+
+    def test_dangling_double_quote_balanced(self, monkeypatch):
+        import shlex
+        out = _s(monkeypatch, 'dalfox url "http://localhost:3000/api/products?param=test\'')
+        shlex.split(out)  # must not raise
+
+    def test_clean_command_untouched(self, monkeypatch):
+        out = _s(monkeypatch, "curl -s http://localhost:3000/robots.txt")
+        assert "'" not in out and out.count('"') == 0
