@@ -743,12 +743,15 @@
                     <span class="font-mono" style="color:#4a4a5a; font-size:0.7rem;" title="Tools run with NO time limit at all (truly unlimited). Overrides the manual timeout.">&#9432;</span>
                 </div>
                 <div>
-                    <label class="block font-pixel mb-2" style="font-size:0.55rem; color:#6a6a8a;">TOOL TIMEOUT (s)</label>
+                    <label class="block font-pixel mb-2" style="font-size:0.55rem; color:#6a6a8a;">
+                        TOOL TIMEOUT (s)
+                        <span class="rc-help" data-tip="How long each tool may run before it's killed. BLANK = each tool's own sensible default (nmap 120s · nuclei 180s · sqlmap 180s · gobuster/ffuf/dirb 120s · hydra/john/hashcat 120s · nikto/sslyze 60s · testssl 90s · whatweb/wafw00f/crlfuzz 60s · curl/netcat 30s · playwright 180s · zap-cli 300s · anything else 60s). Type a number to force that ONE timeout on EVERY tool (e.g. 300 to give slow tools more room). Ignored when NO TIMEOUT is on."><span class="rc-q">?</span></span>
+                    </label>
                     <div class="flex items-center gap-2">
-                        <input type="number" id="tool-timeout-input" min="0" step="30" placeholder="default"
-                            class="cyber-input rounded px-2 py-1" style="width:90px; font-size:0.8rem;">
-                        <span class="font-mono" style="color:#4a4a5a; font-size:0.7rem;" title="Manual per-tool timeout in seconds applied to every tool. Blank = sensible per-tool defaults. Ignored when NO TIMEOUT is on.">&#9432;</span>
+                        <input type="number" id="tool-timeout-input" min="0" step="30" placeholder="per-tool (30–300)"
+                            class="cyber-input rounded px-2 py-1" style="width:130px; font-size:0.8rem;">
                     </div>
+                    <div class="font-mono" style="font-size:0.55rem; color:#5a5a6a; margin-top:3px;">blank = per-tool defaults · type to override all</div>
                 </div>
             </div>
 
