@@ -78,3 +78,17 @@ class TestInventedFlags:
 
     def test_dalfox_depth_stripped(self, monkeypatch):
         assert "--depth" not in _s(monkeypatch, "dalfox url http://localhost:3000/p --depth 2")
+
+
+class TestUrlQuoting:
+    def test_ampersand_url_gets_quoted(self, monkeypatch):
+        out = _s(monkeypatch, "curl -s http://localhost:3000/api/login?email=a&password=b")
+        assert "'http://host.docker.internal:3000/api/login?email=a&password=b'" in out
+
+    def test_already_quoted_url_not_double_quoted(self, monkeypatch):
+        out = _s(monkeypatch, 'curl -s "http://localhost:3000/x?a=1&b=2"')
+        assert "''" not in out and '"http://host.docker.internal:3000/x?a=1&b=2"' in out
+
+    def test_plain_url_unchanged(self, monkeypatch):
+        out = _s(monkeypatch, "curl -s http://localhost:3000/robots.txt")
+        assert "'" not in out

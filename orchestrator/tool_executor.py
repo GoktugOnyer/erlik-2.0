@@ -230,6 +230,18 @@ def _sanitize_command(command: str, target_url: str = None) -> str:
                 # build the bounded list first, then run hydra against it
                 command = f"head -n {cap} {wl} > {bounded} 2>/dev/null; {command}"
 
+    # Quote bare URLs that carry shell-special query separators. The model often
+    # emits `curl http://x/api?a=1&b=2` unquoted — the shell then backgrounds at
+    # '&' and drops the rest of the query, so multi-param requests (logins,
+    # injection payloads) silently lose everything after the first '&'. Wrap any
+    # UNquoted http(s) URL containing & or ; in single quotes. URLs already
+    # inside quotes (preceded by ' or ") are left alone.
+    command = re.sub(
+        r'''(?<![\'"])(https?://[^\s'"]*[&;][^\s'"]*)''',
+        r"'\1'",
+        command,
+    )
+
     return command
 
 
