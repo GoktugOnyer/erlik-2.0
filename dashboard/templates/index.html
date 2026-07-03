@@ -1723,6 +1723,38 @@
             return `${hh}:${mm} ${dd}/${mo}/${yy}`;
         }
 
+        // ===== Consolidated chain report =====
+        async function viewChainReport(chainId) {
+            try {
+                const r = await fetch(`/api/chains/${chainId}/report`);
+                if (!r.ok) { addLog('[chain] consolidated report not ready yet', 'log-error'); return; }
+                const d = await r.json();
+                showMarkdownOverlay('CONSOLIDATED CHAIN REPORT — ' + chainId, d.markdown,
+                    `/api/chains/${chainId}/report/download`);
+            } catch (e) { addLog('[chain] could not load consolidated report', 'log-error'); }
+        }
+        function showMarkdownOverlay(title, md, downloadUrl) {
+            let ov = document.getElementById('md-overlay');
+            if (!ov) {
+                ov = document.createElement('div');
+                ov.id = 'md-overlay';
+                ov.style.cssText = 'position:fixed; inset:0; background:rgba(0,0,0,0.82); z-index:9999; display:flex; align-items:center; justify-content:center; padding:4vh 4vw;';
+                ov.onclick = (e) => { if (e.target === ov) ov.remove(); };
+                document.body.appendChild(ov);
+            }
+            ov.innerHTML =
+                `<div style="background:#0a0a1a; border:1px solid #a05cff; border-radius:10px; max-width:1000px; width:100%; max-height:92vh; display:flex; flex-direction:column;">
+                    <div style="display:flex; align-items:center; justify-content:space-between; padding:12px 16px; border-bottom:1px solid #1a1a2e;">
+                        <span class="font-pixel" style="font-size:0.6rem; color:#a05cff;">${escapeHtml(title)}</span>
+                        <span>
+                            <a href="${downloadUrl}" class="font-pixel" style="font-size:0.5rem; color:#00ff88; text-decoration:none; margin-right:16px;">&#8595; DOWNLOAD</a>
+                            <span onclick="document.getElementById('md-overlay').remove()" style="cursor:pointer; color:#ff4466; font-size:1rem;">&#10008;</span>
+                        </span>
+                    </div>
+                    <div style="overflow:auto; padding:18px 22px; font-size:0.78rem; line-height:1.6; color:#c7d3e6;">${renderMarkdown(md)}</div>
+                </div>`;
+        }
+
         async function loadReportsList() {
             const container = document.getElementById('reports-list');
             const countEl = document.getElementById('reports-count');
@@ -2617,6 +2649,10 @@ ${htmlBody}
                         document.getElementById('chain-status-badge').textContent = 'COMPLETE';
                         document.getElementById('chain-status-badge').style.color = '#00ff41';
                         addLog(`[chain] All ${data.total_sessions} phases completed!`, 'log-report');
+                        if (data.chain_id) {
+                            addLog(`[chain] Consolidated (de-duplicated) report ready — opening…`, 'log-report');
+                            viewChainReport(data.chain_id);
+                        }
                         setStoppedUI();
                     } else if (data.type === 'chain_ready') {
                         addLog(`[chain] ${data.message}`, 'log-system');

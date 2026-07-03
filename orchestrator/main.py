@@ -2431,6 +2431,111 @@ async def _start_chain_session(session_id: str):
     })
 
 
+async def _generate_chain_report(chain_id: str, target_url: str) -> str | None:
+    """Consolidate every phase session of a chain into ONE de-duplicated report.
+
+    Each phase re-discovers the same low-hanging vulns (ftp, robots, CORS…), so
+    the four per-session reports overlap heavily and look like noise. This merges
+    them, de-dupes by (vuln_type, URL-without-query), honours triage (rejected
+    excluded, severity_override applied), and writes a single chain_<id>.md.
+    """
+    db = await get_db()
+    try:
+        cur = await db.execute(
+            "SELECT id, chain_phase, total_steps, total_findings "
+            "FROM sessions WHERE chain_id = ? ORDER BY chain_position", (chain_id,))
+        sessions = [dict(r) for r in await cur.fetchall()]
+        if not sessions:
+            return None
+        sids = [s["id"] for s in sessions]
+        ph = ",".join("?" * len(sids))
+        cur = await db.execute(
+            f"SELECT vuln_type, severity, url, parameter, evidence, cve_id, "
+            f"calibrated_severity, severity_override, triage_status "
+            f"FROM findings WHERE session_id IN ({ph}) ORDER BY id", sids)
+        findings = [dict(r) for r in await cur.fetchall()]
+        cur = await db.execute(
+            f"SELECT DISTINCT context_type, key FROM recon_context "
+            f"WHERE session_id IN ({ph}) ORDER BY context_type, key", sids)
+        ctx = [dict(r) for r in await cur.fetchall()]
+    finally:
+        await db.close()
+
+    def eff_sev(f):
+        return (f.get("severity_override") or f.get("calibrated_severity")
+                or f.get("severity") or "info").lower()
+
+    seen: dict = {}
+    for f in findings:
+        if (f.get("triage_status") or "") == "rejected":
+            continue
+        url = (f.get("url") or "").split("?")[0].rstrip("/").lower()
+        key = ((f.get("vuln_type") or "").lower(), url)
+        seen.setdefault(key, f)
+    order = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
+    unique = sorted(seen.values(), key=lambda f: order.get(eff_sev(f), 5))
+    counts: dict = {}
+    for f in unique:
+        counts[eff_sev(f)] = counts.get(eff_sev(f), 0) + 1
+    raw_total = sum((s.get("total_findings") or 0) for s in sessions)
+
+    L: list[str] = []
+    L.append("# Chained Penetration Test — Consolidated Report")
+    L.append("")
+    L.append(f"**Target:** {target_url}  ")
+    L.append(f"**Chain ID:** `{chain_id}`  ")
+    L.append(f"**Phases:** {' → '.join(s.get('chain_phase') or '?' for s in sessions)}  ")
+    L.append(f"**Unique findings:** {len(unique)}  (from {raw_total} raw across all phases)")
+    L.append("")
+    L.append("## Executive Summary")
+    L.append("")
+    sev_line = " · ".join(f"{counts[k]} {k}" for k in ("critical", "high", "medium", "low", "info") if counts.get(k))
+    L.append(f"A {len(sessions)}-phase chained assessment (recon → discovery → vuln scan → "
+             f"exploitation) against {target_url} produced **{len(unique)} unique findings**"
+             + (f" ({sev_line})" if sev_line else "") +
+             ", after de-duplicating the overlapping results each phase re-reported.")
+    L.append("")
+    L.append("## Phase Breakdown")
+    L.append("")
+    L.append("| Phase | Steps | Raw findings |")
+    L.append("|---|---|---|")
+    for s in sessions:
+        L.append(f"| {s.get('chain_phase') or '?'} | {s.get('total_steps') or 0} | {s.get('total_findings') or 0} |")
+    L.append("")
+    L.append(f"> The **{raw_total} raw** count includes the same vuln re-reported by each phase. "
+             f"The **{len(unique)} unique** findings below are the real, de-duplicated result.")
+    L.append("")
+    L.append("## Consolidated Findings")
+    L.append("")
+    if unique:
+        L.append("| # | Severity | Type | URL | Evidence |")
+        L.append("|---|---|---|---|---|")
+        for i, f in enumerate(unique, 1):
+            ev = (f.get("evidence") or "").replace("|", "/").replace("\n", " ").strip()[:130]
+            cve = f" `{f['cve_id']}`" if f.get("cve_id") else ""
+            L.append(f"| {i} | {eff_sev(f).upper()} | {f.get('vuln_type', '?')}{cve} "
+                     f"| {f.get('url', '') or '-'} | {ev} |")
+    else:
+        L.append("_No findings recorded across the chain._")
+    L.append("")
+    if ctx:
+        by: dict = {}
+        for c in ctx:
+            by.setdefault(c["context_type"], set()).add(c.get("key") or "")
+        L.append("## Reconnaissance Summary")
+        L.append("")
+        for t, items in by.items():
+            its = sorted(x for x in items if x)[:30]
+            if its:
+                L.append(f"- **{t}** ({len(its)}): {', '.join(its)}")
+        L.append("")
+
+    REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+    path = REPORTS_DIR / f"chain_{chain_id}.md"
+    path.write_text("\n".join(L), encoding="utf-8")
+    return str(path)
+
+
 async def _chain_auto_progress(session_id: str):
     """Called at the end of a chain session. Auto-creates and starts the next session if applicable."""
     db = await get_db()
@@ -2481,11 +2586,19 @@ async def _chain_auto_progress(session_id: str):
                 (current_phase, current_position + 1, chain_id)
             )
             await db.commit()
+            # Combine the four phase reports into ONE de-duplicated chain report.
+            try:
+                _chain_report = await _generate_chain_report(chain_id, chain["target_url"])
+            except Exception as _e:  # noqa: BLE001 — a report failure must not break the chain
+                _chain_report = None
+                print(f"[chain {chain_id[:8]}] combined report failed: {_e}", flush=True)
             await manager.broadcast(session_id, {
                 "type": "chain_complete",
                 "chain_id": chain_id,
                 "total_sessions": current_position + 1,
-                "message": "All chain phases completed!",
+                "report_path": _chain_report,
+                "message": (f"All chain phases completed! Consolidated report: {_chain_report}"
+                            if _chain_report else "All chain phases completed!"),
             })
             return
 
@@ -4597,6 +4710,40 @@ async def get_chain(chain_id: str):
         }
     finally:
         await db.close()
+
+
+@app.get("/api/chains/{chain_id}/report")
+async def get_chain_report(chain_id: str):
+    """The consolidated, de-duplicated report for a whole chain (markdown)."""
+    if "/" in chain_id or ".." in chain_id:
+        raise HTTPException(400, "invalid chain id")
+    path = REPORTS_DIR / f"chain_{chain_id}.md"
+    if not path.exists():
+        # Fall back to generating it on demand (e.g. an older completed chain).
+        db = await get_db()
+        try:
+            row = await db.execute("SELECT target_url FROM chains WHERE id = ?", (chain_id,))
+            chain = await row.fetchone()
+        finally:
+            await db.close()
+        if chain:
+            try:
+                await _generate_chain_report(chain_id, chain["target_url"])
+            except Exception:  # noqa: BLE001
+                pass
+    if not path.exists():
+        raise HTTPException(404, "chain report not found (chain may not be complete)")
+    return {"chain_id": chain_id, "markdown": path.read_text(encoding="utf-8", errors="replace")}
+
+
+@app.get("/api/chains/{chain_id}/report/download")
+async def download_chain_report(chain_id: str):
+    if "/" in chain_id or ".." in chain_id:
+        raise HTTPException(400, "invalid chain id")
+    path = REPORTS_DIR / f"chain_{chain_id}.md"
+    if not path.exists():
+        raise HTTPException(404, "chain report not found")
+    return FileResponse(path, media_type="text/markdown", filename=f"chain_{chain_id}.md")
 
 
 @app.post("/api/chains/{chain_id}/continue")
