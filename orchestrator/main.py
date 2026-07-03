@@ -362,6 +362,24 @@ TOOL_PHASES = {
 MIN_PHASES_BEFORE_DONE = 3  # must cover at least 3 of 4 phases before "done" is accepted
 DEFAULT_MIN_TURNS_BEFORE_DONE = 8   # base min tools before "done" is accepted (scales with max_turns)
 
+# Reasoning models (Qwen3 / Trendyol-Cybersecurity / DeepSeek-R1 …) emit a
+# <think>…</think> block before the answer. Left in place it accumulates in the
+# message history (every turn gets slower + more tokens) and can trick the
+# action parser into "executing" a command the model was only reasoning about.
+_THINK_RX = re.compile(r'<think>.*?</think>', re.DOTALL | re.IGNORECASE)
+
+
+def _strip_reasoning(text: str) -> str:
+    """Drop <think>…</think> reasoning blocks from an LLM response. Handles an
+    unclosed <think> (truncated output) by discarding the dangling tail."""
+    if not text or "<think>" not in text.lower():
+        return text
+    text = _THINK_RX.sub("", text)
+    idx = text.lower().rfind("<think>")   # unclosed tag → everything after is reasoning
+    if idx != -1:
+        text = text[:idx]
+    return text.strip()
+
 # --- Chain Mode Phase Definitions ---
 CHAIN_PHASES = ["recon", "discovery", "vuln_scan", "exploitation"]
 
@@ -2550,8 +2568,14 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
 
     # Scale min-turns-before-done proportionally to max_turns
     # Default: 8 min out of 30 max (~50%). Scale same ratio for higher limits.
-    min_turns_before_done = max(DEFAULT_MIN_TURNS_BEFORE_DONE, int(max_turns * 0.5))
-    min_turns_before_done = min(min_turns_before_done, 25)  # cap at 25 — no need to force more
+    # Override with ERLIK_MIN_TURNS_BEFORE_DONE=N to let a slow model finish
+    # sooner (each turn can cost minutes on a 32B) without editing the default.
+    _min_env = os.environ.get("ERLIK_MIN_TURNS_BEFORE_DONE", "").strip()
+    if _min_env.isdigit():
+        min_turns_before_done = int(_min_env)
+    else:
+        min_turns_before_done = max(DEFAULT_MIN_TURNS_BEFORE_DONE, int(max_turns * 0.5))
+        min_turns_before_done = min(min_turns_before_done, 25)  # cap at 25 — no need to force more
 
     await manager.broadcast(session_id, {
         "type": "log", "phase": "recon",
@@ -2926,6 +2950,7 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
                     timeout=300.0,  # 5-minute absolute ceiling per LLM call
                 )
                 duration = int((time.time() - start_time) * 1000)
+                response = _strip_reasoning(response)   # drop <think>…</think> before parse/history
                 print(f"[agent {session_id[:8]}] turn {turn+1}/{max_turns} ← LLM ok ({duration}ms)", flush=True)
             except asyncio.TimeoutError:
                 print(f"[agent {session_id[:8]}] turn {turn+1}/{max_turns} ← LLM TIMEOUT after 300s", flush=True)

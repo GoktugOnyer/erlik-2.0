@@ -226,3 +226,19 @@ class TestSeededGroundTruth:
         assert r["match"] is True
         matched = m.JUICE_SHOP_GROUND_TRUTH[r["gt_index"]]
         assert matched["url_pattern"] == "/rest/products/search"
+
+
+# ── reasoning-model <think> stripping (perf + parser correctness) ─────────
+class TestStripReasoning:
+    def test_closed_think_block_removed(self):
+        r = m._strip_reasoning('<think>reasoning here</think>{"action":"done"}')
+        assert r == '{"action":"done"}'
+
+    def test_unclosed_think_tail_dropped(self):
+        assert m._strip_reasoning('answer<think>cut off') == 'answer'
+
+    def test_no_think_untouched(self):
+        assert m._strip_reasoning('{"action":"run_tool"}') == '{"action":"run_tool"}'
+
+    def test_case_insensitive(self):
+        assert m._strip_reasoning('<THINK>x</THINK>ok') == 'ok'
