@@ -91,6 +91,29 @@
         .font-pixel { font-family: var(--font-pixel); }
         .font-mono { font-family: var(--font-mono); }
 
+        /* ===== Rich hover tooltips (RUN CONFIG toggles etc.) ===== */
+        .rc-help { position: relative; }
+        .rc-help > .rc-q {
+            display: inline-block; width: 13px; height: 13px; line-height: 13px;
+            text-align: center; border-radius: 50%; font-size: 0.6rem;
+            border: 1px solid #6a5a9a; color: #a99ad0; margin-left: 2px;
+            font-family: var(--font-mono); cursor: help; user-select: none;
+        }
+        .rc-help:hover::after {
+            content: attr(data-tip);
+            position: absolute; left: 0; top: 150%; z-index: 2000;
+            width: 340px; max-width: 78vw; white-space: normal;
+            background: #0b0b1c; border: 1px solid #a05cff; border-radius: 7px;
+            color: #d7e6ff; padding: 11px 13px; font-size: 0.72rem;
+            line-height: 1.55; font-family: var(--font-mono);
+            box-shadow: 0 6px 26px rgba(0,0,0,0.7); text-transform: none;
+            letter-spacing: normal;
+        }
+        .rc-help:hover::before {  /* little arrow */
+            content: ""; position: absolute; left: 12px; top: calc(150% - 6px);
+            border: 6px solid transparent; border-bottom-color: #a05cff; z-index: 2001;
+        }
+
         /* ===== Neon Borders ===== */
         .neon-border-cyan {
             border: 1px solid var(--neon-cyan);
@@ -733,21 +756,18 @@
                     <span id="rc-preset-desc" class="font-mono" style="font-size:0.65rem; color:#5a5a6a;"></span>
                 </div>
                 <div class="flex items-center gap-4 flex-wrap" style="font-size:0.7rem;">
-                    <label class="flex items-center gap-1.5 cursor-pointer"
-                        title="Enrich CVE references in findings with NVD CVSS score / severity / CWE at session end (free, no key).">
+                    <label class="flex items-center gap-1.5 cursor-pointer rc-help" data-tip="CVE ENRICHMENT — When the scan turns up a CVE id (e.g. from nuclei), this looks it up in the NVD database and attaches the official CVSS score, severity, and CWE weakness class to the finding. Runs once at the end. Free, no API key, no account. ON = standardized severity numbers on CVE findings. OFF = faster finish / fully offline.">
                         <input type="checkbox" id="rc-cve" class="accent-purple-400" style="width:14px;height:14px;" onchange="markCustomPreset()">
-                        <span class="font-pixel" style="font-size:0.5rem; color:#8a8aa0;">CVE ENRICH</span>
+                        <span class="font-pixel" style="font-size:0.5rem; color:#8a8aa0;">CVE ENRICH</span><span class="rc-q">?</span>
                     </label>
-                    <label class="flex items-center gap-1.5 cursor-pointer"
-                        title="Inject the 1-3 most relevant pentest knowledge references (payloads/techniques) into the agent prompt for this mission's vuln class.">
+                    <label class="flex items-center gap-1.5 cursor-pointer rc-help" data-tip="SKILLS — Injects 1–3 relevant pentest knowledge sheets (payloads, detection probes, exploitation steps) into the AI's prompt, picked from the target's tech stack and your VULN CATEGORY — e.g. SQL-injection & XSS cheat-sheets for an injection mission. Helps a smaller local model choose better tools and payloads. ON = smarter agent. OFF = leaner, faster prompt. (Library lives in skills_catalog/.)">
                         <input type="checkbox" id="rc-skills" class="accent-purple-400" style="width:14px;height:14px;" onchange="markCustomPreset()">
-                        <span class="font-pixel" style="font-size:0.5rem; color:#8a8aa0;">SKILLS</span>
+                        <span class="font-pixel" style="font-size:0.5rem; color:#8a8aa0;">SKILLS</span><span class="rc-q">?</span>
                     </label>
-                    <label class="flex items-center gap-1.5 cursor-pointer"
-                        title="Run a deterministic OWASP Nettacker scan BEFORE the agent and seed it with verified recon (open ports, tech, paths, header/TLS/CVE hits). Requires nettacker installed.">
+                    <label class="flex items-center gap-1.5 cursor-pointer rc-help" data-tip="NETTACKER PRE-SCAN — Runs OWASP Nettacker (a fast, deterministic, NON-AI scanner) against the target BEFORE the AI starts, then hands the agent the verified results: open ports, detected tech, exposed paths, TLS/header/CVE hits. Gives the agent a factual head-start so it wastes fewer turns on blind recon. Needs the Nettacker-enabled kali image (docker compose build kali-tools). Pick a scenario in the dropdown.">
                         <input type="checkbox" id="rc-nettacker" class="accent-purple-400" style="width:14px;height:14px;"
                             onchange="markCustomPreset(); toggleNettackerOpts();">
-                        <span class="font-pixel" style="font-size:0.5rem; color:#8a8aa0;">NETTACKER PRE-SCAN</span>
+                        <span class="font-pixel" style="font-size:0.5rem; color:#8a8aa0;">NETTACKER PRE-SCAN</span><span class="rc-q">?</span>
                     </label>
                     <span id="rc-nettacker-opts" class="flex items-center gap-2 hidden">
                         <select id="rc-nettacker-scenario" onchange="markCustomPreset()" class="cyber-input rounded px-2 py-0.5"
@@ -757,20 +777,17 @@
                             <span class="font-pixel" style="font-size:0.5rem; color:#8a8aa0;">+FINDINGS</span>
                         </label>
                     </span>
-                    <label class="flex items-center gap-1.5 cursor-pointer"
-                        title="After the run, re-fetch high/critical findings with curl and confirm by signature before marking them verified.">
+                    <label class="flex items-center gap-1.5 cursor-pointer rc-help" data-tip="POC VERIFY — After the scan, re-tests each HIGH/CRITICAL finding by re-sending the request and checking the vulnerability signature still reproduces. A finding is only marked 'verified' if it holds up. Cuts false positives in the final report. Costs a little extra time at the end.">
                         <input type="checkbox" id="rc-poc" class="accent-purple-400" style="width:14px;height:14px;" onchange="markCustomPreset()">
-                        <span class="font-pixel" style="font-size:0.5rem; color:#8a8aa0;">POC VERIFY</span>
+                        <span class="font-pixel" style="font-size:0.5rem; color:#8a8aa0;">POC VERIFY</span><span class="rc-q">?</span>
                     </label>
-                    <label class="flex items-center gap-1.5 cursor-pointer"
-                        title="Capture tokens/cookies/creds from tool output and surface them for reuse on later steps (multi-step exploitation).">
+                    <label class="flex items-center gap-1.5 cursor-pointer rc-help" data-tip="PRIMITIVES — Watches tool output for reusable secrets (JWT tokens, session cookies, API keys, credentials) and surfaces them so the agent can reuse them on later steps — e.g. log in, then hit an authenticated endpoint. Essential for multi-step exploitation that needs a logged-in session.">
                         <input type="checkbox" id="rc-primitives" class="accent-purple-400" style="width:14px;height:14px;" onchange="markCustomPreset()">
-                        <span class="font-pixel" style="font-size:0.5rem; color:#8a8aa0;">PRIMITIVES</span>
+                        <span class="font-pixel" style="font-size:0.5rem; color:#8a8aa0;">PRIMITIVES</span><span class="rc-q">?</span>
                     </label>
-                    <label class="flex items-center gap-1.5 cursor-pointer"
-                        title="Seed the session with durable knowledge accumulated from prior runs against the SAME target.">
+                    <label class="flex items-center gap-1.5 cursor-pointer rc-help" data-tip="TARGET MEMORY — Seeds the session with durable notes accumulated from PREVIOUS runs against the same target (host:port): discovered endpoints, tech stack, what worked. Makes repeat scans of the same target smarter and faster. Only helps once you've scanned this target before.">
                         <input type="checkbox" id="rc-targetmem" class="accent-purple-400" style="width:14px;height:14px;" onchange="markCustomPreset()">
-                        <span class="font-pixel" style="font-size:0.5rem; color:#8a8aa0;">TARGET MEMORY</span>
+                        <span class="font-pixel" style="font-size:0.5rem; color:#8a8aa0;">TARGET MEMORY</span><span class="rc-q">?</span>
                     </label>
                 </div>
             </div>
