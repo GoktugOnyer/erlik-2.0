@@ -391,12 +391,22 @@ def _detect_jwt_tool(ctx: DetectContext) -> list[Finding]:
 # ── hydra ────────────────────────────────────────────────────────────────────
 def _detect_hydra(ctx: DetectContext) -> list[Finding]:
     for line in ctx.output.split("\n"):
-        if "host:" in line.lower() and ("login:" in line.lower() or "password:" in line.lower()):
-            return [{
-                "vuln_type": "Broken Authentication", "severity": "high",
-                "url": "", "parameter": "",
-                "evidence": f"Brute force success: {line.strip()[:300]}",
-            }]
+        low = line.lower()
+        # Hydra prints a CRACKED credential as:
+        #   [PORT][service] host: H   login: U   password: P
+        # Require that exact shape (login: AND password: each with a value) so a
+        # failed run — whose progress/error lines also contain "login:"/"host:"
+        # ("[DATA] attacking ...://[host]:port/login:...", "0 valid password
+        # found", "could not resolve address") — no longer emits a false finding.
+        if not re.search(r'\[\d+\]\[[^\]]+\].*\blogin:\s*\S+.*\bpassword:\s*\S+', line, re.IGNORECASE):
+            continue
+        if any(bad in low for bad in ("could not", "0 valid", "[error]", "attacking", "[data]")):
+            continue
+        return [{
+            "vuln_type": "Broken Authentication", "severity": "high",
+            "url": "", "parameter": "",
+            "evidence": f"Brute force success: {line.strip()[:300]}",
+        }]
     return []
 
 

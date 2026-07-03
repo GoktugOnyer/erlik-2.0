@@ -42,6 +42,13 @@ DOCKER_BIN = _resolve_docker_bin()
 # target_url is missing AND the legacy lab compose stack is in use.
 LEGACY_DOCKER_TARGET_HOST = os.environ.get("ERLIK_DOCKER_TARGET_HOST", "")
 
+# Tools run INSIDE the kali-tools container, where "localhost" is the container
+# itself — not the target. Docker Desktop / OrbStack expose the host machine as
+# `host.docker.internal`, so a loopback target (localhost/127.0.0.1) is reached
+# there. Override for exotic setups (e.g. a compose service name) via env.
+DOCKER_HOST_GATEWAY = os.environ.get("ERLIK_DOCKER_HOST_GATEWAY", "host.docker.internal")
+_LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "0.0.0.0", "::1", ""}
+
 # Tools that are safe to run and their max execution time (seconds)
 TOOL_TIMEOUTS = {
     # Recon & Scanning
@@ -112,50 +119,59 @@ def _sanitize_command(command: str, target_url: str = None) -> str:
 
     target_host = "localhost"
     target_port = 80
-    target_hp = f"{target_host}:{target_port}"
-
     if target_url:
         parsed = urlparse(target_url)
         target_host = parsed.hostname or "localhost"
         target_port = parsed.port or (443 if parsed.scheme == "https" else 80)
-        target_hp = f"{target_host}:{target_port}"
 
-        # Strip LLM training-data bias toward juice-shop:3000, but only when
-        # the actual target is NOT juice-shop. When it is, the rewrite would
-        # duplicate path segments (e.g. /rest/products/rest/products/...).
-        if "juice-shop" not in target_host:
-            command = command.replace("http://juice-shop:3000", target_url.rstrip("/"))
-            command = command.replace("https://juice-shop:3000", target_url.rstrip("/"))
-            command = command.replace("juice-shop:3000", target_hp)
-            command = re.sub(r'\bjuice-shop\b', target_host, command)
+    # Resolve the host tools should ACTUALLY connect to (see DOCKER_HOST_GATEWAY).
+    #   native mode            -> the target host verbatim (loopback works)
+    #   ERLIK_DOCKER_TARGET_HOST-> that explicit host (legacy lab override)
+    #   docker + loopback target-> the host gateway (host.docker.internal)
+    #   docker + remote target -> the target host (reachable from the container)
+    if ERLIK_NATIVE:
+        exec_host = target_host
+    elif LEGACY_DOCKER_TARGET_HOST:
+        exec_host = LEGACY_DOCKER_TARGET_HOST
+    elif target_host.lower() in _LOOPBACK_HOSTS:
+        exec_host = DOCKER_HOST_GATEWAY
+    else:
+        exec_host = target_host
+    exec_port = target_port or 3000
+    exec_hp = f"{exec_host}:{exec_port}"
 
-    # Legacy lab support: ERLIK_DOCKER_TARGET_HOST=juice-shop reproduces old
-    # behaviour where the agent says "localhost" but means the in-network app.
-    if not ERLIK_NATIVE and LEGACY_DOCKER_TARGET_HOST:
-        host = LEGACY_DOCKER_TARGET_HOST
-        port = target_port or 3000
-        command = re.sub(r'https?://localhost:\d+', f'http://{host}:{port}', command)
-        command = re.sub(r'https?://127\.0\.0\.1:\d+', f'http://{host}:{port}', command)
-        command = re.sub(r'\blocalhost\b', host, command)
-        command = re.sub(r'\b127\.0\.0\.1\b', host, command)
+    # Rewrite every hostname the model might emit — its juice-shop training-data
+    # bias, loopback references (which point at the *container* under docker),
+    # and the literal target host — to the reachable exec host. Port-anchored so
+    # it never touches wordlist paths. This is what makes the target reachable;
+    # previously `juice-shop:3000` (which works) was rewritten to `localhost`
+    # (which doesn't, from inside the container).
+    aliases = ["juice-shop", "localhost", "127.0.0.1", "0.0.0.0"]
+    if target_host and target_host.lower() not in aliases:
+        aliases.append(target_host)
+    for a in aliases:
+        if a == exec_host:
+            continue
+        command = re.sub(r'https?://' + re.escape(a) + r'(?::\d+)?', f'http://{exec_hp}', command)
+        command = re.sub(r'(?<![\w.])' + re.escape(a) + r':\d+\b', exec_hp, command)
+    # Bare host with no port (e.g. `nmap localhost`, `nmap juice-shop`) -> exec
+    # host. Runs after the port-anchored rewrites, so only standalone hosts
+    # remain. Guarded so it never matches a longer host/IP (localhost.foo,
+    # 127.0.0.10).
+    for bare in ("juice-shop", "localhost", "127.0.0.1"):
+        if bare != exec_host:
+            command = re.sub(r'(?<![\w.-])' + re.escape(bare) + r'(?![\w.:-])', exec_host, command)
 
     tool_name = _extract_tool_name(command)
-    if not ERLIK_NATIVE and LEGACY_DOCKER_TARGET_HOST:
-        # Tools that require an explicit http:// scheme — fix bare host:port.
+    # Tools that need an explicit http:// scheme — fix a bare exec host:port.
+    if not ERLIK_NATIVE:
         TOOLS_NEEDING_SCHEME = ["gobuster", "ffuf", "nikto", "nuclei", "dalfox", "wfuzz",
                                 "sqlmap", "xsstrike", "commix", "crlfuzz", "whatweb", "wafw00f",
                                 "arjun", "curl", "zap-cli"]
         if tool_name in TOOLS_NEEDING_SCHEME:
-            host = LEGACY_DOCKER_TARGET_HOST
-            port = target_port or 3000
             command = re.sub(
-                r'(?<!http://)(?<!https://)\b' + re.escape(host) + r':\d+\b',
-                f'http://{host}:{port}',
-                command,
-            )
-            command = re.sub(
-                r'(?<!http://)(?<!https://)\b' + re.escape(host) + r'(?!:)\b',
-                f'http://{host}:{port}',
+                r'(?<!http://)(?<!https://)\b' + re.escape(exec_host) + r':(\d+)\b',
+                f'http://{exec_host}:\\1',
                 command,
             )
 
@@ -164,7 +180,25 @@ def _sanitize_command(command: str, target_url: str = None) -> str:
     # the default template subset which misses A02 (crypto), A07 (auth), A08
     # (SCA/CVE), A10 (SSRF). Inject a broad tag set so the LLM doesn't have
     # to know nuclei's flag conventions to get full coverage.
+    # Strip flags the model commonly invents that make a tool abort with a usage
+    # dump instead of running (seen repeatedly in real runs). Conservative —
+    # only well-known non-existent flags for the specific tool.
+    _BAD_FLAGS = {
+        "arjun":    [r'\s--fuzzer\b', r'\s--include-js\b'],
+        "xsstrike": [r'\s--batch\b'],
+        "crlfuzz":  [r'\s--?batch\b'],
+        "dalfox":   [r'\s--depth\s+\d+\b', r'\s--batch\b'],
+    }
+    for pat in _BAD_FLAGS.get(tool_name, []):
+        command = re.sub(pat, ' ', command)
+
     if tool_name == "nuclei":
+        # The model routinely passes `-t cves/`, `-t xss/`, `-t cves/2019/x.yaml`
+        # — none resolve against the installed template layout (templates live
+        # under http/…), so nuclei aborts with "could not find template". Strip
+        # any NON-absolute -t/-templates selector and drive coverage with -tags,
+        # which is layout-independent and always works.
+        command = re.sub(r'(?:^|\s)-(?:t|templates)\s+(?!/)\S+', ' ', command)
         has_selector = bool(re.search(r'(?:^|\s)-(?:tags|t|templates|tl|id|w)\b', command))
         if not has_selector:
             command += " -tags cve,vuln,sqli,xss,ssrf,jwt,auth,exposure,misconfig,default-login"

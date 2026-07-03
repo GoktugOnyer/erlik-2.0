@@ -195,6 +195,15 @@ class TestOtherTools:
         assert len(findings) == 1
         assert findings[0]["vuln_type"] == "Broken Authentication"
 
+    def test_hydra_failed_run_no_false_finding(self):
+        """A hydra run that couldn't even connect must not emit a finding — its
+        progress/error lines contain 'login:'/'host:' but no cracked credential
+        (regression from a real run log that falsely reported Broken Auth)."""
+        out = ("[DATA] attacking http-post-form://[localhost:3000]:80/login:user=^USER^&pass=^PASS^:Invalid\n"
+               "0 of 1 target completed, 0 valid password found\n"
+               "[ERROR] could not resolve address: localhost:3000")
+        assert detect("hydra", out) == []
+
     def test_nikto_finding(self):
         out = "+ OSVDB-3092: /admin/: This might be interesting.\n+ Server: Apache"
         findings = detect("nikto", out)
