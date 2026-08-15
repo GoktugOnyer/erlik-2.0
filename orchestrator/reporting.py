@@ -66,6 +66,7 @@ def report_to_html(report: dict) -> str:
                          if f.get("cvss_score") is not None else "—"),
                 ("CWE", _e(f.get("cwe") or "—")),
                 ("OWASP", _e(f.get("owasp") or "—")),
+                ("ATT&CK", _e(f.get("mitre") or "—")),
                 ("Location", f'<code>{_e(f.get("affected_url") or "—")}</code>'),
                 ("Confidence", _e(f.get("confidence") or "—")),
             ]

@@ -121,6 +121,7 @@ class ReportFinding(BaseModel):
     cvss_vector: Optional[str] = None
     cwe: Optional[str] = None
     owasp: Optional[str] = None
+    mitre: Optional[str] = None
     affected_url: Optional[str] = None
     description: Optional[str] = None
     impact: Optional[str] = None

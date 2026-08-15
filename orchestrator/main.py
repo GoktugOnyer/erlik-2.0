@@ -1370,6 +1370,50 @@ async def _load_primitives(session_id: str, chain_id: str | None = None) -> list
         return []
 
 
+async def _persist_derived_references(session_id: str) -> int:
+    """Fill the `mitre` and `ref_links` columns for a session's findings.
+
+    Both columns were dead: `mitre` only ever received a hardcoded None, and
+    `ref_links` had no writer at all, so ReportFinding.references was always []
+    and the HTML report's References section never rendered.
+
+    Values are constructed from the row itself (cwe / cve_id / owasp_category /
+    vuln_type) — see orchestrator/references.py for why these are derived rather
+    than requested from the model. Existing non-empty values are left alone.
+    Returns the number of rows updated. Never raises.
+    """
+    updated = 0
+    try:
+        from orchestrator.references import (build_ref_links, mitre_for,
+                                             serialise_ref_links)
+        db = await get_db()
+        try:
+            cur = await db.execute(
+                "SELECT id, vuln_type, cwe, cve_id, owasp_category, mitre, ref_links "
+                "FROM findings WHERE session_id = ?", (session_id,))
+            rows = [dict(r) for r in await cur.fetchall()]
+
+            for r in rows:
+                mitre = r.get("mitre") or mitre_for(r.get("vuln_type"))
+                refs = r.get("ref_links") or serialise_ref_links(build_ref_links(
+                    cwe=r.get("cwe"), cve_id=r.get("cve_id"),
+                    owasp_category=r.get("owasp_category")))
+                if (mitre or None) == (r.get("mitre") or None) and \
+                        (refs or None) == (r.get("ref_links") or None):
+                    continue
+                await db.execute(
+                    "UPDATE findings SET mitre = ?, ref_links = ? WHERE id = ?",
+                    (mitre or None, refs or None, r["id"]))
+                updated += 1
+            if updated:
+                await db.commit()
+        finally:
+            await db.close()
+    except Exception as e:  # noqa: BLE001
+        print(f"[refs {session_id[:8]}] derivation failed (non-fatal): {e}", flush=True)
+    return updated
+
+
 async def _set_poc_status(finding_id: int, status: str, verified: bool = False,
                           evidence: str | None = None) -> None:
     """Record a PoC re-verification outcome on one finding. Never raises.
@@ -1853,11 +1897,16 @@ async def _generate_report(session_id: str, model: str, target_url: str,
                 fb = structured.get(i)
                 if not fb or not f.get("id"):
                     continue
+                # `mitre` is intentionally absent here: it is derived
+                # deterministically from vuln_type by _persist_derived_references
+                # below, which also runs for findings the model returned no block
+                # for. Passing a hardcoded None here used to be the only write the
+                # column ever got, which is why it was always empty.
                 await db2.execute(
                     "UPDATE findings SET calibrated_severity = ?, owasp_category = ?, "
-                    "mitre = ?, impact = ?, remediation = ?, confidence = ?, "
+                    "impact = ?, remediation = ?, confidence = ?, "
                     "cwe = COALESCE(cwe, ?) WHERE id = ?",
-                    (fb.get("CALIBRATED_SEVERITY"), fb.get("OWASP"), None,
+                    (fb.get("CALIBRATED_SEVERITY"), fb.get("OWASP"),
                      fb.get("IMPACT"), fb.get("REMEDIATION"), fb.get("CONFIDENCE"),
                      fb.get("CWE"), f["id"]),
                 )
@@ -1871,6 +1920,11 @@ async def _generate_report(session_id: str, model: str, target_url: str,
             await db2.commit()
         finally:
             await db2.close()
+
+    # Derive mitre + ref_links for EVERY finding in the session. Runs after the
+    # structured update so it sees the final cwe/owasp values, and outside the
+    # `if structured:` guard so findings the model skipped still get references.
+    await _persist_derived_references(session_id)
 
     # Render the Findings table now that calibration has populated the rows.
     if findings_table_index is not None:
@@ -1969,7 +2023,7 @@ async def _build_report_json(session_id: str) -> dict:
         session = dict(srow) if srow else {}
         cur = await db.execute(
             "SELECT vuln_type, severity, url, evidence, cve_id, cvss_score, cvss_vector, "
-            "cwe, calibrated_severity, owasp_category, impact, remediation, confidence, "
+            "cwe, calibrated_severity, owasp_category, mitre, impact, remediation, confidence, "
             "ref_links, triage_status, severity_override "
             "FROM findings WHERE session_id = ? ORDER BY id", (session_id,)
         )
@@ -1998,6 +2052,7 @@ async def _build_report_json(session_id: str) -> dict:
             cvss_vector=r.get("cvss_vector"),
             cwe=r.get("cwe"),
             owasp=r.get("owasp_category"),
+            mitre=r.get("mitre"),
             affected_url=r.get("url"),
             description=(r.get("evidence") or None),
             impact=r.get("impact"),
