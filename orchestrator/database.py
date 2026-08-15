@@ -321,11 +321,19 @@ async def init_db():
                 config_suggestions TEXT,
                 recommended_next_run TEXT,
                 confidence TEXT,
+                coverage TEXT,
                 raw TEXT,
                 model TEXT,
                 created_at TEXT NOT NULL DEFAULT (datetime('now'))
             );
         """)
+
+        # session_reviews predates the measured-coverage column, and the CREATE
+        # above only runs for a fresh database — an existing one needs the ALTER.
+        try:
+            await db.execute("ALTER TABLE session_reviews ADD COLUMN coverage TEXT DEFAULT NULL")
+        except Exception:
+            pass  # already present
 
         # Operator triage columns (accept/reject + severity override) — additive.
         triage_columns = [

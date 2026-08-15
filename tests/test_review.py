@@ -151,6 +151,126 @@ def test_markdown_is_empty_when_there_is_nothing_to_say():
     assert R.render_review_markdown(R.parse_review("nothing")) == ""
 
 
+# --- ground-truth coverage ------------------------------------------------
+#
+# "What did this run miss" is MEASURED, not asked of the model: the same
+# one-to-one assignment that produces the confusion matrix yields the unmatched
+# ground truths, so recall and reported coverage cannot contradict each other.
+# The answer key is read post-hoc and must never be visible to the agent.
+
+GT_ROWS = [
+    {"target_name": "OWASP Juice Shop", "target_url": "http://juice-shop:3000"},
+    {"target_name": "DVWA", "target_url": "http://dvwa"},
+]
+
+# How the answer key is ACTUALLY seeded — Juice Shop under localhost, while every
+# real run targets the compose service name.
+REAL_GT_ROWS = [
+    {"target_name": "OWASP Juice Shop", "target_url": "http://localhost:3000"},
+    {"target_name": "DVWA", "target_url": "http://dvwa:8080"},
+]
+
+
+@pytest.mark.parametrize("url, expected", [
+    ("http://juice-shop:3000", "OWASP Juice Shop"),
+    ("http://juice-shop:3000/rest/products", "OWASP Juice Shop"),
+    ("https://juice-shop", "OWASP Juice Shop"),
+    ("http://dvwa/login.php", "DVWA"),
+])
+def test_target_resolves_from_the_session_url(url, expected):
+    assert R.match_target_name(url, GT_ROWS) == expected
+
+
+@pytest.mark.parametrize("url", [
+    "http://juice-shop:3000",
+    "http://juice-shop:3000/rest/user/login",
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+])
+def test_loopback_and_service_name_are_the_same_target(url):
+    """The regression that made this feature silently do nothing: ground truth
+    registers Juice Shop under localhost:3000, runs target juice-shop:3000, and
+    tool_executor rewrites between them. A strict host match found no answer key
+    for the only target that has one."""
+    assert R.match_target_name(url, REAL_GT_ROWS) == "OWASP Juice Shop"
+
+
+def test_alias_matching_does_not_confuse_different_services():
+    """The port is what identifies a service inside the lab, so a shared alias
+    must not merge two different ones."""
+    assert R.match_target_name("http://dvwa:8080", REAL_GT_ROWS) == "DVWA"
+    assert R.match_target_name("http://localhost:8080", REAL_GT_ROWS) == "DVWA"
+    assert R.match_target_name("http://juice-shop:9999", REAL_GT_ROWS) is None
+
+
+def test_unknown_target_returns_none_rather_than_guessing():
+    """A wrong answer key would report fabricated coverage gaps."""
+    assert R.match_target_name("http://example.com", GT_ROWS) is None
+    assert R.match_target_name(None, GT_ROWS) is None
+    assert R.match_target_name("http://juice-shop:3000", []) is None
+
+
+def test_missed_vulnerabilities_are_listed_as_measured_fact():
+    p = R.build_review_prompt({}, {}, [], {}, coverage={
+        "total": 5, "found": 3,
+        "missed": [{"vuln_type": "Cross-Site Scripting", "severity": "high",
+                    "url_pattern": "/search", "parameter": "q",
+                    "owasp_category": "A03:2021"}]})
+    assert "3 of 5 known vulnerabilities were found" in p
+    assert "[HIGH] Cross-Site Scripting at /search (param: q) [A03:2021]" in p
+
+
+def test_full_coverage_says_so():
+    p = R.build_review_prompt({}, {}, [], {}, coverage={"total": 4, "found": 4, "missed": []})
+    assert "all 4 known vulnerabilities for this target were reported" in p
+
+
+def test_absent_answer_key_forbids_speculation():
+    p = R.build_review_prompt({}, {}, [], {}, coverage=None)
+    assert "no answer key for this target" in p
+    assert "do not speculate" in p
+
+
+def test_model_is_told_not_to_re_argue_the_measured_list():
+    p = R.build_review_prompt({}, {}, [], {}, coverage={"total": 1, "found": 0, "missed": []})
+    assert "measured, not your judgement" in p
+    assert "do not add classes to it" in p
+
+
+def test_long_miss_lists_are_truncated():
+    missed = [{"vuln_type": f"V{i}", "severity": "low"} for i in range(30)]
+    p = R.build_review_prompt({}, {}, [], {}, coverage={"total": 30, "found": 0, "missed": missed})
+    assert "…and 10 more" in p
+
+
+def test_coverage_matches_the_confusion_matrix():
+    """The two must be derived from one assignment, or a report can claim recall
+    0.33 while listing a different number of misses."""
+    from orchestrator.main import _assign_findings_to_ground_truth, _sound_confusion_matrix
+    gts = [{"vuln_type": "SQL Injection", "url_pattern": "/login", "parameter": "email", "severity": "critical"},
+           {"vuln_type": "Cross-Site Scripting", "url_pattern": "/search", "parameter": "q", "severity": "high"},
+           {"vuln_type": "Broken Access Control", "url_pattern": "/basket", "parameter": None, "severity": "high"}]
+    fs = [{"vuln_type": "SQL Injection", "url": "http://t/login", "parameter": "email"}]
+    a = _assign_findings_to_ground_truth(fs, gts)
+    m = _sound_confusion_matrix(fs, gts)
+    assert len(a["matched"]) == m["tp"]
+    assert len(a["missed_ground_truths"]) == m["fn"]
+    assert len(a["unmatched_findings"]) == m["fp"]
+
+
+def test_assignment_is_deterministic():
+    """Feeds research metrics, so it must not reorder between runs."""
+    from orchestrator.main import _assign_findings_to_ground_truth
+    gts = [{"vuln_type": "XSS", "url_pattern": "/a", "parameter": "q", "severity": "high"},
+           {"vuln_type": "XSS", "url_pattern": "/b", "parameter": "q", "severity": "high"}]
+    fs = [{"vuln_type": "XSS", "url": "http://t/a", "parameter": "q"}]
+    first = _assign_findings_to_ground_truth(fs, gts)
+    for _ in range(5):
+        again = _assign_findings_to_ground_truth(fs, gts)
+        assert [g["url_pattern"] for g in again["missed_ground_truths"]] == \
+               [g["url_pattern"] for g in first["missed_ground_truths"]]
+
+
 # --- credential redaction -------------------------------------------------
 #
 # primitives.py teaches the agent to reuse captured material, its reuse hints
@@ -479,6 +599,68 @@ def test_observed_ports_are_threaded_through(temp_db, fake_llm, monkeypatch):
         observed_ports=[3000, 27017, 3000], observed_tech=["Express", "Express"]))
     assert seen["activity"]["open_ports"] == [3000, 27017]   # deduped, sorted
     assert seen["activity"]["tech"] == ["Express"]           # deduped, order kept
+
+
+def test_ground_truth_never_reaches_the_agent(temp_db, fake_llm):
+    """THE constraint on this feature. The answer key may inform the post-hoc
+    critique; if it reached the agent's own context the measurement would be
+    worthless. Asserted structurally: nothing that builds the agent's system
+    prompt reads ground_truth."""
+    import inspect
+    import orchestrator.main as M
+
+    agent_src = inspect.getsource(M.agent_loop)
+    assert "ground_truth" not in agent_src, \
+        "agent_loop must never read the ground-truth answer key"
+
+    # And the only reader is the post-run review.
+    for fn in (M._build_report_json, M._persist_derived_references):
+        assert "ground_truth" not in inspect.getsource(fn)
+    assert "ground_truth" in inspect.getsource(M.run_ai_review)
+
+
+def test_measured_coverage_is_persisted_and_returned(temp_db, fake_llm):
+    """The miss list must survive without a model — it is computed, not authored."""
+    _seed_session()
+
+    async def seed_gt():
+        db = await db_mod.get_db()
+        # /x matches the finding seeded by _seed_session, so this exercises a
+        # genuine hit alongside two genuine misses.
+        for vt, sev, pat in [("SQL Injection", "critical", "/x"),
+                             ("Cross-Site Scripting", "high", "/search"),
+                             ("Broken Access Control", "high", "/rest/basket")]:
+            await db.execute(
+                "INSERT INTO ground_truth (target_name, target_url, vuln_type, severity, "
+                "url_pattern, parameter, owasp_category) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                ("OWASP Juice Shop", "http://juice-shop:3000", vt, sev, pat, None, "A03:2021"))
+        await db.commit()
+        await db.close()
+    asyncio.run(seed_gt())
+
+    out = _run()
+    cov = out["coverage"]
+    assert cov["target_name"] == "OWASP Juice Shop"
+    assert cov["total"] == 3
+    # the seeded finding matches the SQLi entry, so two remain unmatched
+    missed = {m["vuln_type"] for m in cov["missed"]}
+    assert "Cross-Site Scripting" in missed
+    assert "SQL Injection" not in missed
+
+    async def read():
+        db = await db_mod.get_db()
+        r = await (await db.execute(
+            "SELECT coverage FROM session_reviews WHERE session_id = ?", ("s1",))).fetchone()
+        await db.close()
+        return dict(r)["coverage"]
+    import json as _json
+    assert _json.loads(asyncio.run(read()))["total"] == 3
+
+
+def test_unknown_target_yields_no_coverage_claim(temp_db, fake_llm):
+    _seed_session()
+    out = _run()
+    assert out["coverage"] is None      # no ground truth seeded for this target
 
 
 def test_explicit_review_model_is_honoured(temp_db, fake_llm, monkeypatch):

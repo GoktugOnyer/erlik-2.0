@@ -1399,15 +1399,25 @@ async def run_ai_review(session_id: str, model: str, runcfg: dict,
                 "prompt_sent FROM steps WHERE session_id = ? ORDER BY step_number",
                 (session_id,))).fetchall()]
 
+            # url and parameter are required by the ground-truth matcher, not
+            # just for display — without them every entry scores below threshold
+            # and the coverage report claims the run missed everything.
             findings = [dict(r) for r in await (await db.execute(
-                "SELECT severity, calibrated_severity, vuln_type FROM findings "
-                "WHERE session_id = ?", (session_id,))).fetchall()]
+                "SELECT severity, calibrated_severity, vuln_type, url, parameter "
+                "FROM findings WHERE session_id = ?", (session_id,))).fetchall()]
 
             # KINDS AND COUNTS ONLY. session_primitives.value holds live tokens;
             # it must never reach a prompt that may be sent to a remote model.
             prim_rows = [dict(r) for r in await (await db.execute(
                 "SELECT kind, COUNT(*) AS n FROM session_primitives "
                 "WHERE session_id = ? GROUP BY kind", (session_id,))).fetchall()]
+
+            # POST-HOC ONLY. The answer key is read here, after the run has
+            # finished, and reaches nothing but the critique. It must never be
+            # visible to the agent — see the leakage test in tests/test_review.py.
+            gt_all = [dict(r) for r in await (await db.execute(
+                "SELECT target_name, target_url, vuln_type, severity, url_pattern, "
+                "parameter, owasp_category FROM ground_truth")).fetchall()]
         finally:
             await db.close()
 
@@ -1429,6 +1439,21 @@ async def run_ai_review(session_id: str, model: str, runcfg: dict,
             sev[k] = sev.get(k, 0) + 1
 
         used = {t for t in by_tool if t != "unknown"}
+        # "What did this run miss" is MEASURED, not asked of the model: the
+        # one-to-one assignment that produces the confusion matrix also yields
+        # the unmatched ground truths, so recall and coverage cannot disagree.
+        coverage = None
+        gt_target = _rv.match_target_name(session.get("target_url"), gt_all)
+        if gt_target:
+            gts = [g for g in gt_all if g.get("target_name") == gt_target]
+            assignment = _assign_findings_to_ground_truth(findings, gts)
+            coverage = {
+                "target_name": gt_target,
+                "total": len(gts),
+                "missed": assignment["missed_ground_truths"],
+                "found": len(assignment["matched"]),
+            }
+
         cfg_for_review = dict(runcfg or {})
         cfg_for_review["toolset_preset"] = session.get("toolset_preset")
         cfg_for_review["enabled_tools"] = sorted(enabled_tools or [])
@@ -1464,6 +1489,7 @@ async def run_ai_review(session_id: str, model: str, runcfg: dict,
             },
             valid_presets=sorted(runconfig.RUN_PRESETS.keys()),
             steps=rows,
+            coverage=coverage,
         )
 
         # The reviewer may be a stronger model than the one under test — it never
@@ -1497,16 +1523,18 @@ async def run_ai_review(session_id: str, model: str, runcfg: dict,
             await db2.execute(
                 "INSERT OR REPLACE INTO session_reviews "
                 "(session_id, coverage_gaps, wasted_effort, config_suggestions, "
-                " recommended_next_run, confidence, raw, model) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                " recommended_next_run, confidence, raw, model, coverage) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (session_id, json.dumps(parsed["coverage_gaps"]),
                  json.dumps(parsed["wasted_effort"]),
                  json.dumps(parsed["config_suggestions"]),
                  parsed["recommended_next_run"], parsed["confidence"],
-                 (raw or "")[:8000], review_model or model))
+                 (raw or "")[:8000], review_model or model,
+                 json.dumps(coverage) if coverage else None))
             await db2.commit()
         finally:
             await db2.close()
+        parsed["coverage"] = coverage
         return parsed
     except Exception as e:  # noqa: BLE001
         print(f"[review {session_id[:8]}] failed (non-fatal): {e}", flush=True)
@@ -4754,6 +4782,11 @@ async def get_session_review(session_id: str):
     if not row:
         return {}
     r = dict(row)
+    if r.get("coverage"):
+        try:
+            r["coverage"] = json.loads(r["coverage"])
+        except (json.JSONDecodeError, TypeError):
+            r["coverage"] = None
     for k in ("coverage_gaps", "wasted_effort", "config_suggestions"):
         try:
             r[k] = json.loads(r[k]) if r.get(k) else []
@@ -6277,6 +6310,46 @@ def _match_finding_to_ground_truth_scored(finding: dict, ground_truths: list[dic
     }
 
 
+def _assign_findings_to_ground_truth(findings: list[dict], ground_truths: list[dict],
+                                     threshold: float = 2.0) -> dict:
+    """One-to-one greedy assignment of findings to ground truths, best score first.
+
+    Extracted so the confusion matrix and the coverage report are computed from
+    the SAME assignment. Two implementations of "which ground truths were hit"
+    would eventually disagree, and then the reported recall and the reported
+    coverage gaps would contradict each other in the same report.
+
+    Returns matched pairs plus the two complements: ground truths nothing matched
+    (what the run MISSED) and findings that matched nothing (candidate false
+    positives). Both are derived, not separately computed.
+    """
+    pairs = []
+    for fi, f in enumerate(findings):
+        for gj, gt in enumerate(ground_truths):
+            r = _match_finding_to_ground_truth_scored(f, [gt])
+            if r.get("score", 0) >= threshold:
+                pairs.append((r["score"], fi, gj))
+    # Ties broken on index so the assignment is deterministic run to run — this
+    # feeds research metrics, which must be reproducible.
+    pairs.sort(key=lambda x: (-x[0], x[1], x[2]))
+
+    used_f: set[int] = set()
+    used_g: set[int] = set()
+    matched: list[dict] = []
+    for score, fi, gj in pairs:
+        if fi in used_f or gj in used_g:
+            continue
+        used_f.add(fi)
+        used_g.add(gj)
+        matched.append({"score": score, "finding": findings[fi], "ground_truth": ground_truths[gj]})
+
+    return {
+        "matched": matched,
+        "missed_ground_truths": [gt for gj, gt in enumerate(ground_truths) if gj not in used_g],
+        "unmatched_findings": [f for fi, f in enumerate(findings) if fi not in used_f],
+    }
+
+
 def _sound_confusion_matrix(findings: list[dict], ground_truths: list[dict],
                             threshold: float = 2.0) -> dict:
     """A SOUND confusion matrix (added alongside the legacy fuzzy scorer).
@@ -6288,22 +6361,8 @@ def _sound_confusion_matrix(findings: list[dict], ground_truths: list[dict],
     single, internally-consistent matrix. Exposed under `sound_metrics`; the
     legacy keys are left untouched so prior runs stay reproducible.
     """
-    pairs = []
-    for fi, f in enumerate(findings):
-        for gj, gt in enumerate(ground_truths):
-            r = _match_finding_to_ground_truth_scored(f, [gt])
-            if r.get("score", 0) >= threshold:
-                pairs.append((r["score"], fi, gj))
-    pairs.sort(key=lambda x: -x[0])
-    used_f: set[int] = set()
-    used_g: set[int] = set()
-    tp = 0
-    for _score, fi, gj in pairs:
-        if fi in used_f or gj in used_g:
-            continue
-        used_f.add(fi)
-        used_g.add(gj)
-        tp += 1
+    assignment = _assign_findings_to_ground_truth(findings, ground_truths, threshold)
+    tp = len(assignment["matched"])
     total_f = len(findings)
     total_g = len(ground_truths)
     fp = total_f - tp

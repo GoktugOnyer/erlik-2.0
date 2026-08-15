@@ -36,6 +36,9 @@ WHAT THE RUN DID
 TOOL USAGE
 {tools_text}
 
+KNOWN VULNERABILITIES THIS RUN DID NOT FIND
+{coverage_text}
+
 COMMANDS ACTUALLY RUN (deduplicated; credentials masked)
 {commands_text}
 
@@ -54,6 +57,12 @@ a quoted fact from above — for example "[turn 7]", "[sqlmap: 4 failed]". A cla
 you cannot cite is one you must not make. Do not fault the agent for skipping a \
 tool that was not in its enabled list, and do not claim a vulnerability class was \
 untested if a command above probed it.
+
+The missed-vulnerability list is measured, not your judgement: it comes from the \
+lab's answer key matched against what this run reported. Do not re-argue whether \
+those vulnerabilities exist and do not add classes to it. Your job for each is to \
+explain, from the evidence above, WHY this run missed it — never probed, probed \
+with a tool that failed, wrong endpoint, or no authenticated session.
 
 Respond in this EXACT format (nothing else):
 
@@ -251,9 +260,94 @@ def _bullets(block: str | None) -> list[str]:
     return out
 
 
+def match_target_name(target_url: str | None, gt_rows: list[dict]) -> str | None:
+    """The ground-truth target whose URL shares a host with this session's.
+
+    Ground truth is keyed by target_name, and every existing caller passes that
+    name as a query parameter defaulting to "OWASP Juice Shop". A post-run review
+    has no operator to ask, so it resolves the target from the session's own URL
+    and returns None rather than guessing — a wrong answer key would report
+    fabricated coverage gaps.
+    """
+    if not target_url or not gt_rows:
+        return None
+
+    def split(u: str | None) -> tuple[str, str]:
+        """(host, port) with the scheme default filled in."""
+        raw = (u or "").strip().lower()
+        scheme = "https" if raw.startswith("https://") else "http"
+        raw = re.sub(r"^[a-z]+://", "", raw).split("/")[0]
+        if ":" in raw:
+            h, _, p = raw.partition(":")
+            return h, p
+        return raw, ("443" if scheme == "https" else "80")
+
+    want_host, want_port = split(target_url)
+    if not want_host:
+        return None
+
+    # The ground truth registers Juice Shop under http://localhost:3000, but every
+    # real run targets http://juice-shop:3000 — tool_executor rewrites between the
+    # two because tools execute inside the compose network (see its
+    # _LOOPBACK_HOSTS/aliases). A strict host comparison therefore finds no answer
+    # key for the one target that has one, and coverage silently disappears.
+    # Within the lab the PORT identifies the service, so a loopback alias on
+    # either side plus an equal port is the same target.
+    loopback = {"localhost", "127.0.0.1", "0.0.0.0", "::1"}
+    parsed = [(row, *split(row.get("target_url"))) for row in gt_rows]
+
+    # Host AND port. Host alone is not enough: several entries share "localhost",
+    # so matching on it would hand back whichever was listed first.
+    for row, gt_host, gt_port in parsed:
+        if gt_host and gt_host == want_host and gt_port == want_port:
+            return row.get("target_name")
+
+    # A distinctive service name identifies the target even on another port.
+    # Loopback names are excluded here precisely because they are not distinctive.
+    for row, gt_host, gt_port in parsed:
+        if gt_host and gt_host == want_host and gt_host not in loopback:
+            return row.get("target_name")
+
+    # Loopback on either side: within the lab the PORT is what identifies the
+    # service, which is what makes localhost:3000 and juice-shop:3000 the same.
+    for row, gt_host, gt_port in parsed:
+        if gt_port == want_port and (gt_host in loopback or want_host in loopback):
+            return row.get("target_name")
+    return None
+
+
+def format_coverage(coverage: dict | None) -> str:
+    """The measured miss list, or an honest statement that none was available."""
+    if not coverage:
+        return ("  (no answer key for this target — coverage cannot be measured, "
+                "so do not speculate about what was missed)")
+    missed = coverage.get("missed") or []
+    total = coverage.get("total") or 0
+    # Prefer the count the assignment actually produced. Deriving it here as
+    # total - len(missed) would be a second source of truth for the same number.
+    found = coverage.get("found")
+    if found is None:
+        found = total - len(missed)
+    if not missed:
+        return f"  none — all {total} known vulnerabilities for this target were reported"
+
+    lines = [f"  {found} of {total} known vulnerabilities were found. "
+             f"These {len(missed)} were NOT:"]
+    for m in missed[:20]:
+        where = m.get("url_pattern") or "—"
+        param = f" (param: {m['parameter']})" if m.get("parameter") else ""
+        cat = f" [{m['owasp_category']}]" if m.get("owasp_category") else ""
+        lines.append(f"  - [{(m.get('severity') or '?').upper()}] "
+                     f"{m.get('vuln_type')} at {where}{param}{cat}")
+    if len(missed) > 20:
+        lines.append(f"  …and {len(missed) - 20} more")
+    return "\n".join(lines)
+
+
 def build_review_prompt(config: dict, activity: dict, tools: list[dict],
                         outcome: dict, valid_presets: list[str] | None = None,
-                        steps: list[dict] | None = None) -> str:
+                        steps: list[dict] | None = None,
+                        coverage: dict | None = None) -> str:
     """Compose the critique prompt from facts already recorded for the session."""
     helps = [k for k in ("skills", "nettacker", "techniques", "primitives",
                          "target_memory", "cve_enrich", "poc_verify")
@@ -332,7 +426,10 @@ def build_review_prompt(config: dict, activity: dict, tools: list[dict],
         config_text += _PRESET_LINE.format(
             presets="\n".join(f"  - {p}" for p in valid_presets))
 
+    coverage_text = format_coverage(coverage)
+
     return REVIEW_PROMPT.format(mission_text=mission_text, config_text=config_text,
+                                coverage_text=coverage_text,
                                 activity_text=activity_text, tools_text=tools_text,
                                 commands_text=commands_text, intents_text=intents_text,
                                 outcome_text=outcome_text)
