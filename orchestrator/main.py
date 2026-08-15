@@ -41,6 +41,16 @@ from orchestrator.detection import auto_detect_findings as _auto_detect_findings
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
+    # Ground truth is static reference data, but it was only ever seeded lazily
+    # by a handful of API endpoints. A dashboard run that never touched those
+    # left the table empty, so the post-run review's coverage measurement found
+    # no answer key and silently reported nothing — the measurement looked
+    # unavailable rather than broken. Seeding here makes it unconditional; the
+    # function is idempotent.
+    try:
+        await _seed_ground_truth()
+    except Exception as e:  # noqa: BLE001
+        print(f"[startup] ground-truth seeding failed (non-fatal): {e}", flush=True)
     yield
 
 
