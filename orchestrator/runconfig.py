@@ -73,10 +73,14 @@ RUN_PRESETS: dict[str, dict] = {
                 "actually runs (ports/tech observed by a light pre-scan), then an AI "
                 "review of the run at the end. Set ERLIK_HACKTRICKS_PATH for full "
                 "technique text; without it you still get titles and reference links.",
+        # poc_verify is on because this preset is meant for real engagements, not
+        # just measurement: an unverified finding that reaches a client report is
+        # something they may act on that nobody re-tested. It only examines
+        # high/critical findings with a usable URL, so the cost is small.
         "config": {"skills": True, "cve_enrich": True, "nettacker": True,
                    "nettacker_scenario": "recon", "techniques": True,
                    "playbooks": "juiceshop", "primitives": True,
-                   "ai_review": True},
+                   "poc_verify": True, "ai_review": True},
     },
     "recon_first": {
         "label": "Recon-first — Nettacker seeds the agent",

@@ -31,6 +31,14 @@ def test_comparison_arms_are_env_proof(monkeypatch):
         assert r["nettacker"] is False, preset
 
 
+def test_client_facing_presets_reverify_their_findings():
+    """A finding that reaches a report is something someone may act on. The
+    presets meant for real use must re-test high/critical findings rather than
+    ship them unverified."""
+    for preset in ("guided_techniques", "deterministic_heavy", "full_assessment"):
+        assert rc.resolve({"preset": preset})["poc_verify"] is True, preset
+
+
 def test_prescan_presets_enable_environment_techniques():
     """Technique routing keys off observed ports, so it belongs with the presets
     that actually run a pre-scan."""
