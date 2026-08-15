@@ -1,0 +1,54 @@
+id: WSTG-INPV-01
+name: Reflected Cross-Site Scripting
+category: Input Validation
+severity: high
+references:
+  - https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/07-Input_Validation_Testing/01-Testing_for_Reflected_Cross_Site_Scripting
+
+target_schema:
+  required: [url, parameter]
+  optional: [cookie, auth_header]
+
+steps:
+  - name: reflect_probe
+    tool: curl
+    # Inject a unique marker with raw HTML tags. If it comes back UNENCODED the
+    # parameter is reflected without output-encoding → reflected XSS.
+    command: >-
+      curl -s "{{url}}?{{parameter}}=xss7331zzz<b>probe</b>"
+    evaluators:
+      - type: regex
+        pattern: 'xss7331zzz<b>probe</b>'
+        emit_finding:
+          vuln_type: Reflected XSS
+          severity: high
+
+  - name: dalfox_scan
+    tool: dalfox
+    when: no_finding_yet
+    command: >-
+      dalfox url "{{url}}?{{parameter}}=1" --skip-bav --timeout 10 --silence
+    evaluators:
+      - type: regex
+        pattern: '\[POC\]|triggered|reflected|verified'
+        emit_finding:
+          vuln_type: Reflected XSS
+          severity: high
+
+  - name: encoded_check
+    tool: curl
+    when: no_finding_yet
+    # If the marker comes back HTML-encoded, output encoding is working — safe.
+    command: >-
+      curl -s "{{url}}?{{parameter}}=xss7331zzz<i>enc</i>"
+    evaluators:
+      - type: llm
+        instruction: >-
+          The probe injected xss7331zzz with HTML tags. If the marker is reflected
+          but the angle brackets are HTML-encoded (&lt; &gt;), the app is safe
+          (matched=false). If the marker is absent, matched=false. Only set
+          matched=true if you see evidence the raw tags survive in an executable
+          context that dalfox/regex missed.
+        emit_finding:
+          vuln_type: Reflected XSS (suspected, LLM-flagged)
+          severity: medium

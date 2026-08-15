@@ -46,6 +46,7 @@ class SessionCreate(BaseModel):
     max_turns: int = 30  # 0 = unlimited (capped at 150 for safety)
     disable_stagnation: bool = False  # benchmark opt-out for the agent-loop stagnation auto-stop
     extra_system_prompt: str = ""  # injected memory/context appended to system prompt
+    run_config: Optional[dict] = None  # per-session automation flow (see orchestrator/runconfig.py)
 
 
 class SessionResponse(BaseModel):
@@ -92,7 +93,51 @@ class Finding(BaseModel):
     evidence: Optional[str] = None
     verified: bool = False
     false_positive: bool = False
+    # CVE enrichment (populated when ERLIK_ENRICH_CVE is set; see enrichment/nvd.py)
+    cve_id: Optional[str] = None
+    cvss_score: Optional[float] = None
+    cvss_vector: Optional[str] = None
+    cwe: Optional[str] = None
+    # Structured fields (Phase 2; populated at report time by the calibration pass)
+    calibrated_severity: Optional[str] = None
+    owasp_category: Optional[str] = None
+    mitre: Optional[str] = None
+    impact: Optional[str] = None
+    remediation: Optional[str] = None
+    confidence: Optional[str] = None
+    ref_links: Optional[str] = None
     created_at: str
+
+
+class ReportFinding(BaseModel):
+    """A single finding in the validated pentest-report.json (Phase 2).
+
+    Pragmatic subset of communitytools formats/data.md (pentest-report.json).
+    """
+    id: str                              # F-NNN
+    title: str
+    severity: str                        # calibrated if available, else as-emitted
+    cvss_score: Optional[float] = None
+    cvss_vector: Optional[str] = None
+    cwe: Optional[str] = None
+    owasp: Optional[str] = None
+    affected_url: Optional[str] = None
+    description: Optional[str] = None
+    impact: Optional[str] = None
+    confidence: Optional[str] = None
+    remediation: Optional[str] = None
+    references: list[str] = []
+
+
+class PentestReport(BaseModel):
+    """Validated source-of-truth report object (Phase 2).
+
+    Written to data/reports/{session_id}.pentest-report.json and served by
+    GET /api/sessions/{session_id}/report.json.
+    """
+    engagement: dict                     # {name, target, dates, status}
+    statistics: dict                     # {total, critical, high, medium, low, informational}
+    findings: list[ReportFinding] = []
 
 
 class ReportResponse(BaseModel):
@@ -133,6 +178,7 @@ class ChainCreate(BaseModel):
     no_timeout: bool = False
     auto_progress: bool = True
     disable_stagnation: bool = False
+    run_config: Optional[dict] = None  # per-session automation flow (applied to every chain sub-session)
 
 
 class ChainResponse(BaseModel):
@@ -175,6 +221,7 @@ class BenchmarkCreate(BaseModel):
     # Empty list or None = use enabled_tools as-is (legacy behaviour).
     toolset_presets: list[str] = []
     disable_stagnation: bool = False
+    run_config: Optional[dict] = None  # per-session automation flow (applied to cold/warm/chain sessions)
 
 
 class BenchmarkSessionResult(BaseModel):

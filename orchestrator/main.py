@@ -7,7 +7,7 @@ import os
 from datetime import datetime
 from contextlib import asynccontextmanager
 from pathlib import Path
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request, Body
 from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.templating import Jinja2Templates
 import httpx
@@ -17,8 +17,13 @@ from orchestrator.models import (
     SessionCreate, SessionResponse, ReportResponse, SessionMetrics,
     ChainCreate, ChainResponse, ChainSessionSummary,
     BenchmarkCreate, BenchmarkSessionResult, BenchmarkResponse,
+    ReportFinding, PentestReport,
 )
 from orchestrator import llm_client
+from orchestrator import runconfig
+from orchestrator.bench import classify_llm_error, request_abort, abort_requested, clear_abort
+from orchestrator.enrichment import enrichment_enabled, find_cve_ids, lookup_cve
+from orchestrator.enrichment.nvd import severity_label as cvss_severity_label
 from orchestrator.tool_executor import execute_tool, check_container_running
 from orchestrator.testcase import load_catalog, find_by_id, run_test_case, run_chain
 from orchestrator.testcase.loader import CATALOG_ROOT as TESTCASE_CATALOG_ROOT
@@ -30,6 +35,9 @@ from orchestrator.testcase.persistence import (
 )
 
 
+from orchestrator.detection import auto_detect_findings as _auto_detect_findings
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
@@ -38,6 +46,31 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Erlik Pentest Agent", lifespan=lifespan)
 templates = Jinja2Templates(directory="dashboard/templates")
+
+
+@app.middleware("http")
+async def _api_token_guard(request: Request, call_next):
+    """Optional shared-secret guard for state-changing API calls.
+
+    Off by default (no behavior change). When ERLIK_API_TOKEN is set, every
+    state-changing request (POST/PUT/PATCH/DELETE) to /api/* must present the
+    token via `X-API-Token: <t>` or `Authorization: Bearer <t>`. GET/HEAD
+    (the dashboard + read endpoints) and /api/health stay open so the page
+    loads; pair this with ERLIK_HOST=127.0.0.1 for a safe default posture.
+    """
+    from fastapi.responses import JSONResponse
+    token = os.environ.get("ERLIK_API_TOKEN", "").strip()
+    if token and request.method in ("POST", "PUT", "PATCH", "DELETE") \
+            and request.url.path.startswith("/api/") \
+            and request.url.path != "/api/health":
+        provided = request.headers.get("x-api-token", "")
+        if not provided:
+            auth = request.headers.get("authorization", "")
+            if auth.lower().startswith("bearer "):
+                provided = auth[7:].strip()
+        if provided != token:
+            return JSONResponse({"detail": "missing or invalid API token"}, status_code=401)
+    return await call_next(request)
 
 
 # --- Toolset Presets (RQ3-b: action-space overload ablation) ---
@@ -328,6 +361,24 @@ TOOL_PHASES = {
 }
 MIN_PHASES_BEFORE_DONE = 3  # must cover at least 3 of 4 phases before "done" is accepted
 DEFAULT_MIN_TURNS_BEFORE_DONE = 8   # base min tools before "done" is accepted (scales with max_turns)
+
+# Reasoning models (Qwen3 / Trendyol-Cybersecurity / DeepSeek-R1 …) emit a
+# <think>…</think> block before the answer. Left in place it accumulates in the
+# message history (every turn gets slower + more tokens) and can trick the
+# action parser into "executing" a command the model was only reasoning about.
+_THINK_RX = re.compile(r'<think>.*?</think>', re.DOTALL | re.IGNORECASE)
+
+
+def _strip_reasoning(text: str) -> str:
+    """Drop <think>…</think> reasoning blocks from an LLM response. Handles an
+    unclosed <think> (truncated output) by discarding the dangling tail."""
+    if not text or "<think>" not in text.lower():
+        return text
+    text = _THINK_RX.sub("", text)
+    idx = text.lower().rfind("<think>")   # unclosed tag → everything after is reasoning
+    if idx != -1:
+        text = text[:idx]
+    return text.strip()
 
 # --- Chain Mode Phase Definitions ---
 CHAIN_PHASES = ["recon", "discovery", "vuln_scan", "exploitation"]
@@ -697,411 +748,6 @@ def _parse_tool_output(tool_name: str, output: str, command: str) -> str:
     return ""
 
 
-def _auto_detect_findings(tool_name: str, output: str, command: str) -> list[dict]:
-    """Programmatically detect confirmed vulnerabilities from tool output.
-    Returns list of finding dicts ready to save to DB.
-    This removes dependence on the LLM to report findings."""
-    findings = []
-
-    # --- sqlmap: confirmed SQL injection ---
-    if tool_name == "sqlmap":
-        # Check for confirmed injection (sqlmap "resumed injection point" or "is vulnerable")
-        sqli_confirmed = False
-        dbms = ""
-        payload_lines = []
-        param = ""
-        for line in output.split("\n"):
-            if "injection point" in line.lower() or "is vulnerable" in line.lower():
-                sqli_confirmed = True
-            if "back-end DBMS" in line and ":" in line:
-                dbms = line.split(":")[-1].strip()
-            if "Parameter:" in line:
-                pm = re.search(r'Parameter:\s*(\S+)', line)
-                if pm:
-                    param = pm.group(1)
-            if "Payload:" in line:
-                payload_lines.append(line.strip())
-        if sqli_confirmed:
-            url_match = re.search(r'-u\s+"?([^"\s]+)', command)
-            url = url_match.group(1) if url_match else ""
-            evidence = f"DBMS: {dbms}" if dbms else "SQL injection confirmed by sqlmap"
-            if payload_lines:
-                evidence += "\n" + "\n".join(payload_lines[:3])
-            findings.append({
-                "vuln_type": "SQL Injection",
-                "severity": "high",
-                "url": url,
-                "parameter": param,
-                "evidence": evidence,
-            })
-
-    # --- nuclei: high/critical findings ---
-    elif tool_name == "nuclei":
-        for line in output.split("\n"):
-            line_lower = line.lower()
-            if "[critical]" in line_lower or "[high]" in line_lower:
-                # Parse nuclei output format: [template-id] [protocol] [severity] url
-                parts = re.findall(r'\[([^\]]+)\]', line)
-                sev = "high"
-                vuln_type = "Nuclei Finding"
-                url = ""
-                for p in parts:
-                    if p.lower() in ("critical", "high"):
-                        sev = p.lower()
-                    elif p not in ("http", "https", "tcp", "dns", "ssl"):
-                        vuln_type = p
-                url_match = re.search(r'(https?://\S+)', line)
-                if url_match:
-                    url = url_match.group(1)
-                findings.append({
-                    "vuln_type": vuln_type,
-                    "severity": sev,
-                    "url": url,
-                    "parameter": "",
-                    "evidence": line.strip()[:500],
-                })
-
-    # --- xsstrike/dalfox: confirmed XSS ---
-    elif tool_name in ("xsstrike", "dalfox"):
-        for line in output.split("\n"):
-            line_lower = line.lower()
-            if ("vulnerable" in line_lower or "confirmed" in line_lower or
-                    "reflected" in line_lower and "xss" in line_lower):
-                url_match = re.search(r'-u\s+"?([^"\s]+)', command) or re.search(r'url\s+"?([^"\s]+)', command)
-                url = url_match.group(1) if url_match else ""
-                findings.append({
-                    "vuln_type": "Cross-Site Scripting (XSS)",
-                    "severity": "medium",
-                    "url": url,
-                    "parameter": "",
-                    "evidence": line.strip()[:500],
-                })
-                break  # one finding per tool run
-
-    # --- curl: multi-pattern detection ---
-    elif tool_name == "curl":
-        output_lower = output.lower()
-        url_match = re.search(r'(https?://\S+)', command)
-        url = url_match.group(1) if url_match else ""
-
-        # --- Exposed user data (emails, passwords in API responses) ---
-        if ('"email"' in output_lower and '"password"' in output_lower) or \
-           ('"email"' in output_lower and ('"role"' in output_lower or '"isadmin"' in output_lower)):
-            emails = re.findall(r'"email"\s*:\s*"([^"]+)"', output)
-            evidence = f"API exposes user data: {len(emails)} user records found"
-            if emails:
-                evidence += f"\nSample: {emails[0]}"
-            findings.append({
-                "vuln_type": "Sensitive Data Exposure",
-                "severity": "medium",
-                "url": url,
-                "parameter": "",
-                "evidence": evidence,
-            })
-
-        # --- Broken Access Control: user enumeration via /api/Users ---
-        if "/api/users" in url.lower() and '"email"' in output_lower:
-            emails = re.findall(r'"email"\s*:\s*"([^"]+)"', output)
-            if emails:
-                findings.append({
-                    "vuln_type": "Broken Access Control",
-                    "severity": "high",
-                    "url": url,
-                    "parameter": "",
-                    "evidence": f"User enumeration: GET /api/Users returns {len(emails)} user records without auth",
-                })
-
-        # --- IDOR: accessing other users' baskets ---
-        if "/rest/basket/" in url.lower() and '"products"' in output_lower:
-            # If the response contains basket data (products), it's accessible
-            basket_id = re.search(r'/rest/basket/(\d+)', url)
-            if basket_id:
-                findings.append({
-                    "vuln_type": "Broken Access Control",
-                    "severity": "critical",
-                    "url": url,
-                    "parameter": "id",
-                    "evidence": f"IDOR: basket {basket_id.group(1)} accessible — response contains product data",
-                })
-
-        # --- IDOR: accessing other users' orders ---
-        if "/api/orders" in url.lower() and ('"totalPrice"' in output_lower or '"products"' in output_lower):
-            order_id = re.search(r'/api/orders/(\w+)', url, re.IGNORECASE)
-            if order_id:
-                findings.append({
-                    "vuln_type": "Broken Access Control",
-                    "severity": "high",
-                    "url": url,
-                    "parameter": "id",
-                    "evidence": f"IDOR: order {order_id.group(1)} data accessible",
-                })
-
-        # --- SQL injection login bypass ---
-        if "/rest/user/login" in url.lower() and '"token"' in output_lower:
-            # Check if command contained SQL injection payload
-            sqli_patterns = ["or 1=1", "' or", "\"or", "1=1--", "admin'--", "' --"]
-            if any(p in command.lower() for p in sqli_patterns):
-                token_match = re.search(r'"token"\s*:\s*"([^"]{20,})"', output)
-                evidence = "SQL injection on login: server returned JWT token"
-                if token_match:
-                    evidence += f"\nToken: {token_match.group(1)[:50]}..."
-                findings.append({
-                    "vuln_type": "SQL Injection",
-                    "severity": "critical",
-                    "url": url,
-                    "parameter": "email",
-                    "evidence": evidence,
-                })
-
-        # --- CORS misconfiguration ---
-        if "access-control-allow-origin" in output_lower:
-            cors_match = re.search(r'access-control-allow-origin:\s*(\S+)', output, re.IGNORECASE)
-            if cors_match and cors_match.group(1).strip() == "*":
-                findings.append({
-                    "vuln_type": "CORS Misconfiguration",
-                    "severity": "medium",
-                    "url": url,
-                    "parameter": "",
-                    "evidence": f"Access-Control-Allow-Origin: * — allows any domain to read responses",
-                })
-            elif cors_match and "evil" in cors_match.group(1).lower():
-                findings.append({
-                    "vuln_type": "CORS Misconfiguration",
-                    "severity": "high",
-                    "url": url,
-                    "parameter": "",
-                    "evidence": f"Server reflects arbitrary Origin: {cors_match.group(1)}",
-                })
-
-        # --- Missing security headers ---
-        if command.strip().startswith("curl -s") and ("-I" in command or "-i" in command or "--head" in command):
-            headers_lower = output_lower
-            missing = []
-            if "content-security-policy" not in headers_lower:
-                missing.append("Content-Security-Policy")
-            if "x-frame-options" not in headers_lower:
-                missing.append("X-Frame-Options")
-            if "strict-transport-security" not in headers_lower:
-                missing.append("Strict-Transport-Security")
-            if "x-content-type-options" not in headers_lower:
-                missing.append("X-Content-Type-Options")
-            if missing and len(missing) >= 2:
-                findings.append({
-                    "vuln_type": "Security Misconfiguration",
-                    "severity": "medium",
-                    "url": url,
-                    "parameter": "",
-                    "evidence": f"Missing security headers: {', '.join(missing)}",
-                })
-
-        # --- X-Powered-By / Server header disclosure ---
-        if "x-powered-by:" in output_lower or ("server:" in output_lower and "express" in output_lower):
-            server_match = re.search(r'(?:x-powered-by|server):\s*(.+)', output, re.IGNORECASE)
-            if server_match:
-                findings.append({
-                    "vuln_type": "Information Disclosure",
-                    "severity": "medium",
-                    "url": url,
-                    "parameter": "",
-                    "evidence": f"Server header exposes: {server_match.group(1).strip()}",
-                })
-
-        # --- Exposed Swagger / API docs ---
-        if "/api-docs" in url.lower() and ("swagger" in output_lower or '"paths"' in output_lower or '"openapi"' in output_lower):
-            findings.append({
-                "vuln_type": "Security Misconfiguration",
-                "severity": "medium",
-                "url": url,
-                "parameter": "",
-                "evidence": "Swagger/OpenAPI documentation exposed — reveals all API endpoints",
-            })
-
-        # --- Exposed metrics endpoint ---
-        if "/metrics" in url.lower() and ("process_" in output_lower or "nodejs_" in output_lower or "http_request" in output_lower):
-            findings.append({
-                "vuln_type": "Security Misconfiguration",
-                "severity": "low",
-                "url": url,
-                "parameter": "",
-                "evidence": "Prometheus metrics endpoint exposed — reveals internal server state",
-            })
-
-        # --- FTP directory listing ---
-        if "/ftp" in url.lower() and ("acquisitions" in output_lower or ".md" in output_lower or ".bak" in output_lower):
-            findings.append({
-                "vuln_type": "Sensitive Data Exposure",
-                "severity": "medium",
-                "url": url,
-                "parameter": "",
-                "evidence": "FTP directory listing exposes sensitive files",
-            })
-
-        # --- Null byte bypass on file access ---
-        if "%2500" in url or "%00" in url:
-            if len(output.strip()) > 50 and "error" not in output_lower[:100]:
-                findings.append({
-                    "vuln_type": "Sensitive Data Exposure",
-                    "severity": "high",
-                    "url": url,
-                    "parameter": "",
-                    "evidence": f"Null byte bypass successful — restricted file accessible ({len(output)} bytes returned)",
-                })
-
-        # --- Open redirect ---
-        if "/redirect" in url.lower():
-            if "301" in output or "302" in output or "location:" in output_lower:
-                loc_match = re.search(r'location:\s*(\S+)', output, re.IGNORECASE)
-                if loc_match and ("evil" in loc_match.group(1).lower() or
-                                  "http" in loc_match.group(1).lower() and "juice" not in loc_match.group(1).lower()):
-                    findings.append({
-                        "vuln_type": "Open Redirect",
-                        "severity": "medium",
-                        "url": url,
-                        "parameter": "to",
-                        "evidence": f"Open redirect: server redirects to {loc_match.group(1)}",
-                    })
-
-        # --- Forged feedback (UserId manipulation) ---
-        if "/api/feedbacks" in url.lower() and '"userid"' in output_lower and "POST" in command.upper():
-            findings.append({
-                "vuln_type": "Broken Access Control",
-                "severity": "high",
-                "url": url,
-                "parameter": "UserId",
-                "evidence": "Forged feedback accepted — server allows setting arbitrary UserId",
-            })
-
-        # --- Stack trace / error disclosure ---
-        # A 500 Express page by itself is NOT a finding. Require evidence of
-        # actual internal information leakage: stack frames, filesystem paths,
-        # or line-numbered source frames.
-        stacktrace_markers = ("stacktrace", "stack trace", "traceback")
-        filesystem_markers = ("/node_modules/", "/usr/", "/home/", "/root/",
-                              "/app/", "/var/", "/juice-shop/")
-        frame_pattern = re.search(r'\.(?:js|ts|py|rb|php):\d+:\d+', output)
-        has_stacktrace = any(m in output_lower for m in stacktrace_markers)
-        has_fs_path = any(m in output for m in filesystem_markers)
-        has_frame = bool(frame_pattern)
-        if has_stacktrace or has_fs_path or has_frame:
-            err_match = re.search(r'<h2><em>\d+</em>\s*(.+?)</h2>', output)
-            err_msg = err_match.group(1).strip() if err_match else "Server error with stack trace"
-            findings.append({
-                "vuln_type": "Information Disclosure",
-                "severity": "info",
-                "url": url,
-                "parameter": "",
-                "evidence": err_msg[:300],
-            })
-
-    # --- jwt_tool: JWT vulnerabilities ---
-    elif tool_name == "jwt_tool":
-        output_lower = output.lower()
-        # JWT secret cracked
-        if "secret key" in output_lower or "cracked" in output_lower or "found" in output_lower:
-            secret_match = re.search(r'(?:secret|key|found)[:\s]+["\']?(\S+)', output, re.IGNORECASE)
-            findings.append({
-                "vuln_type": "Broken Authentication",
-                "severity": "critical",
-                "url": "",
-                "parameter": "",
-                "evidence": f"JWT weak secret cracked: {secret_match.group(1) if secret_match else 'key found'}",
-            })
-        # JWT none algorithm accepted
-        if "none" in output_lower and ("accepted" in output_lower or "bypass" in output_lower or "success" in output_lower):
-            findings.append({
-                "vuln_type": "Broken Authentication",
-                "severity": "critical",
-                "url": "",
-                "parameter": "",
-                "evidence": "JWT none algorithm attack successful — server accepts unsigned tokens",
-            })
-
-    # --- hydra: brute force success ---
-    elif tool_name == "hydra":
-        for line in output.split("\n"):
-            if "host:" in line.lower() and ("login:" in line.lower() or "password:" in line.lower()):
-                findings.append({
-                    "vuln_type": "Broken Authentication",
-                    "severity": "high",
-                    "url": "",
-                    "parameter": "",
-                    "evidence": f"Brute force success: {line.strip()[:300]}",
-                })
-                break
-
-    # --- nikto: findings ---
-    elif tool_name == "nikto":
-        for line in output.split("\n"):
-            if line.strip().startswith("+ ") and ("OSVDB" in line or "vulnerability" in line.lower()
-                                                   or "outdated" in line.lower() or "XSS" in line):
-                findings.append({
-                    "vuln_type": "Nikto Finding",
-                    "severity": "info",
-                    "url": "",
-                    "parameter": "",
-                    "evidence": line.strip()[:300],
-                })
-
-    # --- commix: command injection ---
-    elif tool_name == "commix":
-        for line in output.split("\n"):
-            if "injectable" in line.lower() or "is vulnerable" in line.lower():
-                url_match = re.search(r'-u\s+"?([^"\s]+)', command)
-                url = url_match.group(1) if url_match else ""
-                findings.append({
-                    "vuln_type": "Command Injection",
-                    "severity": "critical",
-                    "url": url,
-                    "parameter": "",
-                    "evidence": line.strip()[:500],
-                })
-                break
-
-    # --- zap-cli: ZAP proxy alerts ---
-    elif tool_name == "zap-cli":
-        # zap-cli alerts returns JSON: {"alerts": [{...}, ...]}
-        try:
-            data = json.loads(output)
-            alerts = data.get("alerts", [])
-            seen = set()  # deduplicate by (name, url)
-            for alert in alerts:
-                risk = (alert.get("risk") or "").lower()
-                name = alert.get("name") or alert.get("alert") or "ZAP Finding"
-                url = alert.get("url") or ""
-                evidence = alert.get("evidence") or ""
-                desc = alert.get("description") or ""
-                param = alert.get("param") or ""
-
-                # Map ZAP risk to our severity
-                sev_map = {"high": "high", "medium": "medium", "low": "low", "informational": "info"}
-                severity = sev_map.get(risk, "info")
-
-                # Only auto-report medium+ findings
-                if severity not in ("high", "medium", "critical"):
-                    continue
-
-                dedup_key = (name, url)
-                if dedup_key in seen:
-                    continue
-                seen.add(dedup_key)
-
-                evidence_str = f"{name}"
-                if evidence:
-                    evidence_str += f"\nEvidence: {evidence[:200]}"
-                if desc:
-                    evidence_str += f"\nDescription: {desc[:200]}"
-
-                findings.append({
-                    "vuln_type": name,
-                    "severity": severity,
-                    "url": url,
-                    "parameter": param,
-                    "evidence": evidence_str[:500],
-                })
-        except (json.JSONDecodeError, TypeError, KeyError):
-            pass  # Not JSON alerts output (could be spider/scan status)
-
-    return findings
 
 
 def _build_chaining_hint(tool_name: str, parsed_output: str, command: str, target_url: str = "http://juice-shop:3000") -> str:
@@ -1329,7 +975,7 @@ REPORT_LLM_PROMPT = """You are a senior penetration tester writing a brief analy
 You will ONLY provide:
 1. An executive summary (exactly 3 sentences)
 2. A risk level (CRITICAL / HIGH / MEDIUM / LOW / INFO) with 1 sentence justification
-3. For each finding below, provide ONE concrete remediation sentence
+3. For each finding below, a short structured block (severity, classification, impact, fix)
 4. 2-3 suggested next steps for deeper testing
 
 TARGET: {target_url}
@@ -1343,6 +989,19 @@ FINDINGS:
 PHASES COMPLETED: {phases_completed}
 PHASES MISSED: {phases_missed}
 
+SEVERITY CALIBRATION (apply when setting CALIBRATED_SEVERITY):
+- Score the CONFIRMED root cause, not only the sub-impact you happened to demonstrate.
+  If the root cause is confirmed (missing tenant/ownership filter, unauthenticated
+  state-changing endpoint, unvalidated server-fetched URL), rate impact from what that
+  root cause WOULD yield against a normal, populated target.
+- A transient or reversible DATA STATE is NOT mitigating (empty table, deleted records,
+  a toggled-off feature, a created-then-deleted resource) — an attacker or normal
+  operation restores it. Record what you physically demonstrated in CONFIDENCE, not as a
+  severity reduction.
+- Only DURABLE, defender-controlled conditions mitigate (port genuinely closed, control
+  genuinely enforced, exposure genuinely internal-only with no pivot). Aggravate for
+  payment/PII context, chained impact, or regulatory exposure.
+
 Respond in this EXACT format (nothing else):
 
 EXECUTIVE_SUMMARY: <3 sentences about what was tested, what was found, overall risk>
@@ -1350,7 +1009,7 @@ EXECUTIVE_SUMMARY: <3 sentences about what was tested, what was found, overall r
 RISK_LEVEL: <CRITICAL|HIGH|MEDIUM|LOW|INFO>
 RISK_REASON: <1 sentence why>
 
-{remediation_prompts}
+{finding_blocks}
 
 NEXT_STEPS:
 - <suggestion 1>
@@ -1573,6 +1232,170 @@ def _build_discovery_chain(finding: dict, steps: list[dict]) -> list[dict]:
     return chain
 
 
+async def enrich_session_findings(session_id: str, force: bool | None = None) -> int:
+    """Enrich a session's findings with NVD CVE data (CVSS / severity / CWE).
+
+    Off unless enabled — by the per-session run config (`force`) or, when
+    `force` is None, the ERLIK_ENRICH_CVE env var. Runs once at session end
+    (batched), not inside the agent loop, because NVD without an API key is
+    ~6s/request. Returns the number of findings updated. Never raises.
+    """
+    if not (force if force is not None else enrichment_enabled()):
+        return 0
+    updated = 0
+    try:
+        db = await get_db()
+        try:
+            cursor = await db.execute(
+                "SELECT id, vuln_type, evidence, url FROM findings WHERE session_id = ? "
+                "AND cve_id IS NULL", (session_id,),
+            )
+            rows = [dict(r) for r in await cursor.fetchall()]
+
+            # Map each finding to the CVE ids referenced in its text.
+            per_finding: list[tuple[int, list[str]]] = []
+            unique_ids: dict[str, None] = {}
+            for r in rows:
+                ids = find_cve_ids(r.get("vuln_type") or "", r.get("evidence") or "",
+                                   r.get("url") or "")
+                if ids:
+                    per_finding.append((r["id"], ids))
+                    for cid in ids:
+                        unique_ids[cid] = None
+            if not unique_ids:
+                return 0
+
+            # Look up each unique CVE once (cache dedupes across findings).
+            lookups: dict[str, dict] = {}
+            for cid in unique_ids:
+                lookups[cid] = await lookup_cve(cid)
+
+            for finding_id, ids in per_finding:
+                # Pick the highest-scoring CVE for this finding.
+                best = None
+                for cid in ids:
+                    info = lookups.get(cid) or {}
+                    score = info.get("cvss_score")
+                    if score is None:
+                        continue
+                    if best is None or score > (best.get("cvss_score") or -1):
+                        best = info
+                if not best or best.get("cvss_score") is None:
+                    continue
+                await db.execute(
+                    "UPDATE findings SET cve_id = ?, cvss_score = ?, cvss_vector = ?, "
+                    "cwe = ? WHERE id = ?",
+                    (best.get("cve_id"), best.get("cvss_score"),
+                     best.get("cvss_vector"), ", ".join(best.get("cwes") or []),
+                     finding_id),
+                )
+                updated += 1
+            await db.commit()
+        finally:
+            await db.close()
+    except Exception as e:  # noqa: BLE001
+        print(f"[enrich {session_id[:8]}] CVE enrichment failed (non-fatal): {e}")
+    return updated
+
+
+async def _store_primitives(session_id: str, tool_name: str, output: str) -> list:
+    """Extract reusable primitives from tool output, persist new ones, return them.
+
+    Never raises. Dedupes against what's already stored for the session so the
+    same token isn't re-announced every turn.
+    """
+    try:
+        from orchestrator.primitives import extract_primitives
+        found = extract_primitives(output or "", tool_name)
+        if not found:
+            return []
+        db = await get_db()
+        try:
+            cur = await db.execute(
+                "SELECT value FROM session_primitives WHERE session_id = ?", (session_id,))
+            existing = {row[0] for row in await cur.fetchall()}
+            fresh = [p for p in found if p["value"] not in existing]
+            for p in fresh:
+                await db.execute(
+                    "INSERT INTO session_primitives (session_id, kind, value, hint, source_tool) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (session_id, p["kind"], p["value"], p.get("hint"), p.get("tool")))
+            if fresh:
+                await db.commit()
+            return fresh
+        finally:
+            await db.close()
+    except Exception as e:  # noqa: BLE001
+        print(f"[primitives {session_id[:8]}] store failed (non-fatal): {e}", flush=True)
+        return []
+
+
+async def poc_reverify_session(session_id: str, target_url: str, enabled_tools: list,
+                               force: bool | None = None) -> int:
+    """Re-run a lightweight PoC for high/critical findings and confirm by signature.
+
+    Off unless enabled (run-config `poc_verify` / ERLIK_POC_VERIFY). For each
+    high/critical finding with a URL, re-fetches the URL with curl (through
+    execute_tool, so scope + timeouts apply) and checks the fresh response
+    against the curl confirmation signatures for that vuln class. On a match the
+    finding's `verified` flag is set to 1 and a re-verification note is appended;
+    findings are never dropped. Returns the number newly confirmed. Never raises.
+
+    This catches reflected/header/exposure classes and payload-in-URL cases; it
+    does not (yet) reproduce blind/multi-step exploits.
+    """
+    if not (force if force is not None else
+            os.environ.get("ERLIK_POC_VERIFY", "").strip().lower() in ("1", "true", "yes", "on")):
+        return 0
+    if "curl" not in (enabled_tools or []):
+        print(f"[poc-verify {session_id[:8]}] skipped (curl not enabled)", flush=True)
+        return 0
+
+    confirmed = 0
+    try:
+        db = await get_db()
+        try:
+            cur = await db.execute(
+                "SELECT id, vuln_type, severity, calibrated_severity, url, evidence "
+                "FROM findings WHERE session_id = ?", (session_id,))
+            rows = [dict(r) for r in await cur.fetchall()]
+        finally:
+            await db.close()
+
+        for r in rows:
+            sev = (r.get("calibrated_severity") or r.get("severity") or "").lower()
+            url = (r.get("url") or "").strip()
+            if sev not in ("high", "critical") or not url or not url.startswith("http"):
+                continue
+            vt = (r.get("vuln_type") or "").lower()
+            # signatures for this class (curl tool), plus a generic evidence token
+            sigs = []
+            for gt_type, by_tool in _HARD_CONFIRMATION_PATTERNS.items():
+                if gt_type in vt or vt in gt_type:
+                    sigs.extend(by_tool.get("curl", []))
+            quoted = "'" + url.replace("'", "'\\''") + "'"  # POSIX single-quote escape
+            res = await execute_tool(f"curl -sS -i -m 15 {quoted}",
+                                     enabled_tools, target_url=target_url,
+                                     tool_hint="curl", custom_timeout=20)
+            out = (res.get("output") or "")
+            out_l = out.lower()
+            hit = next((s for s in sigs if re.search(s, out_l, re.IGNORECASE)), None)
+            if hit:
+                note = f" [PoC re-verified {datetime.now():%Y-%m-%d %H:%M}: curl matched /{hit}/]"
+                db2 = await get_db()
+                try:
+                    await db2.execute(
+                        "UPDATE findings SET verified = 1, evidence = ? WHERE id = ?",
+                        (((r.get("evidence") or "") + note)[:2000], r["id"]))
+                    await db2.commit()
+                finally:
+                    await db2.close()
+                confirmed += 1
+    except Exception as e:  # noqa: BLE001
+        print(f"[poc-verify {session_id[:8]}] failed (non-fatal): {e}", flush=True)
+    return confirmed
+
+
 async def _generate_report(session_id: str, model: str, target_url: str,
                            session_type: str, vuln_category: str,
                            total_steps: int, total_findings: int,
@@ -1600,18 +1423,24 @@ async def _generate_report(session_id: str, model: str, target_url: str,
 
         # Fetch findings — convert to dicts immediately
         cursor = await db.execute(
-            "SELECT vuln_type, severity, url, parameter, evidence "
+            "SELECT id, vuln_type, severity, url, parameter, evidence, "
+            "cve_id, cvss_score, cvss_vector, cwe "
             "FROM findings WHERE session_id = ? ORDER BY id", (session_id,)
         )
         raw_findings = await cursor.fetchall()
         findings = []
         for row in raw_findings:
             findings.append({
-                "vuln_type": row[0] or "Unknown",
-                "severity": row[1] or "info",
-                "url": row[2] or "N/A",
-                "parameter": row[3] or "N/A",
-                "evidence": row[4] or "N/A",
+                "id": row[0],
+                "vuln_type": row[1] or "Unknown",
+                "severity": row[2] or "info",
+                "url": row[3] or "N/A",
+                "parameter": row[4] or "N/A",
+                "evidence": row[5] or "N/A",
+                "cve_id": row[6],
+                "cvss_score": row[7],
+                "cvss_vector": row[8],
+                "cwe": row[9],
             })
     finally:
         await db.close()
@@ -1638,6 +1467,15 @@ async def _generate_report(session_id: str, model: str, target_url: str,
     report_lines.append(f"| **Findings** | {total_findings} |")
     report_lines.append(f"| **Date** | {timestamp} |")
     report_lines.append("")
+
+    # ─── Findings table placeholder ───
+    # Built after the calibration pass (PART 3) so it reflects calibrated
+    # severity / OWASP / CWE. Single placeholder line spliced in later.
+    findings_table_index = None
+    if findings:
+        report_lines.append("__FINDINGS_TABLE__")
+        findings_table_index = len(report_lines) - 1
+        report_lines.append("")
 
     # Placeholder for LLM sections (filled in later)
     report_lines.append("## Executive Summary")
@@ -1820,15 +1658,26 @@ async def _generate_report(session_id: str, model: str, target_url: str,
 
     # Build findings text for LLM
     findings_for_llm = []
-    remediation_prompts = []
+    block_prompts = []
     for i, f in enumerate(findings, 1):
+        cve_hint = f" [enriched: {f['cve_id']} CVSS {f['cvss_score']}]" if f.get("cve_id") else ""
         findings_for_llm.append(
-            f"FINDING {i}: [{f['severity'].upper()}] {f['vuln_type']} at {f['url']} (param: {f['parameter']})"
+            f"FINDING {i}: [{f['severity'].upper()}] {f['vuln_type']} at {f['url']} "
+            f"(param: {f['parameter']}){cve_hint}"
         )
-        remediation_prompts.append(f"REMEDIATION_{i}: <one sentence fix for {f['vuln_type']} at {f['url']}>")
+        # Structured per-finding block the model fills in (Phase 2).
+        block_prompts.append(
+            f"FINDING_{i}:\n"
+            f"CALIBRATED_SEVERITY: <CRITICAL|HIGH|MEDIUM|LOW|INFO>\n"
+            f"OWASP: <e.g. A03:2021 - Injection, or NONE>\n"
+            f"CWE: <e.g. CWE-89, or NONE>\n"
+            f"IMPACT: <one line: confidentiality/integrity/availability + business impact>\n"
+            f"CONFIDENCE: <confirmed|demonstrated|potential>\n"
+            f"REMEDIATION: <one concrete fix sentence>"
+        )
 
     findings_text = "\n".join(findings_for_llm) if findings_for_llm else "No vulnerabilities found."
-    remediation_text = "\n".join(remediation_prompts) if remediation_prompts else ""
+    finding_blocks_text = "\n\n".join(block_prompts) if block_prompts else ""
 
     prompt = REPORT_LLM_PROMPT.format(
         target_url=target_url,
@@ -1838,7 +1687,7 @@ async def _generate_report(session_id: str, model: str, target_url: str,
         findings_text=findings_text,
         phases_completed=phases_completed_str,
         phases_missed=phases_missed_str,
-        remediation_prompts=remediation_text,
+        finding_blocks=finding_blocks_text,
     )
 
     # Call LLM for analysis only
@@ -1866,10 +1715,94 @@ async def _generate_report(session_id: str, model: str, target_url: str,
     risk_reason_match = re.search(r'RISK_REASON:\s*(.+?)(?=\nREMEDIATION_|\nNEXT_STEPS:|\Z)', llm_analysis, re.DOTALL)
     risk_reason = risk_reason_match.group(1).strip() if risk_reason_match else ""
 
-    # Extract remediations
-    remediations = {}
-    for m in re.finditer(r'REMEDIATION_(\d+):\s*(.+?)(?=\nREMEDIATION_|\nNEXT_STEPS:|\Z)', llm_analysis, re.DOTALL):
-        remediations[int(m.group(1))] = m.group(2).strip()
+    # Extract structured per-finding blocks (Phase 2). Back-compatible: if the
+    # model emits nothing parseable, `structured` stays empty and the report
+    # renders exactly as before.
+    def _parse_finding_blocks(text: str) -> dict[int, dict]:
+        out: dict[int, dict] = {}
+        # Split into FINDING_N sections; each runs until the next FINDING_N /
+        # NEXT_STEPS / end of text.
+        for m in re.finditer(
+            r'FINDING_(\d+):\s*(.+?)(?=\nFINDING_\d+:|\nNEXT_STEPS:|\Z)',
+            text, re.DOTALL,
+        ):
+            idx = int(m.group(1))
+            block = m.group(2)
+            fields: dict[str, str] = {}
+            for key in ("CALIBRATED_SEVERITY", "OWASP", "CWE", "IMPACT",
+                        "CONFIDENCE", "REMEDIATION"):
+                fm = re.search(rf'{key}:\s*(.+)', block)
+                if fm:
+                    val = fm.group(1).strip()
+                    # Drop placeholder echoes and explicit NONE markers.
+                    if val and not val.startswith("<") and val.upper() != "NONE":
+                        fields[key] = val
+            if fields:
+                out[idx] = fields
+        return out
+
+    structured = _parse_finding_blocks(llm_analysis)
+
+    # Back-compat alias: remediation text keyed by index (used below).
+    remediations = {i: fb["REMEDIATION"] for i, fb in structured.items() if "REMEDIATION" in fb}
+
+    # Persist structured fields back onto the finding rows.
+    if structured:
+        db2 = await get_db()
+        try:
+            for i, f in enumerate(findings, 1):
+                fb = structured.get(i)
+                if not fb or not f.get("id"):
+                    continue
+                await db2.execute(
+                    "UPDATE findings SET calibrated_severity = ?, owasp_category = ?, "
+                    "mitre = ?, impact = ?, remediation = ?, confidence = ?, "
+                    "cwe = COALESCE(cwe, ?) WHERE id = ?",
+                    (fb.get("CALIBRATED_SEVERITY"), fb.get("OWASP"), None,
+                     fb.get("IMPACT"), fb.get("REMEDIATION"), fb.get("CONFIDENCE"),
+                     fb.get("CWE"), f["id"]),
+                )
+                # Reflect into the in-memory dict so the table below renders fresh data.
+                f["calibrated_severity"] = fb.get("CALIBRATED_SEVERITY")
+                f["owasp_category"] = fb.get("OWASP")
+                f["impact"] = fb.get("IMPACT")
+                f["confidence"] = fb.get("CONFIDENCE")
+                if fb.get("CWE") and not f.get("cwe"):
+                    f["cwe"] = fb.get("CWE")
+            await db2.commit()
+        finally:
+            await db2.close()
+
+    # Render the Findings table now that calibration has populated the rows.
+    if findings_table_index is not None:
+        has_cve = any(f.get("cve_id") for f in findings)
+        has_calib = any(f.get("calibrated_severity") for f in findings)
+        tbl = ["## Findings", ""]
+        if has_cve or has_calib:
+            tbl.append("| # | Type | Severity | CVE | CVSS | CWE | OWASP | URL |")
+            tbl.append("|---|------|----------|-----|------|-----|-------|-----|")
+            for i, f in enumerate(findings, 1):
+                cvss = f.get("cvss_score")
+                cvss_str = f"{cvss} ({cvss_severity_label(cvss)})" if cvss is not None else "—"
+                calib = f.get("calibrated_severity")
+                raw = (f.get("severity") or "info")
+                # §7: show both when they differ.
+                sev_str = (f"{calib} (raw {raw})" if calib and calib.upper() != raw.upper()
+                           else (calib or raw))
+                tbl.append(
+                    f"| {i} | {f['vuln_type']} | {sev_str} | "
+                    f"{f.get('cve_id') or '—'} | {cvss_str} | {f.get('cwe') or '—'} | "
+                    f"{f.get('owasp_category') or '—'} | `{f['url']}` |"
+                )
+        else:
+            tbl.append("| # | Type | Severity | URL | Parameter |")
+            tbl.append("|---|------|----------|-----|-----------|")
+            for i, f in enumerate(findings, 1):
+                tbl.append(
+                    f"| {i} | {f['vuln_type']} | {f['severity']} | "
+                    f"`{f['url']}` | {f['parameter']} |"
+                )
+        report_lines[findings_table_index] = "\n".join(tbl)
 
     # Extract next steps
     next_steps = []
@@ -1917,6 +1850,76 @@ async def _generate_report(session_id: str, model: str, target_url: str,
         await db.close()
 
     return report_md, executive_summary, gen_duration
+
+
+_SEV_STAT_KEY = {
+    "CRITICAL": "critical", "HIGH": "high", "MEDIUM": "medium",
+    "LOW": "low", "INFO": "informational", "INFORMATIONAL": "informational",
+}
+
+
+async def _build_report_json(session_id: str) -> dict:
+    """Assemble the validated pentest-report.json (Phase 2) from the (enriched,
+    calibrated) finding rows. Source of truth for GET /report.json and the
+    on-disk artifact. Uses calibrated_severity when present, else the raw label.
+    """
+    db = await get_db()
+    try:
+        srow = await (await db.execute(
+            "SELECT * FROM sessions WHERE id = ?", (session_id,))).fetchone()
+        session = dict(srow) if srow else {}
+        cur = await db.execute(
+            "SELECT vuln_type, severity, url, evidence, cve_id, cvss_score, cvss_vector, "
+            "cwe, calibrated_severity, owasp_category, impact, remediation, confidence, "
+            "ref_links, triage_status, severity_override "
+            "FROM findings WHERE session_id = ? ORDER BY id", (session_id,)
+        )
+        rows = [dict(r) for r in await cur.fetchall()]
+    finally:
+        await db.close()
+
+    stats = {"total": 0, "critical": 0, "high": 0, "medium": 0, "low": 0,
+             "informational": 0}
+    report_findings = []
+    i = 0
+    for r in rows:
+        # Operator triage: rejected findings are excluded from the deliverable;
+        # a severity override wins over calibrated/raw.
+        if r.get("triage_status") == "rejected":
+            continue
+        i += 1
+        sev = (r.get("severity_override") or r.get("calibrated_severity")
+               or r.get("severity") or "INFO").upper()
+        refs = [x.strip() for x in (r.get("ref_links") or "").split(",") if x.strip()]
+        report_findings.append(ReportFinding(
+            id=f"F-{i:03d}",
+            title=r.get("vuln_type") or "Unknown",
+            severity=sev,
+            cvss_score=r.get("cvss_score"),
+            cvss_vector=r.get("cvss_vector"),
+            cwe=r.get("cwe"),
+            owasp=r.get("owasp_category"),
+            affected_url=r.get("url"),
+            description=(r.get("evidence") or None),
+            impact=r.get("impact"),
+            confidence=r.get("confidence"),
+            remediation=r.get("remediation"),
+            references=refs,
+        ))
+        stats["total"] += 1
+        stats[_SEV_STAT_KEY.get(sev, "informational")] += 1
+
+    report = PentestReport(
+        engagement={
+            "name": f"erlik session {session_id[:8]}",
+            "target": session.get("target_url") or "",
+            "dates": session.get("created_at") or "",
+            "status": session.get("status") or "complete",
+        },
+        statistics=stats,
+        findings=report_findings,
+    )
+    return report.model_dump()
 
 
 # --- File-Based Report Saving ---
@@ -1992,10 +1995,24 @@ async def _save_report_file(session_id: str, target_url: str, session_type: str,
 
 # --- Recon Context Extraction & Injection ---
 
+def _target_key(target_url: str) -> str:
+    """Normalized host:port used to accumulate memory across runs of one target."""
+    from urllib.parse import urlparse
+    p = urlparse(target_url if "://" in (target_url or "") else f"http://{target_url}")
+    host = (p.hostname or "").lower()
+    if not host:
+        return ""
+    port = p.port or (443 if p.scheme == "https" else 80)
+    return f"{host}:{port}"
+
+
 async def _extract_recon_context(session_id: str):
     """Parse tool outputs from a completed session and store structured recon data."""
     db = await get_db()
     try:
+        srow = await (await db.execute(
+            "SELECT target_url FROM sessions WHERE id = ?", (session_id,))).fetchone()
+        target_key = _target_key(srow["target_url"]) if srow else ""
         cursor = await db.execute(
             "SELECT tool_called, tool_input, tool_output FROM steps "
             "WHERE session_id = ? AND tool_output IS NOT NULL",
@@ -2116,15 +2133,86 @@ async def _extract_recon_context(session_id: str):
         db = await get_db()
         try:
             await db.executemany(
-                "INSERT INTO recon_context (session_id, context_type, key, value, source_tool) "
-                "VALUES (?, ?, ?, ?, ?)",
-                [(session_id, ct, k, v, st) for ct, k, v, st in context_entries],
+                "INSERT INTO recon_context (session_id, context_type, key, value, source_tool, target_key) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                [(session_id, ct, k, v, st, target_key) for ct, k, v, st in context_entries],
             )
             await db.commit()
         finally:
             await db.close()
 
     return len(context_entries)
+
+
+async def _get_target_memory_context(session_id: str, target_url: str, max_chars: int = 1600) -> str:
+    """Durable per-TARGET knowledge compiled from ALL prior runs against the same
+    target (not just an explicit parent). Lets even a cold session start from what
+    earlier runs already learned. Returns "" if nothing prior. Never raises.
+    """
+    tk = _target_key(target_url)
+    if not tk:
+        return ""
+    try:
+        db = await get_db()
+        try:
+            cur = await db.execute(
+                "SELECT DISTINCT context_type, key, value FROM recon_context "
+                "WHERE target_key = ? AND session_id != ? "
+                "ORDER BY context_type, key LIMIT 300", (tk, session_id))
+            rows = [dict(r) for r in await cur.fetchall()]
+            cur2 = await db.execute(
+                "SELECT f.vuln_type, f.severity, f.url, s.target_url FROM findings f "
+                "JOIN sessions s ON f.session_id = s.id "
+                "WHERE f.session_id != ? AND (f.false_positive IS NULL OR f.false_positive = 0)",
+                (session_id,))
+            allf = [dict(r) for r in await cur2.fetchall()]
+            cur3 = await db.execute(
+                "SELECT COUNT(DISTINCT session_id) FROM recon_context WHERE target_key = ? AND session_id != ?",
+                (tk, session_id))
+            n_runs = (await cur3.fetchone())[0]
+        finally:
+            await db.close()
+    except Exception as e:  # noqa: BLE001
+        print(f"[target-mem {session_id[:8]}] {e}", flush=True)
+        return ""
+
+    prior_findings = [f for f in allf if _target_key(f.get("target_url") or "") == tk]
+    if not rows and not prior_findings:
+        return ""
+
+    buckets: dict[str, list] = {}
+    for r in rows:
+        buckets.setdefault(r["context_type"], [])
+        key = r["key"]
+        if key and key not in buckets[r["context_type"]]:
+            buckets[r["context_type"]].append(key)
+
+    label = {"directory": "Known paths", "endpoint": "Known endpoints",
+             "technology": "Detected tech", "service": "Services",
+             "parameter": "Parameters", "finding": "Prior scan hits"}
+    lines = [
+        "═══════════════════════════════════════════════════════════════",
+        f"PRIOR KNOWLEDGE FOR THIS TARGET (accumulated from {n_runs} earlier run(s))",
+        "═══════════════════════════════════════════════════════════════",
+        "START from these verified facts — do NOT re-discover them. Re-check the "
+        "prior findings and go deeper / test what earlier runs missed.",
+    ]
+    for ctype in ("technology", "service", "directory", "endpoint", "parameter", "finding"):
+        vals = buckets.get(ctype)
+        if vals:
+            lines.append(f"{label.get(ctype, ctype)}: " + ", ".join(vals[:25]))
+    if prior_findings:
+        seen = set()
+        fl = []
+        for f in prior_findings:
+            k = (f.get("vuln_type"), f.get("url"))
+            if k in seen:
+                continue
+            seen.add(k)
+            fl.append(f"{f.get('vuln_type')} @ {f.get('url')} ({f.get('severity')})")
+        lines.append("Previously confirmed findings: " + "; ".join(fl[:20]))
+    out = "\n".join(lines)
+    return out[:max_chars] + ("\n" if len(out) <= max_chars else " …\n")
 
 
 async def _get_warm_start_context(parent_session_id: str) -> str:
@@ -2275,18 +2363,22 @@ async def _create_chain_session(chain_id: str, chain_row, phase: str, position: 
     toolset_preset = chain_row["toolset_preset"] if "toolset_preset" in chain_row.keys() else None
     disable_stagnation = bool(chain_row["disable_stagnation"]) if "disable_stagnation" in chain_row.keys() and chain_row["disable_stagnation"] else False
 
+    # Carry the chain's run_config onto every sub-session (defensive: older chain
+    # rows from before the migration may not have the column).
+    _chain_run_config = chain_row["run_config"] if "run_config" in chain_row.keys() else None
+
     db = await get_db()
     try:
         await db.execute(
             "INSERT INTO sessions (id, target_url, scope_mode, system_prompt, model, enabled_tools, "
             "session_type, no_timeout, max_turns, chain_id, chain_position, chain_phase, "
-            "toolset_preset, disable_stagnation) "
-            "VALUES (?, ?, ?, ?, ?, ?, 'chain', ?, ?, ?, ?, ?, ?, ?)",
+            "toolset_preset, disable_stagnation, run_config) "
+            "VALUES (?, ?, ?, ?, ?, ?, 'chain', ?, ?, ?, ?, ?, ?, ?, ?)",
             (session_id, chain_row["target_url"], chain_row["scope_mode"],
              chain_row["system_prompt"], chain_row["model"], enabled_tools_str,
              1 if no_timeout else 0, max_turns,
              chain_id, position, phase,
-             toolset_preset, 1 if disable_stagnation else 0),
+             toolset_preset, 1 if disable_stagnation else 0, _chain_run_config),
         )
         await db.commit()
     finally:
@@ -2339,6 +2431,111 @@ async def _start_chain_session(session_id: str):
     })
 
 
+async def _generate_chain_report(chain_id: str, target_url: str) -> str | None:
+    """Consolidate every phase session of a chain into ONE de-duplicated report.
+
+    Each phase re-discovers the same low-hanging vulns (ftp, robots, CORS…), so
+    the four per-session reports overlap heavily and look like noise. This merges
+    them, de-dupes by (vuln_type, URL-without-query), honours triage (rejected
+    excluded, severity_override applied), and writes a single chain_<id>.md.
+    """
+    db = await get_db()
+    try:
+        cur = await db.execute(
+            "SELECT id, chain_phase, total_steps, total_findings "
+            "FROM sessions WHERE chain_id = ? ORDER BY chain_position", (chain_id,))
+        sessions = [dict(r) for r in await cur.fetchall()]
+        if not sessions:
+            return None
+        sids = [s["id"] for s in sessions]
+        ph = ",".join("?" * len(sids))
+        cur = await db.execute(
+            f"SELECT vuln_type, severity, url, parameter, evidence, cve_id, "
+            f"calibrated_severity, severity_override, triage_status "
+            f"FROM findings WHERE session_id IN ({ph}) ORDER BY id", sids)
+        findings = [dict(r) for r in await cur.fetchall()]
+        cur = await db.execute(
+            f"SELECT DISTINCT context_type, key FROM recon_context "
+            f"WHERE session_id IN ({ph}) ORDER BY context_type, key", sids)
+        ctx = [dict(r) for r in await cur.fetchall()]
+    finally:
+        await db.close()
+
+    def eff_sev(f):
+        return (f.get("severity_override") or f.get("calibrated_severity")
+                or f.get("severity") or "info").lower()
+
+    seen: dict = {}
+    for f in findings:
+        if (f.get("triage_status") or "") == "rejected":
+            continue
+        url = (f.get("url") or "").split("?")[0].rstrip("/").lower()
+        key = ((f.get("vuln_type") or "").lower(), url)
+        seen.setdefault(key, f)
+    order = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
+    unique = sorted(seen.values(), key=lambda f: order.get(eff_sev(f), 5))
+    counts: dict = {}
+    for f in unique:
+        counts[eff_sev(f)] = counts.get(eff_sev(f), 0) + 1
+    raw_total = sum((s.get("total_findings") or 0) for s in sessions)
+
+    L: list[str] = []
+    L.append("# Chained Penetration Test — Consolidated Report")
+    L.append("")
+    L.append(f"**Target:** {target_url}  ")
+    L.append(f"**Chain ID:** `{chain_id}`  ")
+    L.append(f"**Phases:** {' → '.join(s.get('chain_phase') or '?' for s in sessions)}  ")
+    L.append(f"**Unique findings:** {len(unique)}  (from {raw_total} raw across all phases)")
+    L.append("")
+    L.append("## Executive Summary")
+    L.append("")
+    sev_line = " · ".join(f"{counts[k]} {k}" for k in ("critical", "high", "medium", "low", "info") if counts.get(k))
+    L.append(f"A {len(sessions)}-phase chained assessment (recon → discovery → vuln scan → "
+             f"exploitation) against {target_url} produced **{len(unique)} unique findings**"
+             + (f" ({sev_line})" if sev_line else "") +
+             ", after de-duplicating the overlapping results each phase re-reported.")
+    L.append("")
+    L.append("## Phase Breakdown")
+    L.append("")
+    L.append("| Phase | Steps | Raw findings |")
+    L.append("|---|---|---|")
+    for s in sessions:
+        L.append(f"| {s.get('chain_phase') or '?'} | {s.get('total_steps') or 0} | {s.get('total_findings') or 0} |")
+    L.append("")
+    L.append(f"> The **{raw_total} raw** count includes the same vuln re-reported by each phase. "
+             f"The **{len(unique)} unique** findings below are the real, de-duplicated result.")
+    L.append("")
+    L.append("## Consolidated Findings")
+    L.append("")
+    if unique:
+        L.append("| # | Severity | Type | URL | Evidence |")
+        L.append("|---|---|---|---|---|")
+        for i, f in enumerate(unique, 1):
+            ev = (f.get("evidence") or "").replace("|", "/").replace("\n", " ").strip()[:130]
+            cve = f" `{f['cve_id']}`" if f.get("cve_id") else ""
+            L.append(f"| {i} | {eff_sev(f).upper()} | {f.get('vuln_type', '?')}{cve} "
+                     f"| {f.get('url', '') or '-'} | {ev} |")
+    else:
+        L.append("_No findings recorded across the chain._")
+    L.append("")
+    if ctx:
+        by: dict = {}
+        for c in ctx:
+            by.setdefault(c["context_type"], set()).add(c.get("key") or "")
+        L.append("## Reconnaissance Summary")
+        L.append("")
+        for t, items in by.items():
+            its = sorted(x for x in items if x)[:30]
+            if its:
+                L.append(f"- **{t}** ({len(its)}): {', '.join(its)}")
+        L.append("")
+
+    REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+    path = REPORTS_DIR / f"chain_{chain_id}.md"
+    path.write_text("\n".join(L), encoding="utf-8")
+    return str(path)
+
+
 async def _chain_auto_progress(session_id: str):
     """Called at the end of a chain session. Auto-creates and starts the next session if applicable."""
     db = await get_db()
@@ -2389,11 +2586,19 @@ async def _chain_auto_progress(session_id: str):
                 (current_phase, current_position + 1, chain_id)
             )
             await db.commit()
+            # Combine the four phase reports into ONE de-duplicated chain report.
+            try:
+                _chain_report = await _generate_chain_report(chain_id, chain["target_url"])
+            except Exception as _e:  # noqa: BLE001 — a report failure must not break the chain
+                _chain_report = None
+                print(f"[chain {chain_id[:8]}] combined report failed: {_e}", flush=True)
             await manager.broadcast(session_id, {
                 "type": "chain_complete",
                 "chain_id": chain_id,
                 "total_sessions": current_position + 1,
-                "message": "All chain phases completed!",
+                "report_path": _chain_report,
+                "message": (f"All chain phases completed! Consolidated report: {_chain_report}"
+                            if _chain_report else "All chain phases completed!"),
             })
             return
 
@@ -2476,8 +2681,14 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
 
     # Scale min-turns-before-done proportionally to max_turns
     # Default: 8 min out of 30 max (~50%). Scale same ratio for higher limits.
-    min_turns_before_done = max(DEFAULT_MIN_TURNS_BEFORE_DONE, int(max_turns * 0.5))
-    min_turns_before_done = min(min_turns_before_done, 25)  # cap at 25 — no need to force more
+    # Override with ERLIK_MIN_TURNS_BEFORE_DONE=N to let a slow model finish
+    # sooner (each turn can cost minutes on a 32B) without editing the default.
+    _min_env = os.environ.get("ERLIK_MIN_TURNS_BEFORE_DONE", "").strip()
+    if _min_env.isdigit():
+        min_turns_before_done = int(_min_env)
+    else:
+        min_turns_before_done = max(DEFAULT_MIN_TURNS_BEFORE_DONE, int(max_turns * 0.5))
+        min_turns_before_done = min(min_turns_before_done, 25)  # cap at 25 — no need to force more
 
     await manager.broadcast(session_id, {
         "type": "log", "phase": "recon",
@@ -2587,13 +2798,32 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
         if system_prompt and "ACCUMULATED TARGET KNOWLEDGE" in system_prompt:
             combined_system += f"\n\n{system_prompt}"
 
+        # Resolve the per-session run configuration (preset + overrides + env
+        # fallback). Decides which deterministic / knowledge stages run below.
+        _rc_raw = None
+        try:
+            _rc_db = await get_db()
+            try:
+                _rc_cur = await _rc_db.execute(
+                    "SELECT run_config FROM sessions WHERE id = ?", (session_id,))
+                _rc_row = await _rc_cur.fetchone()
+                _rc_raw = _rc_row[0] if _rc_row else None
+            finally:
+                await _rc_db.close()
+        except Exception:
+            _rc_raw = None
+        runcfg = runconfig.resolve(_rc_raw)
+        print(f"[runconfig {session_id[:8]}] preset={runcfg['preset']} "
+              f"skills={runcfg['skills']} nettacker={runcfg['nettacker']}"
+              f"({runcfg['nettacker_scenario']}) cve={runcfg['cve_enrich']}", flush=True)
+
         # Inject exploit playbooks for the 6 hard vulnerability classes when enabled
-        # (ERLIK_PLAYBOOKS=1). Target-detected by hostname/port — see orchestrator/playbooks.py.
+        # (per-session run config or ERLIK_PLAYBOOKS). See orchestrator/playbooks.py.
         try:
             from orchestrator.playbooks import get_playbook_context
         except ImportError:
             from playbooks import get_playbook_context
-        _pb_ctx = get_playbook_context(target_url)
+        _pb_ctx = get_playbook_context(target_url, mode=runcfg["playbooks"])
         if _pb_ctx:
             combined_system += f"\n\n{_pb_ctx}"
             print(f"[playbooks {session_id[:8]}] injected {len(_pb_ctx)} chars (target={target_url})", flush=True)
@@ -2603,6 +2833,95 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
             })
         else:
             print(f"[playbooks {session_id[:8]}] skipped (ERLIK_PLAYBOOKS={'set' if os.environ.get('ERLIK_PLAYBOOKS') else 'unset'}, target={target_url})", flush=True)
+
+        # Inject auto-selected skill knowledge (ERLIK_SKILLS=1). Unlike the
+        # Juice-Shop playbooks, this is target-agnostic: it picks 1-3 references
+        # from skills_catalog/ by the mission's vuln class. See orchestrator/skills.py.
+        try:
+            from orchestrator.skills import render_skills
+        except ImportError:
+            from skills import render_skills
+        try:
+            _sk_hint = " ".join(filter(None, [vuln_category or "", system_prompt or ""]))
+            _sk_ctx = render_skills(_sk_hint) if runcfg["skills"] else ""
+        except Exception as _sk_err:  # noqa: BLE001 — never break the loop over knowledge injection
+            _sk_ctx = ""
+            print(f"[skills {session_id[:8]}] error (non-fatal): {_sk_err}", flush=True)
+        if _sk_ctx:
+            combined_system += f"\n\n{_sk_ctx}"
+            print(f"[skills {session_id[:8]}] injected {len(_sk_ctx)} chars (hint={_sk_hint[:60]!r})", flush=True)
+            await manager.broadcast(session_id, {
+                "type": "log", "phase": "recon",
+                "message": f"SKILLS: injected {len(_sk_ctx)} chars of relevant pentest knowledge",
+            })
+
+        # Deterministic pre-scan (OWASP Nettacker) — seed the agent with verified
+        # recon (open ports, tech, paths, header/TLS/CVE hits) so it explores less.
+        # Gated by ERLIK_NETTACKER (default off). See orchestrator/integrations/nettacker.py.
+        try:
+            from orchestrator.integrations import nettacker as _nt_mod
+            _nt_on = runcfg["nettacker"]
+        except Exception:  # noqa: BLE001
+            _nt_on = False
+        if _nt_on:
+            await manager.broadcast(session_id, {
+                "type": "log", "phase": "recon",
+                "message": f"Nettacker pre-scan running (deterministic recon, scenario={runcfg['nettacker_scenario']})…",
+            })
+            _nt = await _nt_mod.run_nettacker(target_url, scenario=runcfg["nettacker_scenario"])
+            if _nt.get("error"):
+                print(f"[nettacker {session_id[:8]}] {_nt['error']}", flush=True)
+                await manager.broadcast(session_id, {
+                    "type": "log", "phase": "recon",
+                    "message": f"Nettacker pre-scan skipped: {_nt['error']}",
+                })
+            else:
+                _parsed = _nt_mod.parse_events(_nt["events"], target_url=target_url)
+                _nt_ctx = _nt_mod.summarize_for_agent(_parsed)
+                if _nt_ctx:
+                    combined_system += f"\n\n{_nt_ctx}"
+                    print(f"[nettacker {session_id[:8]}] injected {len(_nt_ctx)} chars "
+                          f"({len(_parsed['open_ports'])} ports, {len(_parsed['findings'])} pre-findings)", flush=True)
+                    await manager.broadcast(session_id, {
+                        "type": "log", "phase": "recon",
+                        "message": f"Nettacker: injected deterministic recon "
+                                   f"({len(_parsed['open_ports'])} ports, {len(_parsed['findings'])} pre-findings)",
+                    })
+                # Optionally persist deterministic findings (opt-in — keeps the
+                # research metrics clean unless the run config enables it).
+                if runcfg["nettacker_findings"] and _parsed["findings"]:
+                    try:
+                        _db = await get_db()
+                        try:
+                            for _f in _parsed["findings"]:
+                                await _db.execute(
+                                    "INSERT INTO findings (session_id, vuln_type, severity, url, parameter, evidence) "
+                                    "VALUES (?, ?, ?, ?, ?, ?)",
+                                    (session_id, _f["vuln_type"], _f["severity"], _f["url"],
+                                     _f["parameter"], _f["evidence"][:2000]),
+                                )
+                            await _db.commit()
+                        finally:
+                            await _db.close()
+                        await manager.broadcast(session_id, {
+                            "type": "log", "phase": "recon",
+                            "message": f"Nettacker: persisted {len(_parsed['findings'])} deterministic findings",
+                        })
+                    except Exception as _pe:  # noqa: BLE001
+                        print(f"[nettacker {session_id[:8]}] persist failed: {_pe}", flush=True)
+
+        # Inject durable per-TARGET memory (from all prior runs against this target).
+        # Unlike warm-start (explicit parent lineage), this applies to any session,
+        # incl. cold. Gated by the run config; default off. See _get_target_memory_context.
+        if runcfg.get("target_memory"):
+            _tm = await _get_target_memory_context(session_id, target_url)
+            if _tm:
+                combined_system += f"\n\n{_tm}"
+                print(f"[target-mem {session_id[:8]}] injected {len(_tm)} chars", flush=True)
+                await manager.broadcast(session_id, {
+                    "type": "log", "phase": "recon",
+                    "message": f"TARGET MEMORY: injected {len(_tm)} chars from prior runs on this target",
+                })
 
         # Inject warm-start context if applicable
         if session_type == "warm" and parent_session_id:
@@ -2744,6 +3063,7 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
                     timeout=300.0,  # 5-minute absolute ceiling per LLM call
                 )
                 duration = int((time.time() - start_time) * 1000)
+                response = _strip_reasoning(response)   # drop <think>…</think> before parse/history
                 print(f"[agent {session_id[:8]}] turn {turn+1}/{max_turns} ← LLM ok ({duration}ms)", flush=True)
             except asyncio.TimeoutError:
                 print(f"[agent {session_id[:8]}] turn {turn+1}/{max_turns} ← LLM TIMEOUT after 300s", flush=True)
@@ -2754,10 +3074,19 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
                 await _finish_session(session_id, "error")
                 return
             except Exception as e:
-                print(f"[agent {session_id[:8]}] turn {turn+1}/{max_turns} ← LLM error: {e}", flush=True)
+                # Classify rate/usage/auth failures as fatal so an overnight
+                # benchmark sweep aborts instead of failing every session the
+                # same way. Transient errors stay per-session.
+                _cls = classify_llm_error(e)
+                if _cls and _cls.is_fatal:
+                    request_abort(f"{_cls.kind}: {_cls.message}")
+                    err_msg = f"FATAL LLM error ({_cls.kind}) — aborting sweep: {e}"
+                else:
+                    err_msg = f"LLM error: {e}"
+                print(f"[agent {session_id[:8]}] turn {turn+1}/{max_turns} ← {err_msg}", flush=True)
                 await manager.broadcast(session_id, {
                     "type": "log", "phase": "error",
-                    "message": f"LLM error: {e}",
+                    "message": err_msg,
                 })
                 await _finish_session(session_id, "error")
                 return
@@ -3095,6 +3424,20 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
                         if uncovered:
                             tool_feedback += f"Move to an uncovered phase: {uncovered[0]}\n"
                         tool_feedback += "Respond with a JSON action."
+
+                    # Stateful primitives: capture tokens/cookies/creds from this
+                    # output and surface them for reuse on later steps. Off by
+                    # default; driven by the per-session run config.
+                    if runcfg.get("primitives"):
+                        _new_prims = await _store_primitives(session_id, tool_name, tool_output)
+                        if _new_prims:
+                            from orchestrator.primitives import format_for_agent
+                            tool_feedback += "\n\n" + format_for_agent(_new_prims) + "\n"
+                            await manager.broadcast(session_id, {
+                                "type": "log", "phase": "test",
+                                "message": f"PRIMITIVES: captured {len(_new_prims)} "
+                                           f"({', '.join(sorted({p['kind'] for p in _new_prims}))}) for reuse",
+                            })
                     messages.append({"role": "user", "content": tool_feedback})
 
                     # Save step to DB (cleaned output, larger truncation)
@@ -3381,6 +3724,29 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
             await db.close()
             db = None
 
+        # Enrich findings with NVD CVE data (driven by the per-session run config).
+        try:
+            n_enriched = await enrich_session_findings(session_id, force=runcfg["cve_enrich"])
+            if n_enriched:
+                await manager.broadcast(session_id, {
+                    "type": "log", "phase": "report",
+                    "message": f"CVE enrichment: {n_enriched} finding(s) scored via NVD",
+                })
+        except Exception as _enrich_err:  # noqa: BLE001
+            print(f"[enrich {session_id[:8]}] skipped: {_enrich_err}")
+
+        # Re-run PoCs for high/critical findings (driven by run config; default off).
+        try:
+            n_pocv = await poc_reverify_session(session_id, target_url, enabled_tools,
+                                                force=runcfg["poc_verify"])
+            if n_pocv:
+                await manager.broadcast(session_id, {
+                    "type": "log", "phase": "report",
+                    "message": f"PoC re-verification: {n_pocv} high/critical finding(s) confirmed",
+                })
+        except Exception as _pv_err:  # noqa: BLE001
+            print(f"[poc-verify {session_id[:8]}] skipped: {_pv_err}")
+
         # Generate report
         try:
             report_md, exec_summary, gen_duration = await _generate_report(
@@ -3429,6 +3795,15 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
                     "type": "log", "phase": "error",
                     "message": f"Failed to save report file: {e}",
                 })
+
+            # Write the validated pentest-report.json artifact (Phase 2).
+            try:
+                report_json = await _build_report_json(session_id)
+                REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+                (REPORTS_DIR / f"{session_id}.pentest-report.json").write_text(
+                    json.dumps(report_json, indent=2), encoding="utf-8")
+            except Exception as e:
+                print(f"[report.json {session_id[:8]}] skipped: {e}")
 
         except Exception as e:
             report_md = None
@@ -3734,6 +4109,80 @@ async def list_sessions():
         await db.close()
 
 
+@app.get("/api/run-presets")
+async def get_run_presets():
+    """Pre-selectable automation setups for the session-create UI."""
+    return {"presets": runconfig.presets_for_api(), "default": runconfig.DEFAULT_PRESET}
+
+
+@app.get("/api/nettacker-scenarios")
+async def get_nettacker_scenarios():
+    """Available Nettacker run modes (name → description) for the UI dropdown."""
+    from orchestrator.integrations.nettacker import list_scenarios, DEFAULT_SCENARIO
+    return {"scenarios": list_scenarios(), "default": DEFAULT_SCENARIO}
+
+
+# ── Skills library (browse in the SKILLS tab) ──────────────────────────────
+@app.get("/api/skills")
+async def get_skills_catalog():
+    """List the skill knowledge library: categories → reference files."""
+    from orchestrator.skills import SKILLS_ROOT, skills_enabled
+    cats = []
+    if SKILLS_ROOT.exists():
+        for cat_dir in sorted(p for p in SKILLS_ROOT.iterdir() if p.is_dir()):
+            files = sorted(f.name for f in cat_dir.glob("*.md"))
+            desc = ""
+            skill_md = cat_dir / "SKILL.md"
+            if skill_md.exists():
+                dm = re.search(r'description:\s*(.+)', skill_md.read_text(encoding="utf-8", errors="replace"))
+                if dm:
+                    desc = dm.group(1).strip()
+            cats.append({"category": cat_dir.name, "description": desc,
+                         "files": files, "count": len(files)})
+    return {"root": str(SKILLS_ROOT), "enabled": skills_enabled(), "categories": cats}
+
+
+@app.get("/api/skills-preview")
+async def preview_skills(hint: str = "injection"):
+    """Which reference sheets the router would inject for a given hint."""
+    from orchestrator.skills import select_skill_files, SKILLS_ROOT
+    files = select_skill_files(hint)
+    return {"hint": hint,
+            "selected": [str(f.relative_to(SKILLS_ROOT)) for f in files]}
+
+
+@app.get("/api/skills/{category}/{filename}")
+async def get_skill_file(category: str, filename: str):
+    """Return one skill reference file's markdown (path-traversal guarded)."""
+    from orchestrator.skills import SKILLS_ROOT
+    if not filename.endswith(".md") or "/" in category or "/" in filename \
+            or ".." in category or ".." in filename:
+        raise HTTPException(status_code=400, detail="invalid path")
+    root = SKILLS_ROOT.resolve()
+    path = (root / category / filename).resolve()
+    if not str(path).startswith(str(root)) or not path.is_file():
+        raise HTTPException(status_code=404, detail="skill file not found")
+    return {"category": category, "filename": filename,
+            "content": path.read_text(encoding="utf-8", errors="replace")}
+
+
+@app.get("/api/sessions/{session_id}/run-config")
+async def get_session_run_config(session_id: str):
+    """The automation config a session ran with (raw + resolved) — for reproducibility."""
+    db = await get_db()
+    try:
+        cur = await db.execute("SELECT run_config FROM sessions WHERE id = ?", (session_id,))
+        row = await cur.fetchone()
+    finally:
+        await db.close()
+    raw = row[0] if row else None
+    try:
+        parsed = json.loads(raw) if raw else None
+    except (ValueError, TypeError):
+        parsed = None
+    return {"raw": parsed, "resolved": runconfig.resolve(raw)}
+
+
 @app.post("/api/sessions", response_model=SessionResponse)
 async def create_session(data: SessionCreate):
     session_id = uuid.uuid4().hex[:12]
@@ -3753,15 +4202,16 @@ async def create_session(data: SessionCreate):
         effective_max_turns = data.max_turns if data.max_turns > 0 else ABSOLUTE_MAX_TURNS
         effective_max_turns = min(effective_max_turns, ABSOLUTE_MAX_TURNS)  # enforce cap
 
+        _run_config_json = json.dumps(data.run_config) if data.run_config else None
         await db.execute(
             "INSERT INTO sessions (id, target_url, scope_mode, system_prompt, model, enabled_tools, "
             "session_type, parent_session_id, vuln_category, no_timeout, max_turns, "
-            "toolset_preset, disable_stagnation, tool_timeout) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "toolset_preset, disable_stagnation, tool_timeout, run_config) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (session_id, data.target_url, data.scope_mode.value, data.system_prompt, data.model,
              enabled_tools_str, data.session_type, data.parent_session_id, data.vuln_category,
              1 if data.no_timeout else 0, effective_max_turns, data.toolset_preset,
-             1 if data.disable_stagnation else 0, data.tool_timeout),
+             1 if data.disable_stagnation else 0, data.tool_timeout, _run_config_json),
         )
         await db.commit()
         row = await db.execute("SELECT * FROM sessions WHERE id = ?", (session_id,))
@@ -3902,6 +4352,85 @@ async def list_findings(session_id: str):
         return [dict(r) for r in rows]
     finally:
         await db.close()
+
+
+@app.post("/api/findings/{finding_id}/triage")
+async def triage_finding(finding_id: int, body: dict = Body(...)):
+    """Operator triage: accept/reject a finding + optional severity override.
+
+    Body: {status?: 'accepted'|'rejected'|null, severity_override?: str|null,
+    note?: str}. 'rejected' also sets false_positive=1 so it's excluded from the
+    deliverable; 'accepted' clears it. Mutating — gated by the API token when set.
+    """
+    status = body.get("status")
+    if status not in (None, "", "accepted", "rejected"):
+        raise HTTPException(400, "status must be 'accepted', 'rejected', or null")
+    sets, vals = [], []
+    if "status" in body:
+        sets.append("triage_status = ?"); vals.append(status or None)
+        if status == "rejected":
+            sets.append("false_positive = 1")
+        elif status == "accepted":
+            sets.append("false_positive = 0")
+    if "severity_override" in body:
+        sets.append("severity_override = ?"); vals.append(body.get("severity_override") or None)
+    if "note" in body:
+        sets.append("triage_note = ?"); vals.append(body.get("note") or None)
+    if not sets:
+        raise HTTPException(400, "nothing to update")
+    db = await get_db()
+    try:
+        vals.append(finding_id)
+        await db.execute(f"UPDATE findings SET {', '.join(sets)} WHERE id = ?", vals)
+        await db.commit()
+        cur = await db.execute("SELECT * FROM findings WHERE id = ?", (finding_id,))
+        row = await cur.fetchone()
+        if not row:
+            raise HTTPException(404, "finding not found")
+        return dict(row)
+    finally:
+        await db.close()
+
+
+@app.get("/api/sessions/{session_id}/report.json")
+async def get_report_json(session_id: str):
+    """Validated pentest-report.json for a session (Phase 2 structured schema).
+
+    Rebuilt live from the (enriched, calibrated) finding rows — the JSON is the
+    source of truth from which the markdown report is rendered.
+    """
+    return await _build_report_json(session_id)
+
+
+@app.get("/api/sessions/{session_id}/report.html", response_class=HTMLResponse)
+async def get_report_html(session_id: str):
+    """Client-ready HTML report (print-to-PDF in a browser), from report.json."""
+    from orchestrator.reporting import report_to_html
+    return HTMLResponse(report_to_html(await _build_report_json(session_id)))
+
+
+@app.get("/api/sessions/{session_id}/report.sarif")
+async def get_report_sarif(session_id: str):
+    """SARIF 2.1.0 for CI / security-tool ingestion, from report.json."""
+    from orchestrator.reporting import report_to_sarif
+    return report_to_sarif(await _build_report_json(session_id), session_id)
+
+
+@app.get("/api/sessions/{session_id}/report.defectdojo.json")
+async def get_report_defectdojo(session_id: str):
+    """DefectDojo 'Generic Findings Import' JSON, from report.json."""
+    from orchestrator.reporting import report_to_defectdojo
+    return report_to_defectdojo(await _build_report_json(session_id))
+
+
+@app.get("/api/sessions/{session_id}/report.jira.csv")
+async def get_report_jira_csv(session_id: str):
+    """CSV for Jira CSV issue import, from report.json."""
+    from fastapi.responses import PlainTextResponse
+    from orchestrator.reporting import report_to_jira_csv
+    csv_text = report_to_jira_csv(await _build_report_json(session_id))
+    return PlainTextResponse(csv_text, media_type="text/csv", headers={
+        "Content-Disposition": f'attachment; filename="erlik-{session_id}.jira.csv"'})
 
 
 @app.get("/api/sessions/{session_id}/report")
@@ -4089,12 +4618,13 @@ async def create_chain(data: ChainCreate):
         await db.execute(
             "INSERT INTO chains (id, target_url, scope_mode, system_prompt, model, enabled_tools, "
             "current_phase, current_position, total_sessions, status, auto_progress, "
-            "max_turns_per_session, no_timeout, toolset_preset, disable_stagnation) "
-            "VALUES (?, ?, ?, ?, ?, ?, 'recon', 0, 1, 'running', ?, ?, ?, ?, ?)",
+            "max_turns_per_session, no_timeout, toolset_preset, disable_stagnation, run_config) "
+            "VALUES (?, ?, ?, ?, ?, ?, 'recon', 0, 1, 'running', ?, ?, ?, ?, ?, ?)",
             (chain_id, data.target_url, data.scope_mode.value, data.system_prompt, data.model,
              enabled_tools_str, 1 if data.auto_progress else 0, effective_max_turns,
              1 if data.no_timeout else 0, data.toolset_preset,
-             1 if data.disable_stagnation else 0),
+             1 if data.disable_stagnation else 0,
+             json.dumps(data.run_config) if data.run_config else None),
         )
         await db.commit()
 
@@ -4180,6 +4710,40 @@ async def get_chain(chain_id: str):
         }
     finally:
         await db.close()
+
+
+@app.get("/api/chains/{chain_id}/report")
+async def get_chain_report(chain_id: str):
+    """The consolidated, de-duplicated report for a whole chain (markdown)."""
+    if "/" in chain_id or ".." in chain_id:
+        raise HTTPException(400, "invalid chain id")
+    path = REPORTS_DIR / f"chain_{chain_id}.md"
+    if not path.exists():
+        # Fall back to generating it on demand (e.g. an older completed chain).
+        db = await get_db()
+        try:
+            row = await db.execute("SELECT target_url FROM chains WHERE id = ?", (chain_id,))
+            chain = await row.fetchone()
+        finally:
+            await db.close()
+        if chain:
+            try:
+                await _generate_chain_report(chain_id, chain["target_url"])
+            except Exception:  # noqa: BLE001
+                pass
+    if not path.exists():
+        raise HTTPException(404, "chain report not found (chain may not be complete)")
+    return {"chain_id": chain_id, "markdown": path.read_text(encoding="utf-8", errors="replace")}
+
+
+@app.get("/api/chains/{chain_id}/report/download")
+async def download_chain_report(chain_id: str):
+    if "/" in chain_id or ".." in chain_id:
+        raise HTTPException(400, "invalid chain id")
+    path = REPORTS_DIR / f"chain_{chain_id}.md"
+    if not path.exists():
+        raise HTTPException(404, "chain report not found")
+    return FileResponse(path, media_type="text/markdown", filename=f"chain_{chain_id}.md")
 
 
 @app.post("/api/chains/{chain_id}/continue")
@@ -5256,6 +5820,50 @@ def _match_finding_to_ground_truth_scored(finding: dict, ground_truths: list[dic
     }
 
 
+def _sound_confusion_matrix(findings: list[dict], ground_truths: list[dict],
+                            threshold: float = 2.0) -> dict:
+    """A SOUND confusion matrix (added alongside the legacy fuzzy scorer).
+
+    Unlike the legacy metrics — which use mismatched precision/recall numerators
+    and let one finding satisfy many ground-truths — this does a one-to-one
+    greedy assignment (each finding matched at most once, each GT matched at most
+    once, best score first). Precision/recall/F1 are therefore derived from a
+    single, internally-consistent matrix. Exposed under `sound_metrics`; the
+    legacy keys are left untouched so prior runs stay reproducible.
+    """
+    pairs = []
+    for fi, f in enumerate(findings):
+        for gj, gt in enumerate(ground_truths):
+            r = _match_finding_to_ground_truth_scored(f, [gt])
+            if r.get("score", 0) >= threshold:
+                pairs.append((r["score"], fi, gj))
+    pairs.sort(key=lambda x: -x[0])
+    used_f: set[int] = set()
+    used_g: set[int] = set()
+    tp = 0
+    for _score, fi, gj in pairs:
+        if fi in used_f or gj in used_g:
+            continue
+        used_f.add(fi)
+        used_g.add(gj)
+        tp += 1
+    total_f = len(findings)
+    total_g = len(ground_truths)
+    fp = total_f - tp
+    fn = total_g - tp
+    precision = tp / (tp + fp) if (tp + fp) else 0.0
+    recall = tp / (tp + fn) if (tp + fn) else 0.0
+    f1 = (2 * precision * recall / (precision + recall)) if (precision + recall) else 0.0
+    return {
+        "tp": tp, "fp": fp, "fn": fn,
+        "precision": round(precision, 4),
+        "recall": round(recall, 4),
+        "f1": round(f1, 4),
+        "threshold": threshold,
+        "note": "one-to-one greedy assignment; consistent P/R/F1",
+    }
+
+
 async def _compute_benchmark_metrics(session_id: str, ground_truths: list[dict]) -> dict:
     """Compute all benchmark metrics for a single session."""
     db = await get_db()
@@ -5451,6 +6059,9 @@ async def _compute_benchmark_metrics(session_id: str, ground_truths: list[dict])
                 "unverified": unverified_count,
                 "suspicious": suspicious_count,
             },
+            # Sound, internally-consistent confusion matrix (parallel to the
+            # legacy precision/recall above, which are kept for reproducibility).
+            "sound_metrics": _sound_confusion_matrix(findings, ground_truths),
         }
     finally:
         await db.close()
@@ -5866,8 +6477,23 @@ async def _run_benchmark_sequence(benchmark_id: str, data: BenchmarkCreate):
 
     repeat_n = max(1, min(data.repeat_n, 50))
 
+    # Clear any stale fatal-abort signal from a prior run in this process.
+    clear_abort()
+
     try:
         for iteration in range(1, repeat_n + 1):
+            # A fatal LLM error (rate/usage/auth) in a prior session aborts the
+            # whole sweep — the remaining iterations would fail identically.
+            _abort = abort_requested()
+            if _abort:
+                await _broadcast_benchmark(benchmark_id, {
+                    "type": "log", "phase": "error",
+                    "message": f"Benchmark aborted after fatal LLM error ({_abort}) — "
+                               f"stopped at iteration {iteration}/{repeat_n}.",
+                })
+                print(f"[BENCHMARK {benchmark_id}] aborting sweep: {_abort}")
+                break
+
             cold_session_id = None
             warm_session_id = None
             chain_id_result = None
@@ -5903,9 +6529,10 @@ async def _run_benchmark_sequence(benchmark_id: str, data: BenchmarkCreate):
             try:
                 await db.execute(
                     "INSERT INTO sessions (id, target_url, scope_mode, system_prompt, model, enabled_tools, "
-                    "session_type, no_timeout, max_turns) VALUES (?, ?, ?, ?, ?, ?, 'cold', ?, ?)",
+                    "session_type, no_timeout, max_turns, run_config) VALUES (?, ?, ?, ?, ?, ?, 'cold', ?, ?, ?)",
                     (cold_session_id, data.target_url, "full", data.system_prompt, data.model,
-                     enabled_tools_str, 1 if data.no_timeout else 0, effective_max_turns)
+                     enabled_tools_str, 1 if data.no_timeout else 0, effective_max_turns,
+                     json.dumps(data.run_config) if data.run_config else None)
                 )
                 await db.execute(
                     "UPDATE benchmark_runs SET cold_session_id = ? WHERE id = ?",
@@ -5956,6 +6583,16 @@ async def _run_benchmark_sequence(benchmark_id: str, data: BenchmarkCreate):
                 "iteration": iteration,
             })
 
+            # Fatal LLM error during the cold session → skip warm/chain and stop.
+            _abort = abort_requested()
+            if _abort:
+                await _broadcast_benchmark(benchmark_id, {
+                    "type": "log", "phase": "error",
+                    "message": f"Benchmark aborted after fatal LLM error ({_abort}).",
+                })
+                print(f"[BENCHMARK {benchmark_id}] aborting sweep after cold: {_abort}")
+                break
+
             # Small delay between sessions
             await asyncio.sleep(5)
 
@@ -5972,9 +6609,10 @@ async def _run_benchmark_sequence(benchmark_id: str, data: BenchmarkCreate):
             try:
                 await db.execute(
                     "INSERT INTO sessions (id, target_url, scope_mode, system_prompt, model, enabled_tools, "
-                    "session_type, parent_session_id, no_timeout, max_turns) VALUES (?, ?, ?, ?, ?, ?, 'warm', ?, ?, ?)",
+                    "session_type, parent_session_id, no_timeout, max_turns, run_config) VALUES (?, ?, ?, ?, ?, ?, 'warm', ?, ?, ?, ?)",
                     (warm_session_id, data.target_url, "full", data.system_prompt, data.model,
-                     enabled_tools_str, cold_session_id, 1 if data.no_timeout else 0, effective_max_turns)
+                     enabled_tools_str, cold_session_id, 1 if data.no_timeout else 0, effective_max_turns,
+                     json.dumps(data.run_config) if data.run_config else None)
                 )
                 await db.execute(
                     "UPDATE benchmark_runs SET warm_session_id = ? WHERE id = ?",
@@ -6034,9 +6672,10 @@ async def _run_benchmark_sequence(benchmark_id: str, data: BenchmarkCreate):
                 await db.execute(
                     "INSERT INTO chains (id, target_url, scope_mode, system_prompt, model, enabled_tools, "
                     "current_phase, current_position, total_sessions, status, auto_progress, "
-                    "max_turns_per_session, no_timeout) VALUES (?, ?, ?, ?, ?, ?, 'recon', 0, 1, 'running', 1, ?, ?)",
+                    "max_turns_per_session, no_timeout, run_config) VALUES (?, ?, ?, ?, ?, ?, 'recon', 0, 1, 'running', 1, ?, ?, ?)",
                     (chain_id_result, data.target_url, "full", data.system_prompt, data.model,
-                     enabled_tools_str, effective_max_turns, 1 if data.no_timeout else 0)
+                     enabled_tools_str, effective_max_turns, 1 if data.no_timeout else 0,
+                     json.dumps(data.run_config) if data.run_config else None)
                 )
                 await db.execute(
                     "UPDATE benchmark_runs SET chain_id = ? WHERE id = ?",

@@ -159,3 +159,61 @@ between runs; aggregate coverage is stable across repeats.
 
 Active development. The deterministic engine and WSTG catalogue are
 operational; the catalogue is being expanded toward broader WSTG coverage.
+
+## Deterministic pre-scan (OWASP Nettacker)
+
+To reduce reliance on the LLM, erlik can run a **deterministic** OWASP Nettacker
+scan before the agent loop and inject the verified results (open ports, detected
+tech, exposed paths, header/TLS/CVE hits) as a starting point — so the model
+confirms/exploits rather than blindly re-discovers.
+
+```bash
+pip install nettacker            # or use the owasp/nettacker Docker image
+export ERLIK_NETTACKER=1         # enable the pre-scan (default off)
+export ERLIK_NETTACKER_SCENARIO=recon   # run mode (default: recon)
+# optional:
+#   ERLIK_NETTACKER_CMD="python -m nettacker.main"   # custom launcher / docker wrapper
+#   ERLIK_NETTACKER_PROFILE="scan,info"              # raw Nettacker --profile (overrides scenario)
+#   ERLIK_NETTACKER_MODULES="port_scan,dir_scan"     # raw -m module list (advanced)
+#   ERLIK_NETTACKER_FINDINGS=1                        # also persist deterministic findings
+```
+
+**Scenarios (run modes)** map to Nettacker's stable scan *profiles*:
+
+| Scenario | Covers |
+|----------|--------|
+| `recon` *(default)* | ports, dirs, tech, subdomains, versions, WAF — fast & safe |
+| `info` | recon + information gathering |
+| `web` | all HTTP/HTTPS checks |
+| `tls` | TLS/SSL certificate, cipher, version |
+| `cves` | all CVE checks (~61 modules) |
+| `kev` | CISA Known-Exploited-Vulnerabilities subset |
+| `critical` | only critical-severity modules |
+| `wordpress` | WordPress core/plugin/theme |
+| `brute` | credential brute-force (needs `-u/-p`; can lock accounts) |
+| `full` | every module (slow & noisy) |
+
+```bash
+python -m orchestrator.integrations.nettacker --scenarios          # list them
+python -m orchestrator.integrations.nettacker http://target --scenario tls
+```
+
+Standalone (any pipeline/model, no erlik session needed):
+
+```bash
+python -m orchestrator.integrations.nettacker http://target        # prints recon block
+python -m orchestrator.integrations.nettacker http://target --json # parsed buckets
+```
+
+Nettacker is Apache-2.0 and is **invoked, not bundled** — see
+[THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).
+
+## License & third-party code
+
+Erlik 2.0 is released under the [MIT License](LICENSE).
+
+Some components are adapted from other open-source projects (e.g. NVD CVE
+enrichment from the MIT-licensed
+[transilienceai/communitytools](https://github.com/transilienceai/communitytools)).
+See [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md) for attribution and the
+bundled license texts under [`licenses/`](licenses/).

@@ -1,0 +1,28 @@
+id: WSTG-ERRH-01
+name: Improper Error Handling
+category: Error Handling
+severity: low
+references:
+  - https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/08-Testing_for_Error_Handling/01-Testing_For_Improper_Error_Handling
+
+target_schema:
+  required: [url]
+  optional: [parameter, cookie, auth_header]
+
+steps:
+  - name: provoke_errors
+    tool: curl
+    # A few malformed requests likely to trip an unhandled exception and leak a
+    # stack trace / framework internals.
+    command: >-
+      bash -c "curl -s \"{{url}}/%ff%fe\"; echo; curl -s \"{{url}}/'\\\"\"; echo; curl -s \"{{url}}?id[]=1\""
+    evaluators:
+      - type: regex
+        pattern: >-
+          stack trace|Traceback \(most recent call last\)|Exception in|at java\.|at org\.[\w.]+|
+          \.java:\d+|node_modules|/usr/local/lib|/var/www|ORA-\d+|SQLSTATE|
+          Warning:.*on line \d+|Fatal error:|Werkzeug Debugger|DEBUG = True|
+          Microsoft \.NET|System\.\w+Exception
+        emit_finding:
+          vuln_type: Verbose Error Message / Stack Trace Disclosure
+          severity: low

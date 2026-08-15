@@ -1,11 +1,15 @@
 """Execute pentest tools inside the kali-tools Docker container (or natively via ERLIK_NATIVE)."""
 
 import asyncio
+import fnmatch
+import ipaddress
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import time
+from urllib.parse import urlparse
 
 ERLIK_NATIVE = bool(os.environ.get("ERLIK_NATIVE", ""))
 CONTAINER_NAME = "kali-tools"
@@ -38,6 +42,13 @@ DOCKER_BIN = _resolve_docker_bin()
 # Only consulted when ERLIK_DOCKER_TARGET_HOST is explicitly set OR when a
 # target_url is missing AND the legacy lab compose stack is in use.
 LEGACY_DOCKER_TARGET_HOST = os.environ.get("ERLIK_DOCKER_TARGET_HOST", "")
+
+# Tools run INSIDE the kali-tools container, where "localhost" is the container
+# itself — not the target. Docker Desktop / OrbStack expose the host machine as
+# `host.docker.internal`, so a loopback target (localhost/127.0.0.1) is reached
+# there. Override for exotic setups (e.g. a compose service name) via env.
+DOCKER_HOST_GATEWAY = os.environ.get("ERLIK_DOCKER_HOST_GATEWAY", "host.docker.internal")
+_LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "0.0.0.0", "::1", ""}
 
 # Tools that are safe to run and their max execution time (seconds)
 TOOL_TIMEOUTS = {
@@ -109,50 +120,59 @@ def _sanitize_command(command: str, target_url: str = None) -> str:
 
     target_host = "localhost"
     target_port = 80
-    target_hp = f"{target_host}:{target_port}"
-
     if target_url:
         parsed = urlparse(target_url)
         target_host = parsed.hostname or "localhost"
         target_port = parsed.port or (443 if parsed.scheme == "https" else 80)
-        target_hp = f"{target_host}:{target_port}"
 
-        # Strip LLM training-data bias toward juice-shop:3000, but only when
-        # the actual target is NOT juice-shop. When it is, the rewrite would
-        # duplicate path segments (e.g. /rest/products/rest/products/...).
-        if "juice-shop" not in target_host:
-            command = command.replace("http://juice-shop:3000", target_url.rstrip("/"))
-            command = command.replace("https://juice-shop:3000", target_url.rstrip("/"))
-            command = command.replace("juice-shop:3000", target_hp)
-            command = re.sub(r'\bjuice-shop\b', target_host, command)
+    # Resolve the host tools should ACTUALLY connect to (see DOCKER_HOST_GATEWAY).
+    #   native mode            -> the target host verbatim (loopback works)
+    #   ERLIK_DOCKER_TARGET_HOST-> that explicit host (legacy lab override)
+    #   docker + loopback target-> the host gateway (host.docker.internal)
+    #   docker + remote target -> the target host (reachable from the container)
+    if ERLIK_NATIVE:
+        exec_host = target_host
+    elif LEGACY_DOCKER_TARGET_HOST:
+        exec_host = LEGACY_DOCKER_TARGET_HOST
+    elif target_host.lower() in _LOOPBACK_HOSTS:
+        exec_host = DOCKER_HOST_GATEWAY
+    else:
+        exec_host = target_host
+    exec_port = target_port or 3000
+    exec_hp = f"{exec_host}:{exec_port}"
 
-    # Legacy lab support: ERLIK_DOCKER_TARGET_HOST=juice-shop reproduces old
-    # behaviour where the agent says "localhost" but means the in-network app.
-    if not ERLIK_NATIVE and LEGACY_DOCKER_TARGET_HOST:
-        host = LEGACY_DOCKER_TARGET_HOST
-        port = target_port or 3000
-        command = re.sub(r'https?://localhost:\d+', f'http://{host}:{port}', command)
-        command = re.sub(r'https?://127\.0\.0\.1:\d+', f'http://{host}:{port}', command)
-        command = re.sub(r'\blocalhost\b', host, command)
-        command = re.sub(r'\b127\.0\.0\.1\b', host, command)
+    # Rewrite every hostname the model might emit — its juice-shop training-data
+    # bias, loopback references (which point at the *container* under docker),
+    # and the literal target host — to the reachable exec host. Port-anchored so
+    # it never touches wordlist paths. This is what makes the target reachable;
+    # previously `juice-shop:3000` (which works) was rewritten to `localhost`
+    # (which doesn't, from inside the container).
+    aliases = ["juice-shop", "localhost", "127.0.0.1", "0.0.0.0"]
+    if target_host and target_host.lower() not in aliases:
+        aliases.append(target_host)
+    for a in aliases:
+        if a == exec_host:
+            continue
+        command = re.sub(r'https?://' + re.escape(a) + r'(?::\d+)?', f'http://{exec_hp}', command)
+        command = re.sub(r'(?<![\w.])' + re.escape(a) + r':\d+\b', exec_hp, command)
+    # Bare host with no port (e.g. `nmap localhost`, `nmap juice-shop`) -> exec
+    # host. Runs after the port-anchored rewrites, so only standalone hosts
+    # remain. Guarded so it never matches a longer host/IP (localhost.foo,
+    # 127.0.0.10).
+    for bare in ("juice-shop", "localhost", "127.0.0.1"):
+        if bare != exec_host:
+            command = re.sub(r'(?<![\w.-])' + re.escape(bare) + r'(?![\w.:-])', exec_host, command)
 
     tool_name = _extract_tool_name(command)
-    if not ERLIK_NATIVE and LEGACY_DOCKER_TARGET_HOST:
-        # Tools that require an explicit http:// scheme — fix bare host:port.
+    # Tools that need an explicit http:// scheme — fix a bare exec host:port.
+    if not ERLIK_NATIVE:
         TOOLS_NEEDING_SCHEME = ["gobuster", "ffuf", "nikto", "nuclei", "dalfox", "wfuzz",
                                 "sqlmap", "xsstrike", "commix", "crlfuzz", "whatweb", "wafw00f",
                                 "arjun", "curl", "zap-cli"]
         if tool_name in TOOLS_NEEDING_SCHEME:
-            host = LEGACY_DOCKER_TARGET_HOST
-            port = target_port or 3000
             command = re.sub(
-                r'(?<!http://)(?<!https://)\b' + re.escape(host) + r':\d+\b',
-                f'http://{host}:{port}',
-                command,
-            )
-            command = re.sub(
-                r'(?<!http://)(?<!https://)\b' + re.escape(host) + r'(?!:)\b',
-                f'http://{host}:{port}',
+                r'(?<!http://)(?<!https://)\b' + re.escape(exec_host) + r':(\d+)\b',
+                f'http://{exec_host}:\\1',
                 command,
             )
 
@@ -161,7 +181,25 @@ def _sanitize_command(command: str, target_url: str = None) -> str:
     # the default template subset which misses A02 (crypto), A07 (auth), A08
     # (SCA/CVE), A10 (SSRF). Inject a broad tag set so the LLM doesn't have
     # to know nuclei's flag conventions to get full coverage.
+    # Strip flags the model commonly invents that make a tool abort with a usage
+    # dump instead of running (seen repeatedly in real runs). Conservative —
+    # only well-known non-existent flags for the specific tool.
+    _BAD_FLAGS = {
+        "arjun":    [r'\s--fuzzer\b', r'\s--include-js\b'],
+        "xsstrike": [r'\s--batch\b'],
+        "crlfuzz":  [r'\s--?batch\b'],
+        "dalfox":   [r'\s--depth\s+\d+\b', r'\s--batch\b'],
+    }
+    for pat in _BAD_FLAGS.get(tool_name, []):
+        command = re.sub(pat, ' ', command)
+
     if tool_name == "nuclei":
+        # The model routinely passes `-t cves/`, `-t xss/`, `-t cves/2019/x.yaml`
+        # — none resolve against the installed template layout (templates live
+        # under http/…), so nuclei aborts with "could not find template". Strip
+        # any NON-absolute -t/-templates selector and drive coverage with -tags,
+        # which is layout-independent and always works.
+        command = re.sub(r'(?:^|\s)-(?:t|templates)\s+(?!/)\S+', ' ', command)
         has_selector = bool(re.search(r'(?:^|\s)-(?:tags|t|templates|tl|id|w)\b', command))
         if not has_selector:
             command += " -tags cve,vuln,sqli,xss,ssrf,jwt,auth,exposure,misconfig,default-login"
@@ -193,6 +231,42 @@ def _sanitize_command(command: str, target_url: str = None) -> str:
                 # build the bounded list first, then run hydra against it
                 command = f"head -n {cap} {wl} > {bounded} 2>/dev/null; {command}"
 
+    # Quote bare URLs that carry shell-special query separators. The model often
+    # emits `curl http://x/api?a=1&b=2` unquoted — the shell then backgrounds at
+    # '&' and drops the rest of the query, so multi-param requests (logins,
+    # injection payloads) silently lose everything after the first '&'. Wrap any
+    # UNquoted http(s) URL containing & or ; in single quotes. URLs already
+    # inside quotes (preceded by ' or ") are left alone.
+    command = re.sub(
+        r'''(?<![\'"])(https?://[^\s'"]*[&;][^\s'"]*)''',
+        r"'\1'",
+        command,
+    )
+
+    # A lone single-quote SQLi probe (…?param=test') left the shell waiting for
+    # a matching quote ("unexpected EOF"), so the tool never ran. Wrap an
+    # UNquoted URL that contains a ' in DOUBLE quotes so the ' is preserved
+    # literally and the command executes.
+    command = re.sub(
+        r'''(?<![\'"])(https?://[^\s"]*'[^\s"]*)''',
+        r'"\1"',
+        command,
+    )
+
+    # Final safety net: if quotes are still unbalanced (e.g. the model opened a
+    # double quote but never closed it — `dalfox url "http://…test'`), append
+    # the missing closer so the command parses instead of dying on EOF.
+    try:
+        shlex.split(command)
+    except ValueError:
+        for _close in ('"', "'"):
+            try:
+                shlex.split(command + _close)
+                command += _close
+                break
+            except ValueError:
+                continue
+
     return command
 
 
@@ -201,6 +275,76 @@ def _validate_command(command: str) -> str | None:
     for pattern in BLOCKED_PATTERNS:
         if re.search(pattern, command, re.IGNORECASE):
             return f"Blocked: command matches dangerous pattern '{pattern}'"
+    return None
+
+
+# --- Scope enforcement (safety floor for the live agent loop) --------------- #
+# Lenient by design so SSRF/IMDS/local testing still works: the session TARGET,
+# plus localhost/RFC1918/link-local (169.254 metadata)/reserved IPs and OAST
+# collaborator domains, are always allowed. Only an UNRELATED PUBLIC host is
+# refused (e.g. the LLM wandering off to scan google.com). A refusal blocks just
+# that one command — the session continues. Disable with ERLIK_SCOPE_ENFORCE=0;
+# broaden with ERLIK_SCOPE_EXTRA_HOSTS=glob,glob (e.g. your OAST domain).
+
+_SCOPE_URL_RX = re.compile(r"https?://[^\s'\"\\<>|]+", re.IGNORECASE)
+_SCOPE_BARE_HOST_RX = re.compile(
+    r"(?<![\w./-])(?:[a-z0-9-]+\.)+[a-z]{2,}(?::\d{1,5})?(?![\w./])", re.IGNORECASE)
+_OAST_MARKERS = ("oast.", "interactsh", "burpcollaborator", "oastify", "canarytokens")
+
+
+def _scope_enforced() -> bool:
+    return os.environ.get("ERLIK_SCOPE_ENFORCE", "1").strip().lower() not in ("0", "false", "no", "off")
+
+
+def _host_is_local_or_private(host: str) -> bool:
+    h = host.lower()
+    if h in ("localhost",) or h.endswith(".internal") or h.endswith(".local") or h.endswith(".lan"):
+        return True
+    try:
+        ip = ipaddress.ip_address(host)
+        return ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_unspecified
+    except ValueError:
+        return False
+
+
+def _scope_allows(host: str, target_host: str, extra: list[str]) -> bool:
+    h = (host or "").lower().rstrip(".")
+    if not h:
+        return True
+    if target_host and (h == target_host or h.endswith("." + target_host)):
+        return True
+    if _host_is_local_or_private(h):
+        return True
+    if any(m in h for m in _OAST_MARKERS):
+        return True
+    if any(fnmatch.fnmatchcase(h, g.lower()) for g in extra):
+        return True
+    return False
+
+
+def _scope_violation(command: str, target_url: str | None) -> str | None:
+    """Return a reason string if the command targets an unrelated public host."""
+    if not _scope_enforced() or not target_url:
+        return None
+    target_host = (urlparse(target_url if "://" in target_url else f"http://{target_url}").hostname or "").lower()
+    extra = [g.strip() for g in os.environ.get("ERLIK_SCOPE_EXTRA_HOSTS", "").split(",") if g.strip()]
+    if os.environ.get("ERLIK_DOCKER_TARGET_HOST"):
+        extra.append(os.environ["ERLIK_DOCKER_TARGET_HOST"].lower())
+
+    candidates: list[str] = []
+    for m in _SCOPE_URL_RX.finditer(command):
+        candidates.append(urlparse(m.group(0)).hostname or "")
+    masked = _SCOPE_URL_RX.sub(" ", command)
+    for m in _SCOPE_BARE_HOST_RX.finditer(masked):
+        tok = m.group(0)
+        # skip filesystem paths / wordlist filenames that look host-ish
+        if "/" in tok or tok.endswith((".txt", ".json", ".yaml", ".yml", ".html", ".php", ".js", ".csv")):
+            continue
+        candidates.append(tok.split(":")[0])
+
+    for host in candidates:
+        if host and not _scope_allows(host, target_host, extra):
+            return f"out-of-scope host {host!r} (target {target_host!r}); set ERLIK_SCOPE_EXTRA_HOSTS to allow, or ERLIK_SCOPE_ENFORCE=0 to disable"
     return None
 
 
@@ -302,6 +446,12 @@ async def execute_tool(command: str, enabled_tools: list[str], no_timeout: bool 
 
     # Rewrite localhost to docker network
     sanitized = _sanitize_command(command, target_url=target_url)
+
+    # Scope enforcement: refuse commands that target an unrelated public host.
+    scope_err = _scope_violation(sanitized, target_url)
+    if scope_err:
+        return {"success": False, "output": "", "tool": tool_name, "duration_ms": 0,
+                "error": f"SCOPE: {scope_err}"}
 
     # Check container is running
     if not await check_container_running():

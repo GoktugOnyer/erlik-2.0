@@ -1,0 +1,38 @@
+id: WSTG-CLNT-07
+name: Cross Origin Resource Sharing
+category: Client-side
+severity: medium
+references:
+  - https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/11-Client-side_Testing/07-Testing_Cross_Origin_Resource_Sharing
+
+target_schema:
+  required: [url]
+  optional: [cookie, auth_header]
+
+steps:
+  - name: origin_reflection
+    tool: curl
+    # An OAST-marked origin so scope enforcement permits the payload host. If the
+    # server reflects our arbitrary origin (or returns '*') together with
+    # credentials, cross-origin reads are possible.
+    command: >-
+      curl -s -i -H "Origin: https://evil.oast.test" "{{url}}"
+    evaluators:
+      - type: regex
+        pattern: 'Access-Control-Allow-Origin:\s*(https://evil\.oast\.test|\*)'
+        emit_finding:
+          vuln_type: CORS Misconfiguration
+          severity: medium
+
+  - name: credentials_check
+    tool: curl
+    when: has_finding
+    command: >-
+      curl -s -i -H "Origin: https://evil.oast.test" "{{url}}"
+    evaluators:
+      - type: regex
+        # Reflected origin + credentials true = exploitable (reads authed data).
+        pattern: 'Access-Control-Allow-Credentials:\s*true'
+        emit_finding:
+          vuln_type: CORS Misconfiguration Allows Credentialed Cross-Origin Reads
+          severity: high

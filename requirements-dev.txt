@@ -1,0 +1,6 @@
+# Development / CI-only dependencies. NOT required to run the orchestrator.
+# The core runtime deps live in requirements.txt; keep this file out of the
+# production install so a normal `pip install -r requirements.txt` stays lean.
+#   pip install -r requirements-dev.txt
+-r requirements.txt
+pytest>=8.0

@@ -1,0 +1,8 @@
+{
+  "name": "erlik-security-skills",
+  "description": "Pentest knowledge skills for authorized security testing — injection, server-side, client-side, API, authentication, web-app-logic, and reconnaissance.",
+  "version": "1.0.0",
+  "author": { "name": "Goktug Onyer" },
+  "repository": "https://github.com/GoktugOnyer/erlik-2.0",
+  "license": "MIT"
+}

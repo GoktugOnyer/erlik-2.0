@@ -207,6 +207,7 @@ async def init_db():
             ("chain_phase", "TEXT DEFAULT NULL"),
             ("toolset_preset", "TEXT DEFAULT NULL"),  # RQ3-b action-space ablation
             ("disable_stagnation", "INTEGER DEFAULT 0"),  # benchmark opt-out
+            ("run_config", "TEXT DEFAULT NULL"),  # per-session automation flow (JSON)
         ]
         for col_name, col_def in migrations:
             try:
@@ -218,6 +219,7 @@ async def init_db():
         chain_migrations = [
             ("toolset_preset", "TEXT DEFAULT NULL"),
             ("disable_stagnation", "INTEGER DEFAULT 0"),
+            ("run_config", "TEXT DEFAULT NULL"),  # per-session automation flow (JSON)
         ]
         for col_name, col_def in chain_migrations:
             try:
@@ -248,10 +250,92 @@ async def init_db():
             except Exception:
                 pass  # column already exists
 
+        # CVE enrichment columns (populated by orchestrator/enrichment/nvd.py
+        # when ERLIK_ENRICH_CVE is set). Additive + nullable — no-op when unused.
+        cve_columns = [
+            ("cve_id", "TEXT DEFAULT NULL"),
+            ("cvss_score", "REAL DEFAULT NULL"),
+            ("cvss_vector", "TEXT DEFAULT NULL"),
+            ("cwe", "TEXT DEFAULT NULL"),
+        ]
+        for table in ("findings", "v2_findings"):
+            for col_name, col_def in cve_columns:
+                try:
+                    await db.execute(f"ALTER TABLE {table} ADD COLUMN {col_name} {col_def}")
+                except Exception:
+                    pass  # column already exists
+
+        # Structured finding columns (Phase 2). Populated at report time by the
+        # calibration pass in main.py:_generate_report. Additive + nullable — the
+        # report renders identically when these stay NULL.
+        structured_columns = [
+            ("calibrated_severity", "TEXT DEFAULT NULL"),
+            ("owasp_category", "TEXT DEFAULT NULL"),
+            ("mitre", "TEXT DEFAULT NULL"),
+            ("impact", "TEXT DEFAULT NULL"),
+            ("remediation", "TEXT DEFAULT NULL"),
+            ("confidence", "TEXT DEFAULT NULL"),
+            ("ref_links", "TEXT DEFAULT NULL"),
+        ]
+        for table in ("findings", "v2_findings"):
+            for col_name, col_def in structured_columns:
+                try:
+                    await db.execute(f"ALTER TABLE {table} ADD COLUMN {col_name} {col_def}")
+                except Exception:
+                    pass  # column already exists
+
+        # Per-target memory: key recon_context by normalized target so knowledge
+        # accumulates across unrelated runs against the same target (additive).
+        try:
+            await db.execute("ALTER TABLE recon_context ADD COLUMN target_key TEXT DEFAULT NULL")
+        except Exception:
+            pass
+        try:
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_recon_context_target ON recon_context(target_key)")
+        except Exception:
+            pass
+
+        # Stateful exploit-primitive store (captured tokens/cookies/creds per session).
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS session_primitives (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                value TEXT NOT NULL,
+                hint TEXT,
+                source_tool TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+        """)
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_session_primitives_sid ON session_primitives(session_id);")
+
+        # Operator triage columns (accept/reject + severity override) — additive.
+        triage_columns = [
+            ("triage_status", "TEXT DEFAULT NULL"),      # accepted | rejected | NULL
+            ("severity_override", "TEXT DEFAULT NULL"),
+            ("triage_note", "TEXT DEFAULT NULL"),
+        ]
+        for table in ("findings", "v2_findings"):
+            for col_name, col_def in triage_columns:
+                try:
+                    await db.execute(f"ALTER TABLE {table} ADD COLUMN {col_name} {col_def}")
+                except Exception:
+                    pass  # column already exists
+
         await db.commit()
 
 
 async def get_db():
     db = await aiosqlite.connect(DB_PATH)
     db.row_factory = aiosqlite.Row
+    # WAL + a busy timeout so concurrent per-step writes from parallel sessions
+    # WAIT for the writer lock instead of failing immediately with
+    # "database is locked". Pure reliability win, no behavior change.
+    # (FK enforcement is intentionally NOT enabled here — it would require
+    # auditing every insert order first; tracked as a separate change.)
+    try:
+        await db.execute("PRAGMA journal_mode=WAL")
+        await db.execute("PRAGMA busy_timeout=5000")
+    except Exception:
+        pass  # never let PRAGMA setup block opening the DB
     return db

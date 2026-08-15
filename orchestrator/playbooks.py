@@ -215,15 +215,16 @@ ALL_PLAYBOOKS = {
 }
 
 
-def get_playbook_context(target_url: str) -> str:
+def get_playbook_context(target_url: str, mode: str | None = None) -> str:
     """Return the combined playbook block to inject for a known target.
 
     These playbooks are Juice-Shop-specific (exact endpoints, exact payloads).
-    They must be enabled explicitly via ERLIK_PLAYBOOKS=juiceshop — never
-    auto-triggered by URL heuristics, which would fire on any random app
-    listening on port 3000.
+    They must be enabled explicitly — via the per-session run config (`mode`) or
+    the ERLIK_PLAYBOOKS env var — never auto-triggered by URL heuristics, which
+    would fire on any random app listening on port 3000.
     """
-    if os.environ.get("ERLIK_PLAYBOOKS", "").lower() != "juiceshop":
+    effective = (mode if mode is not None else os.environ.get("ERLIK_PLAYBOOKS", "")).lower()
+    if effective != "juiceshop":
         return ""
 
     header = (

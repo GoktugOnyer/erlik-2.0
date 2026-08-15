@@ -8,6 +8,40 @@
     <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&family=Share+Tech+Mono&display=swap" rel="stylesheet">
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
+    <script>
+        // --- XSS-safe helpers (LLM- and target-controlled content is untrusted) ---
+        function escapeHtml(s) {
+            return String(s == null ? '' : s)
+                .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+        }
+        // Render markdown, then sanitize the resulting HTML (strips <script>, on*=, etc.).
+        function renderMarkdown(md) {
+            const html = marked.parse(md || '');
+            return (window.DOMPurify ? DOMPurify.sanitize(html) : escapeHtml(md));
+        }
+
+        // --- Optional API-token attachment (when ERLIK_API_TOKEN is set server-side) ---
+        (function () {
+            const _f = window.fetch;
+            window.fetch = async function (url, opts) {
+                try {
+                    const t = localStorage.getItem('erlik_api_token');
+                    if (t && typeof url === 'string' && url.indexOf('/api/') === 0) {
+                        opts = opts || {};
+                        opts.headers = Object.assign({}, opts.headers || {}, { 'X-API-Token': t });
+                    }
+                } catch (e) { /* ignore */ }
+                const resp = await _f(url, opts);
+                if (resp.status === 401 && typeof url === 'string' && url.indexOf('/api/') === 0) {
+                    const t = prompt('API token required (ERLIK_API_TOKEN). Enter it to continue:');
+                    if (t) { try { localStorage.setItem('erlik_api_token', t); } catch (e) {} location.reload(); }
+                }
+                return resp;
+            };
+        })();
+    </script>
     <style>
         /* ===== CSS Custom Properties ===== */
         :root {
@@ -56,6 +90,29 @@
         /* ===== Pixel Font Helpers ===== */
         .font-pixel { font-family: var(--font-pixel); }
         .font-mono { font-family: var(--font-mono); }
+
+        /* ===== Rich hover tooltips (RUN CONFIG toggles etc.) ===== */
+        .rc-help { position: relative; }
+        .rc-help > .rc-q {
+            display: inline-block; width: 13px; height: 13px; line-height: 13px;
+            text-align: center; border-radius: 50%; font-size: 0.6rem;
+            border: 1px solid #6a5a9a; color: #a99ad0; margin-left: 2px;
+            font-family: var(--font-mono); cursor: help; user-select: none;
+        }
+        .rc-help:hover::after {
+            content: attr(data-tip);
+            position: absolute; left: 0; top: 150%; z-index: 2000;
+            width: 340px; max-width: 78vw; white-space: normal;
+            background: #0b0b1c; border: 1px solid #a05cff; border-radius: 7px;
+            color: #d7e6ff; padding: 11px 13px; font-size: 0.72rem;
+            line-height: 1.55; font-family: var(--font-mono);
+            box-shadow: 0 6px 26px rgba(0,0,0,0.7); text-transform: none;
+            letter-spacing: normal;
+        }
+        .rc-help:hover::before {  /* little arrow */
+            content: ""; position: absolute; left: 12px; top: calc(150% - 6px);
+            border: 6px solid transparent; border-bottom-color: #a05cff; z-index: 2001;
+        }
 
         /* ===== Neon Borders ===== */
         .neon-border-cyan {
@@ -590,6 +647,11 @@
                 style="font-size: 0.55rem;">
                 &#9636; MONITOR
             </button>
+            <button id="nav-skills" onclick="switchView('skills')"
+                class="nav-tab font-pixel px-4 py-2 rounded"
+                style="font-size: 0.55rem;">
+                &#9670; SKILLS
+            </button>
         </nav>
         <div class="flex items-center gap-2">
             <span id="health-dot" class="w-3 h-3 rounded-full" style="background:#3a3a4a;"></span>
@@ -681,12 +743,60 @@
                     <span class="font-mono" style="color:#4a4a5a; font-size:0.7rem;" title="Tools run with NO time limit at all (truly unlimited). Overrides the manual timeout.">&#9432;</span>
                 </div>
                 <div>
-                    <label class="block font-pixel mb-2" style="font-size:0.55rem; color:#6a6a8a;">TOOL TIMEOUT (s)</label>
+                    <label class="block font-pixel mb-2" style="font-size:0.55rem; color:#6a6a8a;">
+                        TOOL TIMEOUT (s)
+                        <span class="rc-help" data-tip="How long each tool may run before it's killed. BLANK = each tool's own sensible default (nmap 120s · nuclei 180s · sqlmap 180s · gobuster/ffuf/dirb 120s · hydra/john/hashcat 120s · nikto/sslyze 60s · testssl 90s · whatweb/wafw00f/crlfuzz 60s · curl/netcat 30s · playwright 180s · zap-cli 300s · anything else 60s). Type a number to force that ONE timeout on EVERY tool (e.g. 300 to give slow tools more room). Ignored when NO TIMEOUT is on."><span class="rc-q">?</span></span>
+                    </label>
                     <div class="flex items-center gap-2">
-                        <input type="number" id="tool-timeout-input" min="0" step="30" placeholder="default"
-                            class="cyber-input rounded px-2 py-1" style="width:90px; font-size:0.8rem;">
-                        <span class="font-mono" style="color:#4a4a5a; font-size:0.7rem;" title="Manual per-tool timeout in seconds applied to every tool. Blank = sensible per-tool defaults. Ignored when NO TIMEOUT is on.">&#9432;</span>
+                        <input type="number" id="tool-timeout-input" min="0" step="30" placeholder="per-tool (30–300)"
+                            class="cyber-input rounded px-2 py-1" style="width:130px; font-size:0.8rem;">
                     </div>
+                    <div class="font-mono" style="font-size:0.55rem; color:#5a5a6a; margin-top:3px;">blank = per-tool defaults · type to override all</div>
+                </div>
+            </div>
+
+            <!-- Run Configuration (automation flow) -->
+            <div class="mt-3 p-3 rounded" style="background:#0a0a1a; border:1px solid #1a1a2e;">
+                <div class="flex items-center gap-3 mb-3 flex-wrap">
+                    <span class="font-pixel" style="font-size:0.55rem; color:#a05cff;">RUN CONFIG</span>
+                    <select id="rc-preset" onchange="applyRunPreset()" class="cyber-input rounded px-2 py-1"
+                        style="font-size:0.75rem;" title="Pre-selectable automation setups; pick one or tweak below (→ custom)."></select>
+                    <span id="rc-preset-desc" class="font-mono" style="font-size:0.65rem; color:#5a5a6a;"></span>
+                </div>
+                <div class="flex items-center gap-4 flex-wrap" style="font-size:0.7rem;">
+                    <label class="flex items-center gap-1.5 cursor-pointer rc-help" data-tip="CVE ENRICHMENT — When the scan turns up a CVE id (e.g. from nuclei), this looks it up in the NVD database and attaches the official CVSS score, severity, and CWE weakness class to the finding. Runs once at the end. Free, no API key, no account. ON = standardized severity numbers on CVE findings. OFF = faster finish / fully offline.">
+                        <input type="checkbox" id="rc-cve" class="accent-purple-400" style="width:14px;height:14px;" onchange="markCustomPreset()">
+                        <span class="font-pixel" style="font-size:0.5rem; color:#8a8aa0;">CVE ENRICH</span><span class="rc-q">?</span>
+                    </label>
+                    <label class="flex items-center gap-1.5 cursor-pointer rc-help" data-tip="SKILLS — Injects 1–3 relevant pentest knowledge sheets (payloads, detection probes, exploitation steps) into the AI's prompt, picked from the target's tech stack and your VULN CATEGORY — e.g. SQL-injection & XSS cheat-sheets for an injection mission. Helps a smaller local model choose better tools and payloads. ON = smarter agent. OFF = leaner, faster prompt. (Library lives in skills_catalog/.)">
+                        <input type="checkbox" id="rc-skills" class="accent-purple-400" style="width:14px;height:14px;" onchange="markCustomPreset()">
+                        <span class="font-pixel" style="font-size:0.5rem; color:#8a8aa0;">SKILLS</span><span class="rc-q">?</span>
+                    </label>
+                    <label class="flex items-center gap-1.5 cursor-pointer rc-help" data-tip="NETTACKER PRE-SCAN — Runs OWASP Nettacker (a fast, deterministic, NON-AI scanner) against the target BEFORE the AI starts, then hands the agent the verified results: open ports, detected tech, exposed paths, TLS/header/CVE hits. Gives the agent a factual head-start so it wastes fewer turns on blind recon. Needs the Nettacker-enabled kali image (docker compose build kali-tools). Pick a scenario in the dropdown.">
+                        <input type="checkbox" id="rc-nettacker" class="accent-purple-400" style="width:14px;height:14px;"
+                            onchange="markCustomPreset(); toggleNettackerOpts();">
+                        <span class="font-pixel" style="font-size:0.5rem; color:#8a8aa0;">NETTACKER PRE-SCAN</span><span class="rc-q">?</span>
+                    </label>
+                    <span id="rc-nettacker-opts" class="flex items-center gap-2 hidden">
+                        <select id="rc-nettacker-scenario" onchange="markCustomPreset()" class="cyber-input rounded px-2 py-0.5"
+                            style="font-size:0.7rem;" title="Nettacker scan scenario (run mode)."></select>
+                        <label class="flex items-center gap-1.5 cursor-pointer" title="Persist Nettacker findings to the DB (counts toward findings).">
+                            <input type="checkbox" id="rc-nettacker-findings" class="accent-purple-400" style="width:14px;height:14px;" onchange="markCustomPreset()">
+                            <span class="font-pixel" style="font-size:0.5rem; color:#8a8aa0;">+FINDINGS</span>
+                        </label>
+                    </span>
+                    <label class="flex items-center gap-1.5 cursor-pointer rc-help" data-tip="POC VERIFY — After the scan, re-tests each HIGH/CRITICAL finding by re-sending the request and checking the vulnerability signature still reproduces. A finding is only marked 'verified' if it holds up. Cuts false positives in the final report. Costs a little extra time at the end.">
+                        <input type="checkbox" id="rc-poc" class="accent-purple-400" style="width:14px;height:14px;" onchange="markCustomPreset()">
+                        <span class="font-pixel" style="font-size:0.5rem; color:#8a8aa0;">POC VERIFY</span><span class="rc-q">?</span>
+                    </label>
+                    <label class="flex items-center gap-1.5 cursor-pointer rc-help" data-tip="PRIMITIVES — Watches tool output for reusable secrets (JWT tokens, session cookies, API keys, credentials) and surfaces them so the agent can reuse them on later steps — e.g. log in, then hit an authenticated endpoint. Essential for multi-step exploitation that needs a logged-in session.">
+                        <input type="checkbox" id="rc-primitives" class="accent-purple-400" style="width:14px;height:14px;" onchange="markCustomPreset()">
+                        <span class="font-pixel" style="font-size:0.5rem; color:#8a8aa0;">PRIMITIVES</span><span class="rc-q">?</span>
+                    </label>
+                    <label class="flex items-center gap-1.5 cursor-pointer rc-help" data-tip="TARGET MEMORY — Seeds the session with durable notes accumulated from PREVIOUS runs against the same target (host:port): discovered endpoints, tech stack, what worked. Makes repeat scans of the same target smarter and faster. Only helps once you've scanned this target before.">
+                        <input type="checkbox" id="rc-targetmem" class="accent-purple-400" style="width:14px;height:14px;" onchange="markCustomPreset()">
+                        <span class="font-pixel" style="font-size:0.5rem; color:#8a8aa0;">TARGET MEMORY</span><span class="rc-q">?</span>
+                    </label>
                 </div>
             </div>
 
@@ -1103,14 +1213,40 @@
             <div id="report-detail-panel" class="hidden cyber-panel neon-border-magenta rounded-lg">
                 <div class="px-4 py-2.5 flex items-center justify-between"
                     style="border-bottom: 1px solid var(--panel-border);">
-                    <div class="flex items-center gap-3">
+                    <div class="flex items-center gap-3 flex-wrap">
                         <h3 class="font-pixel neon-text-magenta" style="font-size: 0.6rem;">REPORT DETAIL</h3>
                         <span id="report-detail-session" class="font-mono neon-text-cyan" style="font-size:0.85rem;"></span>
+                        <span id="report-detail-runcfg" class="flex items-center gap-1.5"></span>
                     </div>
                     <div class="flex gap-2">
                         <button onclick="downloadReportFromList()" class="font-pixel px-3 py-1 rounded border text-xs"
                             style="font-size:0.45rem; color:var(--neon-green); border-color:var(--neon-green); background:transparent; cursor:pointer;">
                             DOWNLOAD .MD
+                        </button>
+                        <button onclick="viewReportJsonFromList()" class="font-pixel px-3 py-1 rounded border text-xs"
+                            style="font-size:0.45rem; color:var(--neon-cyan); border-color:var(--neon-cyan); background:transparent; cursor:pointer;"
+                            title="Open the validated pentest-report.json (structured findings: CVSS, CWE, OWASP, impact, remediation)">
+                            REPORT .JSON
+                        </button>
+                        <button onclick="viewReportFormat('report.html')" class="font-pixel px-3 py-1 rounded border text-xs"
+                            style="font-size:0.45rem; color:var(--neon-cyan); border-color:var(--neon-cyan); background:transparent; cursor:pointer;"
+                            title="Open the client-ready HTML report (print to PDF from the browser)">
+                            .HTML
+                        </button>
+                        <button onclick="viewReportFormat('report.sarif')" class="font-pixel px-3 py-1 rounded border text-xs"
+                            style="font-size:0.45rem; color:var(--neon-cyan); border-color:var(--neon-cyan); background:transparent; cursor:pointer;"
+                            title="Open SARIF 2.1.0 (CI / security-tool ingestion)">
+                            SARIF
+                        </button>
+                        <button onclick="viewReportFormat('report.defectdojo.json')" class="font-pixel px-3 py-1 rounded border text-xs"
+                            style="font-size:0.45rem; color:var(--neon-purple); border-color:var(--neon-purple); background:transparent; cursor:pointer;"
+                            title="DefectDojo Generic Findings Import JSON">
+                            DEFECTDOJO
+                        </button>
+                        <button onclick="viewReportFormat('report.jira.csv')" class="font-pixel px-3 py-1 rounded border text-xs"
+                            style="font-size:0.45rem; color:var(--neon-purple); border-color:var(--neon-purple); background:transparent; cursor:pointer;"
+                            title="Jira CSV issue import">
+                            JIRA CSV
                         </button>
                         <button onclick="closeReportDetail()" class="font-pixel px-3 py-1 rounded border text-xs"
                             style="font-size:0.45rem; color:var(--neon-red); border-color:var(--neon-red); background:transparent; cursor:pointer;">
@@ -1128,6 +1264,11 @@
 
                 <!-- Findings Summary Bar -->
                 <div id="report-detail-findings" class="px-4 py-2 flex flex-wrap gap-2 hidden"
+                    style="border-bottom: 1px solid var(--panel-border);">
+                </div>
+
+                <!-- Findings triage (accept / reject / severity override) -->
+                <div id="report-detail-triage" class="px-4 py-2 hidden"
                     style="border-bottom: 1px solid var(--panel-border);">
                 </div>
 
@@ -1182,6 +1323,11 @@
                             <input type="checkbox" id="bench-no-timeout" checked class="accent-cyan-400" style="width:16px;height:16px;">
                             <span class="font-mono" style="font-size:0.8rem; color:#8a8a9a;">Enabled</span>
                         </label>
+                    </div>
+                    <div>
+                        <label class="block font-pixel mb-2" style="font-size:0.5rem; color:#a05cff;">RUN CONFIG</label>
+                        <select id="bench-preset" class="cyber-input rounded px-3 py-2" style="font-size:0.85rem;"
+                            title="Automation preset applied to every cold/warm/chain session in the sweep (CVE enrichment, skills, Nettacker pre-scan)."></select>
                     </div>
                     <div>
                         <button id="bench-start-btn" onclick="startBenchmark()"
@@ -1360,12 +1506,14 @@
                                 <th class="text-left py-2 px-2" style="color:#6a6a8a; font-weight:normal;">tier</th>
                                 <th class="text-left py-2 px-2" style="color:#6a6a8a; font-weight:normal;">vuln</th>
                                 <th class="text-left py-2 px-2" style="color:#6a6a8a; font-weight:normal;">sev</th>
+                                <th class="text-left py-2 px-2" style="color:#6a6a8a; font-weight:normal;" title="NVD CVE (when a finding references one; populated at session end)">cve</th>
+                                <th class="text-left py-2 px-2" style="color:#6a6a8a; font-weight:normal;" title="NVD CVSS base score">cvss</th>
                                 <th class="text-left py-2 px-2" style="color:#6a6a8a; font-weight:normal;">tool</th>
                                 <th class="text-left py-2 px-2" style="color:#6a6a8a; font-weight:normal;">url</th>
                             </tr>
                         </thead>
                         <tbody id="mon-findings-tbody">
-                            <tr><td colspan="6" class="text-center py-4" style="color:#5a5a6a;">loading…</td></tr>
+                            <tr><td colspan="8" class="text-center py-4" style="color:#5a5a6a;">loading…</td></tr>
                         </tbody>
                     </table>
                 </div>
@@ -1402,6 +1550,42 @@
             </section>
         </div><!-- /view-monitor -->
 
+        <!-- ============================================================= -->
+        <!-- VIEW: SKILLS — browse the pentest knowledge library            -->
+        <!-- ============================================================= -->
+        <div id="view-skills" class="hidden space-y-5">
+            <div class="cyber-border rounded-lg p-5" style="background:rgba(10,10,26,0.6);">
+                <div class="flex items-center justify-between mb-3">
+                    <span class="font-pixel neon-text-purple" style="font-size:0.7rem;">&#9670; SKILLS LIBRARY</span>
+                    <span id="skills-meta" class="font-mono" style="font-size:0.6rem; color:#6a6a8a;"></span>
+                </div>
+                <p class="font-mono" style="font-size:0.68rem; color:#8a8aa0; line-height:1.65;">
+                    Reusable pentest knowledge — payloads, detection probes, exploitation steps. When the
+                    <b style="color:#a05cff;">SKILLS</b> toggle is on, a router injects the 1&ndash;3 most relevant
+                    sheets for your target's tech&nbsp;+&nbsp;<b>VULN CATEGORY</b> into the agent's prompt (this is
+                    generic technique knowledge, not target-specific endpoints &mdash; that's what the playbook adds).
+                    Files live in <code style="color:#9ad;">skills_catalog/skills/</code>.
+                </p>
+                <div class="flex items-center gap-2 mt-3 flex-wrap">
+                    <span class="font-pixel" style="font-size:0.5rem; color:#6a6a8a;">PREVIEW WHAT GETS INJECTED FOR:</span>
+                    <input id="skills-hint" class="cyber-input rounded px-2 py-1" style="font-size:0.7rem; width:220px;"
+                        placeholder="e.g. sql injection, xss, jwt" value="sql injection"
+                        onkeydown="if(event.key==='Enter')previewSkills()">
+                    <button onclick="previewSkills()" class="font-pixel px-3 py-1 rounded border"
+                        style="font-size:0.5rem; color:#00ff88; border-color:#00ff88; background:transparent; cursor:pointer;">SHOW</button>
+                    <span id="skills-preview-out" class="font-mono" style="font-size:0.62rem; color:#00ff88;"></span>
+                </div>
+            </div>
+            <div style="display:grid; grid-template-columns:260px 1fr; gap:16px;">
+                <div class="cyber-border rounded-lg p-3" id="skills-cats" style="background:rgba(10,10,26,0.6); align-self:start;">
+                    <div class="font-mono" style="color:#5a5a6a; font-size:0.7rem;">loading…</div>
+                </div>
+                <div class="cyber-border rounded-lg p-4" id="skills-content" style="background:rgba(10,10,26,0.6); min-height:320px;">
+                    <div class="font-mono" style="color:#5a5a6a; font-size:0.7rem;">Select a category on the left, then a file to read it.</div>
+                </div>
+            </div>
+        </div><!-- /view-skills -->
+
     </main>
 
     <!-- Scanline Overlay -->
@@ -1420,18 +1604,20 @@
 
         // ===== View Switching =====
         function switchView(view) {
-            const views = ['scanner', 'reports', 'benchmark', 'monitor'];
+            const views = ['scanner', 'reports', 'benchmark', 'monitor', 'skills'];
             const panels = {
                 scanner: document.getElementById('view-scanner'),
                 reports: document.getElementById('view-reports'),
                 benchmark: document.getElementById('view-benchmark'),
                 monitor: document.getElementById('view-monitor'),
+                skills: document.getElementById('view-skills'),
             };
             const navs = {
                 scanner: document.getElementById('nav-scanner'),
                 reports: document.getElementById('nav-reports'),
                 benchmark: document.getElementById('nav-benchmark'),
                 monitor: document.getElementById('nav-monitor'),
+                skills: document.getElementById('nav-skills'),
             };
 
             // Start the monitor polling loop the first time the user opens the tab
@@ -1449,6 +1635,70 @@
 
             if (view === 'reports') loadReportsList();
             if (view === 'benchmark') loadBenchmarkHistory();
+            if (view === 'skills') loadSkills();
+        }
+
+        // ===== Skills library browser =====
+        let __skillsData = null;
+        async function loadSkills() {
+            if (__skillsData) { renderSkillCats(); return; }
+            try {
+                const r = await fetch('/api/skills');
+                __skillsData = await r.json();
+            } catch (e) {
+                document.getElementById('skills-cats').innerHTML =
+                    '<div class="font-mono" style="color:#ff4466; font-size:0.65rem;">Failed to load skills.</div>';
+                return;
+            }
+            const total = __skillsData.categories.reduce((a, c) => a + c.count, 0);
+            document.getElementById('skills-meta').textContent =
+                `${__skillsData.categories.length} categories · ${total} sheets · SKILLS ${__skillsData.enabled ? 'ON' : 'OFF'} by default`;
+            renderSkillCats();
+        }
+        function renderSkillCats() {
+            const el = document.getElementById('skills-cats');
+            el.innerHTML = __skillsData.categories.map(c => `
+                <button onclick="showSkillCat('${encodeURIComponent(c.category)}')"
+                    class="font-mono block w-full text-left px-2 py-1.5 rounded mb-1"
+                    style="font-size:0.7rem; color:#c9b8f0; background:#0e0e22; border:1px solid #1a1a2e; cursor:pointer;">
+                    ${escapeHtml(c.category)} <span style="color:#5a5a6a;">(${c.count})</span>
+                </button>`).join('');
+        }
+        function showSkillCat(catEnc) {
+            const cat = decodeURIComponent(catEnc);
+            const c = __skillsData.categories.find(x => x.category === cat);
+            if (!c) return;
+            const el = document.getElementById('skills-content');
+            el.innerHTML =
+                `<div class="font-pixel mb-2" style="font-size:0.62rem; color:#a05cff;">${escapeHtml(cat)}</div>` +
+                (c.description ? `<p class="font-mono mb-3" style="font-size:0.66rem; color:#8a8aa0; line-height:1.55;">${escapeHtml(c.description)}</p>` : '') +
+                `<div class="flex flex-wrap gap-1.5">` +
+                c.files.map(f => `<button onclick="viewSkillFile('${encodeURIComponent(cat)}','${encodeURIComponent(f)}')"
+                    class="font-mono px-2 py-1 rounded" style="font-size:0.62rem; color:#9ad; background:#0e0e22; border:1px solid #1a1a2e; cursor:pointer;">${escapeHtml(f)}</button>`).join('') +
+                `</div><div id="skill-file-view" class="mt-4"></div>`;
+        }
+        async function viewSkillFile(catEnc, fnEnc) {
+            const view = document.getElementById('skill-file-view');
+            view.innerHTML = '<div class="font-mono" style="color:#5a5a6a; font-size:0.65rem;">loading…</div>';
+            try {
+                const r = await fetch(`/api/skills/${catEnc}/${fnEnc}`);
+                const d = await r.json();
+                view.innerHTML =
+                    `<div class="font-pixel mb-2" style="font-size:0.55rem; color:#00fff5;">${escapeHtml(d.filename)}</div>` +
+                    `<div style="background:#08081a; border:1px solid #1a1a2e; border-radius:6px; padding:14px; max-height:62vh; overflow:auto; font-size:0.72rem; line-height:1.6; color:#c7d3e6;">${renderMarkdown(d.content)}</div>`;
+            } catch (e) {
+                view.innerHTML = '<div class="font-mono" style="color:#ff4466; font-size:0.65rem;">Failed to load file.</div>';
+            }
+        }
+        async function previewSkills() {
+            const hint = document.getElementById('skills-hint').value || 'injection';
+            const out = document.getElementById('skills-preview-out');
+            out.textContent = '…';
+            try {
+                const r = await fetch('/api/skills-preview?hint=' + encodeURIComponent(hint));
+                const d = await r.json();
+                out.textContent = d.selected.length ? '→ ' + d.selected.join('  ·  ') : '(nothing matches — no skills injected)';
+            } catch (e) { out.textContent = '(preview failed)'; }
         }
 
         // ===== Reports List =====
@@ -1471,6 +1721,38 @@
             const mo = String(d.getMonth() + 1).padStart(2, '0');
             const yy = d.getFullYear();
             return `${hh}:${mm} ${dd}/${mo}/${yy}`;
+        }
+
+        // ===== Consolidated chain report =====
+        async function viewChainReport(chainId) {
+            try {
+                const r = await fetch(`/api/chains/${chainId}/report`);
+                if (!r.ok) { addLog('[chain] consolidated report not ready yet', 'log-error'); return; }
+                const d = await r.json();
+                showMarkdownOverlay('CONSOLIDATED CHAIN REPORT — ' + chainId, d.markdown,
+                    `/api/chains/${chainId}/report/download`);
+            } catch (e) { addLog('[chain] could not load consolidated report', 'log-error'); }
+        }
+        function showMarkdownOverlay(title, md, downloadUrl) {
+            let ov = document.getElementById('md-overlay');
+            if (!ov) {
+                ov = document.createElement('div');
+                ov.id = 'md-overlay';
+                ov.style.cssText = 'position:fixed; inset:0; background:rgba(0,0,0,0.82); z-index:9999; display:flex; align-items:center; justify-content:center; padding:4vh 4vw;';
+                ov.onclick = (e) => { if (e.target === ov) ov.remove(); };
+                document.body.appendChild(ov);
+            }
+            ov.innerHTML =
+                `<div style="background:#0a0a1a; border:1px solid #a05cff; border-radius:10px; max-width:1000px; width:100%; max-height:92vh; display:flex; flex-direction:column;">
+                    <div style="display:flex; align-items:center; justify-content:space-between; padding:12px 16px; border-bottom:1px solid #1a1a2e;">
+                        <span class="font-pixel" style="font-size:0.6rem; color:#a05cff;">${escapeHtml(title)}</span>
+                        <span>
+                            <a href="${downloadUrl}" class="font-pixel" style="font-size:0.5rem; color:#00ff88; text-decoration:none; margin-right:16px;">&#8595; DOWNLOAD</a>
+                            <span onclick="document.getElementById('md-overlay').remove()" style="cursor:pointer; color:#ff4466; font-size:1rem;">&#10008;</span>
+                        </span>
+                    </div>
+                    <div style="overflow:auto; padding:18px 22px; font-size:0.78rem; line-height:1.6; color:#c7d3e6;">${renderMarkdown(md)}</div>
+                </div>`;
         }
 
         async function loadReportsList() {
@@ -1563,6 +1845,9 @@
             panel.classList.remove('hidden');
             panel.scrollIntoView({ behavior: 'smooth' });
 
+            renderRunConfigBadges(sid);  // reproducibility: which automation flow this session used
+            renderTriageTable(sid);      // accept / reject / severity-override controls
+
             try {
                 const [reportResp, findingsResp] = await Promise.all([
                     fetch(`/api/sessions/${sid}/report`),
@@ -1584,12 +1869,14 @@
                     summaryPanel.classList.remove('hidden');
                 }
 
-                // Show findings severity bar
+                // Show findings severity bar (prefer §7 calibrated severity when present)
                 if (findings.length > 0) {
                     const sevCounts = { critical: 0, high: 0, medium: 0, low: 0, info: 0 };
+                    let cveCount = 0;
                     findings.forEach(f => {
-                        const sev = (f.severity || 'info').toLowerCase();
+                        const sev = (f.calibrated_severity || f.severity || 'info').toLowerCase();
                         if (sev in sevCounts) sevCounts[sev]++;
+                        if (f.cve_id) cveCount++;
                     });
                     findingsBar.innerHTML = '';
                     for (const [sev, count] of Object.entries(sevCounts)) {
@@ -1601,11 +1888,18 @@
                             findingsBar.appendChild(badge);
                         }
                     }
+                    if (cveCount > 0) {
+                        const badge = document.createElement('span');
+                        badge.className = 'px-2 py-0.5 rounded font-pixel';
+                        badge.style.cssText = 'font-size:0.45rem; color:#9a9ab0; border:1px solid #3a3a4a;';
+                        badge.textContent = `CVE-LINKED: ${cveCount}`;
+                        findingsBar.appendChild(badge);
+                    }
                     findingsBar.classList.remove('hidden');
                 }
 
                 // Show full report
-                content.innerHTML = marked.parse(report.report_markdown || '*Report content is empty.*');
+                content.innerHTML = renderMarkdown(report.report_markdown || '*Report content is empty.*');
 
             } catch (err) {
                 content.innerHTML = '<p style="color:var(--neon-red);">Error loading report: ' + err.message + '</p>';
@@ -1622,6 +1916,18 @@
             a.href = `/api/sessions/${sid}/report/download`;
             a.download = `pentest-report-${sid}.md`;
             a.click();
+        }
+
+        function viewReportJsonFromList() {
+            if (reportDetailSessionId) {
+                window.open(`/api/sessions/${reportDetailSessionId}/report.json`, '_blank');
+            }
+        }
+
+        function viewReportFormat(fmt) {
+            if (reportDetailSessionId) {
+                window.open(`/api/sessions/${reportDetailSessionId}/${fmt}`, '_blank');
+            }
         }
 
         function downloadReportFromList() {
@@ -1945,7 +2251,7 @@
             const panel = document.getElementById('report-panel');
             const content = document.getElementById('report-content');
             // Render markdown to styled HTML via marked.js
-            content.innerHTML = marked.parse(markdown);
+            content.innerHTML = renderMarkdown(markdown);
             panel.classList.remove('hidden');
             panel.scrollIntoView({ behavior: 'smooth' });
         }
@@ -1967,7 +2273,7 @@
                 mime = 'text/markdown';
             } else {
                 // Convert markdown to styled HTML via marked.js
-                const htmlBody = marked.parse(currentReportMarkdown);
+                const htmlBody = renderMarkdown(currentReportMarkdown);
                 content = buildStandaloneHtml(sessionId, htmlBody);
                 filename = `pentest-report-${sessionId || 'unknown'}.html`;
                 mime = 'text/html';
@@ -2068,10 +2374,10 @@ ${htmlBody}
             div.style.cssText = 'background: rgba(13,13,21,0.8); border: 1px solid var(--panel-border);';
             div.innerHTML = `
                 <div class="flex items-center justify-between mb-1">
-                    <span class="font-bold" style="color:#e0e0e0; font-size:0.9rem;">${data.vuln_type || 'Unknown'}</span>
-                    <span class="px-2 py-0.5 rounded font-pixel ${sevClass}" style="font-size:0.5rem;">${(data.severity || '?').toUpperCase()}</span>
+                    <span class="font-bold" style="color:#e0e0e0; font-size:0.9rem;">${escapeHtml(data.vuln_type || 'Unknown')}</span>
+                    <span class="px-2 py-0.5 rounded font-pixel ${sevClass}" style="font-size:0.5rem;">${escapeHtml((data.severity || '?').toUpperCase())}</span>
                 </div>
-                <div class="font-mono" style="color:#5a5a6a; font-size:0.85rem;">${data.url || ''}</div>
+                <div class="font-mono" style="color:#5a5a6a; font-size:0.85rem;">${escapeHtml(data.url || '')}</div>
             `;
             panel.appendChild(div);
             const count = panel.querySelectorAll('[class*="rounded p-3"]').length;
@@ -2082,7 +2388,11 @@ ${htmlBody}
         const SETTINGS_INPUT_IDS = [
             'target-url', 'scope-mode', 'model-select', 'session-type',
             'parent-session', 'vuln-category', 'max-turns-slider',
-            'no-timeout-toggle', 'system-prompt', 'preset-select'
+            'no-timeout-toggle', 'system-prompt', 'preset-select',
+            // Run Configuration panel
+            'rc-preset', 'rc-cve', 'rc-skills', 'rc-nettacker',
+            'rc-nettacker-scenario', 'rc-nettacker-findings',
+            'rc-poc', 'rc-primitives', 'rc-targetmem'
         ];
 
         function lockSettings() {
@@ -2225,6 +2535,7 @@ ${htmlBody}
                             max_turns_per_session: parseInt(document.getElementById('max-turns-slider').value) || 0,
                             no_timeout: document.getElementById('no-timeout-toggle').checked,
                             auto_progress: true,
+                            run_config: buildRunConfig(),
                         }),
                     });
                     const chain = await resp.json();
@@ -2266,6 +2577,7 @@ ${htmlBody}
                         no_timeout: document.getElementById('no-timeout-toggle').checked,
                         tool_timeout: parseInt(document.getElementById('tool-timeout-input').value) || null,
                         max_turns: parseInt(document.getElementById('max-turns-slider').value) || 0,
+                        run_config: buildRunConfig(),
                     }),
                 });
                 const session = await resp.json();
@@ -2293,7 +2605,8 @@ ${htmlBody}
 
         function connectToSession(sid) {
             const wsProtocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-            ws = new WebSocket(`${wsProtocol}//${location.host}/ws/${sid}`);
+            const wsUrl = `${wsProtocol}//${location.host}/ws/${sid}`;
+            ws = new WebSocket(wsUrl);
 
             ws.onmessage = (event) => {
                 try {
@@ -2303,14 +2616,15 @@ ${htmlBody}
                     addLog(`[ws] ${event.data}`);
                 }
             };
-            ws.onclose = () => addLog('[system] WebSocket disconnected', 'log-system');
-            ws.onerror = () => addLog('[system] WebSocket error', 'log-error');
+            ws.onclose = (e) => addLog(`[system] WebSocket disconnected (code ${e.code})`, 'log-system');
+            ws.onerror = () => addLog(`[system] WebSocket error → ${wsUrl} (is the server still running on this host:port?)`, 'log-error');
         }
 
         function connectToChainSession(sid) {
             const wsProtocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
             if (ws) { try { ws.close(); } catch {} }
-            ws = new WebSocket(`${wsProtocol}//${location.host}/ws/${sid}`);
+            const wsUrl = `${wsProtocol}//${location.host}/ws/${sid}`;
+            ws = new WebSocket(wsUrl);
 
             ws.onmessage = (event) => {
                 try {
@@ -2335,6 +2649,10 @@ ${htmlBody}
                         document.getElementById('chain-status-badge').textContent = 'COMPLETE';
                         document.getElementById('chain-status-badge').style.color = '#00ff41';
                         addLog(`[chain] All ${data.total_sessions} phases completed!`, 'log-report');
+                        if (data.chain_id) {
+                            addLog(`[chain] Consolidated (de-duplicated) report ready — opening…`, 'log-report');
+                            viewChainReport(data.chain_id);
+                        }
                         setStoppedUI();
                     } else if (data.type === 'chain_ready') {
                         addLog(`[chain] ${data.message}`, 'log-system');
@@ -2345,8 +2663,8 @@ ${htmlBody}
                     addLog(`[ws] ${event.data}`);
                 }
             };
-            ws.onclose = () => {};
-            ws.onerror = () => addLog('[system] WebSocket error', 'log-error');
+            ws.onclose = (e) => { if (e && e.code && e.code !== 1000) addLog(`[system] WebSocket closed (code ${e.code})`, 'log-system'); };
+            ws.onerror = () => addLog(`[system] WebSocket error → ${wsUrl} (is the server still running on this host:port?)`, 'log-error');
         }
 
         function handleWsMessage(data) {
@@ -2573,6 +2891,7 @@ ${htmlBody}
                         no_timeout: noTimeout,
                         repeat_n: repeatN,
                         model: document.getElementById('model-select').value || 'qwen2.5-coder:7b-instruct-q4_K_M',
+                        run_config: (function(){ const s=document.getElementById('bench-preset'); return s && s.value ? {preset: s.value} : null; })(),
                     }),
                 });
                 const data = await resp.json();
@@ -2993,11 +3312,11 @@ ${htmlBody}
 
                         findingsHtml += `<tr style="border-bottom:1px solid #0a0a1a;">
                             <td style="padding:3px 8px;"><span style="color:${clsColor}; font-weight:bold; font-size:0.7rem;">${clsLabel}${scoreStr}</span></td>
-                            <td style="padding:3px 8px;" title="${vTooltip}\n\nSnippet: ${vSnippet}"><span style="color:${vColor}; font-size:0.7rem; cursor:help;">${vIcon} ${vStatus}${vTool}</span></td>
-                            <td style="padding:3px 8px;"><span style="color:${sColor}; font-weight:bold; text-transform:uppercase;">${f.severity}</span></td>
-                            <td style="padding:3px 8px; color:#c0c0d0;">${f.vuln_type}</td>
-                            <td style="padding:3px 8px; color:#8a8a9a; font-size:0.7rem; max-width:160px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${f.url || '---'}</td>
-                            <td style="padding:3px 8px; color:#5a5a6a; font-size:0.65rem; max-width:200px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${f.match_reason || ''}">${f.match_reason || '---'}</td>
+                            <td style="padding:3px 8px;" title="${escapeHtml(vTooltip)}\n\nSnippet: ${escapeHtml(vSnippet)}"><span style="color:${vColor}; font-size:0.7rem; cursor:help;">${vIcon} ${escapeHtml(vStatus)}${escapeHtml(vTool)}</span></td>
+                            <td style="padding:3px 8px;"><span style="color:${sColor}; font-weight:bold; text-transform:uppercase;">${escapeHtml(f.severity)}</span></td>
+                            <td style="padding:3px 8px; color:#c0c0d0;">${escapeHtml(f.vuln_type)}</td>
+                            <td style="padding:3px 8px; color:#8a8a9a; font-size:0.7rem; max-width:160px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${escapeHtml(f.url || '---')}</td>
+                            <td style="padding:3px 8px; color:#5a5a6a; font-size:0.65rem; max-width:200px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${escapeHtml(f.match_reason || '')}">${escapeHtml(f.match_reason || '---')}</td>
                         </tr>`;
                     });
                     findingsHtml += '</table>';
@@ -3062,7 +3381,7 @@ ${htmlBody}
                         </div>`;
                     document.body.appendChild(modal);
                 }
-                document.getElementById('bench-report-content').innerHTML = marked.parse(md);
+                document.getElementById('bench-report-content').innerHTML = renderMarkdown(md);
                 modal.style.display = 'flex';
             } catch (err) {
                 alert('Failed to load report: ' + err.message);
@@ -3397,7 +3716,10 @@ ${htmlBody}
                                 session_id: s.id,
                                 tier: s.toolset_preset,
                                 vuln_type: f.vuln_type || '?',
-                                severity: (f.severity || '').toLowerCase(),
+                                severity: (f.calibrated_severity || f.severity || '').toLowerCase(),
+                                raw_severity: (f.severity || '').toLowerCase(),
+                                cve_id: f.cve_id || '',
+                                cvss_score: (f.cvss_score === null || f.cvss_score === undefined) ? '' : f.cvss_score,
                                 tool: bestTool,
                                 step_num: bestStepNum,
                                 url: f.url || '',
@@ -3413,7 +3735,7 @@ ${htmlBody}
             const ftbody = document.getElementById('mon-findings-tbody');
             const fmeta = document.getElementById('mon-findings-meta');
             if (findingsRows.length === 0) {
-                ftbody.innerHTML = '<tr><td colspan="6" class="text-center py-4" style="color:#5a5a6a;">no findings in current run yet</td></tr>';
+                ftbody.innerHTML = '<tr><td colspan="8" class="text-center py-4" style="color:#5a5a6a;">no findings in current run yet</td></tr>';
                 fmeta.textContent = '0 findings · current run only';
             } else {
                 // Group counts per tool for the meta line
@@ -3435,13 +3757,19 @@ ${htmlBody}
                 ftbody.innerHTML = findingsRows.map(r => {
                     const tierLabel = _monTierLabel(r.tier);
                     const tierColor = _monTierColor(r.tier);
-                    const url = r.url.length > 70 ? r.url.slice(0, 70) + '…' : r.url;
+                    const url = escapeHtml(r.url.length > 70 ? r.url.slice(0, 70) + '…' : r.url);
+                    // §7: flag when calibrated severity differs from the raw label.
+                    const sevCell = (r.raw_severity && r.raw_severity !== r.severity)
+                        ? `${escapeHtml(r.severity || '—')}<span style="color:#5a5a6a;"> (raw ${escapeHtml(r.raw_severity)})</span>`
+                        : escapeHtml(r.severity || '—');
                     return `<tr style="border-bottom:1px solid #14141e;">
                         <td class="py-1 px-2" style="color:#a8a8c0;">${r.session_id}</td>
                         <td class="py-1 px-2"><span style="color:${tierColor}; border:1px solid ${tierColor}; padding:1px 5px; border-radius:3px; font-size:0.6rem;">${tierLabel}</span></td>
-                        <td class="py-1 px-2" style="color:#d8d8e8;">${r.vuln_type}</td>
-                        <td class="py-1 px-2" style="color:${sevColor(r.severity)}; font-weight:600;">${r.severity || '—'}</td>
-                        <td class="py-1 px-2" style="color:var(--neon-green);">${r.tool}${r.step_num ? `<span style="color:#5a5a6a;"> #${r.step_num}</span>` : ''}</td>
+                        <td class="py-1 px-2" style="color:#d8d8e8;">${escapeHtml(r.vuln_type)}</td>
+                        <td class="py-1 px-2" style="color:${sevColor(r.severity)}; font-weight:600;">${sevCell}</td>
+                        <td class="py-1 px-2" style="color:#9a9ab0;">${escapeHtml(r.cve_id || '—')}</td>
+                        <td class="py-1 px-2" style="color:${r.cvss_score !== '' ? sevColor(r.severity) : '#5a5a6a'}; font-weight:600;">${r.cvss_score !== '' ? escapeHtml(String(r.cvss_score)) : '—'}</td>
+                        <td class="py-1 px-2" style="color:var(--neon-green);">${escapeHtml(r.tool)}${r.step_num ? `<span style="color:#5a5a6a;"> #${escapeHtml(String(r.step_num))}</span>` : ''}</td>
                         <td class="py-1 px-2" style="color:#7a7a8a; word-break:break-all;">${url}</td>
                     </tr>`;
                 }).join('');
@@ -3451,12 +3779,188 @@ ${htmlBody}
                 'refreshed ' + new Date().toLocaleTimeString();
         }
 
+        // ===== Run Configuration (automation flow) =====
+        let RUN_PRESETS_CACHE = [];
+        let _rcApplying = false;
+
+        async function loadRunConfigOptions() {
+            try {
+                const [pResp, sResp] = await Promise.all([
+                    fetch('/api/run-presets'), fetch('/api/nettacker-scenarios')
+                ]);
+                const pData = await pResp.json();
+                RUN_PRESETS_CACHE = pData.presets || [];
+                const presetSel = document.getElementById('rc-preset');
+                presetSel.innerHTML = '';
+                RUN_PRESETS_CACHE.forEach(p => {
+                    const o = document.createElement('option');
+                    o.value = p.name; o.textContent = p.label; presetSel.appendChild(o);
+                });
+                const cust = document.createElement('option');
+                cust.value = 'custom'; cust.textContent = 'Custom'; presetSel.appendChild(cust);
+
+                const sData = await sResp.json();
+                const scenSel = document.getElementById('rc-nettacker-scenario');
+                scenSel.innerHTML = '';
+                Object.entries(sData.scenarios || {}).forEach(([name, desc]) => {
+                    const o = document.createElement('option');
+                    o.value = name; o.textContent = name; o.title = desc; scenSel.appendChild(o);
+                });
+                scenSel.value = sData.default || 'recon';
+
+                presetSel.value = pData.default || (RUN_PRESETS_CACHE[0] || {}).name || 'custom';
+                applyRunPreset();
+
+                // Benchmark form: a single preset dropdown (sessions in a sweep
+                // share one automation preset).
+                const benchSel = document.getElementById('bench-preset');
+                if (benchSel) {
+                    benchSel.innerHTML = '';
+                    RUN_PRESETS_CACHE.forEach(p => {
+                        const o = document.createElement('option');
+                        o.value = p.name; o.textContent = p.label; o.title = p.desc || '';
+                        benchSel.appendChild(o);
+                    });
+                    benchSel.value = pData.default || (RUN_PRESETS_CACHE[0] || {}).name;
+                }
+            } catch (e) { /* non-fatal: the form still works without a run config */ }
+        }
+
+        function _presetByName(name) { return RUN_PRESETS_CACHE.find(p => p.name === name); }
+
+        function applyRunPreset() {
+            const name = document.getElementById('rc-preset').value;
+            const descEl = document.getElementById('rc-preset-desc');
+            if (name === 'custom') { descEl.textContent = 'Custom — set each option manually.'; toggleNettackerOpts(); return; }
+            const p = _presetByName(name);
+            if (!p) return;
+            _rcApplying = true;
+            const c = p.config || {};
+            descEl.textContent = p.desc || '';
+            document.getElementById('rc-cve').checked = !!c.cve_enrich;
+            document.getElementById('rc-skills').checked = !!c.skills;
+            document.getElementById('rc-nettacker').checked = !!c.nettacker;
+            document.getElementById('rc-nettacker-findings').checked = !!c.nettacker_findings;
+            document.getElementById('rc-poc').checked = !!c.poc_verify;
+            document.getElementById('rc-primitives').checked = !!c.primitives;
+            document.getElementById('rc-targetmem').checked = !!c.target_memory;
+            if (c.nettacker_scenario) document.getElementById('rc-nettacker-scenario').value = c.nettacker_scenario;
+            toggleNettackerOpts();
+            _rcApplying = false;
+        }
+
+        function markCustomPreset() {
+            if (_rcApplying) return;
+            document.getElementById('rc-preset').value = 'custom';
+            document.getElementById('rc-preset-desc').textContent = 'Custom — set each option manually.';
+        }
+
+        function toggleNettackerOpts() {
+            const on = document.getElementById('rc-nettacker').checked;
+            document.getElementById('rc-nettacker-opts').classList.toggle('hidden', !on);
+        }
+
+        function buildRunConfig() {
+            const presetSel = document.getElementById('rc-preset');
+            if (!presetSel || !presetSel.options.length) return null;  // load failed → env fallback
+            return {
+                preset: presetSel.value,
+                cve_enrich: document.getElementById('rc-cve').checked,
+                skills: document.getElementById('rc-skills').checked,
+                nettacker: document.getElementById('rc-nettacker').checked,
+                nettacker_findings: document.getElementById('rc-nettacker-findings').checked,
+                nettacker_scenario: document.getElementById('rc-nettacker-scenario').value || 'recon',
+                poc_verify: document.getElementById('rc-poc').checked,
+                primitives: document.getElementById('rc-primitives').checked,
+                target_memory: document.getElementById('rc-targetmem').checked,
+            };
+        }
+
+        async function renderRunConfigBadges(sid) {
+            const el = document.getElementById('report-detail-runcfg');
+            if (!el) return;
+            el.innerHTML = '';
+            try {
+                const r = await fetch(`/api/sessions/${sid}/run-config`);
+                if (!r.ok) return;
+                const eff = (await r.json()).resolved || {};
+                const mk = (txt, on, title) => {
+                    const b = document.createElement('span');
+                    b.className = 'px-1.5 py-0.5 rounded font-pixel';
+                    b.style.cssText = `font-size:0.4rem; border:1px solid ${on ? '#a05cff' : '#2a2a3a'}; color:${on ? '#c79bff' : '#4a4a5a'};`;
+                    b.textContent = txt; b.title = title || '';
+                    return b;
+                };
+                if (eff.preset && eff.preset !== 'custom') {
+                    const p = document.createElement('span');
+                    p.className = 'font-pixel'; p.style.cssText = 'font-size:0.4rem; color:#7a7a8a;';
+                    p.textContent = `preset:${eff.preset}`; el.appendChild(p);
+                }
+                el.appendChild(mk('CVE', eff.cve_enrich, 'CVE enrichment was ' + (eff.cve_enrich ? 'on' : 'off')));
+                el.appendChild(mk('SKILLS', eff.skills, 'Skill knowledge injection was ' + (eff.skills ? 'on' : 'off')));
+                el.appendChild(mk(eff.nettacker ? `NETTACKER:${eff.nettacker_scenario}` : 'NETTACKER',
+                                  eff.nettacker, 'Deterministic Nettacker pre-scan was ' + (eff.nettacker ? 'on' : 'off')));
+            } catch (e) { /* non-fatal */ }
+        }
+
+        // ===== Findings triage (accept / reject / severity override) =====
+        function _sevColorName(s) {
+            return ({ critical: '#ff3b6b', high: '#ff3b6b', medium: '#ffcc00',
+                      low: '#00d0ff', info: '#6a6a8a' }[String(s).toLowerCase()] || '#6a6a8a');
+        }
+
+        async function renderTriageTable(sid) {
+            const el = document.getElementById('report-detail-triage');
+            if (!el) return;
+            el.classList.add('hidden'); el.innerHTML = '';
+            try {
+                const r = await fetch(`/api/sessions/${sid}/findings`);
+                if (!r.ok) return;
+                const findings = await r.json();
+                if (!findings.length) return;
+                const sevOpts = ['', 'critical', 'high', 'medium', 'low', 'info'];
+                const rows = findings.map(f => {
+                    const rejected = f.triage_status === 'rejected';
+                    const accepted = f.triage_status === 'accepted';
+                    const eff = (f.severity_override || f.calibrated_severity || f.severity || 'info');
+                    const opts = sevOpts.map(o =>
+                        `<option value="${o}" ${(f.severity_override || '') === o ? 'selected' : ''}>${o ? escapeHtml(o) : '— override —'}</option>`).join('');
+                    return `<tr style="opacity:${rejected ? 0.4 : 1}; border-bottom:1px solid #14141e;">
+                        <td class="py-1 px-2" style="color:#d8d8e8;">${escapeHtml(f.vuln_type || '?')}</td>
+                        <td class="py-1 px-2" style="color:${_sevColorName(eff)}; font-weight:600;">${escapeHtml(String(eff).toUpperCase())}</td>
+                        <td class="py-1 px-2" style="color:#7a7a8a; max-width:220px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${escapeHtml(f.url || '')}</td>
+                        <td class="py-1 px-2" style="white-space:nowrap;">
+                            <button onclick="triageFinding('${sid}',${f.id},{status:'accepted'})" title="Accept" style="color:${accepted ? '#00ff88' : '#5a5a6a'}; cursor:pointer; background:none; border:none; font-size:0.9rem;">&#10004;</button>
+                            <button onclick="triageFinding('${sid}',${f.id},{status:'rejected'})" title="Reject (false positive — excluded from report)" style="color:${rejected ? '#ff4466' : '#5a5a6a'}; cursor:pointer; background:none; border:none; font-size:0.9rem;">&#10008;</button>
+                            <select onchange="triageFinding('${sid}',${f.id},{severity_override:this.value})" class="cyber-input rounded" style="font-size:0.62rem;">${opts}</select>
+                        </td>
+                    </tr>`;
+                }).join('');
+                el.innerHTML = `<div class="font-pixel mb-1" style="font-size:0.5rem; color:#a05cff;">TRIAGE &mdash; accept / reject / override severity (rejected are excluded from the report + exports)</div>
+                    <div style="max-height:180px; overflow:auto;"><table style="width:100%; font-size:0.72rem; border-collapse:collapse;">
+                    <thead><tr style="color:#6a6a8a;"><th class="text-left px-2">vuln</th><th class="text-left px-2">sev</th><th class="text-left px-2">url</th><th class="text-left px-2">triage</th></tr></thead>
+                    <tbody>${rows}</tbody></table></div>`;
+                el.classList.remove('hidden');
+            } catch (e) { /* non-fatal */ }
+        }
+
+        async function triageFinding(sid, id, patch) {
+            try {
+                await fetch(`/api/findings/${id}/triage`, {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(patch),
+                });
+            } catch (e) { /* non-fatal */ }
+            renderTriageTable(sid);  // reflect new state (report.json/html/sarif honor it live)
+        }
+
         // ===== Init =====
         checkHealth();
         setInterval(checkHealth, 15000);
         loadPresets();
         loadToolsetPresets();
         loadModels();
+        loadRunConfigOptions();
         updateToolCount();
     </script>
 </body>
