@@ -314,6 +314,13 @@ async def init_db():
             ("triage_status", "TEXT DEFAULT NULL"),      # accepted | rejected | NULL
             ("severity_override", "TEXT DEFAULT NULL"),
             ("triage_note", "TEXT DEFAULT NULL"),
+            # PoC re-verification outcome. `verified` alone could not distinguish a
+            # finding that FAILED re-verification from one that was never tested,
+            # so a 0 there meant nothing. Deliberately NOT folded into
+            # false_positive: the re-check is a plain GET of the finding's URL, so
+            # a non-match is "did not reproduce this way", not proof of falsehood.
+            #   confirmed | not_reproduced | untested | NULL (never run)
+            ("poc_status", "TEXT DEFAULT NULL"),
         ]
         for table in ("findings", "v2_findings"):
             for col_name, col_def in triage_columns:

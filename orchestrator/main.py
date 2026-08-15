@@ -1370,6 +1370,34 @@ async def _load_primitives(session_id: str, chain_id: str | None = None) -> list
         return []
 
 
+async def _set_poc_status(finding_id: int, status: str, verified: bool = False,
+                          evidence: str | None = None) -> None:
+    """Record a PoC re-verification outcome on one finding. Never raises.
+
+    `verified` is only ever set to 1 (on a confirmation) — a non-reproduction is
+    recorded in poc_status, not by clearing a flag another stage may have set.
+    """
+    try:
+        db = await get_db()
+        try:
+            if evidence is not None and verified:
+                sql, params = ("UPDATE findings SET verified = 1, poc_status = ?, evidence = ? "
+                               "WHERE id = ?", (status, evidence, finding_id))
+            elif evidence is not None:
+                sql, params = ("UPDATE findings SET poc_status = ?, evidence = ? WHERE id = ?",
+                               (status, evidence, finding_id))
+            else:
+                sql, params = ("UPDATE findings SET poc_status = ? WHERE id = ?",
+                               (status, finding_id))
+            await db.execute(sql, params)
+            await db.commit()
+        finally:
+            await db.close()
+    except Exception as e:  # noqa: BLE001
+        print(f"[poc-verify] status write failed for finding {finding_id} (non-fatal): {e}",
+              flush=True)
+
+
 async def poc_reverify_session(session_id: str, target_url: str, enabled_tools: list,
                                force: bool | None = None) -> int:
     """Re-run a lightweight PoC for high/critical findings and confirm by signature.
@@ -1380,6 +1408,19 @@ async def poc_reverify_session(session_id: str, target_url: str, enabled_tools: 
     against the curl confirmation signatures for that vuln class. On a match the
     finding's `verified` flag is set to 1 and a re-verification note is appended;
     findings are never dropped. Returns the number newly confirmed. Never raises.
+
+    Every examined finding also records a `poc_status`, because `verified = 0`
+    could not distinguish "failed re-verification" from "never tested":
+
+      confirmed       a class signature matched the fresh response
+      not_reproduced  signatures existed and ran, but none matched
+      untested        no curl signatures for this class, or the class is unknown
+
+    `not_reproduced` is NOT a false-positive verdict and must not be read as one.
+    The re-check is a plain GET of the finding's URL, so anything that needed a
+    POST body, an auth header, a payload parameter, or a multi-step/blind
+    technique will legitimately fail to reproduce here. That is why this never
+    touches the `false_positive` column.
 
     This catches reflected/header/exposure classes and payload-in-URL cases; it
     does not (yet) reproduce blind/multi-step exploits.
@@ -1392,6 +1433,8 @@ async def poc_reverify_session(session_id: str, target_url: str, enabled_tools: 
         return 0
 
     confirmed = 0
+    not_reproduced = 0
+    untested = 0
     try:
         db = await get_db()
         try:
@@ -1408,11 +1451,24 @@ async def poc_reverify_session(session_id: str, target_url: str, enabled_tools: 
             if sev not in ("high", "critical") or not url or not url.startswith("http"):
                 continue
             vt = (r.get("vuln_type") or "").lower()
-            # signatures for this class (curl tool), plus a generic evidence token
+            # Signatures for this class (curl tool). The `vt` guard matters:
+            # vuln_type is nullable, and `"" in gt_type` is true for EVERY class,
+            # so an untyped finding used to be tested against the union of all
+            # signatures — where loose tokens like /302/ or /redirect/ match almost
+            # any response, manufacturing a confirmation.
             sigs = []
-            for gt_type, by_tool in _HARD_CONFIRMATION_PATTERNS.items():
-                if gt_type in vt or vt in gt_type:
-                    sigs.extend(by_tool.get("curl", []))
+            if vt:
+                for gt_type, by_tool in _HARD_CONFIRMATION_PATTERNS.items():
+                    if gt_type in vt or vt in gt_type:
+                        sigs.extend(by_tool.get("curl", []))
+
+            if not sigs:
+                # Nothing to test against — say so instead of leaving it looking
+                # untested-but-failed. Skips the pointless request, too.
+                await _set_poc_status(r["id"], "untested")
+                untested += 1
+                continue
+
             quoted = "'" + url.replace("'", "'\\''") + "'"  # POSIX single-quote escape
             res = await execute_tool(f"curl -sS -i -m 15 {quoted}",
                                      enabled_tools, target_url=target_url,
@@ -1420,17 +1476,20 @@ async def poc_reverify_session(session_id: str, target_url: str, enabled_tools: 
             out = (res.get("output") or "")
             out_l = out.lower()
             hit = next((s for s in sigs if re.search(s, out_l, re.IGNORECASE)), None)
+            stamp = f"{datetime.now():%Y-%m-%d %H:%M}"
             if hit:
-                note = f" [PoC re-verified {datetime.now():%Y-%m-%d %H:%M}: curl matched /{hit}/]"
-                db2 = await get_db()
-                try:
-                    await db2.execute(
-                        "UPDATE findings SET verified = 1, evidence = ? WHERE id = ?",
-                        (((r.get("evidence") or "") + note)[:2000], r["id"]))
-                    await db2.commit()
-                finally:
-                    await db2.close()
+                note = f" [PoC re-verified {stamp}: curl matched /{hit}/]"
+                await _set_poc_status(r["id"], "confirmed", verified=True,
+                                      evidence=((r.get("evidence") or "") + note)[:2000])
                 confirmed += 1
+            else:
+                note = (f" [PoC re-check {stamp}: no class signature reproduced on a "
+                        f"plain GET — not a false-positive verdict]")
+                await _set_poc_status(r["id"], "not_reproduced",
+                                      evidence=((r.get("evidence") or "") + note)[:2000])
+                not_reproduced += 1
+        print(f"[poc-verify {session_id[:8]}] confirmed={confirmed} "
+              f"not_reproduced={not_reproduced} untested={untested}", flush=True)
     except Exception as e:  # noqa: BLE001
         print(f"[poc-verify {session_id[:8]}] failed (non-fatal): {e}", flush=True)
     return confirmed
@@ -5593,6 +5652,20 @@ _HARD_CONFIRMATION_PATTERNS = {
     },
     "command injection": {
         "commix": [r"injectable", r"is vulnerable"],
+        # Without a curl entry, poc_reverify_session collected ZERO signatures for
+        # this class (it reads only the "curl" key), so a critical Command
+        # Injection finding could never be re-verified. These are high-specificity
+        # command-output markers — deliberately not loose tokens, since a false
+        # confirmation on an RCE finding is worse than no confirmation.
+        "curl": [
+            r"uid=\d+\([^)]+\)\s+gid=\d+\(",          # id
+            # (?m) is required: the haystack is a whole HTTP response, so a bare
+            # ^ anchors to "HTTP/1.1 ..." and this could never match.
+            r"(?m)^root:[x*!]?:0:0:",                  # /etc/passwd
+            r"\bLinux\s+\S+\s+\d+\.\d+\.\d+",         # uname -a
+            r"PING\s+\S+\s+\(\d{1,3}(?:\.\d{1,3}){3}\)",  # ping
+            r"\bdrwx[r-][w-][x-]",                     # ls -l directory listing
+        ],
     },
 }
 
