@@ -3,14 +3,36 @@ set -e
 
 echo "=== Pentest Agent Setup ==="
 
+# Pick the interpreter. macOS ships no bare `python` — only `python3` — so
+# calling `python` here aborts the script under `set -e` before anything runs.
+if command -v python3 > /dev/null 2>&1; then
+    PYTHON=python3
+elif command -v python > /dev/null 2>&1; then
+    PYTHON=python
+else
+    echo "[!] No Python found — install Python 3.10+ first." >&2
+    exit 1
+fi
+
 # Create venv
 if [ ! -d ".venv" ]; then
-    echo "[+] Creating Python virtual environment..."
-    python -m venv .venv
+    echo "[+] Creating Python virtual environment with ${PYTHON}..."
+    "$PYTHON" -m venv .venv
 fi
 
 echo "[+] Activating venv and installing requirements..."
-source .venv/Scripts/activate 2>/dev/null || source .venv/bin/activate
+# Test for the file explicitly instead of relying on `source A || source B`:
+# under `set -e`, macOS's bash 3.2 treats a failed `source` as a fatal
+# special-builtin error and exits before the fallback can run.
+if [ -f ".venv/Scripts/activate" ]; then
+    source .venv/Scripts/activate      # Windows (Git Bash / MSYS)
+elif [ -f ".venv/bin/activate" ]; then
+    source .venv/bin/activate          # macOS / Linux
+else
+    echo "[!] Virtualenv creation failed — no activate script under .venv/." >&2
+    exit 1
+fi
+
 pip install -r requirements.txt
 
 echo "[+] Starting Docker containers..."

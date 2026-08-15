@@ -1,7 +1,19 @@
 #!/bin/bash
 set -e
 
-source .venv/Scripts/activate 2>/dev/null || source .venv/bin/activate
+# Activate the virtualenv. Test for the file explicitly instead of relying on
+# `source A || source B`: under `set -e`, macOS's bash 3.2 treats a failed
+# `source` as a fatal special-builtin error and exits the script before the
+# fallback can run — and the 2>/dev/null hid the reason, so it failed silently.
+if [ -f ".venv/Scripts/activate" ]; then
+    source .venv/Scripts/activate      # Windows (Git Bash / MSYS)
+elif [ -f ".venv/bin/activate" ]; then
+    source .venv/bin/activate          # macOS / Linux
+else
+    echo "[!] No virtualenv found at .venv/ — run ./setup.sh first." >&2
+    exit 1
+fi
+
 find . -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true
 
 # Ensure the docker binary is reachable so tool_executor can run `docker exec`
