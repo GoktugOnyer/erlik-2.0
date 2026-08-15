@@ -634,6 +634,15 @@ def _parse_tool_output(tool_name: str, output: str, command: str) -> str:
                 # Skip obvious progress/decoration lines
                 if path in ("Progress:", "::", "---", "===") or path.startswith("==="):
                     continue
+                # Normalise to a leading slash. gobuster 3.x prints bare names
+                # ("config"), dirb prints absolute URLs, ffuf prints either.
+                # _build_chaining_hint matched on /\S+, so bare names produced ZERO
+                # hits: discovery found paths, the agent was handed none of them,
+                # and it invented endpoints like /endpoint?param=test instead.
+                if path.startswith(("http://", "https://")):
+                    path = "/" + path.split("/", 3)[3] if path.count("/") >= 3 else "/"
+                if not path.startswith("/"):
+                    path = "/" + path
                 findings.append(f"  {path} (status {m.group(2)})")
         if findings:
             return f"DISCOVERED PATHS ({len(findings)}):\n" + "\n".join(findings[:15])
