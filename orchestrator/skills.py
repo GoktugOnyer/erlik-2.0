@@ -53,7 +53,11 @@ ALIASES = {
     "owasp": ["injection", "authentication", "access"],
 }
 
-# Action-oriented reference files get a relevance boost.
+# Action-oriented reference files are preferred, but ONLY as a tie-breaker
+# between files of equal topical relevance — never as a way to outrank a file
+# that matched more query tokens. Category directories share tokens ("client-side"
+# and "server-side" both yield "side"), so letting a filename-shape bonus
+# outweigh real overlap made e.g. an "ssrf" hint select client-side quickstarts.
 _BOOST = (("quickstart", 3), ("cheat-sheet", 2), ("advanced", 1), ("principles", 1))
 
 _STOP = {
@@ -102,25 +106,28 @@ def select_skill_files(hint: str, max_files: int = 3, max_chars: int = 14000) ->
     q = _tokens(hint)
     if not q:
         return []
-    scored: list[tuple[int, Path]] = []
+    scored: list[tuple[int, int, Path]] = []
     for path, toks in _catalog():
         overlap = len(q & toks)
         if overlap == 0:
             continue
-        score = overlap
         name = path.name.lower()
-        for kw, boost in _BOOST:
-            if kw in name:
-                score += boost
-        scored.append((score, path))
-    scored.sort(key=lambda x: (-x[0], str(x[1])))
+        boost = sum(b for kw, b in _BOOST if kw in name)
+        scored.append((overlap, boost, path))
+    # Rank on topical overlap first; the action-oriented boost only orders files
+    # that are equally relevant. Sorting on a combined sum let a +3 filename
+    # bonus beat a genuinely better match.
+    scored.sort(key=lambda x: (-x[0], -x[1], str(x[2])))
 
     chosen: list[Path] = []
     used = 0
-    for _score, path in scored:
+    for _overlap, _boost, path in scored:
         size = path.stat().st_size
         if chosen and used + size > max_chars:
-            break
+            # Skip this one — a later, smaller file may still fit. Breaking here
+            # abandoned the remaining budget entirely (an oversized rank-2 file
+            # truncated the selection to a single skill).
+            continue
         chosen.append(path)
         used += size
         if len(chosen) >= max_files:
