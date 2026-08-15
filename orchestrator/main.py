@@ -760,7 +760,7 @@ def _parse_tool_output(tool_name: str, output: str, command: str) -> str:
 
 
 
-def _build_chaining_hint(tool_name: str, parsed_output: str, command: str, target_url: str = "http://juice-shop:3000") -> str:
+def _build_chaining_hint(tool_name: str, parsed_output: str, command: str, target_url: str = "") -> str:
     """Suggest concrete next commands based on what a tool found."""
     hints = []
     # Use the session's actual target URL for hints (target-agnostic)
@@ -939,7 +939,10 @@ PENETRATION TESTING METHODOLOGY:
 
 IMPORTANT:
 - ALWAYS include http:// in URLs for web tools.
-- Use "juice-shop" as hostname (not localhost) — tools run inside Docker network.
+- Use the EXACT target host given to you below — never localhost, and never a
+  host from an example. Tools run inside a Docker network, so a hostname you
+  invent will not resolve, and a finding recorded against the wrong host is
+  worse than no finding at all.
 - Run ONE command at a time, then analyze the result.
 - NEVER repeat the same command if it fails. Try a DIFFERENT tool or approach.
 - After gobuster/ffuf find paths, explore them with curl before running heavy scanners.
@@ -3411,7 +3414,13 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
         messages = [{"role": "system", "content": combined_system}]
 
         tools_str = ", ".join(enabled_tools) if enabled_tools else "none"
-        target_info = f"Target: http://juice-shop:3000 (web app)"
+        # The session's ACTUAL target. This was hardcoded to Juice Shop, so a run
+        # against any other host told the agent it was testing Juice Shop: it
+        # emitted commands naming that host and attributed findings to it. The
+        # command rewriter redirected the traffic, so nothing off-target was
+        # scanned, but a finding recorded against a host that was never in scope
+        # is a reporting error a client would rightly object to.
+        target_info = f"Target: {target_url} (web app)"
         if target_reachable:
             target_info += " — confirmed reachable"
         else:
@@ -3423,7 +3432,7 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
                 f"{target_info}\n"
                 f"Scope: {scope_mode}\n"
                 f"Enabled tools: {tools_str}\n\n"
-                f"REMEMBER: Always use http://juice-shop:3000 as the target URL.\n"
+                f"REMEMBER: Always use {target_url} as the target URL.\n"
                 f"You have been given a MISSION above. Read it carefully. "
                 f"Begin by choosing your first reconnaissance step. Respond with a JSON action."
             )
@@ -3433,7 +3442,7 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
                 f"{target_info}\n"
                 f"Scope: {scope_mode}\n"
                 f"Enabled tools: {tools_str}\n\n"
-                f"REMEMBER: Always use http://juice-shop:3000 as the target URL.\n"
+                f"REMEMBER: Always use {target_url} as the target URL.\n"
                 f"Start by running a reconnaissance command. Respond with a JSON action."
             )
         messages.append({"role": "user", "content": initial_prompt})
@@ -3571,7 +3580,7 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
                 messages.append({"role": "assistant", "content": response})
                 messages.append({"role": "user", "content":
                     "Please respond with a valid JSON object. Example: "
-                    '{"action": "run_tool", "command": "whatweb http://juice-shop:3000", "reason": "Fingerprint the web server"}'
+                    '{"action": "run_tool", "command": "whatweb ' + target_url + '", "reason": "Fingerprint the web server"}'
                 })
 
                 # Save step
@@ -3825,13 +3834,13 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
                         if tool_name == "zap-cli" and "spider" in command:
                             tool_feedback += (
                                 "\nMANDATORY: You just started a ZAP spider. You MUST now:\n"
-                                "1. Run: zap-cli active-scan http://juice-shop:3000\n"
-                                "2. Then: zap-cli alerts http://juice-shop:3000\n"
+                                f"1. Run: zap-cli active-scan {target_url}\n"
+                                f"2. Then: zap-cli alerts {target_url}\n"
                                 "Complete these 2 steps BEFORE using any other tool.\n\n"
                             )
                         elif tool_name == "zap-cli" and "active-scan" in command:
                             tool_feedback += (
-                                "\nMANDATORY: Active scan complete. Now run: zap-cli alerts http://juice-shop:3000\n\n"
+                                f"\nMANDATORY: Active scan complete. Now run: zap-cli alerts {target_url}\n\n"
                             )
 
                         # === Mid-session nudges: push model toward untested phases ===
@@ -3870,13 +3879,13 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
                         if tool_name in ("gobuster", "ffuf") and "exclude" in tool_output.lower():
                             tool_feedback += (
                                 "This failed because the server returns the same response for all paths.\n"
-                                "RETRY with: gobuster dir -u http://juice-shop:3000 -w /usr/share/dirb/wordlists/common.txt --exclude-length 3748\n"
-                                "Or use: ffuf -u http://juice-shop:3000/FUZZ -w /usr/share/dirb/wordlists/common.txt -fs 3748\n"
+                                f"RETRY with: gobuster dir -u {target_url} -w /usr/share/dirb/wordlists/common.txt\n"
+                                f"Or use: ffuf -u {target_url}/FUZZ -w /usr/share/dirb/wordlists/common.txt\n"
                             )
                         else:
                             tool_feedback += (
                                 "This command failed. Do NOT retry it. Try a DIFFERENT tool or approach.\n"
-                                "Remember: use http://juice-shop:3000 with http:// prefix.\n"
+                                f"Remember: use {target_url} with the http:// prefix.\n"
                             )
                         if uncovered:
                             tool_feedback += f"Move to an uncovered phase: {uncovered[0]}\n"
