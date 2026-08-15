@@ -38,6 +38,7 @@ _BOOL_KEYS = {
     "primitives": "ERLIK_PRIMITIVES",
     "target_memory": "ERLIK_TARGET_MEMORY",
     "techniques": "ERLIK_TECHNIQUES",
+    "ai_review": "ERLIK_AI_REVIEW",
 }
 
 # Sensible pre-selectable setups. Keys map to the flag bundle a preset turns on;
@@ -52,7 +53,8 @@ RUN_PRESETS: dict[str, dict] = {
         # Every knowledge/help lever explicitly False so the baseline is clean.
         "config": {"cve_enrich": False, "skills": False, "nettacker": False,
                    "playbooks": "", "primitives": False, "target_memory": False,
-                   "poc_verify": False, "techniques": False},
+                   "poc_verify": False, "techniques": False,
+                   "ai_review": False},
     },
     "guided_ai": {
         "label": "Guided AI — skills + target playbook (most effective)",
@@ -63,7 +65,18 @@ RUN_PRESETS: dict[str, dict] = {
         # compared against ai_only, so no help lever may drift in from the env.
         "config": {"skills": True, "cve_enrich": True, "nettacker": False,
                    "playbooks": "juiceshop", "primitives": True,
-                   "techniques": False},
+                   "techniques": False, "ai_review": True},
+    },
+    "guided_techniques": {
+        "label": "Guided Attack — environment-specific techniques",
+        "desc": "Skills + target playbook + techniques matched to what the target "
+                "actually runs (ports/tech observed by a light pre-scan), then an AI "
+                "review of the run at the end. Set ERLIK_HACKTRICKS_PATH for full "
+                "technique text; without it you still get titles and reference links.",
+        "config": {"skills": True, "cve_enrich": True, "nettacker": True,
+                   "nettacker_scenario": "recon", "techniques": True,
+                   "playbooks": "juiceshop", "primitives": True,
+                   "ai_review": True},
     },
     "recon_first": {
         "label": "Recon-first — Nettacker seeds the agent",
@@ -72,7 +85,7 @@ RUN_PRESETS: dict[str, dict] = {
         "config": {"nettacker": True, "nettacker_scenario": "recon",
                    "skills": True, "cve_enrich": True, "playbooks": "juiceshop",
                    "primitives": True, "target_memory": True,
-                   "techniques": True},
+                   "techniques": True, "ai_review": True},
     },
     "deterministic_heavy": {
         "label": "Deterministic-heavy — broad pre-scan",
@@ -81,7 +94,7 @@ RUN_PRESETS: dict[str, dict] = {
         "config": {"nettacker": True, "nettacker_scenario": "web",
                    "nettacker_findings": True, "skills": True, "cve_enrich": True,
                    "playbooks": "juiceshop", "poc_verify": True,
-                   "techniques": True},
+                   "techniques": True, "ai_review": True},
     },
     "full_assessment": {
         "label": "Full assessment — everything on (slow)",
@@ -90,7 +103,7 @@ RUN_PRESETS: dict[str, dict] = {
         "config": {"nettacker": True, "nettacker_scenario": "full",
                    "nettacker_findings": True, "skills": True, "cve_enrich": True,
                    "playbooks": "juiceshop", "poc_verify": True, "primitives": True,
-                   "target_memory": True, "techniques": True},
+                   "target_memory": True, "techniques": True, "ai_review": True},
     },
 }
 
@@ -120,7 +133,7 @@ def resolve(run_config=None) -> dict:
     # Explicit per-key values in the session config override the preset.
     for k in ("cve_enrich", "skills", "nettacker", "nettacker_findings",
               "nettacker_scenario", "playbooks", "poc_verify", "primitives",
-              "target_memory", "techniques"):
+              "target_memory", "techniques", "ai_review"):
         if k in cfg and cfg[k] is not None:
             base[k] = cfg[k]
 
@@ -148,6 +161,7 @@ def resolve(run_config=None) -> dict:
         "primitives": tri("primitives"),
         "target_memory": tri("target_memory"),
         "techniques": tri("techniques"),
+        "ai_review": tri("ai_review"),
         "nettacker_scenario": scenario,
         "playbooks": playbooks,
     }

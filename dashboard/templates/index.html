@@ -801,6 +801,10 @@
                         <input type="checkbox" id="rc-techniques" class="accent-purple-400" style="width:14px;height:14px;" onchange="markCustomPreset()">
                         <span class="font-pixel" style="font-size:0.5rem; color:#8a8aa0;">TECHNIQUES</span><span class="rc-q">?</span>
                     </label>
+                    <label class="flex items-center gap-1.5 cursor-pointer rc-help" data-tip="AI REVIEW — After the run finishes, a second AI pass critiques the RUN itself (not the app): what attack surface was never touched, which tools kept failing, and which settings to change next time. Advisory only — it never creates findings and never changes the metrics.">
+                        <input type="checkbox" id="rc-aireview" class="accent-purple-400" style="width:14px;height:14px;" onchange="markCustomPreset()">
+                        <span class="font-pixel" style="font-size:0.5rem; color:#8a8aa0;">AI REVIEW</span><span class="rc-q">?</span>
+                    </label>
                 </div>
             </div>
 
@@ -2396,7 +2400,7 @@ ${htmlBody}
             // Run Configuration panel
             'rc-preset', 'rc-cve', 'rc-skills', 'rc-nettacker',
             'rc-nettacker-scenario', 'rc-nettacker-findings',
-            'rc-poc', 'rc-primitives', 'rc-targetmem', 'rc-techniques'
+            'rc-poc', 'rc-primitives', 'rc-targetmem', 'rc-techniques', 'rc-aireview'
         ];
 
         function lockSettings() {
@@ -2694,6 +2698,15 @@ ${htmlBody}
                 setPhase(data.active);
             } else if (data.type === 'finding') {
                 addFinding(data);
+            } else if (data.type === 'review') {
+                // Post-run AI critique of the run itself. Advisory: it never
+                // creates findings, so it is logged, not added to the findings list.
+                const r = data.review || {};
+                addLog(`[review] ${data.message || 'AI run review complete'}`, 'log-report');
+                (r.coverage_gaps || []).forEach(x => addLog(`[review] gap: ${x}`, 'log-report'));
+                (r.wasted_effort || []).forEach(x => addLog(`[review] wasted: ${x}`, 'log-report'));
+                (r.config_suggestions || []).forEach(x => addLog(`[review] suggest: ${x}`, 'log-report'));
+                if (r.recommended_next_run) addLog(`[review] next run: ${r.recommended_next_run}`, 'log-report');
             } else if (data.type === 'report') {
                 showReport(data.report_markdown);
                 addLog('[report] Report generated and ready for download', 'log-report');
@@ -3848,6 +3861,7 @@ ${htmlBody}
             document.getElementById('rc-poc').checked = !!c.poc_verify;
             document.getElementById('rc-primitives').checked = !!c.primitives;
             document.getElementById('rc-techniques').checked = !!c.techniques;
+            document.getElementById('rc-aireview').checked = !!c.ai_review;
             document.getElementById('rc-targetmem').checked = !!c.target_memory;
             if (c.nettacker_scenario) document.getElementById('rc-nettacker-scenario').value = c.nettacker_scenario;
             toggleNettackerOpts();
@@ -3878,6 +3892,7 @@ ${htmlBody}
                 poc_verify: document.getElementById('rc-poc').checked,
                 primitives: document.getElementById('rc-primitives').checked,
                 techniques: document.getElementById('rc-techniques').checked,
+                ai_review: document.getElementById('rc-aireview').checked,
                 target_memory: document.getElementById('rc-targetmem').checked,
             };
         }

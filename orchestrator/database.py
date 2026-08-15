@@ -309,6 +309,24 @@ async def init_db():
         """)
         await db.execute("CREATE INDEX IF NOT EXISTS idx_session_primitives_sid ON session_primitives(session_id);")
 
+        # Post-run AI critique of the RUN (coverage gaps, wasted effort, config
+        # advice). Kept in its own table, never on findings: the review is
+        # advisory and must not reach any column the metrics read.
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS session_reviews (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL UNIQUE,
+                coverage_gaps TEXT,
+                wasted_effort TEXT,
+                config_suggestions TEXT,
+                recommended_next_run TEXT,
+                confidence TEXT,
+                raw TEXT,
+                model TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+        """)
+
         # Operator triage columns (accept/reject + severity override) — additive.
         triage_columns = [
             ("triage_status", "TEXT DEFAULT NULL"),      # accepted | rejected | NULL

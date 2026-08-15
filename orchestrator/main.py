@@ -1370,6 +1370,99 @@ async def _load_primitives(session_id: str, chain_id: str | None = None) -> list
         return []
 
 
+async def run_ai_review(session_id: str, model: str, runcfg: dict,
+                        enabled_tools: list[str], force: bool | None = None) -> dict | None:
+    """Critique the finished run and persist the suggestions. Never raises.
+
+    Advisory only: this writes to `session_reviews` and nothing else. It creates
+    no findings and touches no column the metrics read, so the model cannot grade
+    its own homework by, say, adding evidence text that the verification labeller
+    would then score.
+    """
+    from orchestrator import review as _rv
+
+    if not (force if force is not None else _rv.review_enabled()):
+        return None
+    try:
+        db = await get_db()
+        try:
+            srow = await (await db.execute(
+                "SELECT target_url, total_duration_ms, max_turns FROM sessions WHERE id = ?",
+                (session_id,))).fetchone()
+            session = dict(srow) if srow else {}
+
+            rows = [dict(r) for r in await (await db.execute(
+                "SELECT phase, tool_called, tool_output FROM steps WHERE session_id = ?",
+                (session_id,))).fetchall()]
+
+            findings = [dict(r) for r in await (await db.execute(
+                "SELECT severity, calibrated_severity FROM findings WHERE session_id = ?",
+                (session_id,))).fetchall()]
+        finally:
+            await db.close()
+
+        # Per-tool call/failure counts straight from the recorded steps.
+        by_tool: dict[str, dict] = {}
+        for r in rows:
+            name = (r.get("tool_called") or "").strip() or "unknown"
+            t = by_tool.setdefault(name, {"tool": name, "calls": 0, "failures": 0,
+                                          "last_error": ""})
+            t["calls"] += 1
+            out = (r.get("tool_output") or "")
+            if (not out.strip()) or out.lstrip().lower().startswith("error"):
+                t["failures"] += 1
+                t["last_error"] = out.strip()[:200]
+
+        sev: dict[str, int] = {}
+        for f in findings:
+            k = (f.get("calibrated_severity") or f.get("severity") or "info").lower()
+            sev[k] = sev.get(k, 0) + 1
+
+        used = {t for t in by_tool if t != "unknown"}
+        prompt = _rv.build_review_prompt(
+            config=runcfg,
+            activity={
+                "target_url": session.get("target_url"),
+                "steps": len(rows),
+                "max_turns": session.get("max_turns"),
+                "phases": sorted({(r.get("phase") or "").strip() for r in rows if r.get("phase")}),
+                "duration_ms": session.get("total_duration_ms"),
+                "open_ports": [],
+            },
+            tools=sorted(by_tool.values(), key=lambda t: -t["calls"]),
+            outcome={
+                "findings": len(findings),
+                "severities": sev,
+                "unused_tools": sorted(set(enabled_tools or []) - used),
+            },
+        )
+
+        raw = await llm_client.chat(
+            [{"role": "system", "content": "You are a precise, sceptical security reviewer."},
+             {"role": "user", "content": prompt}], model=model)
+        parsed = _rv.parse_review(raw)
+
+        db2 = await get_db()
+        try:
+            await db2.execute(
+                "INSERT OR REPLACE INTO session_reviews "
+                "(session_id, coverage_gaps, wasted_effort, config_suggestions, "
+                " recommended_next_run, confidence, raw, model) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (session_id, json.dumps(parsed["coverage_gaps"]),
+                 json.dumps(parsed["wasted_effort"]),
+                 json.dumps(parsed["config_suggestions"]),
+                 parsed["recommended_next_run"], parsed["confidence"],
+                 (raw or "")[:8000], model))
+            await db2.commit()
+        finally:
+            await db2.close()
+        return parsed
+    except Exception as e:  # noqa: BLE001
+        print(f"[review {session_id[:8]}] failed (non-fatal): {e}", flush=True)
+        return None
+
+
 async def _persist_derived_references(session_id: str) -> int:
     """Fill the `mitre` and `ref_links` columns for a session's findings.
 
@@ -3993,6 +4086,28 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
                 "type": "log", "phase": "report",
                 "message": f"Report generated ({gen_duration}ms)",
             })
+            # Post-run AI critique of the RUN (coverage gaps, wasted effort,
+            # config advice). Runs after the report so it can see the finished
+            # picture, and is appended to the markdown rather than folded into
+            # the report LLM call — keeping it a separate, clearly-labelled
+            # advisory section that creates no findings and moves no metric.
+            try:
+                _review = await run_ai_review(session_id, model, runcfg,
+                                              enabled_tools,
+                                              force=runcfg.get("ai_review"))
+                if _review:
+                    from orchestrator.review import render_review_markdown
+                    _rv_md = render_review_markdown(_review)
+                    if _rv_md:
+                        report_md = f"{report_md}\n\n{_rv_md}"
+                    await manager.broadcast(session_id, {
+                        "type": "review", "review": _review,
+                        "message": f"AI run review: {len(_review['coverage_gaps'])} coverage gap(s), "
+                                   f"{len(_review['config_suggestions'])} suggestion(s)",
+                    })
+            except Exception as _rv_err:  # noqa: BLE001
+                print(f"[review {session_id[:8]}] skipped: {_rv_err}", flush=True)
+
             # Send report to dashboard
             await manager.broadcast(session_id, {
                 "type": "report",
@@ -4569,6 +4684,30 @@ async def list_steps(session_id: str):
         return [dict(r) for r in rows]
     finally:
         await db.close()
+
+
+@app.get("/api/sessions/{session_id}/review")
+async def get_session_review(session_id: str):
+    """The post-run AI critique of this run, or {} if none was generated.
+
+    Advisory only — it holds coverage gaps, wasted effort and config advice, and
+    is deliberately kept out of every table the metrics read.
+    """
+    db = await get_db()
+    try:
+        row = await (await db.execute(
+            "SELECT * FROM session_reviews WHERE session_id = ?", (session_id,))).fetchone()
+    finally:
+        await db.close()
+    if not row:
+        return {}
+    r = dict(row)
+    for k in ("coverage_gaps", "wasted_effort", "config_suggestions"):
+        try:
+            r[k] = json.loads(r[k]) if r.get(k) else []
+        except (json.JSONDecodeError, TypeError):
+            r[k] = []
+    return r
 
 
 @app.get("/api/sessions/{session_id}/findings")
