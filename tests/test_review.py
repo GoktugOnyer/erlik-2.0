@@ -97,6 +97,34 @@ def test_prompt_names_the_enabled_help():
     assert "nmap, nuclei" in p
 
 
+def test_wasted_turns_are_made_visible():
+    """A turn that produced no tool step still consumed budget. Reporting only
+    the recorded steps hid exactly the turns the review exists to find."""
+    p = R.build_review_prompt(
+        config={}, activity={"steps": 30, "recorded_steps": 7, "max_turns": 30},
+        tools=[], outcome={})
+    assert "turns used: 30 of 30" in p
+    assert "only 7 produced a tool step" in p
+    assert "23 turn(s) yielded nothing" in p
+
+
+def test_no_gap_reported_when_every_turn_produced_a_step():
+    p = R.build_review_prompt(
+        config={}, activity={"steps": 7, "recorded_steps": 7, "max_turns": 30},
+        tools=[], outcome={})
+    assert "yielded nothing" not in p
+
+
+def test_observed_environment_reaches_the_prompt():
+    """open_ports was hardcoded to [], so the reviewer could never comment on
+    what the target was actually running."""
+    p = R.build_review_prompt(
+        config={}, activity={"open_ports": [3000, 27017], "tech": ["Express", "jQuery 2.2.4"]},
+        tools=[], outcome={})
+    assert "ports observed: 3000, 27017" in p
+    assert "Express" in p and "jQuery 2.2.4" in p
+
+
 def test_prompt_marks_the_unguided_baseline_explicitly():
     p = R.build_review_prompt(config={"preset": "ai_only"},
                               activity={}, tools=[], outcome={})
@@ -299,6 +327,43 @@ def test_review_is_persisted(temp_db, fake_llm):
     # The REVIEWER model is recorded, not the model under test — otherwise a
     # result could not be traced to what actually produced the critique.
     assert row["model"] == "qwen3.5:35b"
+
+
+def test_authoritative_turn_count_is_used_not_the_step_row_count(temp_db, fake_llm, monkeypatch):
+    """sessions.total_steps counts turns; steps rows count turns that produced a
+    tool call. The review must report the former, or it undercounts the waste."""
+    _seed_session()
+
+    async def bump():
+        db = await db_mod.get_db()
+        await db.execute("UPDATE sessions SET total_steps = 25 WHERE id = ?", ("s1",))
+        await db.commit()
+        await db.close()
+    asyncio.run(bump())
+
+    # main.py imports the module inside the function, so patching the module
+    # attribute here is what run_ai_review will resolve at call time.
+    seen = {}
+    real_build = R.build_review_prompt
+    monkeypatch.setattr(R, "build_review_prompt",
+                        lambda **kw: seen.update(kw) or real_build(**kw))
+    _run()
+    # one step row was seeded, but the session recorded 25 turns
+    assert seen["activity"]["steps"] == 25
+    assert seen["activity"]["recorded_steps"] == 1
+
+
+def test_observed_ports_are_threaded_through(temp_db, fake_llm, monkeypatch):
+    _seed_session()
+    seen = {}
+    real_build = R.build_review_prompt
+    monkeypatch.setattr(R, "build_review_prompt",
+                        lambda **kw: seen.update(kw) or real_build(**kw))
+    asyncio.run(main_mod.run_ai_review(
+        "s1", "test-model", {"preset": "guided_ai"}, ["curl"], force=True,
+        observed_ports=[3000, 27017, 3000], observed_tech=["Express", "Express"]))
+    assert seen["activity"]["open_ports"] == [3000, 27017]   # deduped, sorted
+    assert seen["activity"]["tech"] == ["Express"]           # deduped, order kept
 
 
 def test_explicit_review_model_is_honoured(temp_db, fake_llm, monkeypatch):

@@ -1371,7 +1371,9 @@ async def _load_primitives(session_id: str, chain_id: str | None = None) -> list
 
 
 async def run_ai_review(session_id: str, model: str, runcfg: dict,
-                        enabled_tools: list[str], force: bool | None = None) -> dict | None:
+                        enabled_tools: list[str], force: bool | None = None,
+                        observed_ports: list[int] | None = None,
+                        observed_tech: list[str] | None = None) -> dict | None:
     """Critique the finished run and persist the suggestions. Never raises.
 
     Advisory only: this writes to `session_reviews` and nothing else. It creates
@@ -1387,7 +1389,8 @@ async def run_ai_review(session_id: str, model: str, runcfg: dict,
         db = await get_db()
         try:
             srow = await (await db.execute(
-                "SELECT target_url, total_duration_ms, max_turns FROM sessions WHERE id = ?",
+                "SELECT target_url, total_duration_ms, max_turns, total_steps "
+                "FROM sessions WHERE id = ?",
                 (session_id,))).fetchone()
             session = dict(srow) if srow else {}
 
@@ -1423,11 +1426,18 @@ async def run_ai_review(session_id: str, model: str, runcfg: dict,
             config=runcfg,
             activity={
                 "target_url": session.get("target_url"),
-                "steps": len(rows),
+                # sessions.total_steps counts TURNS; len(rows) counts turns that
+                # produced a tool step. Using len(rows) alone undercounted, and
+                # undercounted precisely the wasted turns the review looks for.
+                "steps": session.get("total_steps") if session.get("total_steps") is not None else len(rows),
+                "recorded_steps": len(rows),
                 "max_turns": session.get("max_turns"),
                 "phases": sorted({(r.get("phase") or "").strip() for r in rows if r.get("phase")}),
                 "duration_ms": session.get("total_duration_ms"),
-                "open_ports": [],
+                # Passed in from agent_loop: recon_context is written AFTER the
+                # review runs, so reading it here would always be empty.
+                "open_ports": sorted(set(observed_ports or [])),
+                "tech": list(dict.fromkeys(observed_tech or [])),
             },
             tools=sorted(by_tool.values(), key=lambda t: -t["calls"]),
             outcome={
@@ -4116,7 +4126,9 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
             try:
                 _review = await run_ai_review(session_id, model, runcfg,
                                               enabled_tools,
-                                              force=runcfg.get("ai_review"))
+                                              force=runcfg.get("ai_review"),
+                                              observed_ports=_observed_ports,
+                                              observed_tech=_observed_tech)
                 if _review:
                     from orchestrator.review import render_review_markdown
                     _rv_md = render_review_markdown(_review)

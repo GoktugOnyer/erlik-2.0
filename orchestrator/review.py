@@ -169,12 +169,25 @@ def build_review_prompt(config: dict, activity: dict, tools: list[dict],
     )
 
     ports = activity.get("open_ports") or []
+    tech = activity.get("tech") or []
+
+    # Turns and recorded steps are different counts: a turn that produced no step
+    # row (unparseable JSON, a rejected action) still consumed budget. The gap is
+    # itself the wasted-effort signal, so show both rather than one.
+    turns = activity.get("steps")
+    recorded = activity.get("recorded_steps")
+    turn_line = f"- turns used: {turns if turns is not None else '?'} of {activity.get('max_turns', '?')} allowed"
+    if recorded is not None and turns is not None and recorded != turns:
+        turn_line += (f" — only {recorded} produced a tool step, so "
+                      f"{turns - recorded} turn(s) yielded nothing")
+
     activity_text = (
         f"- target: {activity.get('target_url')}\n"
-        f"- turns used: {activity.get('steps', 0)} of {activity.get('max_turns', '?')} allowed\n"
+        f"{turn_line}\n"
         f"- phases reached: {', '.join(activity.get('phases') or []) or 'none recorded'}\n"
         f"- duration: {round((activity.get('duration_ms') or 0) / 1000)}s\n"
-        f"- ports observed: {', '.join(str(p) for p in ports) if ports else 'none recorded'}"
+        f"- ports observed: {', '.join(str(p) for p in ports) if ports else 'none recorded'}\n"
+        f"- technologies detected: {', '.join(str(t) for t in tech[:12]) if tech else 'none recorded'}"
     )
 
     if tools:
