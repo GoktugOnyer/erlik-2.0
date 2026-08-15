@@ -8,6 +8,43 @@ services:
       - pentest-net
     restart: unless-stopped
 
+  # Second lab target. erlik already ships 19 DVWA ground-truth entries, so it is
+  # the cheapest way to check the framework generalises beyond Juice Shop rather
+  # than having been tuned to it. Most of that ground truth lives under
+  # /vulnerabilities/*, which DVWA puts behind a login — which also makes it a
+  # real exercise of credential capture and reuse.
+  dvwa:
+    # digininja is DVWA's own maintainer; the widely-copied vulnerables/web-dvwa
+    # image is a stale third-party build. This one is NOT all-in-one — it needs
+    # the database service below, or every page dies with "Connection refused"
+    # inside dvwaPage.inc.php and the whole app answers 302 to login.php.
+    image: ghcr.io/digininja/dvwa:latest
+    container_name: dvwa
+    depends_on:
+      - dvwa-db
+    environment:
+      - DB_SERVER=dvwa-db
+      - DB_DATABASE=dvwa
+      - DB_USER=dvwa
+      - DB_PASSWORD=p@ssw0rd
+    ports:
+      - "8081:80"
+    networks:
+      - pentest-net
+    restart: unless-stopped
+
+  dvwa-db:
+    image: mysql:8.0
+    container_name: dvwa-db
+    environment:
+      - MYSQL_ROOT_PASSWORD=dvwa
+      - MYSQL_DATABASE=dvwa
+      - MYSQL_USER=dvwa
+      - MYSQL_PASSWORD=p@ssw0rd
+    networks:
+      - pentest-net
+    restart: unless-stopped
+
   kali-tools:
     build:
       context: .
@@ -15,6 +52,7 @@ services:
     container_name: kali-tools
     depends_on:
       - juice-shop
+      - dvwa
       - zap
     networks:
       - pentest-net
