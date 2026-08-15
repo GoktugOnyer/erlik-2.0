@@ -686,7 +686,7 @@
                 <div>
                     <label class="block font-pixel mb-2" style="font-size:0.55rem; color:#6a6a8a;">AI MODEL</label>
                     <select id="model-select" class="cyber-input cyber-select rounded">
-                        <option value="qwen2.5-coder:7b-instruct-q4_K_M">Loading models...</option>
+                        <option value="qwen2.5-coder:7b">Loading models...</option>
                     </select>
                 </div>
                 <div class="flex gap-2">
@@ -1994,15 +1994,28 @@
                 const select = document.getElementById('model-select');
                 select.innerHTML = '';
                 if (data.models && data.models.length > 0) {
-                    data.models.forEach(m => {
+                    // Exact match only. The old test also accepted any tag in the
+                    // same FAMILY, and marked every match in turn so the last one
+                    // won — with qwen2.5-coder:7b-juicy2 and -cipher installed
+                    // beside the base model, a "baseline" run could silently be
+                    // handed a target-tuned fine-tune purely by listing order.
+                    const exact = data.models.indexOf(data.default);
+                    data.models.forEach((m, i) => {
                         const opt = document.createElement('option');
                         opt.value = m;
                         opt.textContent = m;
-                        if (m === data.default || m.startsWith(data.default.split(':')[0])) {
-                            opt.selected = true;
-                        }
+                        if (i === exact) opt.selected = true;
                         select.appendChild(opt);
                     });
+                    if (exact === -1) {
+                        // Configured model not installed: say so rather than
+                        // quietly running whatever happens to be first.
+                        const warn = document.createElement('option');
+                        warn.value = data.default;
+                        warn.textContent = data.default + ' (NOT INSTALLED — ollama pull it)';
+                        warn.selected = true;
+                        select.insertBefore(warn, select.firstChild);
+                    }
                 } else {
                     const opt = document.createElement('option');
                     opt.value = data.default;
@@ -2914,7 +2927,7 @@ ${htmlBody}
                         max_turns: maxTurns,
                         no_timeout: noTimeout,
                         repeat_n: repeatN,
-                        model: document.getElementById('model-select').value || 'qwen2.5-coder:7b-instruct-q4_K_M',
+                        model: document.getElementById('model-select').value || 'qwen2.5-coder:7b',
                         run_config: (function(){ const s=document.getElementById('bench-preset'); return s && s.value ? {preset: s.value} : null; })(),
                     }),
                 });

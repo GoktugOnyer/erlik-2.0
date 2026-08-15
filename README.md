@@ -69,7 +69,7 @@ docs/                Methodology + evaluation documentation
 - **Python 3.10+** — runs the orchestrator
 - **Ollama** *(optional)* — local LLM for the model-judge steps. The deterministic
   checks work without it. Install from [ollama.com](https://ollama.com), then pull a
-  model: `ollama pull qwen2.5-coder:7b-instruct-q4_K_M`
+  model: `ollama pull qwen2.5-coder:7b`
 
 ## Setup
 
@@ -139,7 +139,7 @@ Dockerised targets, scored against a fixed ground-truth catalogue.
 ```bash
 # 1. Bring up the lab and pull the evaluation model
 docker compose up -d
-ollama pull qwen2.5-coder:7b-instruct-q4_K_M      # also 14b / 32b
+ollama pull qwen2.5-coder:7b      # also 14b / 32b
 
 # 2. Point tool execution at the in-network target container
 export ERLIK_DOCKER_TARGET_HOST=juice-shop        # reproduces the lab wiring

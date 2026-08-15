@@ -51,7 +51,7 @@ done
 if curl -s http://localhost:11434/api/tags > /dev/null 2>&1; then
     echo "[+] Ollama is running"
     if ! ollama list 2>/dev/null | grep -q "qwen2.5-coder"; then
-        echo "[!] Model not found. Run: ollama pull qwen2.5-coder:7b-instruct-q4_K_M"
+        echo "[!] Model not found. Run: ollama pull qwen2.5-coder:7b"
     fi
 else
     echo "[!] Ollama is not running. Start it with: OLLAMA_NUM_GPU=99 ollama serve"

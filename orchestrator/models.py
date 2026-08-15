@@ -35,7 +35,7 @@ class SessionCreate(BaseModel):
     target_url: str
     scope_mode: ScopeMode = ScopeMode.full
     system_prompt: str = ""
-    model: str = "qwen2.5-coder:7b-instruct-q4_K_M"
+    model: str = "qwen2.5-coder:7b"
     enabled_tools: list[str] = _DEFAULT_TOOLS
     toolset_preset: Optional[str] = None  # "core_10" | "standard_20" | "full_30" | None (custom)
     session_type: str = "cold"
@@ -172,7 +172,7 @@ class ChainCreate(BaseModel):
     target_url: str
     scope_mode: ScopeMode = ScopeMode.full
     system_prompt: str = ""
-    model: str = "qwen2.5-coder:7b-instruct-q4_K_M"
+    model: str = "qwen2.5-coder:7b"
     enabled_tools: list[str] = _DEFAULT_TOOLS
     toolset_preset: Optional[str] = None
     max_turns_per_session: int = 30
@@ -215,7 +215,7 @@ class BenchmarkCreate(BaseModel):
     max_turns: int = 30
     no_timeout: bool = True
     repeat_n: int = 1
-    model: str = "qwen2.5-coder:7b-instruct-q4_K_M"
+    model: str = "qwen2.5-coder:7b"
     system_prompt: str = ""
     enabled_tools: list[str] = _DEFAULT_TOOLS
     # RQ3-b: toolset_presets is a list — benchmark runner iterates across these.

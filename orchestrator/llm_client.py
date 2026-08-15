@@ -14,7 +14,11 @@ import re
 PROVIDER = os.environ.get("ERLIK_LLM_PROVIDER", "ollama").lower()
 
 OLLAMA_BASE = os.environ.get("OLLAMA_BASE", "http://localhost:11434")
-OLLAMA_DEFAULT_MODEL = "qwen2.5-coder:7b-instruct-q4_K_M"
+# Must be a tag Ollama can actually serve. This was
+# "qwen2.5-coder:7b-instruct-q4_K_M", which is not what `ollama pull
+# qwen2.5-coder:7b` installs — every run on the default 404'd on its first
+# generation while /api/health reported the model as available.
+OLLAMA_DEFAULT_MODEL = "qwen2.5-coder:7b"
 
 OPENAI_BASE = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")
 OPENAI_DEFAULT_MODEL = os.environ.get("OPENAI_DEFAULT_MODEL", "gpt-4o")
@@ -213,6 +217,42 @@ async def list_models() -> list[str]:
     if PROVIDER == "openai":
         return await _openai_list_models()
     return await _ollama_list_models()
+
+
+class ModelUnavailable(RuntimeError):
+    """The requested model is not installed, raised BEFORE a run starts."""
+
+
+async def ensure_model_available(model: str | None = None) -> str:
+    """Check the model can be served, and return the tag that will be used.
+
+    Deliberately raises instead of substituting a near neighbour. The model is an
+    experimental variable, and this machine has `qwen2.5-coder:7b-juicy2` and
+    `-cipher` installed alongside the base `qwen2.5-coder:7b` — quietly falling
+    back to a target-tuned variant would corrupt a baseline run while looking
+    perfectly normal in the logs. Fail loudly, name the near misses, let the
+    operator choose.
+
+    Only meaningful for Ollama; a remote provider validates at request time.
+    """
+    use_model = model or _default_model()
+    if PROVIDER != "ollama":
+        return use_model
+
+    installed = await _ollama_list_models()
+    if not installed:
+        # Ollama unreachable — let the request itself produce the transport error
+        # rather than blocking a run on a health probe that may just have raced.
+        return use_model
+    if model_installed(use_model, installed):
+        return use_model
+
+    near = suggest_models(use_model, installed)
+    hint = f" Closest installed: {', '.join(near)}." if near else ""
+    raise ModelUnavailable(
+        f"Model '{use_model}' is not installed in Ollama.{hint} "
+        f"Pull it with `ollama pull {use_model}`, or set ERLIK_LLM_MODEL "
+        f"(or pick a model in the dashboard) to one that is installed.")
 
 
 async def chat(messages: list[dict], model: str | None = None, max_retries: int = 3) -> str:

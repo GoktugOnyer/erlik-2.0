@@ -2986,6 +2986,25 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
                      vuln_category: str = None, no_timeout: bool = False,
                      max_turns: int = DEFAULT_MAX_TURNS, tool_timeout: int = None):
     """Multi-turn agent loop: LLM plans tools, we execute them, feed results back."""
+    # Check the model can actually be served BEFORE spending a run on it. The
+    # configured default used to be a tag Ollama does not have, so a session
+    # would set up, inject context, then die on an opaque 404 at the first
+    # generation. Never substitutes a near neighbour — see ensure_model_available.
+    try:
+        await llm_client.ensure_model_available(model)
+    except llm_client.ModelUnavailable as _mu:
+        print(f"[session {session_id[:8]}] {_mu}", flush=True)
+        await manager.broadcast(session_id, {
+            "type": "error", "phase": "recon", "message": str(_mu),
+        })
+        db = await get_db()
+        try:
+            await db.execute("UPDATE sessions SET status = 'failed' WHERE id = ?", (session_id,))
+            await db.commit()
+        finally:
+            await db.close()
+        return
+
     db = None
     step_number = 0
     findings_count = 0
