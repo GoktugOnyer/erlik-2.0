@@ -24,6 +24,9 @@ automated scan of ONE web application. Critique the RUN, not the application. \
 Do not restate findings and do not give remediation advice — a separate report \
 covers that.
 
+THE MISSION (what this run was asked to do)
+{mission_text}
+
 RUN CONFIGURATION (what help the agent had)
 {config_text}
 
@@ -33,12 +36,24 @@ WHAT THE RUN DID
 TOOL USAGE
 {tools_text}
 
+COMMANDS ACTUALLY RUN (deduplicated; credentials masked)
+{commands_text}
+
+WHAT THE AGENT SAID IT WAS DOING (its own reason per turn)
+{intents_text}
+
 OUTCOME
 {outcome_text}
 
 Judge only from the evidence above. If something was not attempted, say so \
 plainly; do not assume it succeeded. Be specific and concrete — name endpoints, \
 tools and settings, not generalities.
+
+EVERY bullet must cite its evidence in brackets: a turn number, a tool name, or \
+a quoted fact from above — for example "[turn 7]", "[sqlmap: 4 failed]". A claim \
+you cannot cite is one you must not make. Do not fault the agent for skipping a \
+tool that was not in its enabled list, and do not claim a vulnerability class was \
+untested if a command above probed it.
 
 Respond in this EXACT format (nothing else):
 
@@ -145,6 +160,87 @@ def select_review_model(installed: list[str] | None = None,
     return attack_model or None
 
 
+def redact_secrets(text: str | None) -> str:
+    """Mask credentials before any recorded text reaches the reviewer.
+
+    Not optional. primitives.py deliberately teaches the agent to reuse captured
+    material — its reuse hints are literally '-H "Authorization: Bearer <jwt>"'
+    and '--cookie "<cookie>"' — so steps.tool_input contains live tokens whenever
+    the primitives lever is on. The reviewer may be a REMOTE model, so sending
+    those verbatim would exfiltrate session credentials to a third party.
+
+    Reuses the extractor's own patterns, so anything primitives can capture is
+    something this can mask.
+    """
+    from orchestrator.primitives import _PATTERNS
+
+    out = text or ""
+    for kind, rx, grp, _hint in _PATTERNS:
+        def _mask(m, _kind=kind, _grp=grp):
+            whole = m.group(0)
+            secret = m.group(_grp) if _grp else whole
+            if not secret or len(secret) < 6:
+                return whole
+            return whole.replace(secret, f"<{_kind}:redacted>")
+        out = rx.sub(_mask, out)
+    return out
+
+
+def summarise_commands(steps: list[dict], per_tool: int = 4,
+                       width: int = 160) -> list[str]:
+    """Distinct commands per tool, redacted and truncated.
+
+    A tool-call count cannot tell '4 probes against 4 parameters' from '4
+    identical retries', which is the difference between thorough and stuck. The
+    commands can, so long as they are deduplicated — the point is the variety,
+    not the volume.
+    """
+    by_tool: dict[str, list[str]] = {}
+    for s in steps or []:
+        tool = (s.get("tool_called") or "?").strip() or "?"
+        cmd = (s.get("tool_input") or "").strip()
+        if not cmd:
+            continue
+        cmd = redact_secrets(cmd)
+        if len(cmd) > width:
+            cmd = cmd[:width] + "…"
+        seen = by_tool.setdefault(tool, [])
+        if cmd not in seen:
+            seen.append(cmd)
+
+    out: list[str] = []
+    for tool in sorted(by_tool):
+        cmds = by_tool[tool]
+        shown = cmds[:per_tool]
+        for c in shown:
+            out.append(f"  [{tool}] {c}")
+        if len(cmds) > per_tool:
+            out.append(f"  [{tool}] …and {len(cmds) - per_tool} more distinct command(s)")
+    return out
+
+
+def summarise_intents(steps: list[dict], limit: int = 8, width: int = 140) -> list[str]:
+    """The agent's own stated reason per turn, redacted.
+
+    Despite the column name, steps.prompt_sent holds the agent's `reason` string
+    — what it said it was about to do. Pairing that with what it actually ran is
+    the only way to catch an intent/action mismatch.
+    """
+    out: list[str] = []
+    for s in steps or []:
+        reason = (s.get("prompt_sent") or "").strip()
+        if not reason:
+            continue
+        reason = redact_secrets(reason)
+        if len(reason) > width:
+            reason = reason[:width] + "…"
+        out.append(f"  turn {s.get('step_number', '?')}"
+                   f" [{(s.get('tool_called') or '-').strip()}]: {reason}")
+        if len(out) >= limit:
+            break
+    return out
+
+
 def _bullets(block: str | None) -> list[str]:
     out: list[str] = []
     for line in (block or "").strip().splitlines():
@@ -156,7 +252,8 @@ def _bullets(block: str | None) -> list[str]:
 
 
 def build_review_prompt(config: dict, activity: dict, tools: list[dict],
-                        outcome: dict, valid_presets: list[str] | None = None) -> str:
+                        outcome: dict, valid_presets: list[str] | None = None,
+                        steps: list[dict] | None = None) -> str:
     """Compose the critique prompt from facts already recorded for the session."""
     helps = [k for k in ("skills", "nettacker", "techniques", "primitives",
                          "target_memory", "cve_enrich", "poc_verify")
@@ -165,8 +262,23 @@ def build_review_prompt(config: dict, activity: dict, tools: list[dict],
         f"- preset: {config.get('preset') or 'custom'}\n"
         f"- help enabled: {', '.join(helps) if helps else 'NONE (raw model baseline)'}\n"
         f"- target playbook: {config.get('playbooks') or 'none'}\n"
-        f"- pre-scan scenario: {config.get('nettacker_scenario') or 'n/a'}"
+        f"- pre-scan scenario: {config.get('nettacker_scenario') or 'n/a'}\n"
+        # Without the tier the reviewer faults the agent for not running tools it
+        # was never given — the toolset preset is an experimental condition.
+        f"- toolset tier: {config.get('toolset_preset') or 'all tools'}\n"
+        f"- tools the agent could call: "
+        f"{', '.join(config.get('enabled_tools') or []) or 'unknown'}"
     )
+
+    mission = (activity.get("mission") or "").strip()
+    mission_text = (redact_secrets(mission)[:700] + ("…" if len(mission) > 700 else "")
+                    if mission else "- (no explicit mission recorded)")
+
+    cmds = summarise_commands(steps or [])
+    commands_text = "\n".join(cmds) if cmds else "  (no commands recorded)"
+
+    intents = summarise_intents(steps or [])
+    intents_text = "\n".join(intents) if intents else "  (no per-turn reasoning recorded)"
 
     ports = activity.get("open_ports") or []
     tech = activity.get("tech") or []
@@ -200,8 +312,18 @@ def build_review_prompt(config: dict, activity: dict, tools: list[dict],
 
     sev = outcome.get("severities") or {}
     sev_text = ", ".join(f"{k}={v}" for k, v in sev.items() if v) or "none"
+    # A severity histogram cannot show that every finding is missing-header noise
+    # and no injection class was ever produced. The classes can.
+    classes = outcome.get("finding_types") or []
+    prims = outcome.get("primitive_kinds") or {}
     outcome_text = (
         f"- findings: {outcome.get('findings', 0)} ({sev_text})\n"
+        f"- finding classes: {', '.join(classes) if classes else 'none'}\n"
+        # No captured credential means the run never reached authenticated
+        # surface — derivable with no model, and the highest-value coverage fact
+        # for an app whose interesting behaviour is behind a login.
+        f"- credentials captured for reuse: "
+        f"{', '.join(f'{k}={v}' for k, v in sorted(prims.items())) if prims else 'NONE — the run never held an authenticated session'}\n"
         f"- tools available but never used: "
         f"{', '.join(outcome.get('unused_tools') or []) or 'none'}"
     )
@@ -210,8 +332,10 @@ def build_review_prompt(config: dict, activity: dict, tools: list[dict],
         config_text += _PRESET_LINE.format(
             presets="\n".join(f"  - {p}" for p in valid_presets))
 
-    return REVIEW_PROMPT.format(config_text=config_text, activity_text=activity_text,
-                                tools_text=tools_text, outcome_text=outcome_text)
+    return REVIEW_PROMPT.format(mission_text=mission_text, config_text=config_text,
+                                activity_text=activity_text, tools_text=tools_text,
+                                commands_text=commands_text, intents_text=intents_text,
+                                outcome_text=outcome_text)
 
 
 def validate_recommendation(recommendation: str, valid_presets: list[str] | None) -> str:

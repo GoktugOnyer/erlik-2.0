@@ -151,6 +151,121 @@ def test_markdown_is_empty_when_there_is_nothing_to_say():
     assert R.render_review_markdown(R.parse_review("nothing")) == ""
 
 
+# --- credential redaction -------------------------------------------------
+#
+# primitives.py teaches the agent to reuse captured material, its reuse hints
+# being literally '-H "Authorization: Bearer <jwt>"' and '--cookie "<cookie>"',
+# so steps.tool_input holds live tokens whenever that lever is on. The reviewer
+# may be a REMOTE model, so anything sent to it must be masked first.
+
+JWT_VALUE = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJhZG1pbiJ9.s3cr3tsignature"
+
+
+def test_jwt_in_a_command_is_masked():
+    cmd = f'curl -H "Authorization: Bearer {JWT_VALUE}" http://juice-shop:3000/rest/user'
+    out = R.redact_secrets(cmd)
+    assert JWT_VALUE not in out
+    assert "redacted" in out
+    assert "juice-shop:3000/rest/user" in out      # the useful part survives
+
+
+def test_cookie_and_basic_auth_are_masked():
+    text = ("Set-Cookie: token=abc123def456ghi\n"
+            "Authorization: Basic YWRtaW46c3VwZXJzZWNyZXQ=")
+    out = R.redact_secrets(text)
+    assert "abc123def456ghi" not in out
+    assert "YWRtaW46c3VwZXJzZWNyZXQ=" not in out
+
+
+def test_redaction_is_safe_on_empty_input():
+    assert R.redact_secrets("") == ""
+    assert R.redact_secrets(None) == ""
+
+
+def test_no_secret_survives_into_the_prompt():
+    """The end-to-end property: whatever the agent ran, the prompt is clean."""
+    steps = [{"step_number": 1, "tool_called": "curl",
+              "tool_input": f'curl -H "Authorization: Bearer {JWT_VALUE}" http://t/x',
+              "prompt_sent": f"reuse the token {JWT_VALUE} against the admin API"}]
+    p = R.build_review_prompt({}, {}, [], {}, steps=steps)
+    assert JWT_VALUE not in p
+
+
+def test_primitive_values_are_never_passed_only_kinds():
+    """The outcome section reports kinds and counts, never the values."""
+    p = R.build_review_prompt({}, {}, [], {"primitive_kinds": {"jwt": 2, "cookie": 1}})
+    assert "jwt=2" in p and "cookie=1" in p
+    assert JWT_VALUE not in p
+
+
+def test_absent_credentials_are_called_out():
+    p = R.build_review_prompt({}, {}, [], {"primitive_kinds": {}})
+    assert "never held an authenticated session" in p
+
+
+# --- richer evidence ------------------------------------------------------
+
+def test_distinct_commands_are_shown_not_just_counts():
+    """4 probes against 4 parameters is not 4 identical retries."""
+    steps = [{"step_number": i, "tool_called": "sqlmap",
+              "tool_input": f"sqlmap -u http://t/search?q=1&p={i}"} for i in range(1, 5)]
+    out = R.summarise_commands(steps)
+    assert len(out) == 4
+    assert all("sqlmap" in line for line in out)
+
+
+def test_identical_retries_collapse():
+    steps = [{"step_number": i, "tool_called": "sqlmap",
+              "tool_input": "sqlmap -u http://t/search?q=1"} for i in range(1, 6)]
+    assert len(R.summarise_commands(steps)) == 1
+
+
+def test_command_list_is_capped_per_tool():
+    steps = [{"step_number": i, "tool_called": "curl",
+              "tool_input": f"curl http://t/{i}"} for i in range(1, 12)]
+    out = R.summarise_commands(steps, per_tool=3)
+    assert len([o for o in out if "…and" not in o]) == 3
+    assert any("and 8 more distinct command(s)" in o for o in out)
+
+
+def test_agent_intent_is_surfaced_with_its_turn():
+    steps = [{"step_number": 3, "tool_called": "whatweb",
+              "prompt_sent": "enumerate authentication endpoints"}]
+    out = R.summarise_intents(steps)
+    assert out and "turn 3" in out[0] and "enumerate authentication" in out[0]
+
+
+def test_mission_and_toolset_tier_reach_the_prompt():
+    p = R.build_review_prompt(
+        config={"toolset_preset": "core_10", "enabled_tools": ["curl", "nmap"]},
+        activity={"mission": "Find authentication bypasses only."},
+        tools=[], outcome={})
+    assert "Find authentication bypasses only." in p
+    assert "core_10" in p
+    assert "curl, nmap" in p
+
+
+def test_finding_classes_are_listed_not_just_severities():
+    p = R.build_review_prompt({}, {}, [], {
+        "findings": 3, "severities": {"low": 3},
+        "finding_types": ["Missing Security Header", "Server Banner Disclosure"]})
+    assert "Missing Security Header" in p
+
+
+def test_prompt_requires_citations():
+    p = R.build_review_prompt({}, {}, [], {})
+    assert "must cite its evidence" in p
+    assert "A claim you cannot cite is one you must not make" in p
+
+
+def test_prompt_guards_against_the_two_known_false_critiques():
+    """The 7B faulted the agent for unavailable tools and claimed classes were
+    untested when they had been probed."""
+    p = R.build_review_prompt({}, {}, [], {})
+    assert "not in its enabled list" in p
+    assert "if a command above probed it" in p
+
+
 # --- reviewer model selection ---------------------------------------------
 #
 # The reviewer may be LARGER than the model under test: it never touches the

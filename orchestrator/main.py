@@ -1389,18 +1389,25 @@ async def run_ai_review(session_id: str, model: str, runcfg: dict,
         db = await get_db()
         try:
             srow = await (await db.execute(
-                "SELECT target_url, total_duration_ms, max_turns, total_steps "
-                "FROM sessions WHERE id = ?",
+                "SELECT target_url, total_duration_ms, max_turns, total_steps, "
+                "system_prompt, toolset_preset FROM sessions WHERE id = ?",
                 (session_id,))).fetchone()
             session = dict(srow) if srow else {}
 
             rows = [dict(r) for r in await (await db.execute(
-                "SELECT phase, tool_called, tool_output FROM steps WHERE session_id = ?",
+                "SELECT phase, step_number, tool_called, tool_input, tool_output, "
+                "prompt_sent FROM steps WHERE session_id = ? ORDER BY step_number",
                 (session_id,))).fetchall()]
 
             findings = [dict(r) for r in await (await db.execute(
-                "SELECT severity, calibrated_severity FROM findings WHERE session_id = ?",
-                (session_id,))).fetchall()]
+                "SELECT severity, calibrated_severity, vuln_type FROM findings "
+                "WHERE session_id = ?", (session_id,))).fetchall()]
+
+            # KINDS AND COUNTS ONLY. session_primitives.value holds live tokens;
+            # it must never reach a prompt that may be sent to a remote model.
+            prim_rows = [dict(r) for r in await (await db.execute(
+                "SELECT kind, COUNT(*) AS n FROM session_primitives "
+                "WHERE session_id = ? GROUP BY kind", (session_id,))).fetchall()]
         finally:
             await db.close()
 
@@ -1422,8 +1429,12 @@ async def run_ai_review(session_id: str, model: str, runcfg: dict,
             sev[k] = sev.get(k, 0) + 1
 
         used = {t for t in by_tool if t != "unknown"}
+        cfg_for_review = dict(runcfg or {})
+        cfg_for_review["toolset_preset"] = session.get("toolset_preset")
+        cfg_for_review["enabled_tools"] = sorted(enabled_tools or [])
+
         prompt = _rv.build_review_prompt(
-            config=runcfg,
+            config=cfg_for_review,
             activity={
                 "target_url": session.get("target_url"),
                 # sessions.total_steps counts TURNS; len(rows) counts turns that
@@ -1438,14 +1449,21 @@ async def run_ai_review(session_id: str, model: str, runcfg: dict,
                 # review runs, so reading it here would always be empty.
                 "open_ports": sorted(set(observed_ports or [])),
                 "tech": list(dict.fromkeys(observed_tech or [])),
+                # What the run was ASKED to do — judging coverage without it is
+                # judging against an unstated goal.
+                "mission": session.get("system_prompt"),
             },
             tools=sorted(by_tool.values(), key=lambda t: -t["calls"]),
             outcome={
                 "findings": len(findings),
                 "severities": sev,
                 "unused_tools": sorted(set(enabled_tools or []) - used),
+                "finding_types": sorted({(f.get("vuln_type") or "").strip()
+                                         for f in findings if f.get("vuln_type")}),
+                "primitive_kinds": {r["kind"]: r["n"] for r in prim_rows},
             },
             valid_presets=sorted(runconfig.RUN_PRESETS.keys()),
+            steps=rows,
         )
 
         # The reviewer may be a stronger model than the one under test — it never
