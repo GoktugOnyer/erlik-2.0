@@ -1527,10 +1527,14 @@ async def poc_reverify_session(session_id: str, target_url: str, enabled_tools: 
                                       evidence=((r.get("evidence") or "") + note)[:2000])
                 confirmed += 1
             else:
-                note = (f" [PoC re-check {stamp}: no class signature reproduced on a "
-                        f"plain GET — not a false-positive verdict]")
-                await _set_poc_status(r["id"], "not_reproduced",
-                                      evidence=((r.get("evidence") or "") + note)[:2000])
+                # Deliberately does NOT annotate `evidence`. That column is a
+                # scoring input to _verify_findings_from_logs (the len>20 gate and
+                # word-match at main.py:5822-5827) and to ground-truth matching
+                # (5967, 5979), so appending a sentence here would shift the
+                # verification labels and GT hits — one-directionally, and only in
+                # the presets where poc_verify is on, which is a confound across
+                # arms rather than a measurement. poc_status already carries this.
+                await _set_poc_status(r["id"], "not_reproduced")
                 not_reproduced += 1
         print(f"[poc-verify {session_id[:8]}] confirmed={confirmed} "
               f"not_reproduced={not_reproduced} untested={untested}", flush=True)
@@ -5718,11 +5722,33 @@ _HARD_CONFIRMATION_PATTERNS = {
             # ^ anchors to "HTTP/1.1 ..." and this could never match.
             r"(?m)^root:[x*!]?:0:0:",                  # /etc/passwd
             r"\bLinux\s+\S+\s+\d+\.\d+\.\d+",         # uname -a
-            r"PING\s+\S+\s+\(\d{1,3}(?:\.\d{1,3}){3}\)",  # ping
+            # The consumer lowercases the response AND passes re.IGNORECASE, so an
+            # uppercase-only "PING" discriminates nothing. Without \b this also
+            # matched mid-word — "Stopping erlik-kali (172.18.0.4)" from a docker
+            # log falsely confirmed RCE. Anchor on ping(8)'s payload-size tail,
+            # which survives lowercasing.
+            r"\bping\s+\S+\s+\(\d{1,3}(?:\.\d{1,3}){3}\)\s+\d+\(\d+\)\s+bytes of data",  # ping
             r"\bdrwx[r-][w-][x-]",                     # ls -l directory listing
         ],
     },
 }
+
+
+_POC_ANNOTATION_RX = re.compile(r"\s*\[PoC re-(?:verified|check)[^\]]*\]")
+
+
+def _strip_poc_annotation(evidence: str | None) -> str:
+    """Evidence text with any PoC re-verification note removed.
+
+    `evidence` is a scoring input — both to the verification labeller (the
+    len>20 gate and word-match below) and to ground-truth matching. A note
+    appended by poc_reverify_session is our own text, not something the target
+    returned, so scoring it lets a re-verification pass move the numbers it is
+    supposed to be auditing. METHODOLOGY.md documents that label as computed
+    independently of the metrics; this keeps it scoring only what was originally
+    recorded.
+    """
+    return _POC_ANNOTATION_RX.sub("", evidence or "")
 
 
 async def _verify_findings_from_logs(session_id: str, findings: list[dict],
@@ -5734,7 +5760,7 @@ async def _verify_findings_from_logs(session_id: str, findings: list[dict],
 
     for f in findings:
         f_type = (f.get("vuln_type") or "").lower()
-        f_evidence = (f.get("evidence") or "").lower()
+        f_evidence = _strip_poc_annotation(f.get("evidence")).lower()
         f_url = (f.get("url") or "").lower()
 
         verification = {
@@ -5915,7 +5941,7 @@ def _match_finding_to_ground_truth_scored(finding: dict, ground_truths: list[dic
     f_type = (finding.get("vuln_type") or "").lower()
     f_url = (finding.get("url") or "").lower()
     f_param = (finding.get("parameter") or "").lower()
-    f_evidence = (finding.get("evidence") or "").lower()
+    f_evidence = _strip_poc_annotation(finding.get("evidence")).lower()
     f_all_text = f"{f_type} {f_url} {f_param} {f_evidence}"
 
     best_score = 0

@@ -150,7 +150,7 @@ def _first_match(body):
     ("id",     "HTTP/1.1 200 OK\n\nuid=0(root) gid=0(root) groups=0(root)"),
     ("passwd", "HTTP/1.1 200 OK\n\nroot:x:0:0:root:/root:/bin/bash"),
     ("uname",  "HTTP/1.1 200 OK\n\nLinux box 5.15.0-generic #1 SMP"),
-    ("ping",   "HTTP/1.1 200 OK\n\nPING example.com (93.184.216.34) 56(84) bytes"),
+    ("ping",   "HTTP/1.1 200 OK\n\nPING example.com (93.184.216.34) 56(84) bytes of data."),
     ("ls",     "HTTP/1.1 200 OK\n\ndrwxr-xr-x 2 root root 4096 Jan 1 app"),
 ])
 def test_command_output_is_detected(name, body):
@@ -164,9 +164,47 @@ def test_command_output_is_detected(name, body):
     ("json_api",        'HTTP/1.1 200 OK\n\n{"data":[{"email":"admin@juice-sh.op","role":"admin"}]}'),
     ("stack_trace",     "HTTP/1.1 500\n\nError: SQLITE_ERROR near \"SELECT\" at /app/routes/search.js:42"),
     ("prose_with_words", "HTTP/1.1 200 OK\n\nOur Linux 5 guide explains uid and gid for root users."),
+    # -ping words + a parenthesised IPv4. The original PING signature had no \b
+    # and relied on an uppercase discriminator that the lowercased haystack and
+    # re.IGNORECASE both destroy, so an exposed docker log falsely confirmed RCE.
+    ("docker_log",   "HTTP/1.1 200 OK\n\nStopping erlik-kali (172.18.0.4) ... done"),
+    ("firewall_log", "HTTP/1.1 200 OK\n\ndropping packet (192.168.1.77)"),
+    ("keepalive",    "HTTP/1.1 200 OK\n\nkeeping host (10.0.0.5) alive"),
+    ("bare_ping",    "HTTP/1.1 200 OK\n\nping host (1.2.3.4)"),
 ])
 def test_benign_responses_do_not_confirm_rce(name, body):
     assert _first_match(body) is None, f"{name} falsely matched {_first_match(body)!r}"
+
+
+def test_real_ping_output_still_confirms():
+    """The tightened signature must not lose the true positive it exists for."""
+    assert _first_match(
+        "HTTP/1.1 200 OK\n\nPING example.com (93.184.216.34) 56(84) bytes of data.")
+
+
+# --- evidence must stay out of the scoring path ---------------------------
+
+def test_non_reproduction_does_not_touch_evidence(temp_db, curl_calls):
+    """`evidence` feeds _verify_findings_from_logs and ground-truth matching, so
+    annotating it on the COMMON outcome would shift the very metrics the
+    re-verification is meant to audit — one-directionally, and only in presets
+    where poc_verify is on."""
+    fid = _add_finding("sql injection")
+    curl_calls.respond_with(BLAND)
+    _run()
+    row = _row(fid)
+    assert row["poc_status"] == "not_reproduced"
+    assert row["evidence"] == "original evidence"
+
+
+def test_poc_annotation_is_stripped_before_scoring():
+    """Even the confirmation note (pre-existing) must not score as target output."""
+    noted = ("Search error [PoC re-verified 2026-08-15 13:40: curl matched /x/]")
+    assert main_mod._strip_poc_annotation(noted) == "Search error"
+    checked = "abc [PoC re-check 2026-08-15 13:40: no class signature reproduced]"
+    assert main_mod._strip_poc_annotation(checked) == "abc"
+    assert main_mod._strip_poc_annotation(None) == ""
+    assert main_mod._strip_poc_annotation("clean") == "clean"
 
 
 def test_passwd_signature_is_multiline_anchored():
@@ -217,14 +255,15 @@ def test_failure_is_recorded_distinctly_from_never_tested(temp_db, curl_calls):
 
 
 def test_non_reproduction_never_marks_a_false_positive(temp_db, curl_calls):
-    """A plain GET failing is not proof the finding is false."""
+    """A plain GET failing is not proof the finding is false — the outcome lives
+    in poc_status alone, and false_positive is left untouched."""
     fid = _add_finding("sql injection")
     curl_calls.respond_with(BLAND)
     _run()
     row = _row(fid)
     assert row["poc_status"] == "not_reproduced"
     assert row["false_positive"] == 0
-    assert "not a false-positive verdict" in row["evidence"]
+    assert row["verified"] == 0
 
 
 # --- gating ---------------------------------------------------------------
