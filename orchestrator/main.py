@@ -1330,6 +1330,46 @@ async def _store_primitives(session_id: str, tool_name: str, output: str) -> lis
         return []
 
 
+async def _load_primitives(session_id: str, chain_id: str | None = None) -> list[dict]:
+    """Every primitive captured for this session — plus, in a chain, those from
+    its sibling sessions — so a later phase inherits credentials captured earlier.
+
+    Each chain phase runs as its own session id, so without the chain_id branch a
+    phase starts blind to tokens the previous phase already captured. Deduped by
+    (kind, value) and ordered oldest-first. Never raises.
+    """
+    try:
+        db = await get_db()
+        try:
+            if chain_id:
+                cursor = await db.execute(
+                    "SELECT p.kind, p.value, p.hint, p.source_tool "
+                    "FROM session_primitives p JOIN sessions s ON s.id = p.session_id "
+                    "WHERE s.chain_id = ? OR p.session_id = ? ORDER BY p.id",
+                    (chain_id, session_id))
+            else:
+                cursor = await db.execute(
+                    "SELECT kind, value, hint, source_tool FROM session_primitives "
+                    "WHERE session_id = ? ORDER BY id", (session_id,))
+            rows = await cursor.fetchall()
+        finally:
+            await db.close()
+
+        out: list[dict] = []
+        seen: set[tuple[str, str]] = set()
+        for r in rows:
+            key = (r["kind"], r["value"])
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append({"kind": r["kind"], "value": r["value"],
+                        "hint": r["hint"], "tool": r["source_tool"]})
+        return out
+    except Exception as e:  # noqa: BLE001
+        print(f"[primitives {session_id[:8]}] load failed (non-fatal): {e}", flush=True)
+        return []
+
+
 async def poc_reverify_session(session_id: str, target_url: str, enabled_tools: list,
                                force: bool | None = None) -> int:
     """Re-run a lightweight PoC for high/critical findings and confirm by signature.
@@ -2939,6 +2979,7 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
                 })
 
         # Inject chain context if applicable
+        chain_id_for_primitives = None
         if session_type == "chain":
             chain_db = await get_db()
             try:
@@ -2951,6 +2992,7 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
                 await chain_db.close()
 
             if chain_info and chain_info["chain_id"]:
+                chain_id_for_primitives = chain_info["chain_id"]
                 chain_position = chain_info["chain_position"] or 0
                 chain_phase = chain_info["chain_phase"] or "recon"
 
@@ -2972,6 +3014,25 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
                         "type": "log", "phase": "recon",
                         "message": f"CHAIN: Phase directive set — {chain_phase.upper()}",
                     })
+
+        # Replay the accumulated primitive store into the opening system prompt.
+        # Capture alone only announced a token on the single turn it was first
+        # seen, so carry-forward depended on the message history surviving
+        # untrimmed — and a chain phase, running as a fresh session id, started
+        # blind to everything earlier phases had captured.
+        if runcfg.get("primitives"):
+            prior_prims = await _load_primitives(session_id, chain_id_for_primitives)
+            if prior_prims:
+                from orchestrator.primitives import format_for_agent
+                combined_system += "\n\n" + format_for_agent(
+                    prior_prims, limit=20,
+                    header="[PRIMITIVES] Credentials/tokens already captured against this "
+                           "target — REUSE these instead of re-authenticating:")
+                await manager.broadcast(session_id, {
+                    "type": "log", "phase": "recon",
+                    "message": f"PRIMITIVES: replayed {len(prior_prims)} captured earlier "
+                               f"({', '.join(sorted({p['kind'] for p in prior_prims}))})",
+                })
 
         messages = [{"role": "system", "content": combined_system}]
 

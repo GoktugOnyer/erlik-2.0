@@ -55,11 +55,17 @@ def extract_primitives(output: str, tool_name: str = "") -> list[dict]:
     return prims
 
 
-def format_for_agent(prims: list[dict], limit: int = 12) -> str:
-    """Compact reuse reminder injected into the agent's tool feedback."""
+def format_for_agent(prims: list[dict], limit: int = 12, header: str | None = None) -> str:
+    """Compact reuse reminder injected into the agent's tool feedback.
+
+    `header` overrides the default lead-in — used when replaying the accumulated
+    store into a new session's system prompt, where "earlier steps" would be
+    wrong (the primitives came from earlier chain phases, not this run's turns).
+    """
     if not prims:
         return ""
-    lines = ["[PRIMITIVES] Credentials/tokens captured from earlier steps — REUSE these "
+    lines = [header or
+             "[PRIMITIVES] Credentials/tokens captured from earlier steps — REUSE these "
              "on subsequent requests instead of re-authenticating:"]
     for p in prims[:limit]:
         v = p["value"]
