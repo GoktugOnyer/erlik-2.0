@@ -126,6 +126,75 @@ def test_selection_is_deterministic():
     assert a == b
 
 
+# --- environment gating ----------------------------------------------------
+#
+# Found by an actual run, not by reading the code. Juice Shop listens on 3000,
+# which is NOT a known service port, so there is no port hit and ranking falls
+# back to pure tag overlap. Ungated, that spans the whole corpus: "injection"
+# matches "Vectored Overloading PE Injection" and "NexMon Packet Injection on
+# Android", "access control" matches Windows UAC and macOS MACF. The run was fed
+# 12 KB of macOS-kernel and Windows content for a web assessment.
+
+WEB_MISSION = ("Assess the OWASP Juice Shop instance for injection, "
+               "authentication and access-control flaws. Report only what you "
+               "can evidence from tool output.")
+
+
+def test_web_target_never_selects_host_or_post_exploitation_material():
+    picked = T.select_techniques(open_ports=[3000], hint=WEB_MISSION, max_items=10)
+    assert picked
+    for t in picked:
+        assert t["env"] in ("web", "service"), t
+
+
+@pytest.mark.parametrize("banned", ["macos", "windows", "binary", "mobile",
+                                    "hardware", "reversing", "blockchain", "ai"])
+def test_no_host_environment_leaks_into_a_default_selection(banned):
+    picked = T.select_techniques(open_ports=[3000], hint=WEB_MISSION, max_items=20)
+    assert all(t["env"] != banned for t in picked)
+
+
+def test_the_host_titles_that_leaked_are_gone_at_any_depth():
+    """These were the gross failure — wrong environment entirely."""
+    titles = " ".join(t["title"].lower() for t in
+                      T.select_techniques(open_ports=[3000], hint=WEB_MISSION, max_items=50))
+    for gone in ("macf", "user account control", "pe injection", "nexmon", "kiosk"):
+        assert gone not in titles, gone
+
+
+def test_what_actually_gets_injected_is_web_relevant():
+    """The default selection is what reaches the agent, so judge that. Deeper
+    ranks may include marginal web entries such as "MS Access SQL Injection" —
+    still the right category, unlike a macOS kernel page."""
+    picked = T.select_techniques(open_ports=[3000], hint=WEB_MISSION)
+    titles = " ".join(t["title"].lower() for t in picked)
+    assert all(t["env"] == "web" for t in picked), [t["env"] for t in picked]
+    for gone in ("ms access", "sd-wan"):
+        assert gone not in titles, gone
+
+
+def test_noisy_mission_words_are_not_query_terms():
+    """'access' pulled in "MS Access SQL Injection" and 'control' pulled in a
+    Cisco SD-WAN page. skills.py already stops both for the same reason."""
+    toks = T._tokens(WEB_MISSION)
+    for noisy in ("access", "control", "assess", "report", "instance", "flaws"):
+        assert noisy not in toks
+
+
+def test_host_material_is_still_reachable_when_asked_for():
+    """The gate is a default, not a deletion — the corpus still covers hosts."""
+    picked = T.select_techniques(hint="privilege escalation",
+                                 environments=["windows"], max_items=3)
+    assert picked
+    assert all(t["env"] == "windows" for t in picked)
+
+
+def test_service_port_routing_is_unaffected_by_the_gate():
+    for port, expect in ((27017, "mongodb"), (6379, "redis"), (3306, "mysql")):
+        picked = T.select_techniques(open_ports=[port], max_items=1)
+        assert picked and expect in picked[0]["id"], port
+
+
 # --- rendering without a local corpus -------------------------------------
 
 def test_render_without_clone_gives_citations_only():

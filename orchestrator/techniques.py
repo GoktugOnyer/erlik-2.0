@@ -32,10 +32,31 @@ INDEX_PATH = Path(__file__).resolve().parents[1] / "techniques_catalog" / "index
 # mdbook directives and HackTricks' sponsor banners — not technique content.
 _STRIP_RX = re.compile(r"\{\{#include[^}]*\}\}|\{\{#ref[^}]*\}\}|\{\{#endref\}\}")
 
+# The hint carries the whole mission prose, so common words become query terms
+# and collide with unrelated titles: "access" pulled in "MS Access SQL Injection"
+# and "control" pulled in "Cisco Catalyst SD-WAN Control Plane". skills.py already
+# stops "access" and "control" for exactly this reason ("kept as expansions, too
+# noisy as raw query terms"); this list had not inherited the lesson.
 _STOP = {
     "the", "and", "for", "with", "test", "testing", "mission", "target",
     "pentesting", "http", "https", "www", "com", "assessment", "scan",
+    "access", "control", "flaws", "flaw", "report", "only", "what", "you",
+    "can", "from", "output", "instance", "assess", "find", "using", "server",
+    "application", "app", "web", "site", "security", "vulnerability", "vulnerabilities",
 }
+
+# erlik assesses web applications over the network. The index also carries host
+# and post-exploitation material (windows, macos, linux, binary, mobile,
+# hardware, reversing, blockchain, ai, generic) because the corpus does, but that
+# content must never be selected for a web assessment.
+#
+# Without this gate the routing is nonsense whenever the target port is not a
+# known service port — and 3000, the Juice Shop port, is not. With no port hit,
+# ranking falls back to pure tag overlap across ALL environments, where
+# "injection" matches "Vectored Overloading PE Injection" and "NexMon Packet
+# Injection on Android", and "access control" matches Windows UAC and macOS MACF.
+# A real run against Juice Shop was fed 12 KB of macOS-kernel and Windows content.
+DEFAULT_ENVIRONMENTS = ("web", "service")
 
 
 def techniques_enabled() -> bool:
@@ -92,7 +113,9 @@ def select_techniques(open_ports: list[int] | None = None,
 
     ports = {int(p) for p in (open_ports or []) if str(p).isdigit()}
     q = _tokens(" ".join(tech or [])) | _tokens(hint)
-    envs = set(environments or [])
+    # Default to the web-assessment environments. Pass `environments` explicitly
+    # to reach host or post-exploitation material.
+    envs = set(environments) if environments else set(DEFAULT_ENVIRONMENTS)
 
     scored: list[tuple[int, int, str, dict]] = []
     for t in index:
