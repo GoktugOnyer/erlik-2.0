@@ -1958,9 +1958,16 @@
                         text.textContent = 'Ollama ready';
                         text.style.color = 'var(--neon-green)';
                     } else {
+                        // The configured model is not installed, so every
+                        // generation will fail on the first call. Name it, and
+                        // point at the closest installed tag when there is one.
                         dot.style.background = 'var(--neon-yellow)';
                         dot.style.boxShadow = '0 0 6px var(--neon-yellow)';
-                        text.textContent = 'Model not pulled';
+                        const near = (data.model_suggestions || [])[0];
+                        text.textContent = near
+                            ? `Model missing: ${data.target_model} — try ${near}`
+                            : `Model not pulled: ${data.target_model}`;
+                        text.title = data.hint || '';
                         text.style.color = 'var(--neon-yellow)';
                     }
                 } else {

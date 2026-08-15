@@ -85,6 +85,37 @@ async def _ollama_list_models() -> list[str]:
         return []
 
 
+def model_installed(target: str, models: list[str]) -> bool:
+    """Whether Ollama can actually serve `target`.
+
+    Must be an EXACT tag match. The previous check compared only the family name
+    (`target.split(":")[0] in m`), so a configured
+    "qwen2.5-coder:7b-instruct-q4_K_M" was reported available because an
+    unrelated "qwen2.5-coder:7b" was installed — the dashboard showed green while
+    every generation 404'd on the first call.
+
+    The one exception is Ollama's own rule that a bare name resolves to :latest.
+    """
+    if not target:
+        return False
+    names = set(models or [])
+    if target in names:
+        return True
+    return ":" not in target and f"{target}:latest" in names
+
+
+def suggest_models(target: str, models: list[str], limit: int = 3) -> list[str]:
+    """Installed tags in the same family as `target` — what the operator probably
+    meant. Surfaced so a near-miss like a wrong quantisation suffix is obvious."""
+    if not target:
+        return []
+    family = target.split(":")[0].strip().lower()
+    if not family:
+        return []
+    return sorted(m for m in (models or [])
+                  if m.split(":")[0].strip().lower() == family)[:limit]
+
+
 async def _ollama_health() -> dict:
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
@@ -92,14 +123,18 @@ async def _ollama_health() -> dict:
             resp.raise_for_status()
             models = [m["name"] for m in resp.json().get("models", [])]
             target = _default_model()
-            has_model = any(target.split(":")[0] in m for m in models)
-            return {
+            available = model_installed(target, models)
+            out = {
                 "provider": "ollama",
                 "ollama": "connected",
                 "models": models,
                 "target_model": target,
-                "model_available": has_model,
+                "model_available": available,
             }
+            if not available:
+                out["model_suggestions"] = suggest_models(target, models)
+                out["hint"] = f"ollama pull {target}"
+            return out
     except Exception as e:
         return {"provider": "ollama", "ollama": "disconnected", "error": str(e)}
 
