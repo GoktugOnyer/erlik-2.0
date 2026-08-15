@@ -37,6 +37,11 @@ Endpoints
     /redirect     open redirect honouring ?url=
     /cors         reflects any Origin, including null, with credentials
     /.git/HEAD    exposed VCS working copy
+    /hbh          trusts X-Forwarded-For behind a hop honouring Connection:
+                  field nominations, so the header can be nominated away
+    /actuator     Spring Boot Actuator index, env dump with datasource password
+    /server-status, /server-info, /nginx_status, /phpinfo.php, /console
+                  exposed platform and debug handlers
     /*-safe       the same handlers, correctly implemented
 """
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -100,6 +105,23 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, LARGE)      # bare wildcard matches everything
         return self._send(200, SMALL)          # literal, or literal* matching nothing
 
+    def _hop_by_hop(self, safe=False):
+        """An origin that trusts X-Forwarded-For for access control, behind a hop
+        that honours `Connection:` field nominations.
+
+        RFC 9110 7.6.1 lets a client name extra fields in `Connection`, and a
+        compliant hop must strip those before forwarding. Where the origin uses
+        one of them to decide access, an attacker can nominate it away. The
+        vulnerable branch therefore answers as though the header never arrived;
+        the safe branch ignores nominations entirely.
+        """
+        conn = (self.headers.get("Connection") or "").lower()
+        xff = self.headers.get("X-Forwarded-For")
+        stripped = (not safe) and "x-forwarded-for" in conn
+        if xff and not stripped:
+            return self._send(200, SMALL)
+        return self._send(403, b'{"error":"forbidden"}')
+
     # --- routing -----------------------------------------------------------
 
     def do_GET(self):
@@ -110,6 +132,49 @@ class Handler(BaseHTTPRequestHandler):
             return self._nosql(q)
         if path == "/ldap":
             return self._ldap(q)
+        if path == "/hbh":
+            return self._hop_by_hop()
+        if path == "/hbh-safe":
+            return self._hop_by_hop(safe=True)
+
+        # --- exposed platform / debug endpoints (WSTG-CONF-02) -------------
+        if path == "/actuator":
+            return self._send(200, (
+                '{"_links":{"self":{"href":"http://x/actuator"},'
+                '"env":{"href":"http://x/actuator/env"},'
+                '"heapdump":{"href":"http://x/actuator/heapdump"},'
+                '"configprops":{"href":"http://x/actuator/configprops"}}}').encode())
+        if path in ("/actuator/env", "/env"):
+            return self._send(200, (
+                '{"activeProfiles":["prod"],"propertySources":[{"name":'
+                '"applicationConfig: [classpath:/application.yml]","properties":'
+                '{"spring.datasource.url":{"value":"jdbc:postgresql://db:5432/app"},'
+                '"spring.datasource.password":{"value":"hunter2"}}}]}').encode())
+        if path == "/server-status":
+            return self._send(200, (
+                "Apache Server Status for fixture\n"
+                "Total Accesses: 4213\nBusyWorkers: 2\nIdleWorkers: 48\n").encode(),
+                "text/plain")
+        if path == "/server-info":
+            return self._send(200, (
+                "Apache Server Information\nServer Root: /etc/apache2\n"
+                "Config File: /etc/apache2/apache2.conf\nModule Name: mod_proxy.c\n").encode(),
+                "text/plain")
+        if path == "/nginx_status":
+            return self._send(200, (
+                "Active connections: 3\nserver accepts handled requests\n"
+                " 12 12 40\n").encode(), "text/plain")
+        if path in ("/phpinfo.php", "/phpinfo", "/info.php", "/php_info.php"):
+            return self._send(200, (
+                "<html><h1>phpinfo()</h1>"
+                "Loaded Configuration File => /etc/php/8.2/apache2/php.ini<br>"
+                "allow_url_fopen => On<br>disable_functions => no value<br>"
+                '_SERVER["DOCUMENT_ROOT"] => /var/www/html</html>').encode(), "text/html")
+        if path == "/console":
+            return self._send(200, (
+                "<html><title>Werkzeug Debugger</title>"
+                "<div class=__debugger__>console is locked</div></html>").encode(),
+                "text/html")
 
         if path == "/noframe":
             return self._send(200, b"<html>framable</html>", "text/html")
