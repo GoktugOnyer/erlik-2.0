@@ -35,7 +35,7 @@ The following table maps each research question to the specific experimental dim
 | **RQ2**: Does the agentic framework structure affect outcomes? | Session type (cold vs warm vs chain) | Compare findings, precision, and coverage across cold (unstructured), warm (context-inherited), and chain (4-phase structured) sessions while holding model and toolset constant. |
 | **RQ3**: Does model size affect penetration testing performance? | Model size (7B vs 14B vs 32B) | Compare metrics across three model sizes while holding toolset and session type constant. Tests whether more parameters yield better tool selection. |
 | **RQ3-b**: Does action-space size affect small-model performance? | Toolset tier (Core-10 vs Standard-20 vs Full-30) | Compare 7B performance across three toolset sizes. Tests the "decision paralysis" hypothesis: do more tools help or hurt small models? |
-| **RQ4**: Does domain-specific LoRA fine-tuning improve pentesting performance? | LoRA fine-tuning experiment | 6-model comparison: 3 baseline + 3 fine-tuned. Tests whether specialisation helps at every scale and whether fine-tuned 7B can match baseline 32B. |
+| **RQ4**: Does domain-specific LoRA fine-tuning improve pentesting performance? | LoRA fine-tuning experiment (FT-v1, FT-v2, FT-v3) | Each fine-tuned variant is compared against the baseline run on the same infrastructure, on unique ground truth coverage and precision. The union of baseline and fine-tuned coverage is also computed, to separate "finds more" from "finds different". |
 
 The dependent variables measured for each session are:
 
@@ -43,9 +43,28 @@ The dependent variables measured for each session are:
 - **True positives (TP)**: findings validated against a ground truth catalogue of 35 known Juice Shop vulnerabilities
 - **False positives (FP)**: findings not matching any ground truth entry
 - **Precision**: TP / (TP + FP)
-- **Ground truth coverage**: fraction of known vulnerabilities discovered
+- **Ground truth coverage**: count of distinct ground-truth entries matched, out of 35 — reported per experiment as a deduplicated union over that experiment's sessions, not per session
 - **Steps used**: actual tool invocations consumed out of the turn budget
 - **Duration**: wall-clock time per session in seconds
+
+**Per-session coverage versus the reported per-experiment metric.** These are two different numbers,
+used for two different purposes. The per-session figure is computed by `_compute_benchmark_metrics`
+and returned by `/api/benchmark/{id}/metrics` under the key `recall`: the fraction of the 35
+ground-truth entries matched by the findings of that one session. It is a diagnostic only — a single
+15-, 30- or 45-turn session covers only part of the catalogue, its value is bounded above by the
+union figure for the whole experiment, and per-session values are never summed or averaged into a
+headline figure. (The `gt_coverage` column written to `summary.csv` is in practice not that number
+either: `fetch_metrics` reads a `coverage` key which the endpoint does not emit, so the column falls
+back to 0.0, and `fetch_chain_metrics` hard-codes 0.0 for chain rows. The column is inert and was not
+used in analysis.)
+
+The metric actually reported for an experiment is the **union of matched ground-truth identifiers
+across every session of that experiment**, deduplicated and expressed over the 35-entry catalogue.
+`compute_gt_coverage` in `scripts/recompute_gt_coverage.py` accumulates matched ids into a set and
+reports `unique_gt_hit`; an entry found in twenty sessions counts once, and the value is bounded
+above by 35 however many sessions the experiment contains. Every coverage percentage quoted in the
+results — "13/35 (37.1%)" and the like — is this per-experiment unique-GT figure, computed over all
+sessions of one matrix run under one model.
 
 ```
 [DIAGRAM: Experimental Matrix]
@@ -64,12 +83,12 @@ Title: "Factorial Experimental Matrix"
 
 ### 3.2.1 Component Overview
 
-Erlik 2.0 consists of four components deployed in a networked environment, each running as a separate service:
+Erlik 2.0 consists of four components: the orchestrator, which runs as a host process (`uvicorn orchestrator.main:app --host 0.0.0.0 --port 8002`), and three containerised services declared in `docker-compose.yml` — the Kali tool environment, the ZAP proxy, and the Juice Shop target:
 
 **1. Orchestrator (FastAPI + Python)**
 The central control plane responsible for:
 - Session and chain lifecycle management (create, start, stop, poll)
-- LLM interaction via Ollama's REST API (model loading, prompt construction, response parsing)
+- LLM interaction through a pluggable provider layer (`orchestrator/llm_client.py`): prompt construction, response parsing, and retry with exponential backoff sit above two interchangeable backends chosen at runtime by the `ERLIK_LLM_PROVIDER` environment variable — `ollama` (the default), which posts to a local Ollama server's `/api/chat` endpoint at `OLLAMA_BASE` (default `http://localhost:11434`), and `openai`, which posts to any OpenAI-compatible `/chat/completions` gateway configured through `OPENAI_BASE_URL`. All evaluation runs reported in this thesis used the Ollama default: no evaluation script sets `ERLIK_LLM_PROVIDER`, and the sprint matrix harness additionally manages model residency by calling the Ollama API directly
 - Tool dispatch to the Kali environment via shell execution
 - Programmatic vulnerability detection independent of LLM judgment
 - Finding storage, ground truth matching, and metrics computation
@@ -83,15 +102,15 @@ Runs on port 8002.
 A custom environment based on `kalilinux/kali-rolling` containing 30 penetration testing tools. In the Docker deployment, this runs as a container (`kali-tools`) with access to the internal `pentest-net` network. In the cloud deployment (ERLIK_NATIVE mode), tools are installed natively on the host and commands execute via local shell.
 
 **3. OWASP ZAP Proxy**
-The Zed Attack Proxy running in headless daemon mode with its JSON API enabled (`-daemon -host 0.0.0.0 -port 8080 -config api.disablekey=true -config api.addrs.addr.name=.* -config api.addrs.addr.regex=true`). Provides automated web application scanning capabilities including spidering, active scanning, and alert retrieval. Accessed by the Kali tools via a custom `zap-cli` bash wrapper that translates high-level commands (e.g., `zap-cli spider http://target`) into ZAP JSON API calls.
+The Zed Attack Proxy running in headless daemon mode with its JSON API enabled (`zap.sh -daemon -host 0.0.0.0 -port 8080 -config api.addrs.addr.name=.* -config api.addrs.addr.regex=true -config api.disablekey=true`). Provides automated web application scanning capabilities including spidering, active scanning, and alert retrieval. Accessed by the Kali tools via a custom `zap-cli` bash wrapper that translates high-level commands (e.g., `zap-cli spider http://target`) into ZAP JSON API calls.
 Runs on port 8090 (externally mapped from internal port 8080).
-Java 17 runtime with `-Xmx8g` heap allocation.
+Deployed from the `ghcr.io/zaproxy/zaproxy:stable` image. `docker-compose.yml` sets no JVM options for the ZAP service — it overrides only the container's command line, ports and network — so the JVM runs with the image defaults; no heap limit is configured by this project.
 
 **4. OWASP Juice Shop v17.1.1**
 The intentionally vulnerable web application serving as the standardised target. Juice Shop is a modern single-page application (Angular frontend, Node.js/Express backend) with a REST API and an in-memory SQLite database. It provides a realistic attack surface with documented vulnerabilities across all OWASP Top 10 categories.
-Runs on port 3000 with `--max-old-space-size=8192` to prevent Node.js OOM under sustained scanning load.
+Runs on port 3000, published one-to-one from the container. `docker-compose.yml` sets no Node.js memory options, so under Docker the target runs with the image defaults; the 8 GB heap applies only in ERLIK_NATIVE mode, where the harness restarts Juice Shop with `NODE_OPTIONS=--max-old-space-size=8192` to prevent Node.js OOM under sustained scanning load (Section 3.8.6).
 
-All four components share a Docker bridge network (`pentest-net`) enabling inter-service communication via hostname resolution (e.g., `http://juice-shop:3000` from within the Kali container).
+The three containerised components share a Docker bridge network (`pentest-net`) enabling inter-service communication via hostname resolution (e.g., `http://juice-shop:3000` from within the Kali container). The orchestrator is not a member of that network: it runs on the host and dispatches every tool invocation as `docker exec kali-tools bash -c <command>`, or, when `ERLIK_NATIVE` is set, as a plain `bash -c <command>` with no container involved.
 
 ```
 [DIAGRAM: System Architecture]
@@ -127,7 +146,7 @@ Four boxes with the orchestrator in the centre:
 
 Arrows:
   Orchestrator <--> LLM: bidirectional "JSON tool calls / responses"
-  Orchestrator --> Kali: "bash -c <command>" (one-way dispatch)
+  Orchestrator --> Kali: "docker exec kali-tools bash -c <command>" (one-way dispatch)
   Kali --> Juice Shop: "HTTP requests" (tool scanning target)
   Kali --> ZAP: "API calls via zap-cli wrapper"
   ZAP --> Juice Shop: "Proxied scanning"
@@ -135,7 +154,9 @@ Arrows:
 
 ### 3.2.2 Database Schema
 
-The orchestrator uses an SQLite database (`data/pentest.db`) with the following schema:
+The orchestrator uses an SQLite database (`data/pentest.db`) created by `init_db()` in `orchestrator/database.py`. The schema declares eleven tables: `sessions`, `steps`, `findings`, `reports`, `recon_context`, `chains`, `ground_truth`, `benchmark_runs`, `benchmark_results`, `v2_runs`, and `v2_findings`. The six tables that carry the data analysed in this thesis are documented below. The remaining five carry no data used in the analysis: `reports` holds one generated markdown report per session, written automatically at the end of every `agent_loop()` run and read back only through the report endpoints; rows in `benchmark_runs` are created only by the dashboard's `/api/benchmarks/run` endpoint; `benchmark_results` is declared but never written by any code path, because benchmark metrics are recomputed on demand by `_compute_benchmark_metrics()`; and `v2_runs`/`v2_findings` belong to the deterministic WSTG test-case engine that this chapter places out of scope (Section 3.2.3).
+
+Several `sessions`, `chains`, `benchmark_runs`, and `benchmark_results` columns are added by `ALTER TABLE` migrations at start-up rather than in the original `CREATE TABLE` statement, so that databases created by earlier builds gain them on first run; the listings below reflect the post-migration schema.
 
 **sessions** — One row per testing session:
 - `id` (TEXT PK): UUID session identifier
@@ -157,7 +178,9 @@ The orchestrator uses an SQLite database (`data/pentest.db`) with the following 
 - `total_steps` (INTEGER): Actual steps taken
 - `total_findings` (INTEGER): Findings recorded
 - `total_duration_ms` (INTEGER): Wall-clock duration in milliseconds
-- `created_at`, `started_at`, `completed_at` (TEXT): Timestamps
+- `vuln_category` (TEXT): Optional category label carried on the session and echoed into the generated report
+- `tool_timeout` (INTEGER): Per-session timeout override applied to every tool invocation, unless `no_timeout` is set, which takes precedence
+- `created_at`, `updated_at` (TEXT): Row creation and last-update timestamps, both defaulting to `datetime('now')`
 
 **steps** — One row per tool invocation:
 - `id` (INTEGER PK): Auto-increment
@@ -195,6 +218,7 @@ The orchestrator uses an SQLite database (`data/pentest.db`) with the following 
 - `auto_progress` (INTEGER): Whether phases advance automatically
 - `max_turns_per_session` (INTEGER): Turn budget per phase
 - `no_timeout`, `disable_stagnation` (INTEGER): Inherited by child sessions
+- `created_at`, `updated_at` (TEXT): Timestamps, both defaulting to `datetime('now')`
 
 **recon_context** — Structured reconnaissance data inherited between sessions:
 - `id` (INTEGER PK): Auto-increment
@@ -203,6 +227,7 @@ The orchestrator uses an SQLite database (`data/pentest.db`) with the following 
 - `key` (TEXT): Identifier (e.g., endpoint path, parameter name)
 - `value` (TEXT): Discovery detail
 - `source_tool` (TEXT): Tool that produced this data
+- `created_at` (TEXT): Timestamp
 
 **ground_truth** — Known Juice Shop vulnerabilities for validation:
 - `id` (INTEGER PK): Auto-increment
@@ -214,34 +239,39 @@ The orchestrator uses an SQLite database (`data/pentest.db`) with the following 
 - `parameter` (TEXT): Expected parameter
 - `description` (TEXT): Human-readable description
 - `owasp_category` (TEXT): OWASP Top 10 classification
+- `created_at` (TEXT): Timestamp
 
 ```
 [DIAGRAM: Database Entity-Relationship]
-Six tables with relationships:
+Eleven tables. Declared foreign keys (REFERENCES clauses in database.py):
 
-  [chains] 1---* [sessions] 1---* [steps]
-                     |
-                     1---* [findings]
-                     |
-                     1---* [recon_context]
+  [sessions] 1---* [steps]
+  [sessions] 1---* [findings]
+  [sessions] 1---1 [reports]        (session_id is UNIQUE)
+  [sessions] 1---* [recon_context]
+  [benchmark_runs] 1---* [benchmark_results] *---1 [sessions]
+  [v2_runs] 1---* [v2_findings]
 
-  [ground_truth] (standalone reference table)
+  [chains] and [ground_truth] declare no foreign keys.
 
-Show primary/foreign key relationships:
+Soft references (plain TEXT columns with no REFERENCES clause, resolved in
+application code):
   chains.id --> sessions.chain_id
-  sessions.id --> steps.session_id
-  sessions.id --> findings.session_id
-  sessions.id --> recon_context.session_id
   sessions.parent_session_id --> sessions.id (self-reference for warm starts)
+  benchmark_runs.cold_session_id / warm_session_id / chain_id
+  v2_runs.chain_root_run_id --> v2_runs.id
+
+Grey out the tables that carry no data used in the analysis: reports,
+benchmark_runs, benchmark_results (never written), v2_runs, v2_findings.
 ```
 
-### 3.2.3 API Endpoints
+### 3.2.3 API Endpoints Used by the Evaluation Harness
 
-The orchestrator exposes a REST API that the sprint matrix script uses to drive experiments:
+The FastAPI application registers 35 HTTP routes plus two WebSocket endpoints (`/ws/{session_id}` and `/ws/benchmark/{benchmark_id}`). The table below is therefore not the whole API: it lists the twelve endpoints that constitute the experiment path, eleven of which the sprint matrix script (`scripts/sprint_matrix.py`) calls directly.
 
 | Endpoint | Method | Purpose |
 |----------|--------|---------|
-| `/api/health` | GET | Health check (ollama connectivity, model availability) |
+| `/api/health` | GET | Provider health check; under the Ollama default it reports connectivity, the installed model list, and whether the target model is present |
 | `/api/sessions` | POST | Create a new session with specified model, toolset, turn count |
 | `/api/sessions/{id}/start` | POST | Launch the agent loop for a session |
 | `/api/sessions/{id}` | GET | Poll session status, steps, findings |
@@ -250,9 +280,11 @@ The orchestrator exposes a REST API that the sprint matrix script uses to drive 
 | `/api/chains/{id}` | GET | Poll chain status, child sessions, aggregate findings |
 | `/api/chains/{id}/stop` | POST | Force-stop a running chain |
 | `/api/presets` | GET | List available playbooks (system prompts) |
-| `/api/toolset-presets` | GET | List toolset tier definitions |
+| `/api/toolset-presets` | GET | List toolset tier definitions (consumed by the dashboard UI; the harness instead passes `toolset_preset` in the session creation body) |
 | `/api/ground-truth` | GET | Retrieve ground truth vulnerability catalogue |
 | `/api/benchmark/{id}/metrics` | GET | Compute TP, FP, precision, coverage for a session |
+
+Beyond this path the application exposes a second, independent execution engine: seven `/api/v2/*` routes backed by `orchestrator/testcase/`. Rather than a free-form LLM agent loop, that engine executes YAML-declared WSTG test cases loaded from `tests_catalog/` (nine cases at the time of writing), where each case is a fixed sequence of tool commands carrying `regex`, `status_code`, and `llm` evaluators, and it can auto-follow a chain of successor test cases (`max_depth` 3 and `max_runs` 12 by default). It persists to its own `v2_runs` and `v2_findings` tables and accepts a per-request `provider`/`model` override. As stated in the scope note at the head of this chapter, no experiment reported in this thesis uses the v2 engine; every result comes from the session and chain endpoints tabulated above.
 
 ---
 
@@ -271,116 +303,96 @@ When a session is started via `/api/sessions/{id}/start`, the orchestrator:
    - The enabled tools list formatted as a tool catalogue
    - For warm sessions: the inherited warm-start context from the parent session
    - For chain sessions: the compiled chain context from prior phases plus the current phase directive
-3. Initialises tracking variables: `step_number = 0`, `findings_count = 0`, `turns_since_last_finding = 0`, `phases_covered = set()`, `recent_commands = []`, `sticky_discoveries = {}`
+3. Initialises tracking state. At function entry: `step_number = 0`, `findings_count = 0`, `session_start_time = time.time()`, `full_steps_data = []`, `full_findings_data = []`. Immediately before the turn loop: `failed_commands: dict[str, int] = {}`, `recent_commands: list[str] = []`, `tools_executed: set[str] = set()`, `consecutive_container_failures = 0`, `turns_since_last_finding = 0`, `last_findings_count = 0`, `sticky_discoveries: list[str] = []` (a list, not a mapping). The loop holds no `phases_covered` variable: the phase gate recomputes coverage on demand from `tools_executed` via `_get_phase_coverage()`, and `phases_covered` appears only as a post-hoc benchmark-result field, derived from the recorded step phase labels when metrics are computed.
 4. Begins the main loop
 
 ### 3.3.2 System Prompt (Complete Text)
 
-The base system prompt (`TOOL_USE_SYSTEM_PROMPT`) is reproduced below in full, as it is a critical component of the experimental design. Every session across all models and conditions uses this identical prompt:
+The base system prompt is held in the `TOOL_USE_SYSTEM_PROMPT` constant and is reproduced verbatim below, as it is a critical component of the experimental design. It is a template rather than a Juice-Shop-hardcoded string: at the start of the scan phase the agent loop parses the session's target URL with `urlparse` and substitutes the `{target_url}`, `{target_host}` and `{target_port}` placeholders (the port defaulting to 443 for `https` and 80 otherwise), then rewrites any residual literal `http://juice-shop:3000` to the session's target URL and any remaining bare `juice-shop` to the session's host. The same prompt text therefore drives runs against any target. Every session across all models and conditions uses this identical template:
 
 ```
-You are an autonomous penetration testing agent. You have access to security tools
-running inside a Kali Linux container targeting a web application.
+You are an autonomous penetration testing agent. You have access to security tools running inside a Kali Linux container targeting a web application.
 
 IMPORTANT RULES:
-1. You MUST respond with ONLY a JSON object for each action. No markdown, no
-   explanations outside the JSON.
+1. You MUST respond with ONLY a JSON object for each action. No markdown, no explanations outside the JSON.
 2. After each tool result, analyze the output and decide the next action.
-3. When you find a vulnerability, report it immediately using the "finding"
-   action BEFORE running the next tool.
-4. You MUST NOT call "done" until you have run tools from at least 3 of the 4
-   testing phases listed below. You will be BLOCKED from finishing if you skip phases.
+3. When you find a vulnerability, report it immediately using the "finding" action BEFORE running the next tool.
+4. You MUST NOT call "done" until you have run tools from at least 3 of the 4 testing phases listed below. You will be BLOCKED from finishing if you skip phases.
 
-TARGET: http://juice-shop:3000
-ALWAYS use the full URL "http://juice-shop:3000" as the target. NEVER use bare
-hostnames without http://.
+TARGET: {target_url}
+ALWAYS use the full URL "{target_url}" as the target. NEVER use bare hostnames without http://.
 
 MANDATORY TESTING PHASES (you must cover at least 3 before calling "done"):
   Phase 1 — RECON: Identify services, technologies, server info, and security headers.
     Tools: nmap, whatweb, wafw00f, curl (response headers)
   Phase 2 — DISCOVERY: Find hidden directories, API endpoints, and parameters.
     Tools: gobuster, ffuf, dirb, arjun, pw-crawl, curl
-  Phase 3 — VULNERABILITY SCANNING: Test discovered endpoints for injection, XSS,
-    and known CVEs.
+  Phase 3 — VULNERABILITY SCANNING: Test discovered endpoints for injection, XSS, and known CVEs.
     Tools: nuclei, sqlmap, xsstrike, dalfox, commix, crlfuzz, zap-cli, nikto
-  Phase 4 — AUTH, LOGIC & EXPLOITATION: Test authentication, authorisation, access
-    control, and business logic.
+  Phase 4 — AUTH, LOGIC & EXPLOITATION: Test authentication, authorisation, access control, and business logic.
     Tools: curl, hydra, jwt_tool, sqlmap
 
 RESPONSE FORMAT — always return exactly one JSON object:
 
 To run a tool:
-{"action": "run_tool", "command": "nmap -sV juice-shop -p 3000",
- "reason": "Port scan to identify services"}
+{"action": "run_tool", "command": "nmap -sV {target_host} -p {target_port}", "reason": "Port scan to identify services"}
 
 To report a vulnerability:
-{"action": "finding", "vuln_type": "SQL Injection", "severity": "high",
- "url": "http://juice-shop:3000/rest/products/search?q=test",
- "parameter": "q", "evidence": "Error message revealed SQL syntax"}
+{"action": "finding", "vuln_type": "SQL Injection", "severity": "high", "url": "{target_url}/endpoint?q=test", "parameter": "q", "evidence": "Error message revealed SQL syntax"}
 
 To finish (ONLY after covering at least 3 phases):
 {"action": "done", "summary": "Completed testing. Found 3 vulnerabilities."}
 
 SEVERITY LEVELS: critical, high, medium, low, info
 
-TOOL USAGE EXAMPLES (use these exact URL formats):
-- nmap -sV juice-shop -p 3000
-- whatweb http://juice-shop:3000
-- gobuster dir -u http://juice-shop:3000 -w /usr/share/dirb/wordlists/common.txt
-  --exclude-length 3748
-- ffuf -u http://juice-shop:3000/FUZZ -w /usr/share/dirb/wordlists/common.txt -fs 3748
-- sqlmap -u "http://juice-shop:3000/endpoint?param=test" --batch --level=3
-- curl -s http://juice-shop:3000/api/
-- curl -sI http://juice-shop:3000  (check response headers)
-- xsstrike -u http://juice-shop:3000/endpoint?param=test
-- dalfox url http://juice-shop:3000/endpoint?param=test
-- nuclei -u http://juice-shop:3000
-- arjun -u http://juice-shop:3000/api/endpoint
-- hydra -l user -P /usr/share/wordlists/rockyou.txt target
-  http-post-form "/login:user=^USER^&pass=^PASS^:Invalid"
+TOOL USAGE EXAMPLES (use the target URL {target_url} — NEVER use any other hostname):
+- nmap -sV {target_host} -p {target_port}
+- whatweb {target_url}
+- gobuster dir -u {target_url} -w /usr/share/dirb/wordlists/common.txt --exclude-length 3748
+- ffuf -u {target_url}/FUZZ -w /usr/share/dirb/wordlists/common.txt -fs 3748
+- sqlmap -u "{target_url}/endpoint?param=test" --batch --level=3
+- curl -s {target_url}/api/
+- curl -sI {target_url}  (check response headers)
+- xsstrike -u {target_url}/endpoint?param=test
+- dalfox url {target_url}/endpoint?param=test
+- nuclei -u {target_url}
+- arjun -u {target_url}/api/endpoint
+- hydra -l user -P /usr/share/wordlists/rockyou.txt target http-post-form "/login:user=^USER^&pass=^PASS^:Invalid"
 - jwt_tool <token> -C -d /usr/share/wordlists/rockyou.txt
 - jwt_tool <token> -X a
-- zap-cli spider http://juice-shop:3000
-- zap-cli active-scan http://juice-shop:3000
-- zap-cli alerts http://juice-shop:3000
-- pw-crawl http://juice-shop:3000
-- nikto -h http://juice-shop:3000
+- zap-cli spider {target_url}
+- zap-cli active-scan {target_url}
+- zap-cli alerts {target_url}
+- pw-crawl {target_url}  (JS-rendered crawl — finds SPA routes and API calls that static tools miss)
+- nikto -h {target_url}
 
 AVAILABLE RESOURCES ON THIS SYSTEM:
 - Wordlists: /usr/share/dirb/wordlists/common.txt, /usr/share/wordlists/rockyou.txt
-- ZAP proxy is running and accessible via zap-cli wrapper. Use "zap-cli spider"
-  then "zap-cli active-scan" then "zap-cli alerts".
+- ZAP proxy is running and accessible via zap-cli wrapper. Use "zap-cli spider" → "zap-cli active-scan" → "zap-cli alerts".
 - All tools run inside a Kali Linux container with network access to the target.
 
 WORKFLOW STRATEGY:
 1. Reconnaissance: identify services, technologies, and security posture (Phase 1).
 2. Discovery: enumerate directories, API endpoints, and parameters (Phase 2).
 3. For each discovered endpoint with parameters: test for injection and XSS (Phase 3).
-4. Authentication testing: attempt login bypass, test token security, check for weak
-   credentials (Phase 4).
-5. Authorisation testing: with any obtained session/token, test access control by
-   modifying resource IDs and accessing restricted resources (Phase 4).
+4. Authentication testing: attempt login bypass, test token security, check for weak credentials (Phase 4).
+5. Authorisation testing: with any obtained session/token, test access control by modifying resource IDs and accessing restricted resources (Phase 4).
 6. Report each finding immediately when discovered.
 7. Only call "done" after thorough multi-phase testing.
 
 CHAINING RULES — use output from one tool as input for the next:
-- nmap finds open ports -> run whatweb on discovered services.
-- gobuster/ffuf finds paths -> run curl on each to understand the response.
-- curl reveals JSON API endpoints -> test with sqlmap (if parameterised) and arjun
-  (to discover parameters).
-- curl shows forms or input fields -> test with xsstrike/dalfox.
-- Any endpoint with query parameters -> test with sqlmap AND xsstrike.
-- sqlmap confirms injection -> IMMEDIATELY report, then test other endpoints.
-- Successful authentication -> extract session token -> use it to test authorisation
-  on other resources.
-- If you find a login endpoint -> try SQL injection on it (e.g. ' OR 1=1--).
-- If you obtain a JWT token -> test with jwt_tool for weak secrets and algorithm
-  confusion.
-- If you find directory listings -> look for backup files, config files, and
-  sensitive data.
-- If you find an API documentation endpoint -> use it to map the full API surface.
-- After tool feedback, check the "KEY FINDINGS" section — use those paths and
-  parameters for your next tool.
+- nmap finds open ports → run whatweb on discovered services.
+- gobuster/ffuf finds paths → run curl on each to understand the response.
+- curl reveals JSON API endpoints → test with sqlmap (if parameterised) and arjun (to discover parameters).
+- curl shows forms or input fields → test with xsstrike/dalfox.
+- Any endpoint with query parameters → test with sqlmap AND xsstrike.
+- sqlmap confirms injection → IMMEDIATELY report, then test other endpoints.
+- Successful authentication → extract session token → use it to test authorisation on other resources.
+- If you find a login endpoint → try SQL injection on it (e.g. ' OR 1=1--).
+- If you obtain a JWT token → test with jwt_tool for weak secrets and algorithm confusion.
+- If you find directory listings → look for backup files, config files, and sensitive data.
+- If you find an API documentation endpoint → use it to map the full API surface.
+- After tool feedback, check the "KEY FINDINGS" section — use those paths and parameters for your next tool.
 
 PENETRATION TESTING METHODOLOGY:
 - Check response headers early (curl -sI) — missing security headers are findings.
@@ -399,6 +411,16 @@ IMPORTANT:
 - Use "juice-shop" as hostname (not localhost) — tools run inside Docker network.
 - Run ONE command at a time, then analyze the result.
 - NEVER repeat the same command if it fails. Try a DIFFERENT tool or approach.
+- After gobuster/ffuf find paths, explore them with curl before running heavy scanners.
+
+TOOL EFFICIENCY:
+- Prefer fast targeted tools over slow broad scanners.
+- nikto is slow (60s+). Use it once for broad coverage, prefer curl + sqlmap + nuclei for speed.
+- commix needs a URL with a parameter (e.g. commix -u "http://host/path?param=val" --batch).
+- crlfuzz does NOT support --batch. Just use: crlfuzz -u "http://host/path"
+- sqlmap needs a URL with a query parameter: sqlmap -u "http://host/path?q=test" --batch --level=3
+- jwt_tool is high-value for token-based auth: test for weak secrets and algorithm confusion.
+- curl is your most versatile tool — use it for probing, header checks, auth testing, and API exploration.
 ```
 
 The prompt design decisions and their rationale:
@@ -459,7 +481,7 @@ The conversation history is checked against a token budget (approximately 3600 t
 The last 6 messages (3 LLM turns) are always preserved verbatim to maintain recent context.
 
 **Step 2: LLM Call**
-The trimmed message history is sent to Ollama's `/api/chat` endpoint with a 300-second timeout. The model generates a JSON response selecting the next action.
+The agent loop wraps each LLM call in `asyncio.wait_for(..., timeout=300.0)` — a hard 300-second ceiling per turn, imposed by the loop rather than by the HTTP client. Beneath that ceiling, `llm_client.chat()` posts the trimmed message history to Ollama's `/api/chat` endpoint and retries up to three attempts, with the httpx timeout escalating across attempts as `120.0 + (attempt * 60.0)` — 120 s, then 180 s, then 240 s — and exponential backoff (`2 ** attempt` seconds) between them, giving 540 s of internal budget. Because that internal budget exceeds the ceiling, a hung inference server is always cut off by the asyncio ceiling first: the `asyncio.TimeoutError` is caught, the agent loop returns immediately and the session is finished with status `error`, so the whole run is aborted rather than merely the turn. On a successful call the model returns a JSON response selecting the next action.
 
 **Step 3: Response Parsing**
 The LLM's response is parsed as JSON. Three action types are handled:
@@ -471,23 +493,27 @@ The LLM's response is parsed as JSON. Three action types are handled:
 If the response is not valid JSON or contains an unrecognised action, the orchestrator sends an error message back to the LLM and continues the loop (consuming one turn).
 
 **Step 4: Duplicate Detection (for run_tool)**
-Before executing a tool command, the orchestrator checks for duplicates:
-- Exact match: the same command string was already executed in this session
-- Semantic match via `_is_duplicate_command()`: normalises whitespace, argument order, and URL encoding to detect functionally identical commands
-- Tool family overlap: `TOOL_FAMILIES` prevents redundant tool pairs (e.g., running `gobuster` and `dirb` on the same directory with the same wordlist)
+Before executing a tool command, the orchestrator applies two independent guards, both evaluated against the entire session history rather than a sliding window:
+- **Repeated-failure guard**: the `failed_commands` dictionary counts, per exact command string, how many times that command has already returned a failure. Once the count reaches 2, the command is refused without execution. Note that this keys on failure count, not on prior success — an exact command string that previously *succeeded* is not blocked by this guard.
+- **Semantic duplicate guard**: `_is_duplicate_command()` reduces each command to a `(tool, target)` pair via `_normalize_command()` — the base executable name, plus the argument following the first `-u`, `--url`, `-t` or `--target` flag, or failing that the first bare `http://`/`https://` token. Two commands collide when they resolve to the same tool family **and** either share a target or one of the two has no extractable target.
+- **Tool families**: `TOOL_FAMILIES` collapses `gobuster`, `dirb` and `ffuf` into a single `dir_enum` family, and `xsstrike` and `dalfox` into a single `xss_scan` family. Members of a family are therefore mutually exclusive — running any one of them exhausts the family's entire allowance for that target, so an agent that has run `gobuster` can no longer run `dirb` or `ffuf` against it.
 
-If a duplicate is detected, the LLM receives a message: "This command (or a very similar one) was already executed. Try a different approach." This consumes one turn.
+The threshold is `max_similar=1`, so the agent is hard-blocked at the *first* repeat: a tool (or a same-family substitute) may be run against a given target exactly once per session, and the second attempt is refused before execution. Only commands that actually reached execution are appended to `recent_commands`, so refused attempts do not themselves consume the allowance.
+
+Neither guard emits that message. Both feed the refusal back as a user message beginning `STOP:`: the duplicate guard reports how many times that tool has already been run on the target and lists up to ten enabled tools the agent has *not* yet tried, while the failure guard names the offending command and its failure count. Both instruct the model to choose a different tool or to use the `done` action. Either way the turn is consumed — the loop `continue`s to the next iteration of its `for turn in range(max_turns)` budget without executing anything.
 
 **Step 5: Command Sanitisation**
-The `_sanitize_command()` function in `tool_executor.py` applies safety and compatibility transformations:
-- **Hostname rewriting**: `localhost` and `127.0.0.1` are replaced with the Docker service hostname `juice-shop` (or preserved in ERLIK_NATIVE mode with `/etc/hosts` aliases)
-- **URL scheme injection**: Bare hostnames are prefixed with `http://` for tools requiring explicit schemes
+The `_sanitize_command()` function in `tool_executor.py` applies compatibility and bounding transformations. It performs no safety filtering — dangerous commands are rejected earlier, by a separate gate described in the final bullet below:
+- **Hostname rewriting (default, target-agnostic)**: the rewrite that always runs goes in the *opposite* direction to a fixed lab hostname. When a `target_url` is supplied and its hostname does not contain `juice-shop`, the sanitiser rewrites `http://juice-shop:3000` and `https://juice-shop:3000` to the target URL, `juice-shop:3000` to the target's `host:port`, and the bare token `juice-shop` to the target hostname. The rewrite exists because the fine-tuned 7B/14B models emit `juice-shop:3000` from training-data bias irrespective of the actual target; it is deliberately skipped when the target really is `juice-shop`, since it would otherwise duplicate path segments.
+- **Legacy lab wiring (conditional)**: rewriting `localhost` and `127.0.0.1` *to* the in-network service name is not unconditional and is not the default. It fires only when `ERLIK_NATIVE` is unset **and** `ERLIK_DOCKER_TARGET_HOST` is set, in which case that variable names the host: `http(s)://localhost:<port>`, `http(s)://127.0.0.1:<port>` and the bare tokens `localhost` and `127.0.0.1` are all redirected to `http://<host>:<target-port>`. The documented lab wiring exports `ERLIK_DOCKER_TARGET_HOST=juice-shop`, which reproduces the behaviour the agent's `localhost` commands depend on.
+- **URL scheme injection (conditional)**: gated on the same two conditions as the legacy wiring above (`ERLIK_NATIVE` unset and `ERLIK_DOCKER_TARGET_HOST` set). It does not prefix arbitrary bare hostnames: it rewrites only occurrences of the configured lab host — with or without a `:<port>` suffix — that are not already preceded by `http://` or `https://`, and only for the fifteen tools listed in `TOOLS_NEEDING_SCHEME` (`gobuster`, `ffuf`, `nikto`, `nuclei`, `dalfox`, `wfuzz`, `sqlmap`, `xsstrike`, `commix`, `crlfuzz`, `whatweb`, `wafw00f`, `arjun`, `curl`, `zap-cli`)
 - **nuclei tag injection**: If the agent calls nuclei without specifying templates or tags, the system auto-appends `-tags cve,vuln,sqli,xss,ssrf,jwt,auth,exposure,misconfig,default-login` to ensure broad coverage
-- **Dangerous command blocking**: Commands matching destructive patterns (`rm -rf /`, `mkfs`, `dd if=`, `shutdown`, `reboot`, `chmod 777`, pipe to shell) are rejected
+- **hydra auto-bounding**: when the agent invokes `hydra`, the framework rewrites the command so that a brute-force attempt terminates within a bounded time. Unless `ERLIK_HYDRA_PASS_CAP` is set to `0` (its default is `300`), the sanitiser appends `-f` if absent (stop at the first valid credential), appends `-t 8` if no thread count was supplied, and — when a `-P <wordlist>` argument is present that does not already point at a generated list — swaps the wordlist for `/tmp/erlik_hydra_pw.txt` and prefixes the whole command with `head -n <cap> <wordlist> > /tmp/erlik_hydra_pw.txt`, so hydra runs against the top *cap* entries rather than the full list. This transformation is methodologically load-bearing rather than cosmetic: an unbounded run against `rockyou.txt` (~14M entries) runs for hours, so it would either exhaust hydra's 120-second default timeout or, in `no_timeout` sessions, block the agent loop indefinitely. Because `_auto_detect_findings()` converts a hydra success line into a `Broken Authentication` finding, bounding is what makes the A07 ground-truth items — the unrate-limited `/rest/user/login` endpoint and the weak admin password — reachable at all within a turn budget. The cap preserves the realistic win (weak or default credentials) while discarding the unreachable tail of the wordlist.
+- **Dangerous command blocking is not part of sanitisation.** It is a separate pre-execution gate, `_validate_command()`, which `execute_tool()` calls first — before the tool whitelist check and before `_sanitize_command()` ever runs. It matches the raw command case-insensitively against `BLOCKED_PATTERNS` (`rm -rf /`, `mkfs`, `dd if=`, `shutdown`, `reboot`, `> /dev/sd`, `chmod 777 /`, and `wget`/`curl` piped into a shell) and on a match returns immediately with `tool: "blocked"` and the error `Blocked: command matches dangerous pattern '<pattern>'`, so the command is never sanitised and never reaches the container
 
 **Step 6: Tool Execution**
 The sanitised command is executed via `subprocess.run()` in the Kali environment with:
-- A per-tool timeout (ranging from 15 seconds for `login-helper` to 300 seconds for `zap-cli`), or unlimited when `no_timeout=True` (capped at 600 seconds global maximum)
+- A timeout resolved in strict precedence order. `no_timeout=True` yields a genuinely unlimited run (`timeout=None` is passed to `subprocess.run()`); there is no global ceiling, though a deployment may re-impose one by setting `ERLIK_NO_TIMEOUT_CAP` to a positive number of seconds (its default of `0` means no cap). Failing that, a session-level `tool_timeout`, when configured, applies that exact value to every tool. Failing both, the per-tool default from `TOOL_TIMEOUTS` applies — 15 seconds for `login-helper` up to 300 seconds for `zap-cli`, and 60 seconds for any tool absent from the table
 - stdout and stderr captured
 - ANSI escape codes stripped from output via `_strip_ansi()`
 - Output truncated to prevent context window overflow
@@ -537,7 +563,7 @@ A vertical flowchart:
        |                                                   |
   [Trim messages to token budget]                          |
        |                                                   |
-  [Send messages to LLM (Ollama API, 300s timeout)]        |
+  [Send messages to LLM (300s asyncio ceiling)]            |
        |                                                   |
   [Parse JSON response]                                    |
        |                                                   |
@@ -828,7 +854,7 @@ Three model sizes from the Qwen2.5-Coder family are evaluated:
 - The models are NOT specifically trained for penetration testing, making them representative of general-purpose LLMs applied to a specialised domain
 - The 4-bit quantisation (Q4_K_M) enables all three sizes to run on a single RTX 4090 (24 GB VRAM) sequentially
 
-This last point is methodologically significant: performance differences reflect raw capability scaling of general-purpose models, not domain-specific training. The fine-tuning experiment (Section 3.8) tests whether domain adaptation changes this outcome.
+This last point is methodologically significant: performance differences reflect raw capability scaling of general-purpose models, not domain-specific training. The fine-tuning experiment (Section 3.9) tests whether domain adaptation changes this outcome.
 
 ### 3.5.2 Toolset Tier (RQ3-b: Action-Space Overload)
 
@@ -847,6 +873,8 @@ Standard-20 + `dirb, wfuzz, crlfuzz, netcat, whois, john, hashcat, testssl, play
 Rationale: Includes legacy fuzzers, password crackers, alternative TLS tools, and interactive browser automation. Tests whether the expanded 30-tool action space degrades performance through decision paralysis in smaller models.
 
 The tiers are strictly nested: Core-10 is a subset of Standard-20, which is a subset of Full-30. This ensures that every tool available in a smaller tier is also available in larger tiers, making performance differences attributable to the additional tools rather than tool substitution.
+
+**Nominal tier size versus installed tool count.** The three tiers are declared in `TOOLSET_PRESETS` in `orchestrator/main.py` and are nominally 10, 20 and 30 entries; `get_toolset_preset_tools()` returns that list verbatim and it is the list the agent is offered in its prompt. It is not a guarantee that every named binary was present on the host that ran a given matrix. The number of Full-30 tools actually installed varied across the evaluation environments: 30 on the 9 April RTX 4090 stack, 25 on the 15 April PRO 6000 cloud, and 27 on the 17 April local host. The `/api/tools/test` endpoint probes the `kali-tools` container for 27 of the 30 Full-30 entries and reports each as available or missing; the three it does not probe are the wrapper helpers `login-helper`, `diff-view` and `interactive-pw`. Because the installed count differs between environments, Full-30 results are comparable only within an environment — the same confound that bars cross-environment comparison of coverage figures.
 
 ```
 [DIAGRAM: Toolset Tier Nesting]
@@ -947,31 +975,35 @@ from `JUICE_SHOP_GROUND_TRUTH` in `orchestrator/main.py`, which is authoritative
 
 ### 3.6.3 Finding-to-Ground-Truth Matching Algorithm
 
-A scoring-based algorithm validates each agent finding against the ground truth catalogue. The algorithm assigns points across four dimensions:
+A scoring-based algorithm validates each agent finding against the ground truth catalogue. The canonical implementation is `_match_finding_to_ground_truth_scored()`, re-implemented unchanged in `scripts/recompute_gt_coverage.py`, the script that produced the ground truth coverage figures reported in this thesis. Each ground truth entry is scored independently against the finding, and the finding is credited to the single highest-scoring entry. Scores accumulate across four dimensions:
 
-1. **Type match (required, +1)**: The finding's `vuln_type` must match a ground truth entry. An alias dictionary handles synonyms:
-   - "XSS" matches "Cross-Site Scripting", "Reflected XSS", "DOM XSS"
-   - "sqli" matches "SQL Injection"
-   - "auth" matches "Broken Authentication"
+1. **Type match (required, +1)**: The ground truth entry's `vuln_type` and the finding's `vuln_type` must contain one another as substrings, in either direction. A finding that fails this test scores nothing against that entry and the entry is skipped. An alias dictionary keyed by ground truth type widens the test, each alias being sought as a substring of the finding's `vuln_type`:
+   - `SQL Injection` also accepts findings typed "sqli", "sql" or "injection"
+   - `XSS` also accepts "cross-site", "xss", "script" or "dom"
+   - `Broken Authentication` also accepts "auth", "login", "brute", "jwt", "credential", "password" or "token"
    - (13 alias groups total)
 
-2. **URL match (+1)**: The finding's URL matches the ground truth entry's `url_pattern` regex (e.g., `/rest/products/search` matches pattern `rest.*product.*search`).
+2. **URL match (+1, or +0.5 generic credit)**: If the ground truth entry defines a `url_pattern`, that pattern must appear as a literal, case-insensitive substring of either the finding's `url` or its `evidence` field. It is plain containment, not a regular expression: no metacharacters are interpreted. If the entry defines no `url_pattern` — a generic vulnerability with no single characteristic endpoint — the finding is awarded **+0.5 partial credit unconditionally**.
 
-3. **Parameter match (+1)**: The finding's parameter matches the expected parameter (e.g., `q` for the search injection).
+3. **Parameter match (+1, or +0.5 generic credit)**: If the ground truth entry defines a `parameter`, that name must appear as a substring of either the finding's `parameter` field or its `evidence` (e.g., `q` for the search injection). If the entry defines no `parameter`, the finding is again awarded **+0.5 partial credit unconditionally**.
 
-4. **Evidence confirmation (+1)**: The finding's evidence contains keywords from a per-vulnerability-type keyword list (e.g., SQL injection evidence containing "UNION", "error-based", "injectable").
+4. **Evidence confirmation (+1)**: At least one keyword from the ground truth type's entry in `_EVIDENCE_CONFIRMATION_KEYWORDS` must appear in the concatenation of the finding's `vuln_type`, `url`, `parameter` and `evidence` fields — not in the evidence field alone (e.g., "union", "error-based", "boolean-based" or "back-end dbms" for SQL injection). `Information Disclosure` is the only catalogue type absent from that dictionary and can therefore never earn this point.
 
-**Classification**: A finding scoring >= 2 is classified as a **true positive**. Below 2 is a **false positive**. The threshold of 2 (type match + one corroborating dimension) balances sensitivity and specificity.
+**Classification**: A finding whose best score is >= 2.0 is classified as a **true positive**; below 2.0 it is a **false positive**. Because the two generic-credit rules each contribute +0.5, the threshold is reached in either of two ways: a type match plus one fully corroborated dimension, or a bare type match against a ground truth entry that specifies neither a `url_pattern` nor a `parameter` (1.0 + 0.5 + 0.5 = 2.0).
 
-Additionally, each finding is cross-checked against tool-specific "hard confirmation" regex patterns that provide high-confidence verification (e.g., sqlmap reporting "is vulnerable" is a hard confirmation for SQL injection).
+**Coverage counting**: Ground truth coverage is measured as unique entries hit, not as a count of matching findings. An entry contributes at most once per experiment however many findings match it, and coverage is reported as `unique_gt_hit / 35` for Juice Shop. Precision is computed over all findings rather than over entries, so several findings mapping to the same entry each count towards the true-positive total.
+
+**Exposure introduced by the partial-credit rules**: because of the two +0.5 rules, a finding can clear the 2.0 threshold without ever corroborating a URL or a parameter. Of the 35 Juice Shop entries, **6 define neither a `url_pattern` nor a `parameter`** — both JWT entries, and one each of Sensitive Data Exposure, Security Misconfiguration, Information Disclosure and CORS Misconfiguration — so for these a bare type match scores exactly 2.0 and is recorded as a true positive. A further **17 entries define a `url_pattern` but leave `parameter` empty**; these carry the +0.5 parameter credit and need only a type match plus an evidence keyword (1.0 + 0.5 + 1.0 = 2.5), so the URL never has to match. Only 12 of the 35 entries constrain both dimensions. The exposure widens because the evidence dimension is tested against the concatenated finding text: for 7 of the 13 catalogue types (`XSS`, `CORS Misconfiguration`, `SSRF`, `Open Redirect`, `File Upload`, `XXE`, `Prototype Pollution`) one of the type's own confirmation keywords is a substring of the type name itself, so simply declaring the type earns the evidence point. Taken together, **15 of the 35 entries score at or above the 2.0 threshold against a finding that supplies nothing but the correct `vuln_type`**, with empty `url`, `parameter` and `evidence` fields; since credit goes to the single best-scoring entry, one such bare finding per catalogue type would register 11 distinct entries as covered. Reported coverage should therefore be read as an upper bound on genuine detection.
+
+**Post-run log verification (reported separately)**: independently of the matching algorithm above, `_verify_findings_from_logs()` re-reads the raw tool output stored with each step and cross-checks every finding against tool-specific "hard confirmation" regular expressions (e.g., sqlmap printing "is vulnerable" or "back-end DBMS" for SQL injection). A finding whose vulnerability type no executed tool is capable of detecting is labelled `suspicious`; the rest are labelled `verified`, `likely` or `unverified` according to a confidence score combining the number of confirmation patterns matched, whether the finding's URL appears in the tool invocation or its output, and whether the finding's evidence text recurs in that output. These labels are an auditing aid only: they are attached to the per-finding detail records after the metrics have already been computed, and **do not affect the true-positive, precision, recall or ground truth coverage figures reported in this thesis**.
 
 ### 3.6.4 Target State Management
 
-Juice Shop's in-memory SQLite database means all application state is lost on process restart. The sprint matrix script calls `reset_juice_shop()` before every session:
+Juice Shop's in-memory SQLite database means all application state is lost on process restart. The sprint matrix script calls `reset_target()` before every session. The function reads the target once from the `ERLIK_TARGET` environment variable (default `http://localhost:3000`) and branches on it: a URL containing `8080` or `dvwa` selects the DVWA branch, which GETs `/setup.php` and then POSTs `create_db=Create+%2F+Reset+Database` to re-seed the MySQL schema; anything else selects the Juice Shop branch, where the `ERLIK_NATIVE` environment variable chooses between a native process restart and `docker restart juice-shop`. Steps 1–3 below are the Juice Shop native branch; step 4 is the health poll common to every branch:
 
 1. Kill the Node.js process (`pkill -f "node.*juice-shop"`)
 2. Wait 3 seconds for process cleanup
-3. Restart with `node --max-old-space-size=8192 build/app.js`
+3. Restart with `node build/app.js` in `/opt/juice-shop` (or `/root/juice-shop`), with `NODE_OPTIONS=--max-old-space-size=8192` exported into the child environment
 4. Poll `http://localhost:3000` health endpoint for up to 60 seconds
 
 This ensures each session faces an identical, pristine target. Without this control, later sessions could exploit artefacts from earlier sessions (user accounts, modified products, solved challenges), inflating findings through no merit of the agent.
@@ -991,9 +1023,24 @@ This ensures each session faces an identical, pristine target. Without this cont
 | Stagnation detector | Disabled (`disable_stagnation=True`) | Full turn budget consumed in all conditions |
 | Wall-clock ceilings | 20 min cold / 20 min warm / 30 min chain | Turn count is the comparison unit; caps are anti-hang backstops only |
 | Target state | Reset before every session | Clean state isolation |
-| Infrastructure | Single RTX 4090 GPU server | Consistent hardware |
+| Inference seed | Ollama default (`ERLIK_OLLAMA_SEED` unset) | Seeded inference is used only in the variance control (3.7.5) |
 | Ground truth | 35 fixed entries | Consistent validation baseline |
 | Finding detection | Programmatic (`_auto_detect_findings`) | Eliminates LLM interpretation variance |
+
+**Infrastructure is a confound, not a control.** The evaluation campaigns did not all run on one
+machine. Three distinct execution environments were used: an RTX 4090 cloud container with 30
+installed tools (Apr 9), an RTX PRO 6000 cloud container with 25 installed tools (Apr 15), and a
+local host running the Docker stack with 27 installed tools (Apr 17). The hardware table in 3.8.3
+documents the RTX 4090 rig, which is the Apr 9 campaign only. Because the environments differ in
+installed tool inventory, orchestrator version and Docker stack, they differ in attainable coverage
+independently of the model under test: the identical baseline Qwen2.5-Coder 7B reaches 10/35, 11/35
+and 13/35 unique ground-truth entries on the Apr 9, Apr 15 and Apr 17 environments respectively — a
+spread of 3 entries produced by the environment alone, with the model held fixed.
+
+The comparison rule that follows is therefore **same-environment only**. Every model-versus-model
+claim is made between arms executed in the same environment: baseline 7B versus FT-v3 7B on Apr 17,
+and baseline 32B versus FT-v1 32B on Apr 15. Absolute coverage percentages are not comparable across
+campaign dates, and no cross-environment difference is reported as a model effect.
 
 ### 3.7.2 Why Stagnation is Disabled
 
@@ -1026,16 +1073,32 @@ The programmatic `_auto_detect_findings()` function applies identical regex-base
 
 ### 3.7.5 Statistical Variance
 
-Each of the 81 primary configurations runs once. To estimate variance, a representative configuration (`cold-standard_20-30t`) is repeated 3 times per model, yielding 2 additional runs per model (6 total).
+Each primary configuration was run exactly once. `scripts/sprint_matrix.py` implements a repeat
+facility — `--repeats N` re-runs the representative configuration `cold-standard_20-30t` a further
+N−1 times, chosen because it sits at median complexity on all three dimensions (middle toolset tier,
+middle turn count, simplest session type) — but the flag defaults to 1 and **no evaluation campaign
+in this thesis invoked it**. No per-model repeat data exists; no standard deviation or confidence
+interval is reported for any individual configuration, and every model in the results table is a
+single pass through the matrix. Running the matrix at N=3 would have tripled a runtime already
+measured at approximately 16 hours per 32B matrix and 5 hours per 7B matrix (3.7.3).
 
-This "middle" configuration was chosen because it represents median complexity across all three dimensions (middle toolset tier, middle turn count, simplest session type).
+The variance control that was executed instead operates on the whole matrix rather than on one
+configuration. Sampling in the primary runs is unseeded: `_get_inference_seed()` reads
+`ERLIK_OLLAMA_SEED`, and when that variable is absent no `options` block is sent to Ollama at all,
+so two runs of the same configuration are not reproducible. Three additional baseline 7B matrices
+were therefore executed in the Apr 17 environment with `ERLIK_OLLAMA_SEED` set to 100, 200 and 300
+(`scripts/overnight_seed_variance.sh`), holding target, playbook, toolsets, turn counts and ground
+truth fixed so that the inference seed is the only variable. Their unique ground-truth coverage was
+10/35, 11/35 and 6/35, against 13/35 for the unseeded reference run — a run-to-run spread of 7
+ground-truth entries attributable to sampling alone. The seed=300 hit set is a strict subset of both
+the seed=100 and seed=200 sets.
 
-The repeat data provides:
-- Standard deviation and confidence interval for the representative condition
-- Validation that single-run results are not statistical outliers
-- Basis for effect size estimation when comparing conditions
-
-A full repetition of all 81 configurations (N=3) was not feasible: estimated 240+ GPU-hours for 32B alone. The representative-repeat design provides variance estimates at approximately 7% of that cost.
+That seed spread, and not a per-configuration standard deviation, is the noise floor against which
+model-versus-model differences must be read. It is complemented by a post-hoc power analysis
+(`scripts/power_analysis.py`): the study's power to detect the observed baseline/fine-tuned
+discordance is 0.09, no effect size in the swept range reaches 80% power at 35 paired ground-truth
+items, and detecting a +3 unique-GT advantage at 80% power would require approximately 92 paired
+items.
 
 ---
 
@@ -1053,19 +1116,22 @@ The evaluation is driven by `scripts/sprint_matrix.py`, which automates the full
    - Phase 2 (Warm): 3 sessions, each parented to its matching cold session
    - Phase 3 (Chain): 3 chains, each with 4 auto-progressing phases
 5. **Repeat runs**: N-1 additional runs of the representative config for variance
-6. **Metrics collection**: After each session, calls `/api/benchmark/{id}/metrics` for ground truth validation
+6. **Metrics collection**: After each session, `fetch_metrics()` calls `/api/benchmark/{id}/metrics` and records `true_positives`, `false_positives` and `precision` into the CSV. This is a live convenience readout taken while the matrix runs; it is not the source of any coverage figure reported in this thesis (Section 3.8.8)
 
 Results are flushed to CSV after every session, ensuring partial results are preserved on interruption.
 
 ### 3.8.2 Multi-Model Wrapper
 
-A wrapper script (`erlik_cloud_multi.sh`) executes the matrix sequentially for all three model sizes:
+A wrapper script, `scripts/overnight_pipeline.sh`, executes the matrix sequentially, one model per invocation of its `run_matrix` function. For each model it:
 
-1. Set `ERLIK_MATRIX_MODEL=qwen2.5-coder:7b`, run full matrix, unload model from VRAM
-2. Set `ERLIK_MATRIX_MODEL=qwen2.5-coder:14b`, run full matrix, unload model from VRAM
-3. Set `ERLIK_MATRIX_MODEL=qwen2.5-coder:32b`, run full matrix, unload model from VRAM
+1. Pre-warms the model with a five-token `/api/generate` request (`num_predict: 5`) to load it into GPU memory
+2. Runs `health_check` (SSH tunnel to the GPU host, orchestrator on port 8002, and the `juice-shop`/`kali-tools`/`zap` containers)
+3. Launches `ERLIK_MATRIX_MODEL=<model> python3 scripts/sprint_matrix.py` in the background and re-runs `health_check` every 120 seconds for as long as that process lives
+4. Locates the `runs/<timestamp>/` directory the matrix created and prints a session/finding/TP/FP summary from its `summary.csv`
 
-Between model phases, `nvidia-smi` confirms VRAM is freed. Each model's results go to a separate timestamped directory under `runs/`.
+VRAM is not reclaimed with `nvidia-smi`. The unload is performed by `reset_ollama_runner()` inside `sprint_matrix.py`, which POSTs `{"model": <model>, "keep_alive": 0}` to Ollama before the matrix starts, forcing the previous runner to drop so the requested model reloads cleanly from disk. Each model's results go to a separate timestamped directory under `runs/`, and the three directories are combined by `scripts/compare_matrices.py` into a dated report under `docs/`.
+
+The model list is a literal in the script rather than a parameter: as committed, the three `run_matrix` calls are `qwen2.5-coder:7b-juicy`, `qwen2.5-coder:7b` and `qwen2.5-coder:14b-juicy`. Running the 7B/14B/32B baseline sweep means editing those three lines, or invoking `sprint_matrix.py` directly with `ERLIK_MATRIX_MODEL` set per run.
 
 ### 3.8.3 Infrastructure Specification
 
@@ -1078,15 +1144,15 @@ Between model phases, `nvidia-smi` confirms VRAM is freed. Each model's results 
 | OS | Ubuntu 22.04 (SimplePod cloud container) |
 | Runtime | ERLIK_NATIVE mode (tools installed natively) |
 | LLM Runtime | Ollama (local inference, no API calls) |
-| Watchdog | juice-shop-watchdog.sh (30s health check, auto-restart) |
+| Target resilience | `restart: unless-stopped` on all three Compose services; `reset_target()` restart plus 60 s health poll before every session; 120 s `health_check` loop in `scripts/overnight_pipeline.sh` for the duration of a matrix |
 
 ### 3.8.4 Output Format
 
 Each matrix run produces:
-- **`summary.csv`**: One row per session/chain with columns: id, turn_count, phase, kind, toolset_preset, max_turns, status, total_steps, total_findings, duration_s, parent_id, label, true_positives, false_positives, precision, gt_coverage
+- **`summary.csv`**: One row per session/chain with columns: id, turn_count, phase, kind, toolset_preset, max_turns, status, total_steps, total_findings, duration_s, parent_id, label, true_positives, false_positives, precision, gt_coverage. The `gt_coverage` column is inert and is zero in every row: `fetch_metrics()` reads a `coverage` key that `/api/benchmark/{id}/metrics` does not return, and `fetch_chain_metrics()` hard-codes the value to 0.0 with the comment that chain-level coverage needs a dedicated endpoint. Coverage is obtained by offline recomputation (Section 3.8.8), never from this column.
 - **`sessions.jsonl`**: Full session JSON objects including all step logs and LLM responses
 - **`run.log`**: Timestamped execution log with phase transitions, timing, and juice-shop reset events
-- **`ground_truth.json`**: Snapshot of the 41-entry ground truth catalogue used for this run
+- **`ground_truth.json`**: Snapshot of the ground truth catalogue used for this run, written from `GET /api/ground-truth`. That endpoint defaults to `target_name="OWASP Juice Shop"` and the matrix script passes no parameter, so the snapshot is the 35-entry Juice Shop catalogue regardless of which target the run was pointed at. Scoring a DVWA run therefore requires the separate 19-entry DVWA catalogue (`DVWA_GROUND_TRUTH` in `orchestrator/main.py`) to be supplied during offline recomputation (Section 3.13)
 
 ### 3.8.5 Environment Setup Procedure
 
@@ -1097,8 +1163,8 @@ This section describes the step-by-step procedure to deploy the evaluation envir
 1. Clone the repository and navigate to the project root
 2. Run `docker compose up -d` which starts three containers:
    - `juice-shop`: Pulls `bkimminich/juice-shop:v17.1.1`, exposes port 3000
-   - `zap`: Pulls `ghcr.io/zaproxy/zaproxy:stable`, runs daemon mode on port 8090 with API access enabled (`api.disablekey=true`)
-   - `kali-tools`: Builds from `Dockerfile.kali`, installs all 30 tools, connects to `pentest-net` bridge network
+   - `zap`: Pulls `ghcr.io/zaproxy/zaproxy:stable`, runs `zap.sh -daemon` on container port 8080 (published to host port 8090) with API access enabled (`api.disablekey=true`)
+   - `kali-tools`: Builds from `Dockerfile.kali`, which installs the nominal Full-30 toolset — apt packages, pip packages (`sslyze`, `XSStrike`, `python-owasp-zap-v2.4`), the Go binaries `dalfox` and `crlfuzz` from GitHub releases, `jwt_tool` from source, and five bundled wrapper scripts (`zap-cli`, `pw-crawl`, `interactive-pw`, `login-helper`, `diff-view`) — and connects to the `pentest-net` bridge network. Installed tool counts differed across the evaluation environments; see Section 3.5.2
 3. Start the orchestrator: `cd orchestrator && python3 -m uvicorn main:app --host 0.0.0.0 --port 8002`
 4. Start Ollama and pull models: `ollama pull qwen2.5-coder:7b qwen2.5-coder:14b qwen2.5-coder:32b`
 5. Verify: `curl http://localhost:8002/api/health` returns `{"ollama": "connected", "model_available": true}`
@@ -1111,21 +1177,21 @@ When Docker-in-Docker is not available (e.g., unprivileged cloud containers), th
 2. Install Python tools: `pip install sslyze XSStrike python-owasp-zap-v2.4`
 3. Install Go binary tools (nuclei, ffuf, dalfox, crlfuzz) from GitHub releases
 4. Clone and set up jwt_tool from `ticarpi/jwt_tool`
-5. Install OWASP ZAP with Java 17 runtime, configure with `-Xmx8g` heap
+5. Install OWASP ZAP and run it in headless daemon mode with its JSON API enabled
 6. Install Juice Shop: `git clone` or `npm install` in `/opt/juice-shop`
 7. Configure `/etc/hosts` aliases: `127.0.0.1 juice-shop zap kali-tools` for Docker hostname compatibility
 8. Set environment variable: `export ERLIK_NATIVE=1`
 9. Deploy custom wrapper scripts (zap-cli, pw-crawl, login-helper, diff-view, interactive-pw) to `/usr/local/bin/`
-10. Start all services: Juice Shop (`node --max-old-space-size=8192 build/app.js`), ZAP daemon, Ollama, Orchestrator
-11. Install the juice-shop watchdog script for automated crash recovery
+10. Start all services: Juice Shop (`node build/app.js` with `NODE_OPTIONS=--max-old-space-size=8192`), ZAP daemon, Ollama, Orchestrator
+11. Provide target crash recovery: in native mode this is the per-session `reset_target()` restart (Section 3.8.6), optionally supervised by a loop such as the `health_check` in `scripts/overnight_pipeline.sh`, which re-checks the tunnel, orchestrator and containers every 120 seconds while a matrix runs
 
-**Watchdog mechanism:** A background script (`juice-shop-watchdog.sh`) runs continuously, polling `http://localhost:3000` every 30 seconds. If the health check fails:
-1. All zombie Node.js processes are killed
-2. Juice Shop is restarted with the 8 GB heap allocation
-3. The restart event is logged with timestamp and recovery duration
-4. The watchdog resumes normal polling
+**Target resilience mechanism:** There is no standalone watchdog daemon in the repository. Recovery from the Node.js out-of-memory failure that Juice Shop exhibits under sustained scanning load is provided by three layers, all of which are in version control:
 
-This mechanism handles the known Node.js out-of-memory issue that occurs when Juice Shop is subjected to sustained scanning load over many hours. During the evaluation, the watchdog fired 4-5 times per 24-hour matrix run, each time restoring the target within 4-16 seconds.
+1. **Docker restart policy.** All three Compose services (`juice-shop`, `kali-tools`, `zap`) declare `restart: unless-stopped`, so the Docker daemon restarts a crashed container without any external supervision.
+2. **Per-session reset.** `reset_target()` in `scripts/sprint_matrix.py` runs before every session and chain. In native mode it issues `pkill -f "node.*juice-shop"`, waits 3 seconds, relaunches `node build/app.js` with `NODE_OPTIONS=--max-old-space-size=8192`, then polls the target every 2 seconds for up to 60 seconds (30 attempts). In Docker mode it issues `docker restart juice-shop` and performs the same health poll. A crash between sessions is therefore cleared unconditionally at the next session boundary.
+3. **Supervising loop.** While a matrix is running, `scripts/overnight_pipeline.sh` re-runs `health_check` every 120 seconds; if any of `juice-shop`, `kali-tools` or `zap` is not listed by `docker ps`, it re-runs `docker-compose up -d` on the whole stack.
+
+The 8 GB heap allocation is applied at every restart, in both the per-session reset and the native launch command, which is what keeps the out-of-memory failure from recurring immediately.
 
 ```
 [DIAGRAM: Setup and Execution Flow]
@@ -1175,7 +1241,9 @@ A vertical timeline / flowchart:
 
 ### 3.8.6 Per-Session Reset Procedure
 
-Before every individual session or chain is created, the following reset procedure executes to ensure a clean, reproducible target state:
+Before every individual session or chain is created, `reset_target()` executes to ensure a clean, reproducible target state. The function reads the target once from the `ERLIK_TARGET` environment variable (default `http://localhost:3000`) and branches on it. A URL containing `8080` or `dvwa` selects the DVWA branch; anything else selects the Juice Shop branch, within which the `ERLIK_NATIVE` environment variable selects a native process restart over `docker restart juice-shop`.
+
+**DVWA branch:** `reset_target()` GETs `/setup.php`, then POSTs `create_db=Create+%2F+Reset+Database` to the same path, which drops and re-seeds the MySQL schema to its default state. No process is killed and the heap flag does not apply. Steps 3 and 4 below are common to both branches; Steps 1 and 2 are Juice Shop only.
 
 **Step 1: Kill Juice Shop**
 - In native mode: `pkill -f "node.*juice-shop"` terminates all Node.js processes running Juice Shop
@@ -1187,12 +1255,12 @@ Before every individual session or chain is created, the following reset procedu
 - The process starts detached (stdout/stderr redirected to /dev/null) so it survives the parent process
 
 **Step 3: Health Check Wait**
-- Poll `http://localhost:3000` every 2 seconds for up to 60 seconds (30 attempts)
+- Poll the target URL given by `ERLIK_TARGET` every 2 seconds for up to 60 seconds (30 attempts)
 - Juice Shop typically becomes responsive within 4-10 seconds
 - If not ready after 60 seconds, a warning is logged but execution continues (the watchdog will catch it)
 
 **Step 4: Log Reset Event**
-- Print `[reset] juice-shop ready after Xs` to the run log with actual wait time
+- Print `[reset] <target> ready after Xs` — where `<target>` is `dvwa` or `juice-shop` depending on the detected branch — with the actual wait time. Note that `reset_target()` uses a bare `print()` rather than the matrix logger, so these lines land in the process stdout capture (for example the daemon spawn log or the pipeline's per-model stdout log), not in `runs/<timestamp>/run.log`
 - This creates an audit trail confirming every session started with a clean target
 
 **What the reset clears:**
@@ -1234,9 +1302,9 @@ A session is considered valid for inclusion in the evaluation dataset if it meet
 
 | Criterion | Condition | Rationale |
 |-----------|-----------|-----------|
-| Juice Shop resets logged | Reset events visible in run.log before each session | Confirms clean target state |
+| Target resets logged | `[reset] <target> ready after Xs` lines present in the matrix process stdout capture, one before each session | Confirms clean target state. These lines are printed by `reset_target()` and do not appear in `runs/<timestamp>/run.log`, which records only the logger's phase and session lines |
 | Ground truth available | `ground_truth.json` exists in run directory | Metrics are computed against consistent reference |
-| Complete matrix | All 27 primary labels present in CSV | Partial matrices have selection bias |
+| Matrix completeness declared | If fewer than the 27 primary labels are present in the CSV, the run is reported as a partial matrix together with its actual session count | Partial matrices are retained rather than discarded — the canonical results table carries runs of 23 and 54 sessions alongside runs of 60–65 — but must never be presented as complete, and only same-environment comparisons are drawn from them |
 
 **Exclusion Criteria (sessions removed from analysis):**
 
@@ -1283,7 +1351,8 @@ A horizontal flow:
   Collects: status, total_steps, total_findings, duration_s
        |
   [sprint_matrix.py calls /api/benchmark/{id}/metrics]
-  Ground truth matching: TP, FP, precision, coverage
+  Live convenience readout: TP, FP, precision
+  (gt_coverage column always zero — see below)
        |
   [Write to summary.csv]
   One row with all metrics
@@ -1291,13 +1360,24 @@ A horizontal flow:
   [Write to sessions.jsonl]
   Full session JSON (all steps, findings, LLM responses)
        |
-  [Post-processing]
-  Filter noise findings
-  Aggregate across models
-  Compute cross-session statistics
+  [Offline recomputation — the authoritative step]
+  scripts/recompute_gt_coverage.py
+    reads runs/<ts>/summary.csv, expands each chain row into its
+    child sessions, pulls findings from SQLite, applies the
+    score >= 2.0 canonical matcher, counts each GT entry once
+  scripts/recompute_all_thesis_tables.py
+    same matcher over every run dir and its own pentest.db,
+    selecting the Juice Shop or DVWA catalogue per run
+       |
+  docs/recomputed_gt_coverage.json
+  docs/recomputed_all_experiments.{json,csv}
        |
   [Analysis-Ready Dataset]
 ```
+
+**Where the reported numbers come from.** The per-session ground-truth figure the orchestrator exposes — surfaced as `recall` and `missed_vulns` by `/api/benchmark/{id}/metrics` and rendered live in the dashboard's benchmark comparison view — is a convenience metric, not a thesis figure. Two properties disqualify it. First, after a finding matches, `_compute_benchmark_metrics()` re-runs the matcher against each ground-truth entry individually and adds *every* entry that passes to `matched_gt_indices`, so one finding can credit several ground-truth entries; this is the lenient multi-match path. Second, the value the matrix script writes to the CSV is `resp.get("coverage", 0.0)`, and the endpoint returns no `coverage` key, so `gt_coverage` is zero in every row.
+
+Every coverage number reported in this chapter and in the results chapter is instead recomputed offline by `scripts/recompute_gt_coverage.py` and `scripts/recompute_all_thesis_tables.py`. Both apply the single canonical scored matcher lifted from `_match_finding_to_ground_truth_scored()` (Section 3.6.3) uniformly across all experiments, and both attribute each finding to at most one ground-truth entry, so `unique_gt_hit` is a true unique-GT count. The unified results document, `docs/THESIS_UNIFIED_RESULTS.md`, names `scripts/recompute_gt_coverage.py` as its source script and supersedes earlier drafts that mixed lenient, strict and scored matching and were therefore not comparable.
 
 **Data volumes per model (approximate):**
 - 27 primary sessions + 2 repeat sessions = 29 rows in summary.csv
@@ -1312,63 +1392,101 @@ A horizontal flow:
 
 ### 3.9.1 Motivation
 
-The baseline evaluation uses general-purpose LLMs with no penetration testing training. The fine-tuning experiment tests whether domain-specific adaptation improves performance across ALL model sizes, answering two questions: (1) does fine-tuning help regardless of scale? and (2) which model size benefits most from specialisation?
+The baseline evaluation uses general-purpose LLMs with no penetration testing training. The fine-tuning experiment tests whether supervised LoRA adaptation on penetration testing data raises unique ground truth coverage above the baseline measured in the same environment.
+
+Fine-tuning was not run as one balanced condition alongside the baseline matrix. Three variants were trained in sequence, each designed in response to the previous result, and the thesis refers to them as FT-v1, FT-v2 and FT-v3:
+
+- **FT-v1** — the first LoRA attempt, trained on a rebalanced mixture of data from earlier extraction attempts and deployed as `pentest-32b` and `pentest-7b-balanced`.
+- **FT-v2** — CIPHER-style reasoning chains (OBSERVATION -> HYPOTHESIS -> TEST PLAN -> action, then RESULT -> VERIFICATION) at 7B, deployed as `qwen2.5-coder:7b-juicy`.
+- **FT-v3** — a seven-source corpus (Juice Shop challenge data, the *Pwning OWASP Juice Shop* book, synthetic payloads, public HuggingFace pentest datasets and the retained FT-v2 chains) at 7B and 14B, deployed as `qwen2.5-coder:7b-juicy3` and `qwen2.5-coder:14b-juicy3`.
+
+Because the variants differ in dataset, LoRA rank and target modules, they are not an ablation of a single factor. Each is therefore compared only against the baseline run on the same infrastructure, never across clouds.
 
 ### 3.9.2 Training Data
 
-The training dataset is extracted from the baseline evaluation matrix sessions:
-- **Positive examples**: Tool invocations that led to true positive findings, formatted as instruction-response pairs (context at time of decision, tool selection and command that succeeded)
-- **Negative examples**: Tool calls that produced no findings or false positives, paired with corrected responses demonstrating better tool selection
-- **Chain examples**: Multi-step sequences showing effective tool chaining (e.g., gobuster discovers `/api/Users`, then curl confirms data leakage)
-- **Negative ratio**: 20-30% of examples are negative (no vulnerability found, scope constraint) to discourage hallucination
+Each variant was trained on a different corpus. There is no single curated dataset shared across the fine-tuning runs, and none of the three corpora is a straight extraction of baseline session logs.
 
-All three baseline models contribute to the training set. The same curated dataset is used for all three fine-tuning runs to ensure the only variable is the base model.
+**FT-v1** used `training_data/train_balanced_v2.jsonl` — approximately 1,000 examples rebalanced from earlier extraction attempts, in the original instruction/response turn format with no explicit reasoning structure.
+
+**FT-v2** used the CIPHER-style reasoning corpus: 333 examples — 131 hand-crafted or solution-grounded anchors, 152 variations of those anchors and 50 examples retained in the earlier evaluation format — covering 30 vulnerability types, split into `training_data/cipher_train.jsonl` (299 examples) and `cipher_val.jsonl` (34 examples). Each assistant turn walks OBSERVATION -> HYPOTHESIS -> TEST PLAN before emitting the JSON action, then RESULT -> VERIFICATION once the tool responds.
+
+**FT-v3** used 2,500 examples assembled by `scripts/assemble_juicy3_dataset.py` from seven sources and split 90/10 into `juicy3_train.jsonl` (2,250 examples) and `juicy3_val.jsonl` (250 examples):
+
+| Source | Examples | Licence | Content |
+|--------|----------|---------|---------|
+| `scthornton/securecode-web` | 800 | CC BY-NC-SA 4.0 | OWASP Top 10 secure-code conversations |
+| Public HuggingFace pentest datasets | 700 | Mixed | Canstralian, offensive_redteam, trendyol, pentest_agent |
+| Juice Shop `challenges.yml` | 322 | Apache-2.0 | 107 challenges x 3 reasoning variants |
+| CIPHER and MediTrack reasoning chains | 288 | Custom (this work) | Retained from FT-v2 |
+| Live `/api/Challenges` export | 214 | Apache-2.0 | Challenge metadata and hints |
+| *Pwning OWASP Juice Shop* book | 109 | CC BY-NC-ND 4.0 | Canonical solution walkthroughs, research use |
+| Synthetic payloads | 67 | Generated | Local generation via `qwen2.5-coder:14b-juicy` |
+
+MediTrack was an additional practice application used while FT-v2 was developed; it has since been removed from the study, but the reasoning examples written against it were retained in the FT-v3 corpus.
+
+Every example is stored as a `messages` array of role/content turns, which the training script renders through the Qwen chat template. The assembly script deduplicates within each source bucket on a SHA-256 hash of the first user and assistant turns, samples each bucket down to its target size, then shuffles and splits with seed 42.
+
+Licensing constrains what can be released: two sources carry non-commercial Creative Commons terms (CC BY-NC-SA 4.0 and CC BY-NC-ND 4.0), so the assembled corpus is used for research only and is not redistributed. `training_data/`, `checkpoints/` and `merged_models/` are excluded from the public repository by `.gitignore`; the assembly and training scripts are published in their place.
 
 ### 3.9.3 Training Method
 
-QLoRA (Quantized Low-Rank Adaptation) is applied to ALL THREE model sizes using identical hyperparameters:
+QLoRA (Quantised Low-Rank Adaptation) is used for every variant: the base model is loaded in 4-bit NormalFloat (NF4) with double quantisation and bfloat16 compute, and only the adapter weights are trained. The configurations are not identical across variants:
 
-| Parameter | Value |
-|-----------|-------|
-| Quantisation | 4-bit NormalFloat (NF4) |
-| LoRA rank (r) | 16 |
-| LoRA alpha (a) | 32 (effective multiplier a/r = 2) |
-| LoRA dropout | 0.05 |
-| Target modules | q_proj, v_proj |
-| Learning rate | 2e-4 with cosine annealing |
-| Batch size | 1 (gradient accumulation 4 = effective batch 4) |
-| Epochs | 3-5 with early stopping (patience 2) |
-| Loss | Cross-entropy on assistant tokens only |
-| Context window | 8192 tokens (truncated from middle if exceeded) |
+| Parameter | FT-v1 | FT-v2 | FT-v3 |
+|-----------|-------|-------|-------|
+| Training script | `finetune_lora.py` | `finetune_lora_cipher.py` | `finetune_lora_cipher.py` |
+| Base sizes trained | 7B, 14B, 32B | 7B | 7B, 14B |
+| LoRA rank (r) | 16 | 16 | 32 |
+| Target modules | q_proj, v_proj (2) | q_proj, v_proj (2) | q_proj, k_proj, v_proj, o_proj (4) |
+| Learning rate | 2e-4 | 2e-4 | 1e-4 |
+| Batch x gradient accumulation | 1 x 4 (effective 4) | 1 x 8 (effective 8) | 1 x 16 (effective 16) |
+| Epochs | 3 | 3 | 3 |
+| Training `max_seq_length` | 8192 (script default) | 4096 | 4096 |
 
-Hardware requirements per model:
+All runs use LoRA alpha 32 (the default in both scripts) and dropout 0.05 (hardcoded in both), a cosine schedule with 10% warmup, weight decay 0.01, bfloat16 training, per-epoch evaluation and checkpointing, `load_best_model_at_end` on `eval_loss`, and seed 42. No early-stopping callback is registered: each run completes its three epochs and the best-scoring epoch checkpoint is restored at the end. Loss is cross-entropy over every token of the rendered chat template — the whole conversation is written into a single `text` field, so no assistant-only masking is applied.
 
-| Model | QLoRA VRAM | GPU Required |
-|-------|-----------|-------------|
-| 7B | ~12-16 GB | RTX 4090 (24 GB) |
-| 14B | ~20-24 GB | RTX 4090 (24 GB, tight) |
-| 32B | ~32+ GB | A100 80 GB (rented) |
+`max_seq_length` is a training-time truncation limit, not the agent's context window (Section 3.3.7). It matters here because the FT-v3 corpus contains examples far longer than the limit: the 7B run measured p95 = 14,826 tokens over its first 50 training examples against a 4096-token limit and emitted its own warning, so long conversations were truncated during training.
 
-The 7B and 14B fine-tuning runs on RTX 4090, 32B on a rented A100 80 GB instance. Estimated training time: 30-90 minutes per model depending on dataset size.
+The FT-v3 runs, the only ones for which full training logs are retained, were executed on a cloud RTX 5090 instance:
+
+| Run | Trainable parameters | Wall-clock | Final train loss | Final eval loss |
+|-----|---------------------|-----------|------------------|-----------------|
+| FT-v3 7B | 20,185,088 of 4,373,157,376 (0.46%) | 62.7 min | 0.708 | 0.692 |
+| FT-v3 14B | 50,331,648 of 8,214,336,512 (0.61%) | 123.1 min | 0.607 | 0.589 |
+
+Parameter counts are those reported by PEFT over the 4-bit quantised model. FT-v1 was trained on cloud A100 and PRO 6000 instances and FT-v2 on an RTX 5090 instance; no 32B model was fine-tuned after FT-v1.
+
+One reproducibility caveat applies to FT-v1: `scripts/finetune_lora.py` as archived hardcodes all seven projection modules (`q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj`), the setting the CIPHER script's own comments record as having caused catastrophic forgetting. The two-module configuration listed above is the one recorded for the FT-v1 runs, and reproducing it requires the `minimal` preset of `finetune_lora_cipher.py`.
 
 ### 3.9.4 Adapter Export and Deployment
 
-After training, LoRA adapter weights are saved as separate checkpoints (50-200 MB each). For inference with Ollama, adapters are merged with base models and re-quantised to GGUF Q4_K_M format using llama.cpp conversion utilities. Each merged model is imported into Ollama via a Modelfile, producing self-contained model files served identically to baseline models. This ensures evaluation infrastructure is identical between baseline and fine-tuned conditions.
+After training, the LoRA adapter is saved as a separate checkpoint. Deployment (`scripts/deploy_juicy3.sh`) merges the adapter into the fp16 base weights via `merge_and_unload()`, converts the merged model to an f16 GGUF with `llama.cpp/convert_hf_to_gguf.py`, quantises that to Q4_K_M with `llama-quantize`, and imports the result into Ollama through a Modelfile. The FT-v3 GGUFs are 4.4 GB (7B) and 8.4 GB (14B), in the same Q4_K_M format as the baseline models, so both conditions are served by the same Ollama runtime.
+
+The Modelfile is not neutral and is part of the fine-tuned condition. The FT-v3 Modelfile pins the Qwen ChatML template with `<|im_start|>` and `<|im_end|>` stop tokens and sets `temperature 0.3`, `top_p 0.9` and `num_ctx 8192`; the earlier `scripts/merge_and_export.py` pipeline emits `temperature 0.7`, `top_p 0.9`, `repeat_penalty 1.1` and `num_ctx 8192` instead. Its `SYSTEM` block, which asks the model to state OBSERVATION, HYPOTHESIS, TEST PLAN, RESULT and VERIFICATION around each JSON action, is superseded at evaluation time because the orchestrator always sends its own system message. The sampling parameters are not superseded: the orchestrator posts only `model`, `messages`, `stream` and an optional seed to `/api/chat`, so whatever the Modelfile sets is the decoding default in force for that fine-tuned model, whereas the baseline tags carry the parameters that ship with the published Ollama model.
+
+`num_ctx 8192` is the window Ollama allocates, not the amount of history the agent supplies: the orchestrator trims independently to `MAX_ESTIMATED_TOKENS = 3600`, reserving the remainder of a 4096-token window for the response (Section 3.3.7), and this trimming is identical in both conditions.
 
 ### 3.9.5 Evaluation
 
-Each fine-tuned model is evaluated using the identical matrix design (27 sessions + repeats) on the same Juice Shop target with the same ground truth validation. This produces a complete 6-model comparison:
+Each fine-tuned model was served from Ollama and driven through the same sprint matrix (`scripts/sprint_matrix.py`, Section 3.8) against the same Juice Shop target, the same 35-entry ground truth catalogue and the same scored matcher (Section 3.6.3). The 27 matrix cells expand to as many as 54 agent sessions, because each chain cell runs the four `CHAIN_PHASES` as separate auto-progressing sessions; repeat runs add further sessions. No fine-tuned variant was evaluated on DVWA, so generalisation of fine-tuning beyond Juice Shop is untested.
 
-| Model | Condition | Sessions |
-|-------|-----------|----------|
-| qwen2.5-coder:7b | Baseline | 27 + repeats |
-| qwen2.5-coder:7b-ft | Fine-tuned | 27 + repeats |
-| qwen2.5-coder:14b | Baseline | 27 + repeats |
-| qwen2.5-coder:14b-ft | Fine-tuned | 27 + repeats |
-| qwen2.5-coder:32b | Baseline | 27 + repeats |
-| qwen2.5-coder:32b-ft | Fine-tuned | 27 + repeats |
+The evaluations that were actually completed, all recomputed with the single canonical matcher, are:
 
-Hypotheses tested:
+| Environment | Model | Sessions | Findings | TP | Unique GT | Precision |
+|-------------|-------|----------|----------|----|-----------|-----------|
+| Apr 15, PRO 6000, 25 tools | qwen2.5-coder:32b (baseline) | 65 | 190 | 188 | 13/35 (37.1%) | 98.9% |
+| Apr 15, PRO 6000, 25 tools | FT-v1 32B (`pentest-32b`) | 60 | 127 | 126 | 8/35 (22.9%) | 99.2% |
+| Apr 15, PRO 6000, 25 tools | qwen2.5-coder:7b (baseline) | 61 | 131 | 126 | 11/35 (31.4%) | 96.2% |
+| Apr 15, PRO 6000, 25 tools | FT-v1 7B (`pentest-7b-balanced`) | 23 | 71 | 71 | 8/35 (22.9%) | 100.0% |
+| Apr 17, local, 27 tools | qwen2.5-coder:7b (baseline) | 62 | 236 | 235 | 13/35 (37.1%) | 99.6% |
+| Apr 17, local, 27 tools | FT-v3 7B (`qwen2.5-coder:7b-juicy3`) | 63 | 237 | 237 | 10/35 (28.6%) | 100.0% |
+| Apr 17, local, 27 tools | FT-v3 14B (`qwen2.5-coder:14b-juicy3`) | 54 | 128 | 126 | 9/35 (25.7%) | 98.4% |
+
+The FT-v1 7B run recorded 23 sessions against 54-65 for every other run and is therefore not a complete matrix. FT-v2 7B was also evaluated on the April 15 cloud and reached 8/35 (22.9%); it is reported in the complementarity analysis rather than in the table above. There is no 14B baseline in the April 17 environment, so FT-v3 14B has no same-size, same-environment comparator.
+
+Only same-environment pairs are compared. The same baseline 7B scores 28.6%, 31.4% and 37.1% on three different infrastructures, so absolute coverage is not comparable across clouds and no cross-environment claim is made.
+
+**Hypotheses.** The hypotheses formulated for this experiment are retained unchanged:
 
 **H2a**: Fine-tuning significantly improves precision and ground truth coverage at every model size compared to the corresponding baseline.
 
@@ -1376,10 +1494,9 @@ Hypotheses tested:
 
 **H2c**: A fine-tuned 7B model achieves comparable or superior performance to the baseline 32B model, demonstrating that specialisation can compensate for scale.
 
-All three outcomes are scientifically valuable:
-- If H2b holds: "small models benefit most from specialisation" — strongest practical argument (deploy fine-tuned 7B instead of expensive 32B)
-- If fine-tuning helps all equally: "domain adaptation is universally valuable regardless of scale"
-- If 32B benefits most: "larger models have more capacity to absorb domain knowledge"
+**Outcome.** H2a is rejected on coverage. Every fine-tuned variant scored below the baseline run in its own environment on unique ground truth: FT-v3 7B 10/35 against 13/35, FT-v1 32B 8/35 against 13/35, and FT-v1 7B and FT-v2 7B 8/35 against 11/35. Precision moved the other way in both clean same-size comparisons — 99.6% to 100.0% at 7B on April 17, and 98.9% to 99.2% at 32B on April 15 — and on April 17 the finding volume was effectively unchanged (236 against 237), so at 7B the loss is one of variety rather than of output. H2b cannot hold in the form stated, because no variant improved; the regression was smaller at 7B (-3 ground truth entries) than at 32B (-5). H2c is rejected: in the one environment containing both a fine-tuned 7B and a baseline 32B (April 15), the fine-tuned 7B reached 8/35 (22.9%) against the 32B baseline's 13/35 (37.1%).
+
+**Complementarity analysis (added after the head-to-head result).** Because the fine-tuned models lost coverage without losing precision, a union analysis was added to the procedure: for each ground truth entry, count it as covered if either condition matched it. On April 17 the baseline covers 13/35 and FT-v3 7B covers 10/35, but their union covers 16/35 (45.7%) — the fine-tuned model contributes 3 entries the baseline never finds and misses 6 that it does, with 7 shared. Fine-tuning as applied here therefore redistributes which vulnerability classes are found rather than expanding how many: no fine-tuned variant exceeded its same-environment baseline on its own, and only unions of baseline and fine-tuned coverage do (16/35 for the baseline plus FT-v3 7B, 18/35 across all 7B models unioned).
 
 ---
 
@@ -1410,7 +1527,7 @@ All experiments are conducted in a closed laboratory environment. The target (Ju
 ### 3.11.2 Responsible Use
 
 The Erlik 2.0 framework is designed for authorised security testing only. The methodology explicitly limits the target to a known-vulnerable training application. The system includes safeguards:
-- Command sanitisation blocks destructive operations (`rm -rf`, `mkfs`, filesystem modifications)
+- A pre-execution gate, `_validate_command()`, rejects destructive operations before any command reaches the container: the raw command is matched case-insensitively against `BLOCKED_PATTERNS` in `tool_executor.py` (`rm -rf /`, `mkfs`, `dd if=`, `shutdown`, `reboot`, `> /dev/sd`, `chmod 777 /`, and `wget`/`curl` piped into a shell). Command sanitisation itself performs no filtering — it only rewrites hostnames and bounds tool arguments
 - Target URL is hardcoded in the system prompt, preventing scope creep
 - No network pivoting or lateral movement capabilities are provided
 - All tool output is logged for audit purposes
@@ -1464,11 +1581,19 @@ All components are open-source and version-controlled:
 | OWASP Juice Shop | v17.1.1 (`bkimminich/juice-shop:v17.1.1`) |
 | Qwen2.5-Coder models | 7B, 14B, 32B via Ollama |
 | Ground truth | 35 entries (Juice Shop) + 19 (DVWA), embedded in source + exported per run |
-| Sprint matrix | `scripts/sprint_matrix.py` |
+| Sprint matrix | `scripts/sprint_matrix.py` (target via `ERLIK_TARGET`, model via `ERLIK_MATRIX_MODEL`) |
+| Multi-model wrapper | `scripts/overnight_pipeline.sh` |
+| Canonical metric recomputation | `scripts/recompute_gt_coverage.py`, `scripts/recompute_all_thesis_tables.py` |
 | Raw data | CSV, JSONL, and logs preserved per run |
 
-To reproduce:
-1. Clone repository, run `docker compose up -d`
+To reproduce (Juice Shop):
+1. Clone the repository, run `docker compose up -d` — this starts `juice-shop` on host port 3000, `zap` on host port 8090, and `kali-tools`
 2. Pull models: `ollama pull qwen2.5-coder:7b qwen2.5-coder:14b qwen2.5-coder:32b`
-3. Execute: `ERLIK_MATRIX_MODEL=qwen2.5-coder:7b python3 scripts/sprint_matrix.py --repeats 3`
-4. Results appear in `runs/<timestamp>/summary.csv`
+3. Start the orchestrator on port 8002 (Section 3.8.5); `sprint_matrix.py` aborts unless `GET /api/health` reports `ollama: connected` and `GET /api/presets` lists the `owasp_methodology` playbook
+4. Execute:
+   `ERLIK_TARGET=http://localhost:3000 ERLIK_MATRIX_MODEL=qwen2.5-coder:7b python3 scripts/sprint_matrix.py --repeats 3`
+   `ERLIK_TARGET` is what `reset_target()` branches on and defaults to `http://localhost:3000`; set it explicitly so the run is self-documenting. Add `ERLIK_NATIVE=1` when running without Docker, so the reset restarts the Node process instead of the container. `--repeats 3` appends two extra `cold-standard_20-30t` runs to the 27 primary labels, giving 29 CSV rows
+5. Raw results appear in `runs/<timestamp>/` as `summary.csv`, `sessions.jsonl`, `run.log` and `ground_truth.json`
+6. Recompute the reported metrics offline: `python3 scripts/recompute_gt_coverage.py` and `python3 scripts/recompute_all_thesis_tables.py`, which write `docs/recomputed_gt_coverage.json` and `docs/recomputed_all_experiments.{json,csv}`. These outputs, not the `gt_coverage` column of `summary.csv`, are the reported coverage figures (Section 3.8.8)
+
+For the DVWA target, set `ERLIK_TARGET=http://localhost:8080`: `reset_target()` detects `8080` or `dvwa` in the URL and resets the database through `/setup.php` instead of restarting a Node process. Note that `sprint_matrix.py` requests `/api/ground-truth` and `/api/benchmark/{id}/metrics` without a `target_name` parameter, so both default to the 35-entry Juice Shop catalogue; DVWA runs must therefore be scored offline against the 19-entry DVWA catalogue, which is what `scripts/recompute_all_thesis_tables.py` does via its per-run `target_key`.
