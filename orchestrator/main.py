@@ -3221,9 +3221,14 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
         # target URL so that routing still works with the pre-scan off.
         _observed_ports: list[int] = []
         _observed_tech: list[str] = []
+        # The session's own host. Credential injection refuses any command that
+        # names a different one, so a captured token cannot be attached to a
+        # request leaving the engagement scope.
+        _target_host_for_creds: str | None = None
         try:
             from urllib.parse import urlparse as _urlparse
             _u = _urlparse(target_url)
+            _target_host_for_creds = _u.hostname
             if _u.port:
                 _observed_ports.append(int(_u.port))
             elif _u.scheme in ("http", "https"):
@@ -3637,6 +3642,28 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
                         "type": "log", "phase": phase,
                         "message": f"   Reason: {reason}",
                     })
+
+                # Attach a credential this session already captured, when the
+                # command has none. Announcing primitives in the agent's context
+                # was not enough — across two real runs it captured a session
+                # cookie and then never sent it, so every request stayed
+                # anonymous and the authenticated surface was never reachable.
+                if runcfg.get("primitives"):
+                    try:
+                        from orchestrator.primitives import inject_credentials
+                        _prims = await _load_primitives(session_id, chain_id_for_primitives)
+                        if _prims:
+                            _augmented, _note = inject_credentials(
+                                command, _prims, target_host=_target_host_for_creds)
+                            if _note:
+                                command = _augmented
+                                await manager.broadcast(session_id, {
+                                    "type": "log", "phase": phase,
+                                    "message": f"   AUTH: {_note} for this request",
+                                })
+                    except Exception as _ci_err:  # noqa: BLE001
+                        print(f"[primitives {session_id[:8]}] injection skipped: {_ci_err}",
+                              flush=True)
 
                 # Execute the tool
                 if kali_running:

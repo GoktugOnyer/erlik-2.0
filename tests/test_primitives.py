@@ -19,6 +19,7 @@ import asyncio
 import pytest
 
 import orchestrator.database as db_mod
+import orchestrator.primitives as P
 from orchestrator.primitives import extract_primitives, format_for_agent
 
 JWT = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJhZG1pbiJ9.abcd1234efgh"
@@ -97,6 +98,109 @@ def test_custom_header_replaces_the_default_lead_in():
     text = format_for_agent(prims, header="[PRIMITIVES] replayed:")
     assert text.startswith("[PRIMITIVES] replayed:")
     assert "captured from earlier steps" not in text
+
+
+# --- automatic reuse in commands ------------------------------------------
+#
+# Announcing a captured credential in the agent's context is not enough. Across
+# two real runs against Juice Shop the agent captured a session cookie and then
+# never sent it, so every request stayed anonymous, the authenticated surface was
+# never reachable, and access-control coverage was zero both times. Reuse has to
+# be automatic.
+
+CREDS = [{"kind": "cookie", "value": "token=abc123def456"},
+         {"kind": "jwt", "value": JWT}]
+
+
+def test_bearer_is_attached_to_an_unauthenticated_curl():
+    out, note = P.inject_credentials(
+        "curl -s http://juice-shop:3000/rest/basket/1", CREDS, target_host="juice-shop")
+    assert note == "reused captured bearer"
+    assert f'-H "Authorization: Bearer {JWT}"' in out
+
+
+@pytest.mark.parametrize("cmd, expect", [
+    ("sqlmap -u http://juice-shop:3000/x --batch", "--headers="),
+    ("ffuf -u http://juice-shop:3000/FUZZ -w l.txt", "-H "),
+    ("nuclei -u http://juice-shop:3000", "-H "),
+])
+def test_other_http_tools_get_the_right_flag(cmd, expect):
+    out, note = P.inject_credentials(cmd, CREDS, target_host="juice-shop")
+    assert note and expect in out
+
+
+def test_non_http_tools_are_left_alone():
+    for cmd in ("nmap -sV juice-shop", "john hash.txt", "whois juice-shop"):
+        out, note = P.inject_credentials(cmd, CREDS, target_host="juice-shop")
+        assert note is None and out == cmd
+
+
+# --- the safety property --------------------------------------------------
+
+def test_credentials_are_never_sent_off_target():
+    """A captured session token attached to a request leaving the engagement
+    would be credential exfiltration performed by our own tool."""
+    cmd = "curl -s https://evil.example.com/collect"
+    out, note = P.inject_credentials(cmd, CREDS, target_host="juice-shop")
+    assert note is None and out == cmd
+    assert JWT not in out
+
+
+def test_a_mixed_command_touching_another_host_is_refused():
+    cmd = "curl -s http://juice-shop:3000/x https://attacker.test/y"
+    out, note = P.inject_credentials(cmd, CREDS, target_host="juice-shop")
+    assert note is None and out == cmd
+
+
+def test_a_command_with_no_explicit_url_is_not_guessed_at():
+    out, note = P.inject_credentials("curl -s /rest/basket", CREDS, target_host="juice-shop")
+    assert note is None
+
+
+def test_a_different_port_on_the_same_host_is_still_in_scope():
+    out, note = P.inject_credentials(
+        "curl -s http://juice-shop:8080/x", CREDS, target_host="juice-shop")
+    assert note is not None
+
+
+@pytest.mark.parametrize("cmd", [
+    'curl -H "Authorization: Bearer mine" http://juice-shop:3000/x',
+    'curl -b "session=mine" http://juice-shop:3000/x',
+    'sqlmap -u http://juice-shop:3000/x --cookie="a=b"',
+    'ffuf -u http://juice-shop:3000/FUZZ -H "Cookie: a=b"',
+])
+def test_an_already_authenticated_command_is_untouched(cmd):
+    """Re-adding would duplicate the header or override a credential the agent
+    chose deliberately."""
+    out, note = P.inject_credentials(cmd, CREDS, target_host="juice-shop")
+    assert note is None and out == cmd
+
+
+def test_nothing_happens_without_credentials():
+    out, note = P.inject_credentials("curl http://juice-shop:3000/x", [], target_host="juice-shop")
+    assert note is None and out == "curl http://juice-shop:3000/x"
+
+
+# --- credential preference ------------------------------------------------
+
+def test_a_jwt_is_preferred_over_a_weaker_token():
+    creds = P.best_credentials([{"kind": "token", "value": "weak12345678"},
+                                {"kind": "jwt", "value": JWT}])
+    assert creds["bearer"] == JWT
+
+
+def test_cookie_and_bearer_are_tracked_separately():
+    creds = P.best_credentials(CREDS)
+    assert creds["bearer"] == JWT
+    assert creds["cookie"] == "token=abc123def456"
+
+
+def test_cookie_is_used_when_no_bearer_exists():
+    out, note = P.inject_credentials(
+        "curl -s http://juice-shop:3000/x",
+        [{"kind": "cookie", "value": "session=xyz789abc"}], target_host="juice-shop")
+    assert note == "reused captured cookie"
+    assert '-b "session=xyz789abc"' in out
 
 
 # --- replay (the fix) -----------------------------------------------------
