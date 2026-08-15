@@ -248,6 +248,43 @@ The index records the upstream commit it was built from, so a result ties to an
 exact corpus revision. See [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md)
 for why the text is referenced rather than bundled.
 
+## Post-run AI review
+
+When a run finishes, a second AI pass critiques **the run, not the target**:
+what attack surface was never touched, which tools kept failing, and which
+settings to change next time. It is advisory — it writes only to
+`session_reviews` and never creates findings or moves a metric.
+
+```bash
+export ERLIK_AI_REVIEW=1                  # enable (on in every preset but ai_only)
+export ERLIK_REVIEW_MODEL=qwen3:27b       # optional: pin the reviewer
+export ERLIK_REVIEW_MODEL_MAX_B=40        # optional: auto-pick cap, default 40B
+```
+
+**The reviewer can be a bigger model than the one under test.** It never touches
+the attack and runs once, after the session, so it is not part of the
+measurement and does not affect experimental control. Left unset, erlik picks
+the largest installed chat model at or below the cap; on a remote provider it
+uses the configured API model. The reviewer actually used is recorded with the
+critique so a result can be traced to it.
+
+The cap exists because the choice should be predictable — without it a 70B
+sitting on the machine would be selected silently and take minutes for one
+critique. Pin `ERLIK_REVIEW_MODEL` for full control.
+
+Why it matters, measured on the same input: a 7B reviewer invented preset names
+in 3 of 4 samples and once claimed no SQL injection was attempted when sqlmap
+had run three times and a SQLi finding was in its input. A 35B reviewer named a
+real preset and correctly diagnosed the failures as a database-protocol probe
+against an HTTP-only service. The recommendation is now also validated against
+the real preset list, and a fabricated name is flagged rather than dropped.
+
+Read it back with:
+
+```bash
+curl -s localhost:8002/api/sessions/<session_id>/review
+```
+
 ## License & third-party code
 
 Erlik 2.0 is released under the [MIT License](LICENSE).

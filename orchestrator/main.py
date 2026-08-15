@@ -1435,12 +1435,34 @@ async def run_ai_review(session_id: str, model: str, runcfg: dict,
                 "severities": sev,
                 "unused_tools": sorted(set(enabled_tools or []) - used),
             },
+            valid_presets=sorted(runconfig.RUN_PRESETS.keys()),
         )
+
+        # The reviewer may be a stronger model than the one under test — it never
+        # touches the attack, so this does not affect experimental control. The
+        # model actually used is recorded alongside the critique.
+        installed: list[str] = []
+        if (llm_client.PROVIDER or "").lower() == "ollama":
+            try:
+                installed = await llm_client.list_models()
+            except Exception:  # noqa: BLE001
+                installed = []
+        review_model = _rv.select_review_model(
+            installed=installed,
+            attack_model=model,
+            explicit=(runcfg or {}).get("review_model") or os.environ.get("ERLIK_REVIEW_MODEL"),
+            provider=llm_client.PROVIDER,
+        )
+        if review_model and review_model != model:
+            print(f"[review {session_id[:8]}] reviewing with {review_model} "
+                  f"(attack model was {model})", flush=True)
 
         raw = await llm_client.chat(
             [{"role": "system", "content": "You are a precise, sceptical security reviewer."},
-             {"role": "user", "content": prompt}], model=model)
+             {"role": "user", "content": prompt}], model=review_model)
         parsed = _rv.parse_review(raw)
+        parsed["recommended_next_run"] = _rv.validate_recommendation(
+            parsed["recommended_next_run"], sorted(runconfig.RUN_PRESETS.keys()))
 
         db2 = await get_db()
         try:
@@ -1453,7 +1475,7 @@ async def run_ai_review(session_id: str, model: str, runcfg: dict,
                  json.dumps(parsed["wasted_effort"]),
                  json.dumps(parsed["config_suggestions"]),
                  parsed["recommended_next_run"], parsed["confidence"],
-                 (raw or "")[:8000], model))
+                 (raw or "")[:8000], review_model or model))
             await db2.commit()
         finally:
             await db2.close()

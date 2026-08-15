@@ -55,15 +55,94 @@ CONFIG_SUGGESTIONS:
 27017 was open but no MongoDB technique context was injected">
 - <another, or "none">
 
-RECOMMENDED_NEXT_RUN: <one sentence: which preset/settings to try next and why>
+RECOMMENDED_NEXT_RUN: <one sentence naming ONE preset from the list above and why>
 
 CONFIDENCE: <high|medium|low — how much the evidence above supports this critique>
 """
+
+# The recommendation was free text, so the model invented plausible preset names
+# ("pentest_web_service", "aggressive") in 3 of 4 measured samples. The valid set
+# is known, so it goes in the prompt and is checked on the way back out.
+_PRESET_LINE = "\nSELECTABLE PRESETS (use one of these names verbatim, nothing else):\n{presets}\n"
 
 
 def review_enabled() -> bool:
     """True when post-run review is opted in via ERLIK_AI_REVIEW."""
     return os.environ.get("ERLIK_AI_REVIEW", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+# The reviewer may be a LARGER model than the one under test. It is not part of
+# the measurement — it never touches the attack, and runs once after the session
+# — so using a stronger model costs seconds and does not affect experimental
+# control. Measured on a 7B: the critique invented preset names in 3 of 4 samples
+# and once contradicted the facts it was given.
+DEFAULT_REVIEW_MAX_B = 40.0
+
+# Not chat models, or not useful as a reviewer.
+_NOT_A_REVIEWER = ("embed", "-vl", "vl:", "vision", "whisper", "rerank")
+
+_PARAM_RX = re.compile(r"(?<![\d.])(\d{1,3}(?:\.\d)?)\s*[bB](?![a-zA-Z0-9])")
+
+
+def parse_param_size(model_name: str) -> float | None:
+    """Billions of parameters advertised in a model tag, if any.
+
+    Handles 'llama3.1:70b' -> 70, 'qwen3.5:35b' -> 35, 'qwen2.5-coder:7b' -> 7,
+    and 'hf.co/…-Qwen3-32B-Q8_0-GGUF:Q8_0' -> 32. The lookbehind stops a version
+    number ('qwen2.5') being read as a size.
+    """
+    if not model_name:
+        return None
+    sizes = [float(m) for m in _PARAM_RX.findall(str(model_name))]
+    return max(sizes) if sizes else None
+
+
+def select_review_model(installed: list[str] | None = None,
+                        attack_model: str | None = None,
+                        explicit: str | None = None,
+                        provider: str = "ollama",
+                        max_b: float | None = None) -> str | None:
+    """Which model should write the critique.
+
+    Precedence:
+      1. an explicit choice (run config `review_model` / ERLIK_REVIEW_MODEL)
+      2. a remote provider — return None so llm_client uses its configured
+         default, which is already the strong hosted model
+      3. locally, the largest installed chat model at or below `max_b`
+
+    The cap keeps the default predictable and quick: without it a 70B present on
+    the machine would silently be chosen and take minutes for one critique. Pin
+    ERLIK_REVIEW_MODEL to override, or raise ERLIK_REVIEW_MODEL_MAX_B.
+
+    Falls back to `attack_model` when nothing better is available, so the review
+    still runs on a machine with only the small model installed.
+    """
+    if explicit and explicit.strip():
+        return explicit.strip()
+    if (provider or "").lower() != "ollama":
+        return None
+
+    if max_b is None:
+        try:
+            max_b = float(os.environ.get("ERLIK_REVIEW_MODEL_MAX_B", "") or DEFAULT_REVIEW_MAX_B)
+        except ValueError:
+            max_b = DEFAULT_REVIEW_MAX_B
+
+    best_name, best_size = None, -1.0
+    for name in (installed or []):
+        low = str(name).lower()
+        if any(bad in low for bad in _NOT_A_REVIEWER):
+            continue
+        size = parse_param_size(name)
+        if size is None or size > max_b:
+            continue
+        if size > best_size:
+            best_name, best_size = name, size
+
+    if best_name and (attack_model is None
+                      or best_size > (parse_param_size(attack_model) or 0)):
+        return best_name
+    return attack_model or None
 
 
 def _bullets(block: str | None) -> list[str]:
@@ -77,7 +156,7 @@ def _bullets(block: str | None) -> list[str]:
 
 
 def build_review_prompt(config: dict, activity: dict, tools: list[dict],
-                        outcome: dict) -> str:
+                        outcome: dict, valid_presets: list[str] | None = None) -> str:
     """Compose the critique prompt from facts already recorded for the session."""
     helps = [k for k in ("skills", "nettacker", "techniques", "primitives",
                          "target_memory", "cve_enrich", "poc_verify")
@@ -114,8 +193,28 @@ def build_review_prompt(config: dict, activity: dict, tools: list[dict],
         f"{', '.join(outcome.get('unused_tools') or []) or 'none'}"
     )
 
+    if valid_presets:
+        config_text += _PRESET_LINE.format(
+            presets="\n".join(f"  - {p}" for p in valid_presets))
+
     return REVIEW_PROMPT.format(config_text=config_text, activity_text=activity_text,
                                 tools_text=tools_text, outcome_text=outcome_text)
+
+
+def validate_recommendation(recommendation: str, valid_presets: list[str] | None) -> str:
+    """Flag a recommendation that names a preset which does not exist.
+
+    Left visible rather than silently dropped: an operator should see that the
+    reviewer invented a name, since it is a signal the critique is unreliable.
+    """
+    if not recommendation or not valid_presets:
+        return recommendation or ""
+    named = set(re.findall(r"[`\"']([A-Za-z_][A-Za-z0-9_]{3,})[`\"']", recommendation))
+    invented = sorted(n for n in named if n not in set(valid_presets))
+    if invented:
+        return (f"{recommendation}  [unverified: no preset named "
+                f"{', '.join(invented)} — reviewer may be unreliable]")
+    return recommendation
 
 
 def parse_review(text: str) -> dict:

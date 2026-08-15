@@ -133,7 +133,7 @@ def resolve(run_config=None) -> dict:
     # Explicit per-key values in the session config override the preset.
     for k in ("cve_enrich", "skills", "nettacker", "nettacker_findings",
               "nettacker_scenario", "playbooks", "poc_verify", "primitives",
-              "target_memory", "techniques", "ai_review"):
+              "target_memory", "techniques", "ai_review", "review_model"):
         if k in cfg and cfg[k] is not None:
             base[k] = cfg[k]
 
@@ -146,6 +146,11 @@ def resolve(run_config=None) -> dict:
                 or DEFAULT_SCENARIO)
     if scenario not in SCENARIOS:
         scenario = DEFAULT_SCENARIO
+
+    # Which model writes the post-run critique. Not a help lever — the reviewer
+    # is not part of the measurement — so it is a free-form string, not tri-state.
+    review_model = (base.get("review_model")
+                    or os.environ.get("ERLIK_REVIEW_MODEL", "").strip() or None)
 
     playbooks = base.get("playbooks")
     if playbooks is None:
@@ -162,6 +167,7 @@ def resolve(run_config=None) -> dict:
         "target_memory": tri("target_memory"),
         "techniques": tri("techniques"),
         "ai_review": tri("ai_review"),
+        "review_model": review_model,
         "nettacker_scenario": scenario,
         "playbooks": playbooks,
     }
