@@ -37,6 +37,7 @@ _BOOL_KEYS = {
     "poc_verify": "ERLIK_POC_VERIFY",
     "primitives": "ERLIK_PRIMITIVES",
     "target_memory": "ERLIK_TARGET_MEMORY",
+    "techniques": "ERLIK_TECHNIQUES",
 }
 
 # Sensible pre-selectable setups. Keys map to the flag bundle a preset turns on;
@@ -51,15 +52,18 @@ RUN_PRESETS: dict[str, dict] = {
         # Every knowledge/help lever explicitly False so the baseline is clean.
         "config": {"cve_enrich": False, "skills": False, "nettacker": False,
                    "playbooks": "", "primitives": False, "target_memory": False,
-                   "poc_verify": False},
+                   "poc_verify": False, "techniques": False},
     },
     "guided_ai": {
         "label": "Guided AI — skills + target playbook (most effective)",
         "desc": "LLM agent + injected skill knowledge + the target's exploit playbook "
                 "(real endpoints & payloads) + primitive reuse + CVE enrichment. No "
                 "external scanner. The most effective setup for finding the most vulns.",
+        # techniques is pinned False for the same reason nettacker is: this arm is
+        # compared against ai_only, so no help lever may drift in from the env.
         "config": {"skills": True, "cve_enrich": True, "nettacker": False,
-                   "playbooks": "juiceshop", "primitives": True},
+                   "playbooks": "juiceshop", "primitives": True,
+                   "techniques": False},
     },
     "recon_first": {
         "label": "Recon-first — Nettacker seeds the agent",
@@ -67,7 +71,8 @@ RUN_PRESETS: dict[str, dict] = {
                 "playbook + CVE enrichment. Reuses durable per-target memory.",
         "config": {"nettacker": True, "nettacker_scenario": "recon",
                    "skills": True, "cve_enrich": True, "playbooks": "juiceshop",
-                   "primitives": True, "target_memory": True},
+                   "primitives": True, "target_memory": True,
+                   "techniques": True},
     },
     "deterministic_heavy": {
         "label": "Deterministic-heavy — broad pre-scan",
@@ -75,7 +80,8 @@ RUN_PRESETS: dict[str, dict] = {
                 "target playbook; lighter AI reliance.",
         "config": {"nettacker": True, "nettacker_scenario": "web",
                    "nettacker_findings": True, "skills": True, "cve_enrich": True,
-                   "playbooks": "juiceshop", "poc_verify": True},
+                   "playbooks": "juiceshop", "poc_verify": True,
+                   "techniques": True},
     },
     "full_assessment": {
         "label": "Full assessment — everything on (slow)",
@@ -84,7 +90,7 @@ RUN_PRESETS: dict[str, dict] = {
         "config": {"nettacker": True, "nettacker_scenario": "full",
                    "nettacker_findings": True, "skills": True, "cve_enrich": True,
                    "playbooks": "juiceshop", "poc_verify": True, "primitives": True,
-                   "target_memory": True},
+                   "target_memory": True, "techniques": True},
     },
 }
 
@@ -114,7 +120,7 @@ def resolve(run_config=None) -> dict:
     # Explicit per-key values in the session config override the preset.
     for k in ("cve_enrich", "skills", "nettacker", "nettacker_findings",
               "nettacker_scenario", "playbooks", "poc_verify", "primitives",
-              "target_memory"):
+              "target_memory", "techniques"):
         if k in cfg and cfg[k] is not None:
             base[k] = cfg[k]
 
@@ -141,6 +147,7 @@ def resolve(run_config=None) -> dict:
         "poc_verify": tri("poc_verify"),
         "primitives": tri("primitives"),
         "target_memory": tri("target_memory"),
+        "techniques": tri("techniques"),
         "nettacker_scenario": scenario,
         "playbooks": playbooks,
     }

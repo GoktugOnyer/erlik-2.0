@@ -20,6 +20,24 @@ def test_ai_solo_is_clean_even_with_env_help_set(monkeypatch):
     assert r["playbooks"] in ("", None)   # no target playbook
 
 
+def test_comparison_arms_are_env_proof(monkeypatch):
+    """Both arms of the baseline-vs-guided comparison must pin every help lever,
+    or a stray env var silently changes what is being measured."""
+    monkeypatch.setenv("ERLIK_TECHNIQUES", "true")
+    monkeypatch.setenv("ERLIK_NETTACKER", "true")
+    for preset in ("ai_only", "guided_ai"):
+        r = rc.resolve({"preset": preset})
+        assert r["techniques"] is False, preset
+        assert r["nettacker"] is False, preset
+
+
+def test_prescan_presets_enable_environment_techniques():
+    """Technique routing keys off observed ports, so it belongs with the presets
+    that actually run a pre-scan."""
+    for preset in ("recon_first", "deterministic_heavy", "full_assessment"):
+        assert rc.resolve({"preset": preset})["techniques"] is True, preset
+
+
 def test_guided_injects_skills_and_playbook():
     r = rc.resolve({"preset": "guided_ai"})
     assert r["skills"] is True

@@ -797,6 +797,10 @@
                         <input type="checkbox" id="rc-targetmem" class="accent-purple-400" style="width:14px;height:14px;" onchange="markCustomPreset()">
                         <span class="font-pixel" style="font-size:0.5rem; color:#8a8aa0;">TARGET MEMORY</span><span class="rc-q">?</span>
                     </label>
+                    <label class="flex items-center gap-1.5 cursor-pointer rc-help" data-tip="TECHNIQUES — Injects attack techniques matched to what THIS target is running, not to the mission text. The pre-scan reports open ports and detected tech; a MongoDB on 27017 pulls MongoDB techniques, a Redis on 6379 pulls Redis. Indexed from HackTricks (CC BY-NC 4.0, cited not bundled) — set ERLIK_HACKTRICKS_PATH to a local clone for full technique text, otherwise you get titles and reference links.">
+                        <input type="checkbox" id="rc-techniques" class="accent-purple-400" style="width:14px;height:14px;" onchange="markCustomPreset()">
+                        <span class="font-pixel" style="font-size:0.5rem; color:#8a8aa0;">TECHNIQUES</span><span class="rc-q">?</span>
+                    </label>
                 </div>
             </div>
 
@@ -2392,7 +2396,7 @@ ${htmlBody}
             // Run Configuration panel
             'rc-preset', 'rc-cve', 'rc-skills', 'rc-nettacker',
             'rc-nettacker-scenario', 'rc-nettacker-findings',
-            'rc-poc', 'rc-primitives', 'rc-targetmem'
+            'rc-poc', 'rc-primitives', 'rc-targetmem', 'rc-techniques'
         ];
 
         function lockSettings() {
@@ -3843,6 +3847,7 @@ ${htmlBody}
             document.getElementById('rc-nettacker-findings').checked = !!c.nettacker_findings;
             document.getElementById('rc-poc').checked = !!c.poc_verify;
             document.getElementById('rc-primitives').checked = !!c.primitives;
+            document.getElementById('rc-techniques').checked = !!c.techniques;
             document.getElementById('rc-targetmem').checked = !!c.target_memory;
             if (c.nettacker_scenario) document.getElementById('rc-nettacker-scenario').value = c.nettacker_scenario;
             toggleNettackerOpts();
@@ -3872,6 +3877,7 @@ ${htmlBody}
                 nettacker_scenario: document.getElementById('rc-nettacker-scenario').value || 'recon',
                 poc_verify: document.getElementById('rc-poc').checked,
                 primitives: document.getElementById('rc-primitives').checked,
+                techniques: document.getElementById('rc-techniques').checked,
                 target_memory: document.getElementById('rc-targetmem').checked,
             };
         }

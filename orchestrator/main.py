@@ -3016,6 +3016,21 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
         # Deterministic pre-scan (OWASP Nettacker) — seed the agent with verified
         # recon (open ports, tech, paths, header/TLS/CVE hits) so it explores less.
         # Gated by ERLIK_NETTACKER (default off). See orchestrator/integrations/nettacker.py.
+        # What the pre-scan observes about the target also drives the
+        # environment-specific technique router further down; seeded from the
+        # target URL so that routing still works with the pre-scan off.
+        _observed_ports: list[int] = []
+        _observed_tech: list[str] = []
+        try:
+            from urllib.parse import urlparse as _urlparse
+            _u = _urlparse(target_url)
+            if _u.port:
+                _observed_ports.append(int(_u.port))
+            elif _u.scheme in ("http", "https"):
+                _observed_ports.append(443 if _u.scheme == "https" else 80)
+        except Exception:  # noqa: BLE001
+            pass
+
         try:
             from orchestrator.integrations import nettacker as _nt_mod
             _nt_on = runcfg["nettacker"]
@@ -3035,6 +3050,14 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
                 })
             else:
                 _parsed = _nt_mod.parse_events(_nt["events"], target_url=target_url)
+                for _op in _parsed.get("open_ports") or []:
+                    try:
+                        _p = int(_op.get("port"))
+                        if _p not in _observed_ports:
+                            _observed_ports.append(_p)
+                    except (TypeError, ValueError):
+                        continue
+                _observed_tech.extend(_parsed.get("tech") or [])
                 _nt_ctx = _nt_mod.summarize_for_agent(_parsed)
                 if _nt_ctx:
                     combined_system += f"\n\n{_nt_ctx}"
@@ -3067,6 +3090,34 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
                         })
                     except Exception as _pe:  # noqa: BLE001
                         print(f"[nettacker {session_id[:8]}] persist failed: {_pe}", flush=True)
+
+        # Environment-specific techniques: route on what this target actually IS
+        # (observed ports + detected technologies) rather than on the mission text.
+        # Body text comes from the reader's own HackTricks clone when
+        # ERLIK_HACKTRICKS_PATH is set; otherwise the committed index still
+        # supplies titles and citation URLs. See orchestrator/techniques.py.
+        if runcfg.get("techniques"):
+            try:
+                from orchestrator import techniques as _tq
+                _tq_ctx = _tq.render_techniques(
+                    open_ports=_observed_ports,
+                    tech=_observed_tech,
+                    hint=f"{vuln_category or ''} {system_prompt or ''}",
+                )
+                if _tq_ctx:
+                    combined_system += f"\n\n{_tq_ctx}"
+                    _n_sel = len(_tq.select_techniques(
+                        _observed_ports, _observed_tech,
+                        f"{vuln_category or ''} {system_prompt or ''}"))
+                    _has_corpus = _tq.hacktricks_root() is not None
+                    await manager.broadcast(session_id, {
+                        "type": "log", "phase": "recon",
+                        "message": f"TECHNIQUES: {_n_sel} matched for ports "
+                                   f"{_observed_ports or '—'}"
+                                   f"{'' if _has_corpus else ' (citations only — set ERLIK_HACKTRICKS_PATH)'}",
+                    })
+            except Exception as _tq_err:  # noqa: BLE001
+                print(f"[techniques {session_id[:8]}] skipped (non-fatal): {_tq_err}", flush=True)
 
         # Inject durable per-TARGET memory (from all prior runs against this target).
         # Unlike warm-start (explicit parent lineage), this applies to any session,

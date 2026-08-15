@@ -208,6 +208,46 @@ python -m orchestrator.integrations.nettacker http://target --json # parsed buck
 Nettacker is Apache-2.0 and is **invoked, not bundled** — see
 [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).
 
+## Environment-specific techniques (HackTricks)
+
+Where the skill library routes on the *mission*, this routes on what the target
+actually **is**. The Nettacker pre-scan reports open ports and detected
+technologies; a detected `27017` pulls MongoDB techniques, a `6379` pulls Redis.
+With the pre-scan off, the target URL's own port still drives routing.
+
+```bash
+export ERLIK_TECHNIQUES=1                              # enable injection (default off)
+export ERLIK_HACKTRICKS_PATH=~/Projects/hacktricks     # optional: full technique text
+```
+
+Two tiers, and the split is a **licensing** requirement rather than a
+convenience. HackTricks is CC BY-NC 4.0; erlik is MIT. Its prose is therefore
+never vendored here:
+
+- **Committed** — `techniques_catalog/index.yaml`: environment, ports, title,
+  routing tags and a citation URL for 814 techniques (175 port-keyed). Facts
+  only.
+- **Runtime, never committed** — with `ERLIK_HACKTRICKS_PATH` set, the router
+  reads body text from *your own* clone. Without it, you still get titles and
+  citation URLs.
+
+Inspect routing without running a session:
+
+```bash
+python -m orchestrator.techniques --ports 27017 6379 --list
+python -m orchestrator.techniques --tech nginx --hint ssrf
+```
+
+Regenerate the index after pulling a newer corpus:
+
+```bash
+python scripts/build_techniques_index.py --hacktricks /path/to/hacktricks
+```
+
+The index records the upstream commit it was built from, so a result ties to an
+exact corpus revision. See [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md)
+for why the text is referenced rather than bundled.
+
 ## License & third-party code
 
 Erlik 2.0 is released under the [MIT License](LICENSE).

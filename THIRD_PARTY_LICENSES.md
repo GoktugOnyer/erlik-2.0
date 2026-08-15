@@ -32,3 +32,45 @@ included or redistributed here; you install them yourself.
 | Tool | License | Used by | Notes |
 |------|---------|---------|-------|
 | [OWASP Nettacker](https://github.com/OWASP/Nettacker) | Apache-2.0 | `orchestrator/integrations/nettacker.py` | Optional deterministic pre-scan. erlik builds a CLI invocation and parses Nettacker's JSON output; no Nettacker source is vendored. Enable with `ERLIK_NETTACKER=1`. |
+
+## HackTricks (referenced, deliberately NOT vendored)
+
+- Source: https://github.com/carlospolop/hacktricks — Carlos Polop
+- License: **CC BY-NC 4.0** (Attribution-**NonCommercial**) —
+  https://creativecommons.org/licenses/by-nc/4.0/
+
+erlik is MIT. HackTricks is NonCommercial. Those terms are incompatible: copying
+HackTricks prose into this repository would publish NC-restricted material under
+an MIT grant and silently bind anyone using erlik commercially to terms this
+project did not choose. So **no HackTricks text is vendored here**, and none ever
+should be — that is a licensing constraint, not a stylistic preference.
+
+What *is* committed is a derived index of **facts** about each technique:
+
+| erlik-2.0 file | Contains | Why this is not the licensed work |
+|----------------|----------|-----------------------------------|
+| `techniques_catalog/index.yaml` | environment, TCP/UDP ports, page title, routing tags, citation URL | Facts and citations. Ports and section names are not authored expression; titles are short factual headings. No sentence of HackTricks prose appears. |
+| `scripts/build_techniques_index.py` | the generator | erlik's own code. Re-derives the index from any clone; records the upstream commit so a result ties to an exact corpus revision. |
+| `orchestrator/techniques.py` | the router | erlik's own code. Reads body text at run time from the operator's own clone. |
+
+Technique **body text** is read at run time from a clone the operator obtains
+themselves, located via `ERLIK_HACKTRICKS_PATH`. It is never copied into the
+repository, never committed, and never redistributed. With no clone configured
+the router degrades to titles plus citation URLs — the MIT-safe subset —
+and `tests/test_techniques.py` pins that behaviour so the separation cannot
+regress unnoticed.
+
+Attribution is carried into every injected block (author, licence, upstream URL)
+as CC BY-NC requires of any use.
+
+Regenerate the index after pulling a newer corpus:
+
+```bash
+python scripts/build_techniques_index.py --hacktricks /path/to/hacktricks
+```
+
+Deterministic test cases under `tests_catalog/wstg/` that were informed by a
+HackTricks technique cite the page in their `references:` field. Their probe
+logic is erlik's own expression of a publicly documented technique; the
+underlying techniques (a header name, a protocol behaviour, a well-known payload
+string) are facts, not the licensed text.
