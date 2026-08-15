@@ -16,7 +16,7 @@ repository by re-running the recompute scripts and comparing hashes.
 |---|---|---|---|---|
 | `docs/recomputed_all_experiments.csv` | `de6330e88c18e42aec58fa209447ee5d4bad5ca1f48a4d75c839a1a212577b02` | ~3 KB | `scripts/recompute_all_thesis_tables.py` | yes |
 | `docs/recomputed_all_experiments.json` | `fc3f7e211fb9d9c0c11f4c6d3af4e61668de21756fc676c8b45216c1295c260f` | ~15 KB | `scripts/recompute_all_thesis_tables.py` | yes |
-| `docs/statistical_tests.json` | `c7cba2b7a4a3cab90b6c44eb2c7e5b465a72a599f48f771cb9b85f2ae993267a` | ~3 KB | `scripts/recompute_gt_coverage.py` (+ scipy) | yes |
+| `docs/statistical_tests.json` | `c7cba2b7a4a3cab90b6c44eb2c7e5b465a72a599f48f771cb9b85f2ae993267a` | ~3 KB | ad-hoc scipy analysis — **no tracked script regenerates this**, see below | yes |
 | `training_data/juicy3_train.jsonl` | `5f2f394469700015dc94c0b5ce9399da02ef61e54fb793ab1d697ac7582a35ed` | 41 MB | `scripts/assemble_juicy3_dataset.py` | **no — see below** |
 | `training_data/juicy3_val.jsonl` | `320099585c0dac63cda470d17c325574108b95efccfef095b51775cadf136081` | 1.7 MB | `scripts/assemble_juicy3_dataset.py` | **no — see below** |
 
@@ -31,6 +31,16 @@ dataset bit-for-bit.
 
 The three `docs/*` hashes **are** verifiable from a clean clone, and are the
 ones backing every number in the results chapter.
+
+### Caveat on `statistical_tests.json`
+
+This file holds scipy hypothesis-test output (`primary_comparison`, `alpha`,
+`mcnemar_per_gt`, `wilcoxon_per_session`, `fisher_per_category_bh`). No script
+in `scripts/` writes it — it was produced by an ad-hoc scipy session over the
+recomputed coverage data. Its hash therefore pins the artefact but does **not**
+pin a reproducible pipeline: a reader can confirm the file is unmodified, but
+cannot currently regenerate it from source. Committing the analysis as a tracked
+script is outstanding work.
 
 ## Regeneration commands
 
@@ -67,8 +77,8 @@ the repository were re-hashed and all three match the pinned values above.
 
 ## Seeds used
 
-All dataset-side operations use **`seed=42`** across Python, NumPy, and
-PyTorch/TRL. `scripts/assemble_juicy3_dataset.py:36` sets:
+All dataset-side operations use **`seed=42`** across Python and PyTorch/TRL.
+`scripts/assemble_juicy3_dataset.py:36` sets:
 
 ```python
 random.seed(42)
@@ -90,14 +100,35 @@ Reproducing the published dataset hashes therefore requires running with the
 default seed; passing `--seed` anything other than `42` will produce a
 different corpus and different adapter weights.
 
-LLM inference during evaluation uses Ollama with `temperature=0.3`,
-`top_p=0.9`, and no explicit seed. Ollama does not expose a
-reproducibility seed at these hyperparameters, so per-session token
-sequences are not bit-identical across runs — but aggregate metrics
-(GT coverage, TP counts) are stable within ±1 GT between independent
-runs, as verified in the Apr 15 and Apr 17 baseline-7B runs which
-produced 11/35 and 13/35 respectively under different tool
-configurations (the delta is attributable to 25-vs-27 tools available,
-not seed variation).
+## Inference seeding and run-to-run variance
 
-See `docs/SEED_VARIANCE_FINAL.md` for the dedicated seed-variance control.
+LLM inference during evaluation uses Ollama with `temperature=0.3` and
+`top_p=0.9`. The reported campaigns ran at Ollama's default seed, but the
+orchestrator **does** support pinning one: `orchestrator/llm_client.py:36`
+reads `ERLIK_OLLAMA_SEED` and, when set, injects it as
+`body["options"] = {"seed": seed}` at `:50-52`.
+
+**Aggregate metrics are not stable across seeds, and this is the single most
+important reproducibility caveat in this project.** The dedicated seed-variance
+control (`scripts/overnight_seed_variance.sh`, raw data in
+`docs/seed_variance_results.json`, analysis in `docs/SEED_VARIANCE_FINAL.md`)
+ran the same baseline `qwen2.5-coder:7b` configuration in one fixed environment,
+varying only the inference seed:
+
+| Run | Seed | Canonical GT coverage |
+|---|---|---|
+| Apr 17 baseline (thesis reference) | Ollama default | 13/35 (37.1%) |
+| Baseline re-run | 100 | 10/35 (28.6%) |
+| Baseline re-run | 200 | 11/35 (31.4%) |
+| Baseline re-run | 300 | ≤8/35 |
+
+That is a spread of roughly **5 ground-truth entries — about 14 percentage
+points of coverage — from seed alone**, with every other variable held constant.
+Any single-run difference smaller than this is within noise and must not be
+attributed to a model, toolset, or fine-tuning effect. `SEED_VARIANCE_FINAL.md`
+exists precisely because a reviewer challenged whether the H3 ensemble gain was
+stochastic rather than a fine-tuning contribution.
+
+Reproducing a specific published number therefore requires the same environment
+*and* an accepting of seed-level variance; set `ERLIK_OLLAMA_SEED` to make an
+individual run repeatable.
