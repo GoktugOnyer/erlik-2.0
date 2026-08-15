@@ -1,0 +1,45 @@
+id: WSTG-CLNT-09
+name: Clickjacking Protection Headers
+category: Client-side
+severity: medium
+references:
+  - https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/11-Client-side_Testing/09-Testing_for_Clickjacking
+  - https://book.hacktricks.wiki/en/pentesting-web/clickjacking.html
+  - https://book.hacktricks.wiki/en/network-services-pentesting/pentesting-web/special-http-headers.html
+
+target_schema:
+  required: [url]
+
+steps:
+  # One header fetch (body discarded). A browser refuses to frame a document
+  # only if the response carries X-Frame-Options or a CSP frame-ancestors
+  # directive; a regex cannot assert the ABSENCE of a line, so the shell turns
+  # each outcome into an unambiguous marker token that a plain regex evaluator
+  # can decide on. Read-only: no state is touched.
+  - name: framing_headers
+    tool: curl
+    command: >-
+      bash -c 'H=$(curl -s -S -D - -o /dev/null --max-time 15 -A "Mozilla/5.0" "{{url}}" | tr -d "\r"); echo "$H"; if [ -z "$H" ]; then echo ERLIK_FRAMING_NO_RESPONSE; elif echo "$H" | head -n 1 | grep -Eq "HTTP/[0-9.]+ 3[0-9][0-9]"; then echo ERLIK_FRAMING_NOT_ASSESSED_REDIRECT; elif echo "$H" | grep -Eiq "^x-frame-options:|^content-security-policy:.*frame-ancestors"; then echo ERLIK_FRAMING_HEADER_PRESENT; else echo ERLIK_FRAMING_HEADER_ABSENT; fi'
+    evaluators:
+      # Neither framing control present on a non-redirect response.
+      - type: regex
+        pattern: 'ERLIK_FRAMING_HEADER_ABSENT'
+        emit_finding:
+          vuln_type: Missing Clickjacking Protection (no X-Frame-Options, no CSP frame-ancestors)
+          severity: medium
+      # ALLOW-FROM was never implemented by Chromium and is dropped from the
+      # spec; ALLOWALL is a vendor invention. Both leave the page framable.
+      - type: regex
+        pattern: '^X-Frame-Options:\s*(ALLOW-FROM|ALLOWALL)'
+        emit_finding:
+          vuln_type: Ineffective X-Frame-Options Value
+          severity: medium
+      # A wildcard source anywhere in the list lets any origin frame the page.
+      # Anchored to the enforcing header so a Report-Only policy — which the
+      # browser never acts on — cannot raise this. A wildcard immediately
+      # followed by a dot is a host pattern (*.example.com), not a bare *.
+      - type: regex
+        pattern: '^Content-Security-Policy:[^\n]*frame-ancestors[^;\n]*\s\*(\s|;|$)'
+        emit_finding:
+          vuln_type: Permissive CSP frame-ancestors Directive
+          severity: medium

@@ -1,0 +1,152 @@
+id: WSTG-CONF-02
+name: Platform Debug and Diagnostic Endpoint Exposure
+category: Configuration & Deployment Management
+severity: high
+references:
+  - https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/02-Configuration_and_Deployment_Management_Testing/02-Test_Application_Platform_Configuration
+  - https://book.hacktricks.wiki/en/network-services-pentesting/pentesting-web/spring-actuators.html
+  - https://book.hacktricks.wiki/en/network-services-pentesting/pentesting-web/apache.html
+  - https://book.hacktricks.wiki/en/network-services-pentesting/pentesting-web/werkzeug.html
+  - https://book.hacktricks.wiki/en/network-services-pentesting/pentesting-web/symphony.html
+  - https://book.hacktricks.wiki/en/network-services-pentesting/pentesting-web/laravel.html
+  - https://book.hacktricks.wiki/en/network-services-pentesting/pentesting-web/php-tricks-esp/index.html
+
+target_schema:
+  required: [url]
+  optional: [cookie, auth_header]
+
+steps:
+  # Spring Boot 2.x publishes a HAL index at /actuator listing every management
+  # endpoint that is actually exposed. Reading the index is read-only and tells
+  # us exactly which sensitive endpoints are reachable without touching them —
+  # in particular /heapdump, which we deliberately never download.
+  - name: actuator_index
+    tool: curl
+    command: >-
+      curl -s -L --max-redirs 3 -A "Mozilla/5.0" --connect-timeout 3 --max-time 6
+      -w "\n[erlik] %{http_code} %{url_effective}\n"
+      "{{url}}/actuator" "{{url}}/actuator/health"
+    evaluators:
+      - type: regex
+        pattern: '"_links"\s*:\s*\{'
+        emit_finding:
+          vuln_type: Spring Boot Actuator Index Reachable Unauthenticated
+          severity: medium
+      - type: regex
+        # A href entry for one of the endpoints that leaks configuration,
+        # credentials, request history or full JVM memory.
+        pattern: '"(heapdump|threaddump|env|configprops|beans|loggers|logfile|httpexchanges|httptrace|trace|mappings|jolokia)"\s*:\s*\{\s*"href"'
+        emit_finding:
+          vuln_type: Sensitive Spring Actuator Endpoint Exposed
+          severity: high
+
+  # Confirm the environment dump itself. Boot 1.x served it at /env, 2.x moved
+  # management endpoints under /actuator. A property-source dump commonly
+  # carries datasource URLs, cloud keys and internal service addresses.
+  - name: actuator_env_dump
+    tool: curl
+    command: >-
+      curl -s -L --max-redirs 3 -A "Mozilla/5.0" --connect-timeout 3 --max-time 6
+      -w "\n[erlik] %{http_code} %{url_effective}\n"
+      "{{url}}/actuator/env" "{{url}}/env" "{{url}}/actuator/configprops"
+    evaluators:
+      - type: regex
+        pattern: '"propertySources"|"activeProfiles"|systemEnvironment|applicationConfig:'
+        emit_finding:
+          vuln_type: Spring Actuator Environment Dump Exposed
+          severity: high
+      - type: regex
+        # Property names that indicate live secrets sitting in the dump.
+        pattern: 'spring\.datasource\.(url|username|password)|"jdbc:[a-z0-9]+:|eureka\.client\.serviceUrl'
+        emit_finding:
+          vuln_type: Datasource Credentials Disclosed via Actuator
+          severity: critical
+
+  # Web-server introspection handlers. mod_status/mod_info are meant to be
+  # bound to localhost; when they answer from the outside they hand over
+  # in-flight request lines, vhost layout, module config and proxy backends.
+  - name: webserver_status_handlers
+    tool: curl
+    command: >-
+      curl -s -L --max-redirs 3 -A "Mozilla/5.0" --connect-timeout 3 --max-time 5
+      -w "\n[erlik] %{http_code} %{url_effective}\n"
+      "{{url}}/server-status" "{{url}}/server-info" "{{url}}/balancer-manager"
+      "{{url}}/nginx_status"
+    evaluators:
+      - type: regex
+        pattern: 'Apache Server Status|BusyWorkers|IdleWorkers|^Total Accesses:'
+        emit_finding:
+          vuln_type: Apache mod_status Publicly Readable
+          severity: medium
+      - type: regex
+        # mod_info labels each loaded module by its source file (core.c,
+        # mod_ssl.c ...) and prints absolute config paths — both are far more
+        # specific than the bare words "Server Settings".
+        pattern: 'Apache Server Information|Module Name:\s*\w+\.c\b|Server Root:\s*[/"]|Config File:\s*[/"]'
+        emit_finding:
+          vuln_type: Apache mod_info Discloses Server Configuration
+          severity: high
+      - type: regex
+        pattern: 'Load Balancer Manager|BalancerMember|balancer://'
+        emit_finding:
+          vuln_type: mod_proxy_balancer Manager Discloses Backends
+          severity: medium
+      - type: regex
+        pattern: 'server accepts handled requests|Active connections:\s*\d+'
+        emit_finding:
+          vuln_type: nginx stub_status Publicly Readable
+          severity: low
+
+  # phpinfo() output is a complete interpreter and environment dump: absolute
+  # paths, loaded extensions, ini hardening state and often environment
+  # variables holding secrets.
+  - name: php_info_pages
+    tool: curl
+    command: >-
+      curl -s -L --max-redirs 3 -A "Mozilla/5.0" --connect-timeout 3 --max-time 5
+      -w "\n[erlik] %{http_code} %{url_effective}\n"
+      "{{url}}/phpinfo.php" "{{url}}/info.php" "{{url}}/php_info.php"
+      "{{url}}/phpinfo"
+    evaluators:
+      - type: regex
+        pattern: 'phpinfo\(\)|allow_url_fopen|disable_functions|Loaded Configuration File|_SERVER\["DOCUMENT_ROOT"\]'
+        emit_finding:
+          vuln_type: phpinfo() Page Exposed
+          severity: high
+
+  # Development-only consoles and profilers left enabled in a deployed app.
+  # We only GET the landing page — no code is submitted to any console.
+  - name: dev_debug_consoles
+    tool: curl
+    command: >-
+      curl -s -L --max-redirs 3 -A "Mozilla/5.0" --connect-timeout 3 --max-time 5
+      -w "\n[erlik] %{http_code} %{url_effective}\n"
+      "{{url}}/_profiler" "{{url}}/telescope" "{{url}}/_ignition/health-check"
+      "{{url}}/console"
+    evaluators:
+      - type: regex
+        # `_profiler/latest` is the redirect target Symfony sends /_profiler to,
+        # so it is the only reliable signal when the profiler body is rendered
+        # client-side. Anchored with (?![\w-]) so an unrelated link such as
+        # /_profiler/latest-news cannot satisfy it.
+        pattern: 'Symfony Profiler|sf-toolbar|_profiler/latest(?![\w-])|Web Debug Toolbar'
+        emit_finding:
+          vuln_type: Symfony Profiler Exposed
+          severity: high
+      - type: regex
+        pattern: 'Laravel Telescope|telescope/app\.js|window\.Telescope'
+        emit_finding:
+          vuln_type: Laravel Telescope Dashboard Exposed
+          severity: high
+      - type: regex
+        # Ignition answers this health probe with a small JSON body; its
+        # presence means the debug-page handler is mounted.
+        pattern: '"can_execute_commands"|ignition\.health|"ignition"'
+        emit_finding:
+          vuln_type: Laravel Ignition Debug Handler Reachable
+          severity: high
+      - type: regex
+        pattern: 'Werkzeug Debugger|__debugger__|console is locked'
+        emit_finding:
+          vuln_type: Werkzeug Interactive Debugger Exposed
+          severity: critical

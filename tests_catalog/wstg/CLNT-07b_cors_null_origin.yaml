@@ -1,0 +1,68 @@
+id: WSTG-CLNT-07b
+name: CORS null Origin Trust (GET and preflight)
+category: Client-side
+severity: high
+references:
+  - https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/11-Client-side_Testing/07-Testing_Cross_Origin_Resource_Sharing
+  - https://book.hacktricks.wiki/en/pentesting-web/cors-bypass.html
+
+target_schema:
+  required: [url]
+  optional: [cookie, auth_header]
+
+steps:
+  # Any page can produce an opaque "null" origin (sandboxed iframe, data: URL,
+  # some redirect chains), so an allowlist that keeps "null" for local dev is
+  # effectively open to every site. WSTG-CLNT-07 only sends a normal attacker
+  # origin, so a server that trusts null and nothing else slips past it.
+  # Read-only GET; -D - keeps the response headers and -o /dev/null drops the
+  # body, so page text can never be mistaken for a CORS header.
+  - name: null_origin_get
+    tool: curl
+    command: >-
+      curl -s -D - -o /dev/null -H "Origin: null" "{{url}}"
+    evaluators:
+      # Trusted null origin + credentials: a cross-origin page can read authed
+      # responses. Order-independent match, both headers must be present.
+      - type: regex
+        pattern: '(?s)(?=[\s\S]*^Access-Control-Allow-Origin:[ \t]*null\b)(?=[\s\S]*^Access-Control-Allow-Credentials:[ \t]*true\b)'
+        emit_finding:
+          vuln_type: CORS Trusts null Origin With Credentials
+          severity: high
+      - type: regex
+        when: no_finding_yet
+        pattern: '^Access-Control-Allow-Origin:[ \t]*null\b'
+        emit_finding:
+          vuln_type: CORS Trusts null Origin
+          severity: medium
+      # Same response, escalation only: a per-origin CORS header that is not
+      # keyed on Origin can be stored by a shared cache and replayed to other
+      # users. \A pins the assertion to the start of the output so the "no Vary
+      # naming Origin anywhere" test cannot pass by restarting past that line.
+      - type: regex
+        when: has_finding
+        pattern: '(?s)\A(?![\s\S]*^Vary:[^\n]*Origin)[\s\S]*^Access-Control-Allow-Origin:[ \t]*\S'
+        emit_finding:
+          vuln_type: "CORS Response Not Keyed on Origin (missing Vary: Origin)"
+          severity: medium
+
+  # The preflight handler is often a separate and laxer code path than the GET
+  # handler. OPTIONS only announces intent - the PUT itself is never sent, so
+  # nothing on the target is written or changed.
+  - name: null_origin_preflight
+    tool: curl
+    when: no_finding_yet
+    command: >-
+      curl -s -D - -o /dev/null -X OPTIONS -H "Origin: null" -H "Access-Control-Request-Method: PUT" -H "Access-Control-Request-Headers: authorization" "{{url}}"
+    evaluators:
+      - type: regex
+        pattern: '(?s)(?=[\s\S]*^Access-Control-Allow-Origin:[ \t]*null\b)(?=[\s\S]*^Access-Control-Allow-Credentials:[ \t]*true\b)'
+        emit_finding:
+          vuln_type: CORS Preflight Approves Credentialed null Origin
+          severity: high
+      - type: regex
+        when: no_finding_yet
+        pattern: '^Access-Control-Allow-Origin:[ \t]*null\b'
+        emit_finding:
+          vuln_type: CORS Preflight Approves null Origin
+          severity: medium

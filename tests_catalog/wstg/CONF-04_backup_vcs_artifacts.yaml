@@ -1,0 +1,150 @@
+id: WSTG-CONF-04
+name: Unreferenced Backup, VCS and Build Artifacts
+category: Configuration & Deployment Management
+severity: high
+references:
+  - https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/02-Configuration_and_Deployment_Management_Testing/04-Review_Old_Backup_and_Unreferenced_Files_for_Sensitive_Information
+  - https://book.hacktricks.wiki/en/network-services-pentesting/pentesting-web/git.html
+  - https://book.hacktricks.wiki/en/network-services-pentesting/pentesting-web/index.html
+  - https://book.hacktricks.wiki/en/network-services-pentesting/pentesting-web/symphony.html
+
+target_schema:
+  required: [url]
+  optional: [cookie, auth_header]
+
+steps:
+  # A deployed working copy leaves the VCS metadata directory under the web
+  # root. These four files are tiny, plain text, and unambiguous — enough to
+  # prove the repository is downloadable without pulling any objects.
+  # (.git/config and .env are already covered by WSTG-INFO-03.)
+  # Every step pipes through tr: the runner decodes tool output as strict
+  # UTF-8, so an undecodable byte anywhere would discard the WHOLE step's
+  # output and silence every evaluator in it. LC_ALL=C keeps tr byte-oriented
+  # (BSD tr otherwise aborts on invalid UTF-8 and truncates).
+  - name: vcs_working_copy
+    tool: curl
+    command: >-
+      curl -s -L --max-redirs 3 -A "Mozilla/5.0" --connect-timeout 3 --max-time 5
+      -w "\n[erlik] %{http_code} %{url_effective}\n"
+      "{{url}}/.git/HEAD" "{{url}}/.git/logs/HEAD" "{{url}}/.svn/entries"
+      "{{url}}/.hg/requires" | LC_ALL=C tr -c '[:print:][:space:]' '.'
+    evaluators:
+      - type: regex
+        # .git/HEAD is a symbolic ref line; .git/logs/HEAD reflog rows start
+        # with two 40-hex object ids.
+        pattern: '^ref:\s+refs/(heads|remotes)/\S+|^[0-9a-f]{40} [0-9a-f]{40} '
+        emit_finding:
+          vuln_type: Exposed .git Working Copy (source history downloadable)
+          severity: high
+      - type: regex
+        # Line-based .svn/entries: a has-props field, or the format number
+        # followed by the empty root-entry name line and its node kind.
+        pattern: '^has-props\r?$|^\d{1,3}\r?\n\r?\n(dir|file)\r?$'
+        emit_finding:
+          vuln_type: Exposed Subversion Working Copy
+          severity: high
+      - type: regex
+        pattern: '^(revlogv1|dotencode|fncache|generaldelta|treemanifest|store)\r?$'
+        emit_finding:
+          vuln_type: Exposed Mercurial Repository Metadata
+          severity: high
+
+  # Deployment leftovers: archives and database dumps parked in the web root.
+  # HEAD only — we read the status line and Content-Type and never transfer
+  # the body, so nothing large is pulled off the target.
+  - name: backup_archive_probe
+    tool: curl
+    command: >-
+      curl -s -I -L --max-redirs 3 -A "Mozilla/5.0" --connect-timeout 3 --max-time 4
+      -w "\n[erlik] %{http_code} %{content_type} %{url_effective}\n"
+      "{{url}}/backup.zip" "{{url}}/backup.tar.gz" "{{url}}/backup.sql"
+      "{{url}}/database.sql" "{{url}}/dump.sql" "{{url}}/www.zip"
+      | LC_ALL=C tr -c '[:print:][:space:]' '.'
+    evaluators:
+      - type: regex
+        # Marker line emitted by curl per URL: a 200 plus an archive/dump
+        # content type at one of these names is a real downloadable backup.
+        pattern: '^\[erlik\] 200 application/(zip|x-zip-compressed|gzip|x-gzip|x-tar|x-gtar|octet-stream|sql|x-sql|x-sqlite3)'
+        emit_finding:
+          vuln_type: Downloadable Backup Archive or Database Dump
+          severity: critical
+      - type: regex
+        pattern: '^\[erlik\] 200 text/(plain|x-sql)'
+        emit_finding:
+          vuln_type: Possible Backup or SQL Dump Served as Text (verify content)
+          severity: medium
+
+  # Editor / IDE droppings. A vim swap file carries the source of the buffer
+  # it shadows; VS Code and JetBrains project files frequently carry the
+  # deployment host and its credentials. Two of these bodies are binary.
+  - name: editor_ide_artifacts
+    tool: curl
+    command: >-
+      curl -s -L --max-redirs 3 -A "Mozilla/5.0" --connect-timeout 3 --max-time 5
+      -w "\n[erlik] %{http_code} %{url_effective}\n"
+      "{{url}}/.DS_Store" "{{url}}/.idea/workspace.xml"
+      "{{url}}/.vscode/sftp.json" "{{url}}/.index.php.swp"
+      | LC_ALL=C tr -c '[:print:][:space:]' '.'
+    evaluators:
+      - type: regex
+        # b0VIM is the magic string at the head of a vim swap file. Matched
+        # case-sensitively — the magic is exact, and a loose match would trip
+        # on minified or base64 blobs.
+        pattern: 'b0VIM\s+[0-9]'
+        case_insensitive: false
+        emit_finding:
+          vuln_type: Vim Swap File Exposes Server-Side Source
+          severity: high
+      - type: regex
+        # Bud1 is the .DS_Store record magic — it enumerates sibling filenames.
+        pattern: 'Bud1'
+        case_insensitive: false
+        emit_finding:
+          vuln_type: .DS_Store Discloses Directory Contents
+          severity: medium
+      - type: regex
+        pattern: '<project version=|<component name='
+        emit_finding:
+          vuln_type: JetBrains .idea Project Metadata Exposed
+          severity: medium
+      - type: regex
+        # Anchored to a JSON key at line start. Unanchored, this fires on any
+        # HTML page carrying an inline config object — a soft-404 or SPA
+        # catch-all would then raise a critical on every path.
+        pattern: '^\s*"(privateKeyPath|remotePath|uploadOnSave)"\s*:'
+        emit_finding:
+          vuln_type: VS Code SFTP Deployment Config Exposed (may carry credentials)
+          severity: critical
+
+  # Build and dependency manifests. Even without secrets these pin exact
+  # component versions, which turns a later CVE lookup into a certainty
+  # rather than a guess.
+  - name: build_manifests
+    tool: curl
+    command: >-
+      curl -s -L --max-redirs 3 -A "Mozilla/5.0" --connect-timeout 3 --max-time 4
+      -w "\n[erlik] %{http_code} %{url_effective}\n"
+      "{{url}}/package.json" "{{url}}/composer.lock" "{{url}}/.npmrc"
+      "{{url}}/appsettings.json" "{{url}}/WEB-INF/web.xml"
+      | LC_ALL=C tr -c '[:print:][:space:]' '.'
+    evaluators:
+      - type: regex
+        pattern: '^\s*"(dependencies|devDependencies)"\s*:\s*\{|^\s*"packages"\s*:\s*\[|^\s*"require"\s*:\s*\{'
+        emit_finding:
+          vuln_type: Dependency Manifest Exposed (component versions disclosed)
+          severity: low
+      - type: regex
+        # Registry auth tokens and ADO.NET connection strings are live secrets
+        # and specific enough to match anywhere. The generic password key is
+        # anchored so an inline JS blob cannot raise a critical.
+        pattern: '_authToken|Server=[^\s;"]+;\s*(Initial Catalog|Database)=|^\s*"(ConnectionStrings|[A-Za-z_]*[Pp]assword)"\s*:'
+        emit_finding:
+          vuln_type: Credentials Disclosed in Exposed Config File
+          severity: critical
+      - type: regex
+        # WEB-INF must never be served; its descriptor maps servlets and
+        # often names internal datasources.
+        pattern: '<web-app|<servlet-class>|<context-param>|<resource-ref>'
+        emit_finding:
+          vuln_type: WEB-INF/web.xml Served by Container
+          severity: high

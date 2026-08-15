@@ -1,0 +1,103 @@
+id: WSTG-INPV-05.6
+name: NoSQL Operator Injection
+category: Input Validation
+severity: high
+references:
+  - https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/07-Input_Validation_Testing/05.6-Testing_for_NoSQL_Injection
+  - https://book.hacktricks.wiki/en/pentesting-web/nosql-injection.html
+
+target_schema:
+  required: [url, parameter]
+
+steps:
+  # A bracketed query parameter (param[x]=v) is decoded into a nested object by
+  # PHP and by Express/qs. If that object reaches a document-store query, the
+  # key is read as a query OPERATOR. We ask for an operator that cannot exist,
+  # so the request can never match or return records — the only possible
+  # outcome is a driver-level rejection, which is exactly what we look for.
+  - name: unknown_operator_probe
+    tool: curl
+    # -g keeps curl from treating [ ] as URL globbing syntax.
+    command: >-
+      BASE=$(curl -s -g -m 8 -o /dev/null -w '%{http_code}' '{{url}}?{{parameter}}=erlikprobe9zq7');
+      echo "baseline_status=$BASE";
+      echo ERLIK_OPERATOR_RESPONSE;
+      curl -s -g -i -m 8 '{{url}}?{{parameter}}[$erlik9zq]=1'
+    evaluators:
+      - type: regex
+        # Driver / ODM error signatures. Their presence proves our bracketed key
+        # was parsed as an operator by the data layer, not treated as a string.
+        pattern: 'MongoServerError|MongoError|MongoParseError|MongoNetworkError|MongooseError|MongoInvalidArgumentError|BSONTypeError|BSONError|unknown top level operator|unknown operator|Cast to (?:ObjectId|String|Number|Date|Boolean|Array) failed|CastError|com\.mongodb\.|pymongo\.errors|search_phase_execution_exception|query_shard_exception|x_content_parse_exception|WRONGTYPE Operation against a key'
+        emit_finding:
+          vuln_type: NoSQL Operator Injection
+          severity: high
+      - type: regex
+        when: no_finding_yet
+        # Weaker signal: the plain value is served fine but the operator-shaped
+        # key crashes the handler. Suggestive of unvalidated query construction.
+        pattern: 'baseline_status=2\d\d[\s\S]*HTTP/[\d.]+ 500'
+        emit_finding:
+          vuln_type: NoSQL Injection (suspected, operator probe caused server error)
+          severity: medium
+
+  # Behavioural test with two controls. Bodies are discarded (-o /dev/null) so
+  # only status code and byte count are ever observed — this step never reads
+  # or stores record content.
+  #   A   literal nonsense value       -> should match nothing
+  #   A2  the same request again       -> STABILITY control
+  #   B   "not equal to" that value    -> matches everything IF the operator is honoured
+  #   C   "equal to" that value        -> semantically identical to A
+  # The marker needs all three conditions: the endpoint must be stable (A == A2),
+  # B must diverge from A, and C must stay equal to A. A backend that never
+  # parses brackets sees B and C as two identically unknown parameter names, so
+  # they move together and the marker stays off. An endpoint whose response size
+  # varies run to run fails the stability control instead of being reported.
+  - name: operator_differential
+    tool: curl
+    command: >-
+      A=$(curl -s -g -m 5 -o /dev/null -w '%{http_code}:%{size_download}' '{{url}}?{{parameter}}=erlikprobe9zq7');
+      A2=$(curl -s -g -m 5 -o /dev/null -w '%{http_code}:%{size_download}' '{{url}}?{{parameter}}=erlikprobe9zq7');
+      B=$(curl -s -g -m 5 -o /dev/null -w '%{http_code}:%{size_download}' '{{url}}?{{parameter}}[$ne]=erlikprobe9zq7');
+      C=$(curl -s -g -m 5 -o /dev/null -w '%{http_code}:%{size_download}' '{{url}}?{{parameter}}[$eq]=erlikprobe9zq7');
+      echo "literal=$A literal_repeat=$A2 ne_operator=$B eq_operator=$C";
+      if [ "$A" = "$A2" ] && [ "$B" != "$A" ] && [ "$C" = "$A" ]; then echo ERLIK_NOSQL_OPERATOR_PARSED; fi
+    evaluators:
+      - type: regex
+        pattern: 'ERLIK_NOSQL_OPERATOR_PARSED'
+        emit_finding:
+          vuln_type: NoSQL Operator Injection (behavioural)
+          severity: high
+      - type: llm
+        when: no_finding_yet
+        instruction: >-
+          The output holds four status:bytes readings for the same endpoint.
+          literal= is a nonsense value, literal_repeat= is the identical request
+          sent a second time, ne_operator= asks for "not equal to" that value,
+          and eq_operator= asks for "equal to" it. First check stability: if
+          literal and literal_repeat differ, the endpoint is noisy and nothing
+          can be concluded, so set matched=false. Otherwise set matched=true
+          only if ne_operator differs clearly from literal (for example a much
+          larger body or a different status) WHILE eq_operator stays equivalent
+          to literal, which means the operator changed the query result. If all
+          readings are identical, or if ne_operator and eq_operator differ from
+          literal in the same way (the parameter was simply dropped), set
+          matched=false.
+        emit_finding:
+          vuln_type: NoSQL Injection (suspected, LLM-flagged)
+          severity: medium
+
+  # Type confusion: an array is supplied where the code expects a scalar. Well
+  # handled input yields a validation error; unvalidated input reaches the ODM
+  # and raises a cast/type failure. A plain GET carrying a value that matches no
+  # record — nothing is written, and only the error signature is scored.
+  - name: array_type_probe
+    tool: curl
+    when: no_finding_yet
+    command: >-
+      curl -s -g -i -m 8 '{{url}}?{{parameter}}[]=erlikprobe9zq7'
+    evaluators:
+      - type: regex
+        pattern: 'Cast to (?:ObjectId|String|Number|Date|Boolean|Array) failed|CastError|BSONTypeError|BSONError|MongooseError|MongoServerError|Array to string conversion|expected string but got array|TypeError: .*(?:toLowerCase|replace|trim) is not a function'
+        emit_finding:
+          vuln_type: NoSQL Injection (suspected, unvalidated array parameter reaches query layer)
+          severity: medium

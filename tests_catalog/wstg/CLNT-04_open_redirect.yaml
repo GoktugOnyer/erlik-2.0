@@ -1,0 +1,83 @@
+id: WSTG-CLNT-04
+name: Client-side URL Redirect (Open Redirect)
+category: Client-side
+severity: medium
+references:
+  - https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/11-Client-side_Testing/04-Testing_for_Client_Side_URL_Redirect
+  - https://book.hacktricks.wiki/en/pentesting-web/open-redirect.html
+
+target_schema:
+  required: [url]
+  optional: [parameter, cookie, auth_header]
+
+steps:
+  # Detection only: -D - dumps the response headers, -o /dev/null discards the
+  # body, and no -L is used, so the redirect is NEVER followed and the marker
+  # host is never contacted. A scheme-relative //host payload defeats naive
+  # validators that only look for "http://" or "https://".
+  - name: declared_parameter_probe
+    tool: curl
+    command: >-
+      curl -s -D - -o /dev/null "{{url}}?{{parameter}}=//erlik-redir.oast.test/"
+    evaluators:
+      - type: regex
+        # Only a Location that STARTS with the marker host is off-site; the
+        # payload merely echoed inside an on-site path is not a redirect.
+        pattern: '^Location:[ \t]*(?:https?:)?//erlik-redir\.oast\.test'
+        emit_finding:
+          vuln_type: Open Redirect
+          severity: medium
+
+  # No parameter supplied (or the wrong one): probe the redirect parameter names
+  # that show up repeatedly in login/logout/return flows, in a single request.
+  - name: common_parameter_sweep
+    tool: curl
+    when: no_finding_yet
+    command: >-
+      curl -s -D - -o /dev/null "{{url}}?redirect=//erlik-redir.oast.test/&next=//erlik-redir.oast.test/&url=//erlik-redir.oast.test/&returnUrl=//erlik-redir.oast.test/&dest=//erlik-redir.oast.test/&continue=//erlik-redir.oast.test/"
+    evaluators:
+      - type: regex
+        pattern: '^Location:[ \t]*(?:https?:)?//erlik-redir\.oast\.test'
+        emit_finding:
+          vuln_type: Open Redirect
+          severity: medium
+
+  # Parser-mismatch case: the validator inspects the raw percent-encoded string
+  # (sees no leading //) while the redirect is emitted from the decoded value.
+  # Still a finding only when the Location comes back DECODED and off-site — an
+  # app that echoes %2f%2f verbatim is emitting a relative path, not a redirect.
+  # The trailing separator is left unencoded so it terminates the host component:
+  # anything the app appends lands in the path rather than extending the marker.
+  - name: encoded_slash_bypass
+    tool: curl
+    when: no_finding_yet
+    command: >-
+      curl -s -D - -o /dev/null "{{url}}?{{parameter}}=%2f%2ferlik-redir.oast.test/"
+    evaluators:
+      - type: regex
+        pattern: '^Location:[ \t]*(?:https?:)?//erlik-redir\.oast\.test'
+        emit_finding:
+          vuln_type: Open Redirect via Encoded Path Separators
+          severity: medium
+
+  # Redirects that never use a Location header (meta refresh, or a scripted
+  # navigation built from the query string) need the body inspected instead.
+  - name: client_side_sink_review
+    tool: curl
+    when: no_finding_yet
+    command: >-
+      curl -s "{{url}}?{{parameter}}=//erlik-redir.oast.test/"
+    evaluators:
+      - type: llm
+        instruction: >-
+          The request injected the marker host erlik-redir.oast.test as a
+          scheme-relative URL. Set matched=true ONLY if the response body sends
+          the browser to that marker: a meta refresh whose content url is the
+          marker, or script that assigns it to location, location.href,
+          location.replace, location.assign, or window.open. Quote the sink line
+          as the reason. Set matched=false if the marker only appears as inert
+          text, inside a visible link the user must click, HTML-escaped in page
+          content, or not at all.
+        emit_finding:
+          vuln_type: Open Redirect via Client-Side Sink (LLM-flagged)
+          severity: medium

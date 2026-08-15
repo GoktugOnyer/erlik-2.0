@@ -1,0 +1,62 @@
+id: WSTG-INPV-15
+name: Hop-by-Hop Header Handling
+category: Input Validation
+severity: medium
+references:
+  - https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/07-Input_Validation_Testing/15-Testing_for_HTTP_Splitting_Smuggling
+  - https://book.hacktricks.wiki/en/pentesting-web/abusing-hop-by-hop-headers.html
+  - https://book.hacktricks.wiki/en/network-services-pentesting/pentesting-web/special-http-headers.html
+  - https://www.rfc-editor.org/rfc/rfc9110.html#section-7.6.1
+
+target_schema:
+  required: [url]
+
+steps:
+  # A client may list extra field names inside `Connection` (RFC 9110 7.6.1).
+  # Any hop that follows the spec has to strip the fields named there before
+  # passing the request on. So: issue the same GET with and without the
+  # client-IP header named that way, and watch the status code. A difference
+  # means something in the chain acted on the list and the origin noticed the
+  # header go missing -- the precondition for the fail-open and cache-poisoning
+  # abuses, not proof of either.
+  #
+  # Request order is two ADJACENT baselines, then the nominated variant, then a
+  # third baseline. All four carry `Connection: close`, so the only thing that
+  # varies is the presence of the nominated field name -- otherwise a target
+  # that merely reacts to `close` looks identical to one honouring nominations.
+  # All three baselines must agree; adjacent sampling is what exposes a backend
+  # pool that alternates responses, which a baseline/probe/baseline order would
+  # read as stable.
+  #
+  # --http1.1 is deliberate: HTTP/2 forbids connection-specific fields, so curl
+  # drops `Connection` entirely over h2 and the probe would test nothing.
+  #
+  # Budget: 4 x --max-time 5 = 20s worst case, inside the 30s ceiling
+  # execute_tool imposes on curl (runner.py never forwards step.timeout).
+  # Read-only: four plain GETs, bodies discarded, nothing written.
+  - name: xff_nomination
+    tool: curl
+    command: >-
+      bash -c 'P="curl -s -o /dev/null --http1.1 --connect-timeout 3 --max-time 5 -w %{http_code}"; B1=$($P -H "Connection: close" -H "X-Forwarded-For: 203.0.113.7" "{{url}}"); B2=$($P -H "Connection: close" -H "X-Forwarded-For: 203.0.113.7" "{{url}}"); N=$($P -H "Connection: close, X-Forwarded-For" -H "X-Forwarded-For: 203.0.113.7" "{{url}}"); B3=$($P -H "Connection: close" -H "X-Forwarded-For: 203.0.113.7" "{{url}}"); echo "baseline=$B1/$B2/$B3 nominated=$N"; if [ "$B1" = "000" ] || [ "$N" = "000" ]; then echo ERLIK_HBH_NO_RESPONSE; elif [ "$B1" != "$B2" ] || [ "$B1" != "$B3" ]; then echo ERLIK_HBH_UNSTABLE_BASELINE; elif [ "$B1" = "$N" ]; then echo ERLIK_HBH_NO_CHANGE; else echo ERLIK_HBH_STATUS_CHANGED; fi'
+    evaluators:
+      - type: regex
+        pattern: 'ERLIK_HBH_STATUS_CHANGED'
+        emit_finding:
+          vuln_type: Hop-by-Hop Nomination of X-Forwarded-For Changes Backend Response
+          severity: medium
+
+  # Stacks disagree about which client-IP header they trust, so name the two
+  # other common ones (a `Connection` value is a list) before concluding the
+  # chain ignores nominations. Runs only if step 1 found nothing. Same control
+  # and same stability guard as above.
+  - name: alt_client_ip_nomination
+    tool: curl
+    when: no_finding_yet
+    command: >-
+      bash -c 'P="curl -s -o /dev/null --http1.1 --connect-timeout 3 --max-time 5 -w %{http_code}"; H1="X-Real-IP: 203.0.113.7"; H2="True-Client-IP: 203.0.113.7"; B1=$($P -H "Connection: close" -H "$H1" -H "$H2" "{{url}}"); B2=$($P -H "Connection: close" -H "$H1" -H "$H2" "{{url}}"); N=$($P -H "Connection: close, X-Real-IP, True-Client-IP" -H "$H1" -H "$H2" "{{url}}"); B3=$($P -H "Connection: close" -H "$H1" -H "$H2" "{{url}}"); echo "baseline=$B1/$B2/$B3 nominated=$N"; if [ "$B1" = "000" ] || [ "$N" = "000" ]; then echo ERLIK_HBH_NO_RESPONSE; elif [ "$B1" != "$B2" ] || [ "$B1" != "$B3" ]; then echo ERLIK_HBH_UNSTABLE_BASELINE; elif [ "$B1" = "$N" ]; then echo ERLIK_HBH_NO_CHANGE; else echo ERLIK_HBH_STATUS_CHANGED; fi'
+    evaluators:
+      - type: regex
+        pattern: 'ERLIK_HBH_STATUS_CHANGED'
+        emit_finding:
+          vuln_type: Hop-by-Hop Nomination of Client-IP Headers Changes Backend Response
+          severity: medium

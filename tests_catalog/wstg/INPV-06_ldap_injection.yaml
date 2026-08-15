@@ -1,0 +1,112 @@
+id: WSTG-INPV-06
+name: LDAP Injection
+category: Input Validation
+severity: high
+references:
+  - https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/07-Input_Validation_Testing/06-Testing_for_LDAP_Injection
+  - https://book.hacktricks.wiki/en/pentesting-web/ldap-injection.html
+
+target_schema:
+  required: [url, parameter]
+
+steps:
+  # Search filters are parenthesised expressions, so an unescaped ")" or "(" in
+  # user input leaves the assembled filter unbalanced and the directory client
+  # refuses to parse it. Every payload below is percent-encoded, which keeps the
+  # command free of shell metacharacters and leaves decoding to the target.
+  #   %28 = (   %29 = )   %2A = *   %3D = =   %26 = &   %78 = x
+  # This is the only step that reads response bodies, so both payloads are a
+  # nonsense value plus one stray bracket: they cannot match a directory entry
+  # under any parse, they can only be rejected by the filter parser.
+  - name: filter_syntax_probe
+    tool: curl
+    command: >-
+      curl -s -i -m 6 '{{url}}?{{parameter}}=erlikprobe9zq7%29';
+      echo ERLIK_LDAP_SECOND_PROBE;
+      curl -s -i -m 6 '{{url}}?{{parameter}}=erlikprobe9zq7%28'
+    evaluators:
+      - type: regex
+        # Directory-client error signatures across JNDI/Java, PHP ldap_*,
+        # .NET System.DirectoryServices, python-ldap/ldap3 and ldapjs. Any of
+        # these means our raw input reached the filter parser. Bare library
+        # names are avoided so a page that merely mentions a client library
+        # cannot trip the match.
+        pattern: 'javax\.naming|com\.sun\.jndi\.ldap|InvalidSearchFilterException|NamingException|LDAPException|LDAP: error code \d+|ldap_search\(\)|ldap_bind\(\)|ldap_list\(\)|Bad search filter|unbalanced parenthes|Invalid DN syntax|INVALID_FILTER|FILTER_ERROR|INVALID_SYNTAX|DirectoryServicesCOMException|System\.DirectoryServices\.|Supplied argument is not a valid LDAP|LDAPSearchException|LDAPInvalidFilterError|node_modules/ldapjs|ldap3\.core\.exceptions'
+        emit_finding:
+          vuln_type: LDAP Injection
+          severity: high
+
+  # Behavioural test with a built-in control. "*" is the LDAP presence wildcard:
+  # if it lands unescaped inside the filter it matches every entry that has the
+  # attribute. Bodies are discarded (-o /dev/null) so only status code and
+  # response length are observed — no directory content is read or stored.
+  #   A  nonsense literal            -> matches nothing
+  #   B  bare wildcard               -> matches everything IF interpreted
+  #   C  nonsense literal + wildcard -> still matches nothing
+  # C is the control: it carries the same special character as B, so a marker
+  # only fires when the wildcard SEMANTICS changed the result, not merely the
+  # presence of an unusual character. The comparison is directional and
+  # tolerant rather than exact: a page that echoes the search term back shifts
+  # every reading by roughly the payload length, so we require B to be
+  # substantially LARGER than A (a matched directory, not a shorter echo) while
+  # C stays within a few bytes of A.
+  - name: wildcard_differential
+    tool: curl
+    command: >-
+      A=$(curl -s -m 6 -o /dev/null -w '%{http_code}:%{size_download}' '{{url}}?{{parameter}}=erlikprobe9zq7');
+      B=$(curl -s -m 6 -o /dev/null -w '%{http_code}:%{size_download}' '{{url}}?{{parameter}}=%2A');
+      C=$(curl -s -m 6 -o /dev/null -w '%{http_code}:%{size_download}' '{{url}}?{{parameter}}=erlikprobe9zq7%2A');
+      echo "literal=$A wildcard=$B prefixed_wildcard=$C";
+      an=${A#*:}; bn=${B#*:}; cn=${C#*:};
+      gap=$(( cn - an )); if [ "$gap" -lt 0 ]; then gap=$(( 0 - gap )); fi;
+      if [ "$(( bn - an ))" -gt 32 ] && [ "$gap" -le 8 ]; then echo ERLIK_LDAP_WILDCARD_INTERPRETED; fi
+    evaluators:
+      - type: regex
+        pattern: 'ERLIK_LDAP_WILDCARD_INTERPRETED'
+        emit_finding:
+          vuln_type: LDAP Injection (wildcard interpreted in search filter)
+          severity: high
+      - type: llm
+        when: no_finding_yet
+        instruction: >-
+          The output holds three status:bytes readings for the same endpoint.
+          literal= used a nonsense value, wildcard= used a bare asterisk, and
+          prefixed_wildcard= used the nonsense value followed by an asterisk.
+          Set matched=true only if wildcard returned clearly MORE data than
+          literal (or a different status) WHILE prefixed_wildcard stayed close
+          to literal — that pattern means the asterisk acted as an LDAP presence
+          wildcard rather than an ordinary character. Note the page may echo the
+          search term, which alone shifts sizes by a few bytes; ignore
+          differences of that magnitude. If all three readings are effectively
+          the same, if wildcard returned LESS than literal, or if wildcard and
+          prefixed_wildcard both diverge from literal, set matched=false.
+        emit_finding:
+          vuln_type: LDAP Injection (suspected, LLM-flagged)
+          severity: medium
+
+  # Blind check for servers that swallow filter errors and render an identical
+  # page either way. Two injected filters are sent whose injected clause is
+  # always true versus always false. They are deliberately byte-for-byte the
+  # same length, encoded and decoded (%2A and %78 are both three characters,
+  # "*" and "x" both one), so a page that echoes the search term produces the
+  # same response size for both and cannot fake a difference. A response that
+  # still tracks the injected truth value proves the filter is
+  # attacker-controlled. Both payloads only read; neither adds, changes or
+  # removes directory data.
+  - name: blind_boolean_differential
+    tool: curl
+    when: no_finding_yet
+    command: >-
+      N=$(curl -s -m 6 -o /dev/null -w '%{http_code}:%{size_download}' '{{url}}?{{parameter}}=erlikprobe9zq7');
+      T=$(curl -s -m 6 -o /dev/null -w '%{http_code}:%{size_download}' '{{url}}?{{parameter}}=%2A%29%28objectClass%3D%2A%29%29%28%26%28objectClass%3Derlikvoid');
+      F=$(curl -s -m 6 -o /dev/null -w '%{http_code}:%{size_download}' '{{url}}?{{parameter}}=%78%29%28objectClass%3D%78%29%29%28%26%28objectClass%3Derlikvoid');
+      echo "nonsense=$N always_true=$T always_false=$F";
+      tn=${T#*:}; fn=${F#*:};
+      if [ "$(( tn - fn ))" -gt 32 ]; then echo ERLIK_LDAP_BLIND_DIFFERENTIAL; fi;
+      if [ "${T%%:*}" != "${F%%:*}" ]; then echo ERLIK_LDAP_BLIND_DIFFERENTIAL; fi
+    evaluators:
+      - type: regex
+        pattern: 'ERLIK_LDAP_BLIND_DIFFERENTIAL'
+        emit_finding:
+          vuln_type: Blind LDAP Injection (response tracks injected filter truth value)
+          severity: high
