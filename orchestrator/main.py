@@ -852,7 +852,7 @@ def _build_chaining_hint(tool_name: str, parsed_output: str, command: str, targe
 
     if tool_name == "nmap" and "OPEN PORTS" in parsed_output:
         hints.append(f'Consider: whatweb {T}')
-        hints.append(f'Consider: gobuster dir -u {T} -w /usr/share/dirb/wordlists/common.txt --exclude-length 3748')
+        hints.append(f'Consider: gobuster dir -u {T} -w /usr/share/dirb/wordlists/common.txt {_discovery_filter(T)}')
 
     elif tool_name in ("gobuster", "ffuf", "dirb") and "DISCOVERED PATHS" in parsed_output:
         paths = re.findall(r'  (/\S+)', parsed_output)
@@ -873,7 +873,7 @@ def _build_chaining_hint(tool_name: str, parsed_output: str, command: str, targe
             hints.append(f'Consider: sqlmap -u "{T}{target}?q=test" --batch --level=3')
 
     elif tool_name == "whatweb" and "TECHNOLOGIES" in parsed_output:
-        hints.append(f'Consider: gobuster dir -u {T} -w /usr/share/dirb/wordlists/common.txt --exclude-length 3748')
+        hints.append(f'Consider: gobuster dir -u {T} -w /usr/share/dirb/wordlists/common.txt {_discovery_filter(T)}')
         hints.append(f'Consider: nikto -h {T}')
 
     elif tool_name == "curl":
@@ -963,8 +963,8 @@ SEVERITY LEVELS: critical, high, medium, low, info
 TOOL USAGE EXAMPLES (use the target URL {target_url} — NEVER use any other hostname):
 - nmap -sV {target_host} -p {target_port}
 - whatweb {target_url}
-- gobuster dir -u {target_url} -w /usr/share/dirb/wordlists/common.txt --exclude-length 3748
-- ffuf -u {target_url}/FUZZ -w /usr/share/dirb/wordlists/common.txt -fs 3748
+- gobuster dir -u {target_url} -w /usr/share/dirb/wordlists/common.txt {_discovery_filter(target_url)}
+- ffuf -u {target_url}/FUZZ -w /usr/share/dirb/wordlists/common.txt {_discovery_filter(target_url, 'ffuf')}
 - sqlmap -u "{target_url}/endpoint?param=test" --batch --level=3
 - curl -s {target_url}/api/
 - curl -sI {target_url}  (check response headers)
@@ -1834,6 +1834,21 @@ def _deliverable_view(findings: list[dict]) -> tuple[list[dict], list[dict]]:
     Returns (included, withheld).
     """
     return list(findings), []
+
+
+def _discovery_filter(target_url: str, tool: str = "gobuster") -> str:
+    """Size-filter flag for a content-discovery command, measured per target.
+
+    Replaces a hardcoded `--exclude-length 3748` that appeared in five prompt
+    sites. 3748 is OWASP Juice Shop's catch-all body size — one target's value,
+    in a tool used on real client engagements, carried by all 39 recorded
+    gobuster invocations.
+
+    Falls back to that literal when the origin has not been probed or the probe
+    was inconclusive, so unprobed runs render byte-identically to before.
+    """
+    from orchestrator import soft404
+    return soft404.filter_flag(soft404.recall(target_url), tool)
 
 
 def current_scope_extra() -> list[str]:
@@ -3536,6 +3551,24 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
         # target URL so that routing still works with the pre-scan off.
         _observed_ports: list[int] = []
         _observed_tech: list[str] = []
+
+        # Measure how this target answers a path that does not exist, BEFORE any
+        # discovery command is rendered into a prompt. Replaces a hardcoded
+        # `--exclude-length 3748` — Juice Shop's catch-all size — that shipped in
+        # five prompt sites. Never raises: an unreachable or unstable origin
+        # yields INDETERMINATE, which renders exactly what erlik rendered before.
+        try:
+            from orchestrator import soft404 as _s404
+            _verdict = await _s404.probe_origin(target_url)
+            await manager.broadcast(session_id, {
+                "type": "log", "phase": "recon",
+                "message": f"Soft-404 probe: {_verdict.state}"
+                           + (f" ({_verdict.size} bytes)" if _verdict.size else "")
+                           + f" — {_verdict.detail}",
+            })
+        except Exception as _pe:  # noqa: BLE001
+            print(f"[soft404 {session_id[:8]}] probe skipped: {_pe}", flush=True)
+
         # The session's own host. Credential injection refuses any command that
         # names a different one, so a captured token cannot be attached to a
         # request leaving the engagement scope.
@@ -4400,7 +4433,7 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
                     _p = str(_up(target_url).port) if _up(target_url).port else ("443" if target_url.startswith("https") else "80")
                     suggestion_cmds = {
                         "recon": f'{{"action": "run_tool", "command": "nmap -sV {_h} -p {_p}", "reason": "Port scan to identify services"}}',
-                        "discovery": f'{{"action": "run_tool", "command": "gobuster dir -u {target_url} -w /usr/share/dirb/wordlists/common.txt --exclude-length 3748", "reason": "Directory enumeration to find hidden paths"}}',
+                        "discovery": f'{{"action": "run_tool", "command": "gobuster dir -u {target_url} -w /usr/share/dirb/wordlists/common.txt {_discovery_filter(target_url)}", "reason": "Directory enumeration to find hidden paths"}}',
                         "vuln_scan": f'{{"action": "run_tool", "command": "nuclei -u {target_url} -severity medium,high,critical", "reason": "Scanning for known vulnerabilities"}}',
                         "exploitation": f'{{"action": "run_tool", "command": "curl -s {target_url}/api/", "reason": "Probing API endpoints for data exposure"}}',
                     }
