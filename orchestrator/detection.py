@@ -196,22 +196,70 @@ def _curl_sqli_login(ctx: DetectContext) -> list[Finding]:
 
 
 def _curl_cors(ctx: DetectContext) -> list[Finding]:
+    """CORS findings, gated on Access-Control-Allow-Credentials.
+
+    A bare `Access-Control-Allow-Origin: *` is NOT a vulnerability: browsers
+    refuse to send credentials to a wildcard origin, so a cross-origin read
+    returns only what any anonymous client could already fetch. It is the correct
+    way to serve a public API. This previously emitted MEDIUM on the wildcard
+    alone and never looked at the credentials header at all — Juice Shop sets
+    `*` on its public root, so the detector produced 12 findings across an 18-run
+    sweep that a triager would reject on sight.
+
+    What actually makes it exploitable is credentialed cross-origin reads:
+    a reflected arbitrary origin, or `null`, together with
+    `Access-Control-Allow-Credentials: true`.
+    """
     if "access-control-allow-origin" not in ctx.output_lower:
         return []
-    cors_match = re.search(r'access-control-allow-origin:\s*(\S+)', ctx.output, re.IGNORECASE)
-    if cors_match and cors_match.group(1).strip() == "*":
+    m = re.search(r'access-control-allow-origin:\s*(\S+)', ctx.output, re.IGNORECASE)
+    if not m:
+        return []
+    origin = m.group(1).strip()
+    creds = bool(re.search(r'access-control-allow-credentials:\s*true',
+                           ctx.output, re.IGNORECASE))
+
+    # Did the server echo back the Origin WE sent? That is reflection, and it is
+    # what distinguishes a deliberate allowlist from an echo-anything policy.
+    sent = re.search(r'origin:\s*([^"\'\s]+)', ctx.command, re.IGNORECASE)
+    reflected = bool(sent and origin.lower() == sent.group(1).strip().lower())
+
+    if origin == "*":
+        if creds:
+            # Browsers reject this pair outright, so it is not exploitable — but
+            # it signals the origin check was meant to be permissive.
+            return [{
+                "vuln_type": "CORS Misconfiguration", "severity": "low",
+                "url": ctx.url, "parameter": "",
+                "evidence": ("Access-Control-Allow-Origin: * with "
+                             "Access-Control-Allow-Credentials: true — browsers "
+                             "block this combination, but it indicates an "
+                             "intentionally permissive origin policy"),
+            }]
+        return []      # public API served correctly
+
+    if origin.lower() == "null":
         return [{
-            "vuln_type": "CORS Misconfiguration", "severity": "medium",
+            "vuln_type": "CORS Misconfiguration",
+            "severity": "high" if creds else "low",
             "url": ctx.url, "parameter": "",
-            "evidence": "Access-Control-Allow-Origin: * — allows any domain to read responses",
+            "evidence": (f"Access-Control-Allow-Origin: null"
+                         f"{' with credentials' if creds else ''} — a sandboxed "
+                         f"iframe or redirect chain can obtain a null origin"),
         }]
-    if cors_match and "evil" in cors_match.group(1).lower():
+
+    if reflected or "evil" in origin.lower():
         return [{
-            "vuln_type": "CORS Misconfiguration", "severity": "high",
+            "vuln_type": "CORS Misconfiguration",
+            "severity": "high" if creds else "low",
             "url": ctx.url, "parameter": "",
-            "evidence": f"Server reflects arbitrary Origin: {cors_match.group(1)}",
+            "evidence": (f"Server reflects arbitrary Origin: {origin}"
+                         f"{' with Access-Control-Allow-Credentials: true — any '
+                            'site can read authenticated responses' if creds
+                            else ' but without credentials, so only anonymous '
+                                 'data is exposed'}"),
         }]
-    return []
+    return []          # a specific, non-reflected origin is an allowlist
 
 
 def _curl_missing_headers(ctx: DetectContext) -> list[Finding]:

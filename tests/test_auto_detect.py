@@ -124,18 +124,50 @@ class TestCurl:
         bac = next(f for f in findings if f["vuln_type"] == "Broken Access Control")
         assert bac["severity"] == "high"
 
-    def test_cors_wildcard(self):
-        # No `curl -s ... -I` so the missing-headers branch stays out of the way.
+    def test_cors_bare_wildcard_is_not_a_finding(self):
+        """A bare ACAO:* is how you correctly serve a public API — browsers refuse
+        to send credentials to a wildcard, so nothing private can be read. This
+        used to emit MEDIUM and produced 12 false findings across an 18-run sweep,
+        because Juice Shop sets it on its public root."""
         out = "HTTP/1.1 200 OK\nAccess-Control-Allow-Origin: *\n"
         findings = detect("curl", out, 'curl http://juice-shop:3000/ -H "Origin: x"')
-        assert types(findings) == ["CORS Misconfiguration"]
-        assert findings[0]["severity"] == "medium"
+        assert "CORS Misconfiguration" not in types(findings)
 
-    def test_cors_reflected_arbitrary_origin_is_high(self):
+    def test_cors_wildcard_with_credentials_is_low(self):
+        """Browsers block this pair, so it is not exploitable — but it shows the
+        origin check was meant to be permissive."""
+        out = ("HTTP/1.1 200 OK\nAccess-Control-Allow-Origin: *\n"
+               "Access-Control-Allow-Credentials: true\n")
+        findings = detect("curl", out, 'curl http://juice-shop:3000/ -H "Origin: x"')
+        f = next(f for f in findings if f["vuln_type"] == "CORS Misconfiguration")
+        assert f["severity"] == "low"
+
+    def test_cors_reflected_origin_with_credentials_is_high(self):
+        """Reflection PLUS credentials is the exploitable case: any site can read
+        authenticated responses."""
+        out = ("Access-Control-Allow-Origin: https://evil.test\n"
+               "Access-Control-Allow-Credentials: true\n")
+        findings = detect("curl", out,
+                          'curl http://juice-shop:3000/ -H "Origin: https://evil.test"')
+        f = next(f for f in findings if f["vuln_type"] == "CORS Misconfiguration")
+        assert f["severity"] == "high"
+
+    def test_cors_reflected_origin_without_credentials_is_low(self):
+        """Without credentials the attacker reads only what any anonymous client
+        could already fetch, so this is not high severity."""
         out = "Access-Control-Allow-Origin: https://evil.test\n"
-        findings = detect("curl", out, 'curl http://juice-shop:3000/ -H "Origin: https://evil.test"')
-        assert findings[0]["vuln_type"] == "CORS Misconfiguration"
-        assert findings[0]["severity"] == "high"
+        findings = detect("curl", out,
+                          'curl http://juice-shop:3000/ -H "Origin: https://evil.test"')
+        f = next(f for f in findings if f["vuln_type"] == "CORS Misconfiguration")
+        assert f["severity"] == "low"
+
+    def test_cors_null_origin_with_credentials_is_high(self):
+        """A sandboxed iframe or redirect chain can obtain a null origin."""
+        out = ("Access-Control-Allow-Origin: null\n"
+               "Access-Control-Allow-Credentials: true\n")
+        findings = detect("curl", out, 'curl http://juice-shop:3000/ -H "Origin: null"')
+        f = next(f for f in findings if f["vuln_type"] == "CORS Misconfiguration")
+        assert f["severity"] == "high"
 
     def test_missing_security_headers(self):
         out = "HTTP/1.1 200 OK\nContent-Type: text/html\nDate: today\n"
