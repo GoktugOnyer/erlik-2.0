@@ -137,9 +137,22 @@ def resolve(run_config=None) -> dict:
     # Explicit per-key values in the session config override the preset.
     for k in ("cve_enrich", "skills", "nettacker", "nettacker_findings",
               "nettacker_scenario", "playbooks", "poc_verify", "primitives",
-              "target_memory", "techniques", "ai_review", "review_model"):
+              "target_memory", "techniques", "ai_review", "review_model",
+              "skills_exclude", "skills_pin", "skills_max_chars"):
         if k in cfg and cfg[k] is not None:
             base[k] = cfg[k]
+
+    # A key that is not in the tuple above VANISHES SILENTLY — the operator
+    # sets it, the UI shows it, and the run ignores it. Name the ones we can
+    # recognise as intended-but-wrong rather than dropping them without a word.
+    warnings: list[str] = []
+    _known = {"cve_enrich", "skills", "nettacker", "nettacker_findings",
+              "nettacker_scenario", "playbooks", "poc_verify", "primitives",
+              "target_memory", "techniques", "ai_review", "review_model",
+              "skills_exclude", "skills_pin", "skills_max_chars", "preset"}
+    for k in cfg:
+        if k not in _known:
+            warnings.append(f"run_config key {k!r} is not recognised and was ignored")
 
     def tri(key: str) -> bool:
         v = base.get(key)
@@ -160,8 +173,35 @@ def resolve(run_config=None) -> dict:
     if playbooks is None:
         playbooks = os.environ.get("ERLIK_PLAYBOOKS", "") or None
 
+    # Budget: clamped, not trusted. 0 does NOT mean "off" — the selector takes
+    # the first file unconditionally — so a 0 here would be a knob whose label
+    # lies. Values outside the sane band fall back to the default and warn.
+    _mc = base.get("skills_max_chars")
+    skills_max_chars = 14000
+    if _mc is not None:
+        try:
+            _mc = int(_mc)
+            if 2000 <= _mc <= 40000:
+                skills_max_chars = _mc
+            else:
+                warnings.append(
+                    f"skills_max_chars {_mc} is outside 2000-40000; using 14000")
+        except (TypeError, ValueError):
+            warnings.append(f"skills_max_chars {_mc!r} is not a number; using 14000")
+
+    def _as_list(v):
+        if v is None:
+            return []
+        if isinstance(v, str):
+            return [x.strip() for x in v.split(",") if x.strip()]
+        return [str(x).strip() for x in v if str(x).strip()]
+
     return {
         "preset": preset or "custom",
+        "skills_exclude": _as_list(base.get("skills_exclude")),
+        "skills_pin": _as_list(base.get("skills_pin")),
+        "skills_max_chars": skills_max_chars,
+        "run_config_warnings": warnings,
         "cve_enrich": tri("cve_enrich"),
         "skills": tri("skills"),
         "nettacker": tri("nettacker"),

@@ -265,8 +265,43 @@ def _class_candidates(cls: str, catalog: list[tuple[Path, set[str]]]) -> list[Pa
                                        str(p)))
 
 
+def catalog_stems() -> set[str]:
+    """Every selectable sheet's filename. The allowlist for pin/exclude."""
+    return {p.name for p, _ in _catalog()}
+
+
+def _resolve_refs(refs, kind: str) -> tuple[list[str], list[str]]:
+    """Split operator-supplied sheet names into (valid, warnings).
+
+    Constrained to CATALOGUE MEMBERS, never free paths: a pin is a
+    guaranteed-injection primitive, so it must not be able to name anything the
+    router could not already have chosen. An unknown name WARNS rather than
+    failing the run — a stale pin from an old preset should not stop a scan —
+    but it is never silently ignored, which is how a knob comes to look like it
+    works while doing nothing.
+    """
+    known = catalog_stems()
+    ok, warn = [], []
+    for raw in (refs or []):
+        name = str(raw).strip()
+        if not name:
+            continue
+        if "/" in name or "\\" in name or ".." in name:
+            warn.append(f"{kind} {name!r} rejected: names a path, not a sheet")
+            continue
+        if not name.endswith(".md"):
+            name += ".md"
+        if name in known:
+            ok.append(name)
+        else:
+            warn.append(f"{kind} {name!r} matches no sheet in the corpus")
+    return ok, warn
+
+
 def select_skill_files(hint: str, max_files: int = 3, max_chars: int = 14000,
-                       tech: list[str] | None = None) -> list[Path]:
+                       tech: list[str] | None = None,
+                       exclude: list[str] | None = None,
+                       pin: list[str] | None = None) -> list[Path]:
     """Return the highest-scoring reference files for a hint, budget-capped.
 
     Classes named in the mission are honoured first, one file each in the order
@@ -285,8 +320,23 @@ def select_skill_files(hint: str, max_files: int = 3, max_chars: int = 14000,
         return []
 
     catalog = _catalog()
+    excluded, _ = _resolve_refs(exclude, "exclude")
+    if excluded:
+        catalog = [(p, t) for p, t in catalog if p.name not in set(excluded)]
     chosen: list[Path] = []
     used = 0
+
+    def _take_pins() -> None:
+        """Pinned sheets are taken before anything else and DO consume budget.
+
+        Exempting them would let a pin quietly raise injected volume above the
+        stated cap, which is the one number an operator must be able to trust.
+        """
+        pinned, _ = _resolve_refs(pin, "pin")
+        by_name = {p.name: p for p, _ in catalog}
+        for name in pinned:
+            if name in by_name:
+                _take(by_name[name])
 
     def _take(path: Path) -> bool:
         nonlocal used
@@ -298,6 +348,9 @@ def select_skill_files(hint: str, max_files: int = 3, max_chars: int = 14000,
         chosen.append(path)
         used += size
         return True
+
+    # 0. Operator pins first — an explicit "always send this" outranks routing.
+    _take_pins()
 
     # 1. One file per class the mission actually named, in the order named, so a
     #    three-class mission is not answered with three files from one class.
@@ -353,13 +406,15 @@ def select_skill_files(hint: str, max_files: int = 3, max_chars: int = 14000,
 
 
 def render_skills(hint: str, max_chars: int = 14000,
+                  exclude: list[str] | None = None, pin: list[str] | None = None,
                   tech: list[str] | None = None) -> str:
     """Compose the selected knowledge block for a hint — WITHOUT the
     ``ERLIK_SKILLS`` gate. Provider-agnostic: the result is plain text you can
     drop into the system prompt of ANY model or API (local Ollama, an
     OpenAI-compatible gateway, Anthropic, etc.). Returns "" when nothing matches.
     """
-    files = select_skill_files(hint, max_chars=max_chars, tech=tech)
+    files = select_skill_files(hint, max_chars=max_chars, tech=tech,
+                               exclude=exclude, pin=pin)
     if not files:
         return ""
     header = (

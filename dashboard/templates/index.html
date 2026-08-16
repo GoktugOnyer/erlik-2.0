@@ -1677,6 +1677,52 @@
                     </div>
                 </div>
             </div>
+
+            <div class="panel rounded p-4">
+                <h3 class="font-pixel" style="font-size:0.62rem;">TUNING</h3>
+                <p class="font-mono mt-1" style="font-size:0.58rem; opacity:.7; max-width:78ch;">
+                    Per-session, stored in this run's config — never a global setting, so two
+                    runs labelled the same cannot differ silently. Leave blank to use defaults.
+                </p>
+
+                <div class="mt-3 grid gap-2" style="grid-template-columns:110px 1fr; align-items:center;">
+                    <label class="font-mono" style="font-size:0.58rem;">pin sheets</label>
+                    <input id="rc-skills-pin" class="input-field font-mono px-2 py-1 rounded"
+                        style="font-size:0.58rem;" placeholder="hunt-ssrf.md, hunt-idor.md"
+                        oninput="previewTuning()">
+                    <label class="font-mono" style="font-size:0.58rem;">exclude</label>
+                    <input id="rc-skills-exclude" class="input-field font-mono px-2 py-1 rounded"
+                        style="font-size:0.58rem;" placeholder="sql-injection-advanced.md"
+                        oninput="previewTuning()">
+                    <label class="font-mono" style="font-size:0.58rem;">budget</label>
+                    <div class="flex items-center gap-2">
+                        <input id="rc-skills-max-chars" type="number" min="2000" max="40000" step="1000"
+                            class="input-field font-mono px-2 py-1 rounded"
+                            style="font-size:0.58rem; width:110px;" placeholder="14000"
+                            oninput="previewTuning()">
+                        <span class="font-mono" style="font-size:0.55rem; opacity:.6;">chars, 2000&ndash;40000</span>
+                    </div>
+                </div>
+
+                <div class="mt-3">
+                    <input id="rc-tuning-mission" class="input-field font-mono w-full px-2 py-1 rounded"
+                        style="font-size:0.58rem;" placeholder="mission text, to preview what this run would receive"
+                        oninput="previewTuning()">
+                    <div id="rc-tuning-preview" class="font-mono mt-2" style="font-size:0.57rem;"></div>
+                </div>
+
+                <div class="mt-3" style="border-left:2px solid #ffb545; padding-left:8px;">
+                    <div class="font-mono" style="font-size:0.57rem; color:#ffb545;">What was actually measured</div>
+                    <div class="font-mono mt-1" style="font-size:0.55rem; opacity:.78; max-width:78ch;">
+                        A 12-run experiment varied <b>skills on/off</b> and <b>playbook on/off</b> only.
+                        Recall fell as injected bytes rose (0.171&nbsp;&rarr;&nbsp;0.095, r&nbsp;=&nbsp;&minus;0.796
+                        against injected bytes) on a 7B model; precision moved the other way
+                        (0.730&nbsp;&rarr;&nbsp;0.917). A preliminary 27B run (n&nbsp;=&nbsp;1 per arm) held recall flat.
+                        <b>No arm varied this budget</b>, so no value here carries a recall figure &mdash;
+                        the readout above is a measurement of bytes, not of outcome.
+                    </div>
+                </div>
+            </div>
             <div class="panel rounded p-4">
                 <h3 class="font-pixel" style="font-size:0.62rem;">DETECTION RULES</h3>
                 <p class="font-mono mt-1" style="font-size:0.58rem; opacity:.7; max-width:78ch;">
@@ -1875,6 +1921,53 @@
             } catch (e) { out.textContent = 'failed'; }
         }
 
+
+
+        // ===== Tuning: per-session skills knobs =====
+        // The preview calls the SAME selector a run uses, so what an operator
+        // sees here is what the run receives — not a re-implementation that
+        // drifts.
+        function tuningConfig() {
+            const csv = id => {
+                const v = (document.getElementById(id)?.value || '').trim();
+                return v ? v.split(',').map(x => x.trim()).filter(Boolean) : null;
+            };
+            const n = parseInt(document.getElementById('rc-skills-max-chars')?.value, 10);
+            return {
+                skills_pin: csv('rc-skills-pin'),
+                skills_exclude: csv('rc-skills-exclude'),
+                // null, not a default: an untouched control must not overwrite
+                // a value the chosen preset pinned.
+                skills_max_chars: Number.isFinite(n) ? n : null,
+            };
+        }
+
+        let __tuningTimer = null;
+        function previewTuning() {
+            clearTimeout(__tuningTimer);
+            __tuningTimer = setTimeout(doPreviewTuning, 250);
+        }
+
+        async function doPreviewTuning() {
+            const mission = (document.getElementById('rc-tuning-mission')?.value || '').trim();
+            const out = document.getElementById('rc-tuning-preview');
+            if (!out) return;
+            if (!mission) { out.innerHTML = '<span style="opacity:.5">enter a mission to preview</span>'; return; }
+            try {
+                const d = await (await fetch('/api/library/routing/explain', {
+                    method: 'POST', headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify(Object.assign({mission}, tuningConfig())),
+                })).json();
+                const warn = (d.warnings || []).length
+                    ? `<div style="color:#ffb545;">${d.warnings.map(escapeHtml).join('<br>')}</div>` : '';
+                out.innerHTML = warn +
+                    `<div><b>${d.injected_total.toLocaleString()}</b> chars would be injected ·
+                     classes: ${d.classes_detected.map(escapeHtml).join(', ') || '<span style="opacity:.5">none</span>'}</div>` +
+                    d.selected.map(x =>
+                        `<div>· ${escapeHtml(x.stem)} — ${x.injected_bytes.toLocaleString()}B
+                         ${x.excerpted ? '<span style="color:#ffb545">(excerpted)</span>' : ''}</div>`).join('');
+            } catch (e) { out.textContent = 'preview failed'; }
+        }
 
         // ===== Authoring: write skill sheets =====
         // Every write is gated server-side (see orchestrator/skills_authoring.py).

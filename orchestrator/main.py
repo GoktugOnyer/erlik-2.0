@@ -3054,6 +3054,17 @@ async def _create_chain_session(chain_id: str, chain_row, phase: str, position: 
     # Carry the chain's run_config onto every sub-session (defensive: older chain
     # rows from before the migration may not have the column).
     _chain_run_config = chain_row["run_config"] if "run_config" in chain_row.keys() else None
+    # A pin is a guaranteed-injection primitive. Inheriting it down a chain
+    # would force one operator-chosen sheet into every phase — recon, exploit,
+    # report — regardless of what that phase is for. Budget and exclusions are
+    # phase-agnostic and do carry.
+    if _chain_run_config:
+        try:
+            _cc = json.loads(_chain_run_config)
+            if isinstance(_cc, dict) and _cc.pop("skills_pin", None) is not None:
+                _chain_run_config = json.dumps(_cc)
+        except (ValueError, TypeError):
+            pass
 
     db = await get_db()
     try:
@@ -3643,6 +3654,11 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
                     except Exception as _pe:  # noqa: BLE001
                         print(f"[nettacker {session_id[:8]}] persist failed: {_pe}", flush=True)
 
+        for _w in (runcfg.get("run_config_warnings") or []):
+            print(f"[runcfg {session_id[:8]}] {_w}", flush=True)
+            await manager.broadcast(session_id, {
+                "type": "log", "phase": "recon", "message": f"RUN CONFIG: {_w}"})
+
         # Inject auto-selected skill knowledge (ERLIK_SKILLS=1). Target-agnostic:
         # picks references from skills_catalog/ by the vuln CLASSES the mission
         # names, plus any technology the pre-scan detected. Deliberately placed
@@ -3655,7 +3671,14 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
             from skills import render_skills
         try:
             _sk_hint = " ".join(filter(None, [vuln_category or "", system_prompt or ""]))
-            _sk_ctx = render_skills(_sk_hint, tech=_observed_tech) if runcfg["skills"] else ""
+            # Operator tunables, per-session from run_config. Never a global
+            # store: two runs labelled the same must not differ silently.
+            _sk_ctx = render_skills(
+                _sk_hint, tech=_observed_tech,
+                max_chars=runcfg.get("skills_max_chars", 14000),
+                exclude=runcfg.get("skills_exclude") or None,
+                pin=runcfg.get("skills_pin") or None,
+            ) if runcfg["skills"] else ""
         except Exception as _sk_err:  # noqa: BLE001 — never break the loop over knowledge injection
             _sk_ctx = ""
             print(f"[skills {session_id[:8]}] error (non-fatal): {_sk_err}", flush=True)
@@ -5040,8 +5063,22 @@ async def library_routing_explain(payload: dict):
     """
     from orchestrator.skills import (select_skill_files, detect_classes,
                                      license_of, SKILLS_ROOT, MAX_FILE_EXCERPT)
-    mission = (payload or {}).get("mission", "") or ""
-    files = select_skill_files(mission)
+    payload = payload or {}
+    mission = payload.get("mission", "") or ""
+    # Resolve the tunables through the SAME code path a run uses, so the
+    # preview cannot disagree with the run — including its warnings, which is
+    # how an operator learns a pin matched nothing instead of assuming it took.
+    from orchestrator.runconfig import resolve as _resolve
+    from orchestrator.skills import _resolve_refs
+    rc = _resolve({k: payload.get(k) for k in
+                   ("skills_pin", "skills_exclude", "skills_max_chars")
+                   if payload.get(k) is not None})
+    _, pin_warn = _resolve_refs(rc["skills_pin"], "pin")
+    _, exc_warn = _resolve_refs(rc["skills_exclude"], "exclude")
+    warnings = list(rc.get("run_config_warnings") or []) + pin_warn + exc_warn
+    files = select_skill_files(mission, max_chars=rc["skills_max_chars"],
+                               exclude=rc["skills_exclude"] or None,
+                               pin=rc["skills_pin"] or None)
     chosen, total = [], 0
     for p in files:
         body = p.read_text(encoding="utf-8", errors="replace").strip()
@@ -5054,6 +5091,8 @@ async def library_routing_explain(payload: dict):
         })
     return {
         "mission": mission[:400],
+        "warnings": warnings,
+        "budget": rc["skills_max_chars"],
         "classes_detected": sorted(detect_classes(mission)),
         "selected": chosen,
         "injected_total": total,
