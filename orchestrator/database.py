@@ -208,6 +208,13 @@ async def init_db():
             ("toolset_preset", "TEXT DEFAULT NULL"),  # RQ3-b action-space ablation
             ("disable_stagnation", "INTEGER DEFAULT 0"),  # benchmark opt-out
             ("run_config", "TEXT DEFAULT NULL"),  # per-session automation flow (JSON)
+            # Authorised scope, SNAPSHOTTED at session creation (JSON list of
+            # globs). Without this the report-time scope verdict depends on the
+            # environment of whichever process happens to serve the request, so
+            # the same session could audit clean in one shell and dirty in
+            # another. A legal boundary must not be re-derived from ambient
+            # state months after the engagement.
+            ("scope_extra", "TEXT DEFAULT NULL"),
         ]
         for col_name, col_def in migrations:
             try:

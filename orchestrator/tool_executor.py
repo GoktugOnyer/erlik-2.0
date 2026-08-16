@@ -433,6 +433,35 @@ def _safe_hostname(url: str) -> str:
         return ""
 
 
+def extract_hosts(text: str) -> list[str]:
+    """Every hostname referenced by `text`, in order, deduplicated.
+
+    Lifted out of _scope_violation so the report-time scope audit uses the
+    SAME extraction as the command-time guard. A second implementation would
+    drift, and then the report would confidently classify hosts by rules the
+    executor does not actually apply.
+    """
+    seen: set[str] = set()
+    out: list[str] = []
+
+    def add(h: str) -> None:
+        if h and h not in seen:
+            seen.add(h)
+            out.append(h)
+
+    for m in _SCOPE_URL_RX.finditer(text or ""):
+        add(_safe_hostname(m.group(0)))
+    masked = _SCOPE_URL_RX.sub(" ", text or "")
+    for m in _SCOPE_BARE_HOST_RX.finditer(masked):
+        tok = m.group(0)
+        # skip filesystem paths / wordlist filenames that look host-ish
+        if "/" in tok or tok.endswith((".txt", ".json", ".yaml", ".yml", ".html",
+                                       ".php", ".js", ".csv")):
+            continue
+        add(tok.split(":")[0])
+    return out
+
+
 def _scope_enforced() -> bool:
     return os.environ.get("ERLIK_SCOPE_ENFORCE", "1").strip().lower() not in ("0", "false", "no", "off")
 
@@ -481,18 +510,7 @@ def _scope_violation(command: str, target_url: str | None) -> str | None:
     if os.environ.get("ERLIK_DOCKER_TARGET_HOST"):
         extra.append(os.environ["ERLIK_DOCKER_TARGET_HOST"].lower())
 
-    candidates: list[str] = []
-    for m in _SCOPE_URL_RX.finditer(command):
-        candidates.append(_safe_hostname(m.group(0)))
-    masked = _SCOPE_URL_RX.sub(" ", command)
-    for m in _SCOPE_BARE_HOST_RX.finditer(masked):
-        tok = m.group(0)
-        # skip filesystem paths / wordlist filenames that look host-ish
-        if "/" in tok or tok.endswith((".txt", ".json", ".yaml", ".yml", ".html", ".php", ".js", ".csv")):
-            continue
-        candidates.append(tok.split(":")[0])
-
-    for host in candidates:
+    for host in extract_hosts(command):
         if host and not _scope_allows(host, target_host, extra):
             return f"out-of-scope host {host!r} (target {target_host!r}); set ERLIK_SCOPE_EXTRA_HOSTS to allow, or ERLIK_SCOPE_ENFORCE=0 to disable"
     return None

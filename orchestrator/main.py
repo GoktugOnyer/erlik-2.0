@@ -1836,6 +1836,91 @@ def _deliverable_view(findings: list[dict]) -> tuple[list[dict], list[dict]]:
     return list(findings), []
 
 
+def current_scope_extra() -> list[str]:
+    """The authorised-scope globs to SNAPSHOT onto a new session."""
+    import os as _os
+    extra = [g.strip() for g in _os.environ.get("ERLIK_SCOPE_EXTRA_HOSTS", "").split(",")
+             if g.strip()]
+    if _os.environ.get("ERLIK_DOCKER_TARGET_HOST"):
+        extra.append(_os.environ["ERLIK_DOCKER_TARGET_HOST"].lower())
+    return extra
+
+
+def _scope_audit(findings: list[dict], target_url: str,
+                 scope_extra: list[str] | None) -> dict:
+    """Classify each finding's URL host against the session's authorised scope.
+
+    NON-BLOCKING, and deliberately so. A finding's URL at the auto-detect site
+    is derived from the executed command, and that command already passed
+    _scope_violation at execution time — so this can only fire when command-time
+    enforcement was off, or on a hostname the MODEL invented. It is a
+    hallucination detector far more than a legal control, and 409-ing a client's
+    deliverables over a host erlik never sent a packet to is the wrong severity.
+    Finding 27 in the recorded corpus (session target http://dvwa, finding url
+    http://juice-shop:3000) would block all five exports for a real session.
+
+    Reads scope from the SNAPSHOT, never from ambient env: otherwise the verdict
+    depends on the environment of whichever process serves the request.
+
+    Returns {"audited": bool, "in_scope": int, "out_of_scope": int,
+             "hosts": [...], "by_id": {id: status}}.
+    """
+    from orchestrator.tool_executor import extract_hosts, _scope_allows, _safe_hostname
+
+    if not target_url:
+        return {"audited": False, "in_scope": 0, "out_of_scope": 0,
+                "hosts": [], "by_id": {}}
+
+    target_host = (_safe_hostname(
+        target_url if "://" in target_url else f"http://{target_url}") or "").lower()
+    extra = list(scope_extra or [])
+
+    by_id: dict = {}
+    offending: list[str] = []
+    n_in = n_out = 0
+    for f in findings:
+        hosts = extract_hosts(f.get("url") or "")
+        bad = [h for h in hosts if not _scope_allows(h, target_host, extra)]
+        if bad:
+            n_out += 1
+            by_id[f.get("id")] = "out_of_scope"
+            for h in bad:
+                if h not in offending:
+                    offending.append(h)
+        else:
+            n_in += 1
+            by_id[f.get("id")] = "in_scope"
+    return {"audited": True, "in_scope": n_in, "out_of_scope": n_out,
+            "hosts": offending, "by_id": by_id}
+
+
+def render_scope_block(audit: dict, target_url: str) -> list[str]:
+    """Markdown for the report's scope section.
+
+    An unaudited session renders SCOPE NOT AUDITED, never a blank section: the
+    failure mode of a governance field is that nobody notices it is empty.
+    """
+    lines = ["## Scope", ""]
+    if not audit or not audit.get("audited"):
+        lines += ["**SCOPE NOT AUDITED** — no authorised scope was recorded for "
+                  "this session, so no finding could be checked against it.", ""]
+        return lines
+    lines.append(f"- Authorised target: `{target_url}`")
+    lines.append(f"- Findings in scope: **{audit['in_scope']}**")
+    if audit["out_of_scope"]:
+        lines.append(f"- Findings referencing an **out-of-scope** host: "
+                     f"**{audit['out_of_scope']}**")
+        for h in audit["hosts"]:
+            lines.append(f"  - `{h}`")
+        lines.append("")
+        lines.append("*A finding URL outside the authorised scope usually means the "
+                     "hostname was invented by the model rather than contacted — "
+                     "commands are checked against scope before they run. Verify "
+                     "before including it in a deliverable.*")
+    lines.append("")
+    return lines
+
+
 def _policy_verdicts(findings: list[dict]) -> dict[int, str]:
     """Map finding id -> rule id, for findings the submission policy demotes.
 
@@ -1947,6 +2032,28 @@ async def _generate_report(session_id: str, model: str, target_url: str,
     report_lines.append(f"| **Findings** | {len(findings)} |")
     report_lines.append(f"| **Date** | {timestamp} |")
     report_lines.append("")
+
+    # ─── Scope audit ───
+    # Reads the snapshot taken at session creation, never ambient env, so the
+    # verdict does not depend on which process serves the request.
+    _scope_extra_snapshot = None
+    _db2 = await get_db()
+    try:
+        _cur2 = await _db2.execute(
+            "SELECT scope_extra FROM sessions WHERE id = ?", (session_id,))
+        _row2 = await _cur2.fetchone()
+        if _row2 and _row2[0]:
+            try:
+                _scope_extra_snapshot = json.loads(_row2[0])
+            except (ValueError, TypeError):
+                _scope_extra_snapshot = None
+    except Exception:
+        _scope_extra_snapshot = None
+    finally:
+        await _db2.close()
+
+    _audit = _scope_audit(findings, target_url, _scope_extra_snapshot)
+    report_lines.extend(render_scope_block(_audit, target_url))
 
     # ─── Findings table placeholder ───
     # Built after the calibration pass (PART 3) so it reflects calibrated
@@ -2911,13 +3018,14 @@ async def _create_chain_session(chain_id: str, chain_row, phase: str, position: 
         await db.execute(
             "INSERT INTO sessions (id, target_url, scope_mode, system_prompt, model, enabled_tools, "
             "session_type, no_timeout, max_turns, chain_id, chain_position, chain_phase, "
-            "toolset_preset, disable_stagnation, run_config) "
-            "VALUES (?, ?, ?, ?, ?, ?, 'chain', ?, ?, ?, ?, ?, ?, ?, ?)",
+            "toolset_preset, disable_stagnation, run_config, scope_extra) "
+            "VALUES (?, ?, ?, ?, ?, ?, 'chain', ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (session_id, chain_row["target_url"], chain_row["scope_mode"],
              chain_row["system_prompt"], chain_row["model"], enabled_tools_str,
              1 if no_timeout else 0, max_turns,
              chain_id, position, phase,
-             toolset_preset, 1 if disable_stagnation else 0, _chain_run_config),
+             toolset_preset, 1 if disable_stagnation else 0, _chain_run_config,
+             json.dumps(current_scope_extra())),
         )
         await db.commit()
     finally:
@@ -4842,12 +4950,13 @@ async def create_session(data: SessionCreate):
         await db.execute(
             "INSERT INTO sessions (id, target_url, scope_mode, system_prompt, model, enabled_tools, "
             "session_type, parent_session_id, vuln_category, no_timeout, max_turns, "
-            "toolset_preset, disable_stagnation, tool_timeout, run_config) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "toolset_preset, disable_stagnation, tool_timeout, run_config, scope_extra) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (session_id, data.target_url, data.scope_mode.value, data.system_prompt, data.model,
              enabled_tools_str, data.session_type, data.parent_session_id, data.vuln_category,
              1 if data.no_timeout else 0, effective_max_turns, data.toolset_preset,
-             1 if data.disable_stagnation else 0, data.tool_timeout, _run_config_json),
+             1 if data.disable_stagnation else 0, data.tool_timeout, _run_config_json,
+             json.dumps(current_scope_extra())),
         )
         await db.commit()
         row = await db.execute("SELECT * FROM sessions WHERE id = ?", (session_id,))
@@ -7274,10 +7383,11 @@ async def _run_benchmark_sequence(benchmark_id: str, data: BenchmarkCreate):
             try:
                 await db.execute(
                     "INSERT INTO sessions (id, target_url, scope_mode, system_prompt, model, enabled_tools, "
-                    "session_type, no_timeout, max_turns, run_config) VALUES (?, ?, ?, ?, ?, ?, 'cold', ?, ?, ?)",
+                    "session_type, no_timeout, max_turns, run_config, scope_extra) VALUES (?, ?, ?, ?, ?, ?, 'cold', ?, ?, ?, ?)",
                     (cold_session_id, data.target_url, "full", data.system_prompt, data.model,
                      enabled_tools_str, 1 if data.no_timeout else 0, effective_max_turns,
-                     json.dumps(data.run_config) if data.run_config else None)
+                     json.dumps(data.run_config) if data.run_config else None,
+                     json.dumps(current_scope_extra()))
                 )
                 await db.execute(
                     "UPDATE benchmark_runs SET cold_session_id = ? WHERE id = ?",
@@ -7354,10 +7464,12 @@ async def _run_benchmark_sequence(benchmark_id: str, data: BenchmarkCreate):
             try:
                 await db.execute(
                     "INSERT INTO sessions (id, target_url, scope_mode, system_prompt, model, enabled_tools, "
-                    "session_type, parent_session_id, no_timeout, max_turns, run_config) VALUES (?, ?, ?, ?, ?, ?, 'warm', ?, ?, ?, ?)",
+                    "session_type, parent_session_id, no_timeout, max_turns, run_config, "
+                    "scope_extra) VALUES (?, ?, ?, ?, ?, ?, 'warm', ?, ?, ?, ?, ?)",
                     (warm_session_id, data.target_url, "full", data.system_prompt, data.model,
                      enabled_tools_str, cold_session_id, 1 if data.no_timeout else 0, effective_max_turns,
-                     json.dumps(data.run_config) if data.run_config else None)
+                     json.dumps(data.run_config) if data.run_config else None,
+                     json.dumps(current_scope_extra()))
                 )
                 await db.execute(
                     "UPDATE benchmark_runs SET warm_session_id = ? WHERE id = ?",
