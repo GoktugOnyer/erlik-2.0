@@ -207,7 +207,19 @@ class TestCommittedCorpus:
         if not corpus:
             pytest.skip("no committed cleanroom corpus yet")
         rep = C.measure(corpus)
-        # 26 of 28 exercised. The two that are not: wfuzz (registered in
-        # _DETECTORS but _content_discovery_pairs has no wfuzz pattern, so it
-        # can never fire) and dirb.
-        assert len(rep.exercised) >= 26, C.format_report(rep)
+        # 27 of 28 exercised. The one that is not is wfuzz, and its zero is a
+        # DIFFERENT KIND of zero from every other — worth stating, because
+        # pooling them is how a dead code path hides inside a coverage number:
+        #
+        #   dirb  — LIVE. _content_discovery_pairs parses its
+        #           `+ url (CODE:200|SIZE:n)` lines correctly; the corpus simply
+        #           had no Zone A case until one was added.
+        #   wfuzz — DEAD. Registered in _DETECTORS and routed to
+        #           _detect_content_discovery, but that parser carries only
+        #           gobuster/ffuf/dirb patterns. wfuzz's native
+        #           `ID / Response / Lines / Word / Chars / Payload` table
+        #           matches none of them, so the detector cannot fire under any
+        #           input. Recorded, not fixed.
+        assert len(rep.exercised) >= 27, C.format_report(rep)
+        assert rep.unreachable == ["wfuzz:_detect_content_discovery"], (
+            "the set of unreachable detectors changed:\n" + C.format_report(rep))

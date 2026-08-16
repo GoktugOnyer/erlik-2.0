@@ -1894,3 +1894,31 @@ fixtures:
   expected: []
   rationale: 'The real output of erlik''s bundled `zap-cli spider` wrapper: ZAP''s spider action returns
     a scan id, not alerts. Valid JSON object with no ''alerts'' key, so the detector correctly emits nothing.'
+- route: /dirb-catchall-scan
+  zone: A
+  family: curl-discovery-paths
+  tool: dirb
+  command: dirb https://clean.test/ /usr/share/dirb/wordlists/common.txt
+  response: '---- Scanning URL: https://clean.test/ ----
+
+    + https://clean.test/ftp (CODE:200|SIZE:412)
+
+    + https://clean.test/robots.txt (CODE:200|SIZE:274)
+
+    + https://clean.test/security.txt (CODE:200|SIZE:188)
+
+    '
+  rationale: 'A clean site that intentionally publishes robots.txt and security.txt, and serves a public
+    /ftp download directory. dirb reports them because they exist and are meant to be found. Zone A dirb
+    case: without it the dirb branch of _content_discovery_pairs has no committed positive control and
+    its silence cannot be told from wfuzz''s dead one.'
+  expected:
+  - vuln_type: Information Disclosure
+    severity: info
+    detector: dirb:_detect_content_discovery
+  - vuln_type: Security Misconfiguration
+    severity: info
+    detector: dirb:_detect_content_discovery
+  - vuln_type: Sensitive Data Exposure
+    severity: medium
+    detector: dirb:_detect_content_discovery
