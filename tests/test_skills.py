@@ -162,3 +162,72 @@ def test_index_and_skill_stubs_are_never_selected(fake_corpus):
     })
     picked = [p.name for p in S.select_skill_files("alpha", max_files=5)]
     assert picked == ["alpha-quickstart.md"]
+
+
+# --- class-aware selection ------------------------------------------------
+#
+# Six real runs all injected exactly 14233 chars — the SAME two files for Juice
+# Shop and for DVWA — because both missions said "injection, authentication and
+# access-control flaws" and the router scored single tokens. "injection" matched
+# ldap-, nosql-, os-command-, sql-, ssti-, xpath- and xxe-injection equally, so
+# they tied on (overlap, boost) and alphabetical order plus file size picked the
+# winner. DVWA, whose ground truth is SQLi/XSS/CSRF/upload, was handed an API
+# Top-10 overview and an OS-command-injection quickstart.
+
+GENERIC_MISSION = ("Assess the instance for injection, authentication and "
+                   "access-control flaws.")
+
+
+def test_every_named_class_is_represented():
+    """The regression: a three-class mission must not answer with one class."""
+    names = " ".join(p.stem for p in S.select_skill_files(GENERIC_MISSION))
+    assert "authentication" in names
+    assert "access-control" in names
+    assert "injection" in names
+
+
+def test_classes_are_detected_from_the_mission():
+    assert set(S.detect_classes(GENERIC_MISSION)) >= {"authn", "authz"}
+    assert "sqli" in S.detect_classes("test for SQL injection")
+    assert "xss" in S.detect_classes("look for cross-site scripting")
+    assert S.detect_classes("nothing relevant here") == []
+
+
+@pytest.mark.parametrize("mission, expect", [
+    ("Test for SQL injection on search", "sql-injection"),
+    ("Look for NoSQL injection in the API", "nosql-injection"),
+    ("Check command injection", "os-command-injection"),
+    ("Check JWT handling", "jwt"),
+    ("Look for IDOR and broken access control", "access-control"),
+    ("Test file upload handling", "file-upload"),
+])
+def test_a_named_class_selects_its_own_sheet(mission, expect):
+    names = " ".join(p.stem for p in S.select_skill_files(mission))
+    assert expect in names, names
+
+
+def test_sql_injection_does_not_select_nosql():
+    """'sql-injection' is a substring of 'nosql-injection-quickstart', so a plain
+    containment test answered a SQLi mission with NoSQL."""
+    picked = [p.stem for p in S.select_skill_files("Test for SQL injection on search")]
+    assert picked[0].startswith("sql-injection"), picked
+
+
+def test_navigation_files_are_never_selected():
+    """'<topic>-index.md' is a table of contents, not technique content."""
+    for mission in (GENERIC_MISSION, "authentication testing", "injection testing"):
+        for p in S.select_skill_files(mission):
+            assert not p.stem.endswith("-index"), p
+
+
+def test_observed_tech_influences_selection():
+    """Routing on mission prose alone gave DVWA and Juice Shop identical files."""
+    base = S.select_skill_files("assess the application")
+    with_tech = S.select_skill_files("assess the application", tech=["jwt", "oauth"])
+    assert with_tech != base or any("jwt" in p.stem or "oauth" in p.stem for p in with_tech)
+
+
+def test_single_class_missions_do_not_inflate_the_budget():
+    """Only a three-class mission widens the budget; one class must not."""
+    total = sum(p.stat().st_size for p in S.select_skill_files("Test for SQL injection"))
+    assert total <= 14000

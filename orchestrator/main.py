@@ -3204,27 +3204,6 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
         else:
             print(f"[playbooks {session_id[:8]}] skipped (ERLIK_PLAYBOOKS={'set' if os.environ.get('ERLIK_PLAYBOOKS') else 'unset'}, target={target_url})", flush=True)
 
-        # Inject auto-selected skill knowledge (ERLIK_SKILLS=1). Unlike the
-        # Juice-Shop playbooks, this is target-agnostic: it picks 1-3 references
-        # from skills_catalog/ by the mission's vuln class. See orchestrator/skills.py.
-        try:
-            from orchestrator.skills import render_skills
-        except ImportError:
-            from skills import render_skills
-        try:
-            _sk_hint = " ".join(filter(None, [vuln_category or "", system_prompt or ""]))
-            _sk_ctx = render_skills(_sk_hint) if runcfg["skills"] else ""
-        except Exception as _sk_err:  # noqa: BLE001 — never break the loop over knowledge injection
-            _sk_ctx = ""
-            print(f"[skills {session_id[:8]}] error (non-fatal): {_sk_err}", flush=True)
-        if _sk_ctx:
-            combined_system += f"\n\n{_sk_ctx}"
-            print(f"[skills {session_id[:8]}] injected {len(_sk_ctx)} chars (hint={_sk_hint[:60]!r})", flush=True)
-            await manager.broadcast(session_id, {
-                "type": "log", "phase": "recon",
-                "message": f"SKILLS: injected {len(_sk_ctx)} chars of relevant pentest knowledge",
-            })
-
         # Deterministic pre-scan (OWASP Nettacker) — seed the agent with verified
         # recon (open ports, tech, paths, header/TLS/CVE hits) so it explores less.
         # Gated by ERLIK_NETTACKER (default off). See orchestrator/integrations/nettacker.py.
@@ -3307,6 +3286,31 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
                         })
                     except Exception as _pe:  # noqa: BLE001
                         print(f"[nettacker {session_id[:8]}] persist failed: {_pe}", flush=True)
+
+        # Inject auto-selected skill knowledge (ERLIK_SKILLS=1). Target-agnostic:
+        # picks references from skills_catalog/ by the vuln CLASSES the mission
+        # names, plus any technology the pre-scan detected. Deliberately placed
+        # after tech detection — it used to run before _observed_tech existed, so
+        # selection saw only the mission prose and every run against every target
+        # received the same two files.
+        try:
+            from orchestrator.skills import render_skills
+        except ImportError:
+            from skills import render_skills
+        try:
+            _sk_hint = " ".join(filter(None, [vuln_category or "", system_prompt or ""]))
+            _sk_ctx = render_skills(_sk_hint, tech=_observed_tech) if runcfg["skills"] else ""
+        except Exception as _sk_err:  # noqa: BLE001 — never break the loop over knowledge injection
+            _sk_ctx = ""
+            print(f"[skills {session_id[:8]}] error (non-fatal): {_sk_err}", flush=True)
+        if _sk_ctx:
+            combined_system += f"\n\n{_sk_ctx}"
+            print(f"[skills {session_id[:8]}] injected {len(_sk_ctx)} chars "
+                  f"(hint={_sk_hint[:50]!r}, tech={_observed_tech[:4]})", flush=True)
+            await manager.broadcast(session_id, {
+                "type": "log", "phase": "recon",
+                "message": f"SKILLS: injected {len(_sk_ctx)} chars of relevant pentest knowledge",
+            })
 
         # Environment-specific techniques: route on what this target actually IS
         # (observed ports + detected technologies) rather than on the mission text.
