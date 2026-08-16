@@ -5080,9 +5080,25 @@ async def library_authoring_status():
         blockers.append("set ERLIK_API_TOKEN (writes must not be unauthenticated)")
     if g["native_mode"]:
         blockers.append("unset ERLIK_NATIVE (no container boundary)")
+    # Per-file reachability, not just a listing. A sheet that sits in the
+    # corpus and is never selected is inert — which is precisely how 100
+    # imported BugHunter skills shipped "available" and reached no run.
+    from orchestrator.skills import select_skill_files
+    probes = ["sql injection", "xss", "idor access control", "ssrf",
+              "authentication", "file upload", "xxe", "csrf",
+              "command injection", "information disclosure"]
+    selected: dict[str, list[str]] = {}
+    for probe in probes:
+        for f in select_skill_files(probe):
+            selected.setdefault(f.name, []).append(probe)
+    files = [{**f, "selected_for": selected.get(f["name"], []),
+              "reachable": f["name"] in selected} for f in A.listing()]
+    inert = [f["name"] for f in files if not f["reachable"]]
     return {"enabled": not blockers, "gates": g, "blockers": blockers,
             "local_root": str(A.local_root()),
-            "files": A.listing(),
+            "files": files,
+            "inert_count": len(inert),
+            "probes": probes,
             "warning": ("Authored text is injected into the system prompt of an "
                         "agent that executes shell commands. erlik does not "
                         "filter it and cannot — review it like code that runs "

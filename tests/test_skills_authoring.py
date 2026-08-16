@@ -276,3 +276,82 @@ class TestEndpointsRefuseLoudly:
         r = client.post("/api/library/skills", json={"name": "x.md", "content": "y"})
         assert r.status_code == 503
         assert "writes_require_token" in r.json()["detail"]
+
+
+class TestReachabilityIsReportedNotAssumed:
+    """The number that makes this feature honest.
+
+    100 imported BugHunter skills once shipped routable, listed in the UI, and
+    selected by nothing. An operator authoring sheets can land in exactly that
+    state, so the API reports per-file reachability and the UI says so in the
+    same panel that invites them to add more.
+    """
+
+    def test_inert_sheet_is_reported_as_never_selected(self, sandbox, client):
+        A.save("zzz-obscure-notes.md", "# notes about nothing in particular\n" * 30)
+        d = client.get("/api/library/authoring/status").json()
+        f = next(x for x in d["files"] if x["name"] == "zzz-obscure-notes.md")
+        assert f["reachable"] is False
+        assert f["selected_for"] == []
+        assert d["inert_count"] == 1
+
+    def test_reachable_sheet_names_the_missions(self, sandbox, client):
+        A.save("hunt-ssrf-clientx.md", "# ssrf notes for client x\n" * 40)
+        d = client.get("/api/library/authoring/status").json()
+        f = next(x for x in d["files"] if x["name"] == "hunt-ssrf-clientx.md")
+        assert f["reachable"] is True
+        assert "ssrf" in f["selected_for"]
+
+    def test_inert_count_is_a_subset_not_a_total(self, sandbox, client):
+        A.save("zzz-obscure-notes.md", "# nothing\n" * 30)
+        A.save("hunt-ssrf-clientx.md", "# ssrf notes\n" * 40)
+        d = client.get("/api/library/authoring/status").json()
+        assert len(d["files"]) == 2
+        assert d["inert_count"] == 1
+
+    def test_status_explains_the_refusal_rather_than_going_blank(self, client, monkeypatch):
+        """A disabled feature must say what to do, not leave a dead button."""
+        monkeypatch.delenv("ERLIK_SKILL_AUTHORING", raising=False)
+        monkeypatch.delenv("ERLIK_API_TOKEN", raising=False)
+        d = client.get("/api/library/authoring/status").json()
+        assert d["enabled"] is False
+        assert len(d["blockers"]) == 2
+        assert any("ERLIK_SKILL_AUTHORING" in b for b in d["blockers"])
+        assert any("ERLIK_API_TOKEN" in b for b in d["blockers"])
+        assert "cannot" in d["warning"] or "does not filter" in d["warning"]
+
+
+class TestEditorIsWiredIntoThePage:
+    """The UI is vanilla JS in one template — no build step means nothing else
+    would catch a panel that renders but is never called."""
+
+    @staticmethod
+    def _html(client):
+        return client.get("/").text
+
+    @pytest.mark.parametrize("token", [
+        'id="authoring-editor"', 'id="authoring-body"', 'id="authoring-inert"',
+        "function saveSkill", "function validateSkill", "function deleteSkill",
+        "function updateByteCount", "function loadAuthoring",
+    ])
+    def test_present(self, client, token):
+        assert token in self._html(client)
+
+    def test_editor_is_actually_invoked_on_view_switch(self, client):
+        """A panel nobody calls is the same defect as a rule that never fires."""
+        assert "loadArsenal(); loadAuthoring();" in self._html(client)
+
+    def test_byte_counter_knows_the_excerpt_limit(self, client):
+        """Past MAX_FILE_EXCERPT the rest of a sheet cannot reach a run, so the
+        editor has to say so while the operator is still typing."""
+        from orchestrator.skills import MAX_FILE_EXCERPT
+        html = self._html(client)
+        assert f"AUTHORING_EXCERPT_LIMIT = {MAX_FILE_EXCERPT}" in html
+        assert f"AUTHORING_MAX_BYTES = 64 * 1024" in html
+        assert A.MAX_BYTES == 64 * 1024
+
+    def test_save_invalidates_the_skills_browser_cache(self, client):
+        """__skillsData is cached; a save that leaves it stale shows the
+        operator a corpus that no longer matches disk."""
+        html = self._html(client)
+        assert html.count("__skillsData = null;") >= 2

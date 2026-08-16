@@ -1646,6 +1646,37 @@
                 <div id="arsenal-routing" class="mt-3"></div>
             </div>
 
+
+            <div class="panel rounded p-4">
+                <div class="flex items-baseline justify-between flex-wrap gap-2">
+                    <h3 class="font-pixel" style="font-size:0.62rem;">YOUR SKILLS</h3>
+                    <div id="authoring-gate" class="font-mono" style="font-size:0.58rem;"></div>
+                </div>
+                <div id="authoring-blocked" class="font-mono mt-2" style="font-size:0.58rem; display:none;"></div>
+
+                <div id="authoring-editor" style="display:none;">
+                    <div id="authoring-inert" class="font-mono mt-2" style="font-size:0.58rem; display:none;"></div>
+                    <div id="authoring-files" class="mt-2"></div>
+
+                    <div class="mt-3" style="border-top:1px solid var(--border,#2a3038); padding-top:10px;">
+                        <div class="flex gap-2 items-center flex-wrap">
+                            <input id="authoring-name" class="input-field font-mono px-2 py-1 rounded"
+                                style="font-size:0.6rem; width:230px;" placeholder="hunt-clientname.md">
+                            <span id="authoring-bytes" class="font-mono" style="font-size:0.55rem; opacity:.7;">0 B</span>
+                            <button onclick="validateSkill()" class="font-pixel px-3 py-1 rounded border"
+                                style="font-size:0.55rem;">VALIDATE</button>
+                            <button onclick="saveSkill()" class="font-pixel px-3 py-1 rounded border"
+                                style="font-size:0.55rem;">SAVE</button>
+                            <label class="font-mono" style="font-size:0.55rem; opacity:.7;">
+                                <input type="checkbox" id="authoring-overwrite"> overwrite</label>
+                        </div>
+                        <textarea id="authoring-body" class="input-field font-mono w-full mt-2 px-2 py-1 rounded"
+                            rows="12" style="font-size:0.6rem;" oninput="updateByteCount()"
+                            placeholder="# Client X notes&#10;&#10;What this target does differently..."></textarea>
+                        <div id="authoring-result" class="font-mono mt-2" style="font-size:0.58rem;"></div>
+                    </div>
+                </div>
+            </div>
             <div class="panel rounded p-4">
                 <h3 class="font-pixel" style="font-size:0.62rem;">DETECTION RULES</h3>
                 <p class="font-mono mt-1" style="font-size:0.58rem; opacity:.7; max-width:78ch;">
@@ -1707,7 +1738,7 @@
             if (view === 'reports') loadReportsList();
             if (view === 'benchmark') loadBenchmarkHistory();
             if (view === 'skills') loadSkills();
-            if (view === 'arsenal') loadArsenal();
+            if (view === 'arsenal') { loadArsenal(); loadAuthoring(); }
         }
 
 
@@ -1842,6 +1873,172 @@
                      <div class="font-mono mt-2" style="font-size:0.53rem; opacity:.65; max-width:78ch;">
                        ${escapeHtml(d.note)}</div>`;
             } catch (e) { out.textContent = 'failed'; }
+        }
+
+
+        // ===== Authoring: write skill sheets =====
+        // Every write is gated server-side (see orchestrator/skills_authoring.py).
+        // This UI never decides whether a save is allowed; it reports what the
+        // server said, including WHICH gate refused.
+        const AUTHORING_EXCERPT_LIMIT = 7000;   // MAX_FILE_EXCERPT
+        const AUTHORING_MAX_BYTES = 64 * 1024;
+
+        function updateByteCount() {
+            const el = document.getElementById('authoring-body');
+            const out = document.getElementById('authoring-bytes');
+            if (!el || !out) return;
+            const n = new TextEncoder().encode(el.value).length;
+            let note = '', colour = '';
+            if (n > AUTHORING_MAX_BYTES) {
+                note = ' — over the 64 KB limit, this will be refused'; colour = '#ff4466';
+            } else if (n > AUTHORING_EXCERPT_LIMIT) {
+                // Past this only the first 7,000 bytes are ever injected, so the
+                // rest of the sheet cannot reach a run.
+                note = ` — only the first ${AUTHORING_EXCERPT_LIMIT.toLocaleString()} B are injected`;
+                colour = '#ffb545';
+            }
+            out.textContent = `${n.toLocaleString()} B${note}`;
+            out.style.color = colour || '';
+        }
+
+        async function loadAuthoring() {
+            let d;
+            try {
+                d = await (await fetch('/api/library/authoring/status')).json();
+            } catch (e) { return; }
+            const gate = document.getElementById('authoring-gate');
+            const blocked = document.getElementById('authoring-blocked');
+            const editor = document.getElementById('authoring-editor');
+
+            gate.innerHTML = d.enabled ? pill('authoring enabled', 'ok')
+                                       : pill('authoring disabled', 'dim');
+            if (!d.enabled) {
+                editor.style.display = 'none';
+                blocked.style.display = '';
+                blocked.innerHTML =
+                    '<div style="opacity:.8;">Writing skill sheets is off. To enable it:</div>' +
+                    '<ul style="margin:4px 0 0 14px; opacity:.75;">' +
+                    d.blockers.map(b => `<li>${escapeHtml(b)}</li>`).join('') + '</ul>' +
+                    `<div class="mt-2" style="opacity:.7; max-width:78ch;">${escapeHtml(d.warning)}</div>`;
+                return;
+            }
+            blocked.style.display = 'none';
+            editor.style.display = '';
+
+            // The number that matters. An operator with authored files none of
+            // which the router ever picks has added nothing, and is told so HERE
+            // — in the same panel inviting them to add more — rather than being
+            // left to assume the corpus grew.
+            const inert = document.getElementById('authoring-inert');
+            if (d.files.length && d.inert_count) {
+                inert.style.display = '';
+                inert.innerHTML =
+                    `<span style="color:#ffb545;">${d.inert_count} of ${d.files.length} of your sheets ` +
+                    `are never selected by the router.</span> They are on disk but no run receives them — ` +
+                    `usually because a vendored sheet out-ranks them for every class they match. ` +
+                    `Adding more files will not change that.`;
+            } else {
+                inert.style.display = 'none';
+            }
+
+            document.getElementById('authoring-files').innerHTML = d.files.length
+                ? d.files.map(f => `
+                    <div class="flex items-center justify-between gap-2" style="padding:3px 0;">
+                      <span class="font-mono" style="font-size:0.58rem;">
+                        ${escapeHtml(f.name)}
+                        <span style="opacity:.5">${f.bytes.toLocaleString()} B</span>
+                      </span>
+                      <span class="flex items-center gap-1">
+                        ${f.reachable
+                            ? pill('selected for: ' + f.selected_for.slice(0,3).join(', '), 'ok')
+                            : pill('never selected', 'warn')}
+                        <button onclick="deleteSkill('${escapeHtml(f.name)}')"
+                          class="font-mono" style="font-size:0.52rem; opacity:.6; text-decoration:underline;">delete</button>
+                      </span>
+                    </div>`).join('')
+                : '<div class="font-mono" style="font-size:0.58rem; opacity:.5;">no authored sheets yet</div>';
+            updateByteCount();
+        }
+
+        function authoringPayload() {
+            return {
+                name: document.getElementById('authoring-name').value.trim(),
+                content: document.getElementById('authoring-body').value,
+                overwrite: document.getElementById('authoring-overwrite').checked,
+            };
+        }
+
+        function renderSignals(sig) {
+            if (!sig || !sig.total) {
+                return '<div style="opacity:.6;">No URLs, hosts, IPs or exec verbs found.</div>';
+            }
+            const row = (label, items) => items.length
+                ? `<div><span style="opacity:.6">${label}:</span> ` +
+                  items.map(i => `<code style="font-size:0.53rem;">${escapeHtml(i)}</code>`).join(' ') + '</div>'
+                : '';
+            return `<div style="border-left:2px solid #ffb545; padding-left:8px;">
+                <div style="color:#ffb545;">${sig.total} thing(s) to review before this enters a prompt</div>
+                ${row('urls', sig.urls)}${row('hosts', sig.hosts)}
+                ${row('ips', sig.ips)}${row('exec', sig.exec_verbs)}
+                <div class="mt-1" style="opacity:.65; max-width:78ch;">${escapeHtml(sig.note)}</div>
+            </div>`;
+        }
+
+        async function validateSkill() {
+            const out = document.getElementById('authoring-result');
+            out.textContent = 'checking…';
+            try {
+                const r = await fetch('/api/library/skills/validate', {
+                    method: 'POST', headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify(authoringPayload()),
+                });
+                if (!r.ok) { out.innerHTML = `<span style="color:#ff4466;">${escapeHtml((await r.json()).detail || r.status)}</span>`; return; }
+                const d = await r.json();
+                out.innerHTML =
+                    (d.ok ? '<div style="color:#31d67a;">valid — nothing written yet</div>'
+                          : '<div style="color:#ff4466;">' +
+                            d.errors.map(e => escapeHtml(e.detail)).join('<br>') + '</div>') +
+                    '<div class="mt-2">' + renderSignals(d.signals) + '</div>';
+            } catch (e) { out.textContent = 'failed'; }
+        }
+
+        async function saveSkill() {
+            const out = document.getElementById('authoring-result');
+            out.textContent = 'saving…';
+            try {
+                const r = await fetch('/api/library/skills', {
+                    method: 'POST', headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify(authoringPayload()),
+                });
+                const d = await r.json();
+                if (!r.ok) {
+                    out.innerHTML = `<span style="color:#ff4466;">${escapeHtml(d.detail || r.status)}</span>`;
+                    return;
+                }
+                // Report reachability at the moment of saving, not later. This is
+                // the countermeasure to a corpus that grows while runs receive
+                // nothing new from it.
+                out.innerHTML = `<div style="color:#31d67a;">saved ${escapeHtml(d.saved)} (${d.bytes.toLocaleString()} B)</div>` +
+                    (d.reachable
+                        ? `<div class="mt-1">${pill('router selects it for: ' + d.selected_for.join(', '), 'ok')}</div>`
+                        : `<div class="mt-1">${pill('the router never selects this sheet', 'warn')}
+                           <div style="opacity:.7; max-width:78ch;">${escapeHtml(d.note)}</div></div>`);
+                __skillsData = null;      // the SKILLS browser is now stale
+                loadAuthoring();
+            } catch (e) { out.textContent = 'failed'; }
+        }
+
+        async function deleteSkill(name) {
+            if (!confirm(`Move ${name} out of the corpus? It is kept in data/skills_trash/.`)) return;
+            try {
+                const r = await fetch('/api/library/skills/' + encodeURIComponent(name), {method: 'DELETE'});
+                const d = await r.json();
+                document.getElementById('authoring-result').innerHTML = r.ok
+                    ? `<span style="opacity:.8;">moved to ${escapeHtml(d.moved_to)}</span>`
+                    : `<span style="color:#ff4466;">${escapeHtml(d.detail || r.status)}</span>`;
+                __skillsData = null;
+                loadAuthoring();
+            } catch (e) { /* ignore */ }
         }
 
         // ===== Skills library browser =====
