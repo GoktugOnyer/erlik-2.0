@@ -5064,6 +5064,99 @@ async def library_routing_explain(payload: dict):
     }
 
 
+@app.get("/api/library/authoring/status")
+async def library_authoring_status():
+    """Which gates are open, and what an operator must do to open the rest.
+
+    A read, so it works while authoring is disabled — the point is to explain
+    the refusal rather than leave a dead button.
+    """
+    from orchestrator import skills_authoring as A
+    g = A.gate_status()
+    blockers = []
+    if not g["authoring_flag"]:
+        blockers.append("set ERLIK_SKILL_AUTHORING=1")
+    if not g["api_token_set"]:
+        blockers.append("set ERLIK_API_TOKEN (writes must not be unauthenticated)")
+    if g["native_mode"]:
+        blockers.append("unset ERLIK_NATIVE (no container boundary)")
+    return {"enabled": not blockers, "gates": g, "blockers": blockers,
+            "local_root": str(A.local_root()),
+            "files": A.listing(),
+            "warning": ("Authored text is injected into the system prompt of an "
+                        "agent that executes shell commands. erlik does not "
+                        "filter it and cannot — review it like code that runs "
+                        "as you.")}
+
+
+@app.post("/api/library/skills/validate")
+async def library_skills_validate(payload: dict, request: Request):
+    """Dry run: validate a sheet and show its content signals. Writes nothing."""
+    from orchestrator import skills_authoring as A
+    try:
+        A.assert_enabled(client_host=(request.client.host if request.client else None),
+                         headers=dict(request.headers))
+    except A.AuthoringDisabled as e:
+        raise HTTPException(403, str(e))
+    name = (payload or {}).get("name", "")
+    body = (payload or {}).get("content", "")
+    errors = []
+    for fn in (lambda: A.validate_name(name), lambda: A.validate_body(body)):
+        try:
+            fn()
+        except A.InvalidSkillRef as e:
+            errors.append({"rule": e.rule, "detail": str(e)})
+    return {"ok": not errors, "errors": errors, "signals": A.content_signals(body)}
+
+
+@app.post("/api/library/skills")
+async def library_skills_create(payload: dict, request: Request):
+    """Write an operator-authored sheet. Disabled unless every gate passes."""
+    from orchestrator import skills_authoring as A
+    try:
+        A.assert_enabled(client_host=(request.client.host if request.client else None),
+                         headers=dict(request.headers))
+    except A.AuthoringDisabled as e:
+        code = 503 if "writes_require_token" in str(e) else 403
+        raise HTTPException(code, str(e))
+    try:
+        path = A.save((payload or {}).get("name", ""),
+                      (payload or {}).get("content", ""),
+                      overwrite=bool((payload or {}).get("overwrite")))
+    except A.InvalidSkillRef as e:
+        raise HTTPException(413 if e.rule == "too_large" else 400, str(e))
+    from orchestrator.skills import select_skill_files
+    # Report RANK, not membership. A sheet that is in the corpus but never
+    # first for any mission is inert — which is exactly how 100 imported
+    # BugHunter skills shipped routable and selected by nothing.
+    probes = ["sql injection", "xss", "idor access control", "ssrf",
+              "authentication", "file upload", "xxe", "csrf"]
+    reached = [p for p in probes
+               if any(f.name == path.name for f in select_skill_files(p))]
+    return {"saved": path.name, "bytes": path.stat().st_size,
+            "selected_for": reached,
+            "reachable": bool(reached),
+            "note": ("selected_for lists the sample missions where the router "
+                     "actually picks this sheet. Empty means it is in the "
+                     "corpus but no run will receive it.")}
+
+
+@app.delete("/api/library/skills/{name}")
+async def library_skills_delete(name: str, request: Request):
+    """Soft-delete: moved outside BOTH corpus roots, never unlinked."""
+    from orchestrator import skills_authoring as A
+    try:
+        A.assert_enabled(client_host=(request.client.host if request.client else None),
+                         headers=dict(request.headers))
+    except A.AuthoringDisabled as e:
+        raise HTTPException(403, str(e))
+    try:
+        dest = A.soft_delete(name)
+    except A.InvalidSkillRef as e:
+        raise HTTPException(404 if e.rule == "missing" else 400, str(e))
+    return {"deleted": name, "moved_to": str(dest)}
+
+
 @app.get("/api/skills-preview")
 async def preview_skills(hint: str = "injection"):
     """Which reference sheets the router would inject for a given hint."""

@@ -122,6 +122,37 @@ _DEFAULT_LICENCE = "MIT — transilienceai/communitytools"
 UNKNOWN_LICENCE = "UNKNOWN — provenance not recorded"
 
 
+def _roots() -> list[Path]:
+    """Corpus roots, in RANK ORDER. Vendored first, operator-authored second.
+
+    Zone rank is structural, not a tiebreak: an authored sheet must never
+    displace a vetted one just by sorting earlier. See _catalog().
+    """
+    from orchestrator import skills_authoring as _sa
+    return [SKILLS_ROOT, _sa.local_root()]
+
+
+def root_of(path: Path) -> Path | None:
+    p = Path(path).resolve()
+    for r in _roots():
+        try:
+            if p.is_relative_to(r.resolve()):
+                return r
+        except OSError:
+            continue
+    return None
+
+
+def rel_of(path: Path) -> Path:
+    """Path relative to whichever root owns it.
+
+    Replaces bare `relative_to(SKILLS_ROOT)`, which raises for an authored file
+    and would 500 every caller the moment the second root has anything in it.
+    """
+    r = root_of(path)
+    return Path(path).resolve().relative_to(r.resolve()) if r else Path(path).name
+
+
 def license_of(path: Path) -> str:
     """Licence string for a corpus file, keyed on its top-level directory.
 
@@ -129,8 +160,15 @@ def license_of(path: Path) -> str:
     new corpus dropped in without a licence entry must be visibly unattributed,
     never silently relabelled as MIT.
     """
+    from orchestrator import skills_authoring as _sa
+    p = Path(path)
     try:
-        rel = Path(path).resolve().relative_to(SKILLS_ROOT.resolve())
+        if p.resolve().is_relative_to(_sa.local_root().resolve()):
+            return "operator-authored — no third-party licence"
+    except OSError:
+        pass
+    try:
+        rel = p.resolve().relative_to(SKILLS_ROOT.resolve())
     except (ValueError, OSError):
         return UNKNOWN_LICENCE
     top = rel.parts[0] if rel.parts else ""
@@ -143,14 +181,19 @@ def license_of(path: Path) -> str:
 
 def _catalog() -> list[tuple[Path, set[str]]]:
     """All corpus files with the tokens derived from their skill + filename."""
-    if not SKILLS_ROOT.exists():
-        return []
     files: list[tuple[Path, set[str]]] = []
-    for p in sorted(SKILLS_ROOT.rglob("*.md")):
-        if p.name in ("NOTICE.md", "INDEX.md", "SKILL.md"):
+    # Rank order matters and is structural: every vendored sheet is appended
+    # before any authored one, so an operator file can only ever be chosen when
+    # it genuinely out-ranks the corpus, never by sorting earlier in a tie.
+    for root in _roots():
+        if not root.exists():
             continue
-        rel = p.relative_to(SKILLS_ROOT)
-        files.append((p, _tokens(f"{rel.parent.name} {p.stem}")))
+        for p in sorted(root.rglob("*.md")):
+            if p.name in ("NOTICE.md", "INDEX.md", "SKILL.md"):
+                continue
+            rel = p.relative_to(root)
+            parent = rel.parent.name if rel.parent.name != "." else "local"
+            files.append((p, _tokens(f"{parent} {p.stem}")))
     return files
 
 
@@ -329,14 +372,14 @@ def render_skills(hint: str, max_chars: int = 14000,
     )
     parts = [header]
     for p in files:
-        rel = p.relative_to(SKILLS_ROOT)
+        rel = rel_of(p)
         body = p.read_text(encoding="utf-8", errors="replace").strip()
         excerpted = len(body) > MAX_FILE_EXCERPT
         if excerpted:
             body = (body[:MAX_FILE_EXCERPT].rsplit("\n", 1)[0]
                     + "\n…(excerpt — this sheet continues beyond what fits the budget)")
         parts.append(
-            f"\n----- skill: {rel.parent.name} / {p.stem}"
+            f"\n----- skill: {rel.parent.name if rel.parent.name != '.' else 'local'} / {p.stem}"
             f"  [{license_of(p)}]{' (EXCERPTED)' if excerpted else ''} -----\n{body}")
     return "\n".join(parts) + "\n"
 

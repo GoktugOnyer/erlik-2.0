@@ -43,6 +43,7 @@ publicly. There is no bug bounty.
 | Submission policy — demote informational classes in reports | on | `orchestrator/submission_policy.py`, `policy_catalog/never_submit.yaml` |
 | Scope audit — flag findings naming a host outside the snapshot | on | `orchestrator/main.py` (`_scope_audit`) |
 | API token on state-changing requests | **off** | `orchestrator/main.py` (`_api_token_guard`) |
+| Skill authoring (writes files into the agent prompt) | **off** | `orchestrator/skills_authoring.py` |
 | Bind address | `127.0.0.1` | `run.sh` (`ERLIK_HOST`) |
 
 ### Environment variables
@@ -56,6 +57,7 @@ publicly. There is no bug bounty.
 | `ERLIK_HOST` | `127.0.0.1` | `0.0.0.0` exposes the API to the network |
 | `ERLIK_NATIVE` | unset | When set, commands run **on the host as your user**, not in the container |
 | `ERLIK_LLM_PROVIDER` | `ollama` | `openai` sends prompts to a third party (`orchestrator/llm_client.py`) |
+| `ERLIK_SKILL_AUTHORING` | unset | `1` enables writing skill sheets from the dashboard. Requires `ERLIK_API_TOKEN`, loopback, and non-native mode |
 
 ## What erlik does NOT protect
 
@@ -77,6 +79,32 @@ publicly. There is no bug bounty.
   (`orchestrator/review.py`) masks credentials on the AI-review path only — it
   has three call sites, all within `review.py`.
 - **`thesis_export` is not redacted.** It ships raw columns by design.
+
+## Authoring skills (off by default)
+
+`ERLIK_SKILL_AUTHORING=1` lets an operator write reference sheets from the
+dashboard. Those sheets are **injected into the system prompt of an agent that
+executes shell commands**, so the endpoint refuses unless all of the following
+hold, and says which one failed:
+
+1. `ERLIK_SKILL_AUTHORING=1`
+2. `ERLIK_API_TOKEN` is set — stricter than the rest of the API on purpose. A
+   guard that is off by default is acceptable for reads and not for a route
+   that writes files into an agent's prompt.
+3. The request comes from loopback, carries no `X-Forwarded-For`/`Forwarded`/
+   `X-Real-IP`, and its `Host` is `127.0.0.1`/`localhost`/`[::1]` (which is
+   what blocks DNS rebinding).
+4. `ERLIK_NATIVE` is unset — native mode has no container boundary.
+
+**erlik does not filter authored content, and cannot.** An exfiltration
+one-liner is textually identical to a legitimate SSRF cheat sheet, because
+payload text is what these files are. Instead every URL, host, IP and exec verb
+is extracted and shown for you to review before saving. You are the review
+step. What does bound the risk: authored files live in `data/skills_local/`,
+outside every licensed corpus directory; the scope guard and per-segment tool
+allowlist still apply to anything the agent then runs; and the save response
+reports whether the router will actually select the sheet, so an inert file is
+visible immediately rather than mistaken for a new capability.
 
 ## Running it lawfully
 

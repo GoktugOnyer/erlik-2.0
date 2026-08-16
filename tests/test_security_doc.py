@@ -40,9 +40,22 @@ class TestEveryPathResolves:
                                r"/[A-Za-z0-9_./*]+)`", text))
         paths |= set(re.findall(r"`(run\.sh|SECURITY\.md|THIRD_PARTY_LICENSES\.md)`", text))
         assert paths, "no paths found — the extraction regex has drifted"
+        # `data/` is gitignored runtime state: the database, reports and the
+        # operator-authored corpus are all created on demand, so a fresh clone
+        # legitimately has none of them. Everything else must exist NOW.
         missing = [p for p in sorted(paths)
-                   if "*" not in p and not (ROOT / p).exists()]
+                   if "*" not in p
+                   and not p.startswith("data/")
+                   and not (ROOT / p).exists()]
         assert missing == [], f"SECURITY.md cites paths that do not exist: {missing}"
+
+    def test_runtime_paths_are_declared_by_their_owner(self):
+        """The data/ exemption above must not become a blanket excuse: every
+        data/ path the doc names has to be one the code actually creates."""
+        from orchestrator import skills_authoring as A
+        text = DOC.read_text()
+        if "data/skills_local" in text:
+            assert A.LOCAL_ROOT_NAME == Path("data") / "skills_local"
 
     def test_markdown_links_resolve(self):
         text = DOC.read_text()
