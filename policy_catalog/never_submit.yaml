@@ -1,0 +1,93 @@
+# Submission policy — which finding classes are informational rather than
+# submittable on a client engagement.
+#
+# Derived from the `triage-validation` skill in Claude-BugHunter
+# (elementalsouls/Claude-BugHunter, CC BY 4.0 — see THIRD_PARTY_LICENSES.md).
+# The classification is theirs; this expression of it is erlik's own.
+#
+# WHY THIS EXISTS
+# Of 216 findings in the recorded corpus, 153 (71%) are Information Disclosure,
+# Security Misconfiguration, Sensitive Data Exposure or CORS — the classes this
+# policy governs. The agent already reads a skill telling it not to report most
+# of them, while the detection layer keeps writing them at `medium`, so they
+# sort above real findings in a severity-ordered client table.
+#
+# DEMOTE, NEVER SUPPRESS
+# Every rule is `action: informational`. Nothing is removed. An earlier design
+# suppressed `cors_wildcard_blocked_by_browser`, which is ground-truth item #30:
+# the row would have stayed in the table so measured recall held, while the
+# client deliverable said nothing was found. Demotion alone solves the stated
+# problem — a severity-ordered table that buries real findings — and provably
+# moves no recorded number.
+#
+# EVIDENCE KEYS MUST BE CODE-CONTROLLED
+# Every `evidence_prefix` / `evidence_contains` below is a literal that
+# orchestrator/detection.py constructs itself. Rules are deliberately NOT
+# written against target-controlled text: a regex over, say, an Express 500
+# page passes CI against a hand-authored fixture and dies against a real one.
+# tests/test_submission_policy.py enforces this by driving every rule from a
+# real (tool, output, command) triple through detection.auto_detect_findings().
+
+version: 1
+
+rules:
+  - id: missing_security_headers
+    vuln_types: ["Security Misconfiguration"]
+    evidence_prefix: "Missing security headers: "
+    max_severity: medium
+    action: informational
+    rationale: >
+      Absent CSP/HSTS/X-Frame-Options is a hardening recommendation, not a
+      vulnerability. Emitted at `medium` by _curl_missing_headers, which places
+      it above genuine low-severity findings in a severity-ordered table.
+
+  - id: server_version_banner
+    vuln_types: ["Information Disclosure"]
+    evidence_prefix: "Server header exposes: "
+    max_severity: medium
+    action: informational
+    unless_field: cve_id
+    rationale: >
+      A Server or X-Powered-By banner is not itself exploitable. The `unless`
+      is a FIELD, not a regex over the evidence: CVE ids live in the `cve_id`
+      column written by enrich_session_findings hundreds of turns after the
+      finding is created, and never appear in the header value the detector
+      captured. Evaluated at report time, so an enriched banner re-qualifies.
+
+  - id: robots_txt_disclosure
+    vuln_types: ["Security Misconfiguration"]
+    evidence_contains: ["robots.txt exposed"]
+    max_severity: low
+    action: informational
+    rationale: >
+      robots.txt is intended to be public. Still reported, because the paths it
+      names are a lead worth following — just not as a submittable finding.
+
+  - id: metrics_endpoint
+    vuln_types: ["Security Misconfiguration"]
+    evidence_contains: ["Prometheus metrics endpoint exposed"]
+    max_severity: low
+    action: informational
+    rationale: >
+      An exposed /metrics endpoint is a misconfiguration worth noting, but
+      carries no impact without demonstrated sensitive content.
+
+  - id: security_txt_disclosure
+    vuln_types: ["Information Disclosure"]
+    evidence_contains: ["security.txt policy file exposed"]
+    max_severity: low
+    action: informational
+    rationale: >
+      security.txt exists to be found. Reporting it as a finding is noise.
+
+  - id: source_map_exposed
+    vuln_types: ["Sensitive Data Exposure"]
+    evidence_contains: ["JavaScript source map exposed"]
+    max_severity: medium
+    action: informational
+    rationale: >
+      Source maps leak application source, which is worth recording, but the
+      detector never reads the .map body — it parses a directory-listing line —
+      so it cannot evidence that secrets are present. Shipped unconditional on
+      purpose: an `unless secrets-in-body` clause would be a dead hatch, since
+      the pattern could only ever match the PATH, never the file contents.

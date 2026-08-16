@@ -1836,6 +1836,29 @@ def _deliverable_view(findings: list[dict]) -> tuple[list[dict], list[dict]]:
     return list(findings), []
 
 
+def _policy_verdicts(findings: list[dict]) -> dict[int, str]:
+    """Map finding id -> rule id, for findings the submission policy demotes.
+
+    Deliberately NOT folded into _deliverable_view. That runs immediately after
+    the findings SELECT, while the calibration pass writes `calibrated_severity`
+    several hundred lines later — so a verdict computed there would be based on
+    a severity that no longer holds by the time the report renders it, and a
+    finding calibration escalated would stay demoted by a stale decision.
+
+    Called at the render points instead, so `max_severity` is compared against
+    whatever the severity actually is at the moment of display.
+    """
+    from orchestrator import submission_policy as _sp
+
+    rules, _version = _sp.cached_rules()
+    out: dict[int, str] = {}
+    for f in findings:
+        d = _sp.classify(f, rules)
+        if d.is_informational and f.get("id") is not None:
+            out[f["id"]] = d.rule
+    return out
+
+
 # Report-producing paths that deliberately do NOT pass through
 # _deliverable_view, each with the reason. tests/test_deliverable.py asserts
 # this list stays exhaustive, so a new report route cannot be added without
@@ -2244,6 +2267,11 @@ async def _generate_report(session_id: str, model: str, target_url: str,
     if findings_table_index is not None:
         has_cve = any(f.get("cve_id") for f in findings)
         has_calib = any(f.get("calibrated_severity") for f in findings)
+        # Submission policy, evaluated HERE — after calibration and CVE
+        # enrichment have written their columns, so `max_severity` is compared
+        # against the severity this table is about to print rather than the one
+        # the detector wrote hundreds of lines earlier.
+        verdicts = _policy_verdicts(findings)
         tbl = ["## Findings", ""]
         if has_cve or has_calib:
             tbl.append("| # | Type | Severity | CVE | CVSS | CWE | OWASP | URL |")
@@ -2256,6 +2284,8 @@ async def _generate_report(session_id: str, model: str, target_url: str,
                 # §7: show both when they differ.
                 sev_str = (f"{calib} (raw {raw})" if calib and calib.upper() != raw.upper()
                            else (calib or raw))
+                if f.get("id") in verdicts:
+                    sev_str = f"informational (was {sev_str})"
                 tbl.append(
                     f"| {i} | {f['vuln_type']} | {sev_str} | "
                     f"{f.get('cve_id') or '—'} | {cvss_str} | {f.get('cwe') or '—'} | "
@@ -2265,10 +2295,19 @@ async def _generate_report(session_id: str, model: str, target_url: str,
             tbl.append("| # | Type | Severity | URL | Parameter |")
             tbl.append("|---|------|----------|-----|-----------|")
             for i, f in enumerate(findings, 1):
+                sev_str = f["severity"]
+                if f.get("id") in verdicts:
+                    sev_str = f"informational (was {sev_str})"
                 tbl.append(
-                    f"| {i} | {f['vuln_type']} | {f['severity']} | "
+                    f"| {i} | {f['vuln_type']} | {sev_str} | "
                     f"`{f['url']}` | {f['parameter']} |"
                 )
+        if verdicts:
+            tbl.append("")
+            tbl.append(
+                f"*{len(verdicts)} finding(s) marked informational by the submission "
+                f"policy (policy_catalog/never_submit.yaml). Nothing is removed — the "
+                f"stored severity is unchanged and every finding is still listed.*")
         report_lines[findings_table_index] = "\n".join(tbl)
 
     # Extract next steps
@@ -6579,12 +6618,27 @@ async def _compute_benchmark_metrics(session_id: str, ground_truths: list[dict])
         recall = len(matched_gt_indices) / len(ground_truths) if ground_truths else 0.0
         f1 = (2 * precision * recall / (precision + recall)) if (precision + recall) > 0 else 0.0
 
-        # Severity score (weighted)
+        # Severity score (weighted). Computed from the STORED severity, so this
+        # number stays comparable with every run recorded before the submission
+        # policy existed.
         severity_weights = {"critical": 5, "high": 4, "medium": 3, "low": 2, "info": 1}
         severity_score = sum(
             severity_weights.get((f.get("severity") or "info").lower(), 1)
             for f in findings
         )
+
+        # The same score after the submission policy demotes informational
+        # classes — the only recorded number demotion can move, reported BESIDE
+        # the raw score rather than replacing it. `policy_stamped` is False when
+        # no catalogue is installed, so "policy had no effect" is distinguishable
+        # from "policy never ran" (identical numbers otherwise).
+        from orchestrator import submission_policy as _sp
+        _rules, _pol_version = _sp.cached_rules()
+        policy_adjusted_severity_score = sum(
+            severity_weights.get(_sp.classify(f, _rules).effective_severity.lower(), 1)
+            for f in findings
+        )
+        policy_stamped = bool(_rules)
 
         # Findings per minute
         duration_min = duration_ms / 60000.0 if duration_ms else 0
@@ -6683,6 +6737,9 @@ async def _compute_benchmark_metrics(session_id: str, ground_truths: list[dict])
             "recall": round(recall, 4),
             "f1_score": round(f1, 4),
             "severity_score": severity_score,
+            "policy_adjusted_severity_score": policy_adjusted_severity_score,
+            "policy_stamped": policy_stamped,
+            "policy_version": _pol_version,
             "findings_per_minute": round(findings_per_min, 4),
             "findings_per_turn": round(findings_per_turn, 4),
             "tool_coverage": round(tool_coverage, 4),
