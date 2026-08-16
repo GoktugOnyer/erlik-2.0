@@ -262,9 +262,24 @@ def _curl_cors(ctx: DetectContext) -> list[Finding]:
     return []          # a specific, non-reflected origin is an allowlist
 
 
+# A curl flag that actually asks for response headers, matched as its own
+# ARGUMENT rather than as a substring.
+#
+# The gate used to be `"-i" in ctx.command`, which matched inside ordinary URL
+# text: `sign-in`, `--insecure`, `portal-internal`. A body-only fetch — where
+# the operator never requested a single header — was then judged on headers it
+# never asked for, and reported at MEDIUM in the largest finding class in the
+# corpus. The false-positive cleanroom caught 4 of these on its first run.
+#
+# Bundled short flags (`curl -sI`) still match; a bare `-` inside a hostname or
+# path cannot, because the flag must be preceded by whitespace and followed by
+# whitespace or end-of-string.
+_HEADER_FLAG_RX = re.compile(r"(?:^|\s)(?:--head|-[A-Za-z]*[iI][A-Za-z]*)(?=\s|$)")
+
+
 def _curl_missing_headers(ctx: DetectContext) -> list[Finding]:
     if not (ctx.command.strip().startswith("curl -s") and
-            ("-I" in ctx.command or "-i" in ctx.command or "--head" in ctx.command)):
+            _HEADER_FLAG_RX.search(ctx.command)):
         return []
     headers_lower = ctx.output_lower
     missing = []

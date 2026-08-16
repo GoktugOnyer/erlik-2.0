@@ -459,3 +459,48 @@ class TestNoOp:
     def test_empty_output_returns_empty(self):
         for tool in ("sqlmap", "nuclei", "curl", "dalfox", "jwt_tool", "hydra"):
             assert detect(tool, "", "") == []
+
+
+class TestHeaderFlagIsAnchored:
+    """`_curl_missing_headers` gates on whether the operator ASKED for headers.
+
+    That gate was `"-i" in ctx.command` — an unanchored substring — so it
+    matched inside ordinary URL text: `sign-in`, `--insecure`,
+    `portal-internal`. A body-only fetch was then judged on headers nobody
+    requested and reported at MEDIUM, in the largest finding class in the
+    recorded corpus. The false-positive cleanroom found three of these on its
+    first run.
+
+    Third instance of this defect class in this codebase, after the OAST scope
+    markers and the cookie flags — hence an explicit test rather than relying
+    on the corpus alone.
+    """
+
+    NO_HEADERS = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{}"
+
+    def _fires(self, command):
+        return any(f["vuln_type"] == "Security Misconfiguration"
+                   for f in detect("curl", self.NO_HEADERS, command))
+
+    def test_real_header_requests_still_fire(self):
+        for cmd in ("curl -s -i https://x.test/",
+                    "curl -s -I https://x.test/",
+                    "curl -sI https://x.test/",
+                    "curl -si https://x.test/",
+                    "curl -s --head https://x.test/",
+                    "curl -s -I -H 'A: b' https://x.test/"):
+            assert self._fires(cmd), f"should fire: {cmd}"
+
+    def test_substring_matches_in_urls_do_not_fire(self):
+        for cmd in ("curl -s https://www.acme.example.com/account/sign-in",
+                    "curl -s https://inventory.corp.internal/api/v1/inventory --insecure",
+                    'curl -s "https://portal-internal.acme-cleanroom.test/healthz"',
+                    "curl -s https://x.test/plain",
+                    "curl -s https://x.test/e-invoice",
+                    "curl -s -H 'X-Test: -i' https://x.test/"):
+            assert not self._fires(cmd), f"should NOT fire: {cmd}"
+
+    def test_body_only_fetch_reports_nothing_about_headers(self):
+        """The core of it: no header flag means no header evidence exists."""
+        assert detect("curl", self.NO_HEADERS,
+                      "curl -s https://x.test/account/sign-in") == []

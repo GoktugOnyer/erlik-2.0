@@ -262,9 +262,6 @@ fixtures:
     password\" name=\"password\"></label>\n  <button>Sign in</button>\n</form>\n<script src=\"/static/auth.js\"\
     ></script>\n"
   expected:
-  - vuln_type: Security Misconfiguration
-    severity: medium
-    detector: curl:_curl_missing_headers
   - vuln_type: Sensitive Data Exposure
     severity: medium
     detector: curl:_curl_exposed_user_data
@@ -281,10 +278,7 @@ fixtures:
   response: '{"items":[{"sku":"ACME-100","qty":42},{"sku":"ACME-220","qty":7}],"page":1}
 
     '
-  expected:
-  - vuln_type: Security Misconfiguration
-    severity: medium
-    detector: curl:_curl_missing_headers
+  expected: []
   rationale: 'Body-only fetch against an internal host with a private-CA certificate, hence --insecure.
     No header flag was used, yet the finding lists all four headers as missing. Cause confirmed by control:
     ''--insecure'' contains the substring ''-i''. The same command with -k instead of --insecure produces
@@ -561,10 +555,7 @@ fixtures:
   response: '{"status":"ok","version":"4.2.1","uptimeSeconds":183402}
 
     '
-  expected:
-  - vuln_type: Security Misconfiguration
-    severity: medium
-    detector: curl:_curl_missing_headers
+  expected: []
   rationale: 'A body-only health check against an internal hostname. No headers were requested, so no
     header-based conclusion is available from this response at all -- yet _curl_missing_headers gates
     on `"-i" in ctx.command` as a bare substring, and the hostname portal-internal contains ''-i''. The
