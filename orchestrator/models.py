@@ -47,6 +47,10 @@ class SessionCreate(BaseModel):
     disable_stagnation: bool = False  # benchmark opt-out for the agent-loop stagnation auto-stop
     extra_system_prompt: str = ""  # injected memory/context appended to system prompt
     run_config: Optional[dict] = None  # per-session automation flow (see orchestrator/runconfig.py)
+    # Engagement authorisation reference (SOW number, ticket, written approval).
+    # Optional by design — see the note in database.py. Recorded verbatim and
+    # rendered in the report; its absence is rendered loudly.
+    authorization_ref: Optional[str] = None
 
 
 class SessionResponse(BaseModel):

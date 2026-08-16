@@ -1,0 +1,103 @@
+# Security posture
+
+erlik is an offensive security tool. It executes attacker-supplied commands
+against a target, stores credentials it captures, and produces reports that can
+contain live secrets. This document states what it protects, what it does not,
+and what you are responsible for.
+
+Every claim below is asserted against live code by `tests/test_security_doc.py`,
+so a default that drifts fails the suite rather than quietly making this file
+wrong.
+
+## Reporting a vulnerability in erlik itself
+
+Open a GitHub issue for anything that does not itself expose a secret. For
+something sensitive, contact the maintainer directly rather than filing
+publicly. There is no bug bounty.
+
+## What erlik stores
+
+`data/pentest.db` (SQLite, unencrypted, gitignored) holds:
+
+| Table | Sensitive content |
+|---|---|
+| `steps.tool_input` | Full commands — including any credential `primitives.inject_credentials` added |
+| `steps.tool_output` | Full tool output, including `Set-Cookie`, tokens, dumped rows |
+| `steps.model_response` | The model's own text, which may quote a captured token |
+| `session_primitives.value` | Captured credentials, stored as plain `TEXT` — **not encrypted** |
+| `findings.evidence` | Proof text, which for a credential finding is the credential |
+| `sessions.system_prompt` | Your mission text |
+
+`data/reports/*.md` contains the full untruncated step log for each session.
+
+**Treat `data/` as credential material.** It is gitignored, not protected.
+
+## Controls that exist
+
+| Control | Default | Where |
+|---|---|---|
+| Scope enforcement — refuse commands naming an unrelated public host | **on** | `orchestrator/tool_executor.py` (`_scope_enforced`, `_scope_violation`) |
+| Safe mode — refuse destructive actions against an in-scope host | **on** | `orchestrator/tool_executor.py` (`_safe_mode_violation`) |
+| Per-segment toolset check — every chained/piped program is checked | on | `orchestrator/tool_executor.py` (`_segment_violation`) |
+| Export redaction — mask credentials leaving the system | on | `orchestrator/redaction.py` |
+| Submission policy — demote informational classes in reports | on | `orchestrator/submission_policy.py`, `policy_catalog/never_submit.yaml` |
+| Scope audit — flag findings naming a host outside the snapshot | on | `orchestrator/main.py` (`_scope_audit`) |
+| API token on state-changing requests | **off** | `orchestrator/main.py` (`_api_token_guard`) |
+| Bind address | `127.0.0.1` | `run.sh` (`ERLIK_HOST`) |
+
+### Environment variables
+
+| Variable | Default | Effect |
+|---|---|---|
+| `ERLIK_SCOPE_ENFORCE` | `1` | `0` disables scope refusal entirely |
+| `ERLIK_SCOPE_EXTRA_HOSTS` | empty | Comma-separated globs added to scope; snapshotted per session |
+| `ERLIK_SAFE_MODE` | `1` | `0` permits destructive commands |
+| `ERLIK_API_TOKEN` | unset | When set, `POST/PUT/PATCH/DELETE` on `/api/*` require it |
+| `ERLIK_HOST` | `127.0.0.1` | `0.0.0.0` exposes the API to the network |
+| `ERLIK_NATIVE` | unset | When set, commands run **on the host as your user**, not in the container |
+| `ERLIK_LLM_PROVIDER` | `ollama` | `openai` sends prompts to a third party (`orchestrator/llm_client.py`) |
+
+## What erlik does NOT protect
+
+- **The API is unauthenticated by default.** `_api_token_guard` engages only
+  when `ERLIK_API_TOKEN` is set, and it never applies to `GET`/`HEAD`. Anything
+  that can reach the port can read every session, finding and stored
+  credential. `run.sh` binds loopback; several scripts under `scripts/` bind
+  `0.0.0.0`.
+- **Stored credentials are not encrypted.** `session_primitives.value` is plain
+  `TEXT`.
+- **The scope guard is not a sandbox.** It refuses commands that *name* an
+  unrelated public host. It cannot stop a tool from following a redirect, and
+  it is not a network control. Put erlik on a network that cannot reach what it
+  must not touch.
+- **`ERLIK_NATIVE=1` removes the container boundary.** Commands run as your
+  user on your machine.
+- **A remote LLM provider sees your prompts.** With `ERLIK_LLM_PROVIDER=openai`,
+  mission text and tool output go to a third party. `redact_secrets`
+  (`orchestrator/review.py`) masks credentials on the AI-review path only — it
+  has three call sites, all within `review.py`.
+- **`thesis_export` is not redacted.** It ships raw columns by design.
+
+## Running it lawfully
+
+erlik is used for real client engagements. Two fields exist to keep that
+defensible, and **neither is enforced**:
+
+- `sessions.authorization_ref` — who authorised this test, and under what
+  reference. Optional. An operator assertion in a mutable column is an audit
+  trail, not audit proof, so erlik does not pretend otherwise by refusing to
+  run without it. A report with no reference says
+  **`AUTHORIZATION: NOT RECORDED`** in the same place a reader looks for the
+  answer.
+- `sessions.scope_extra` — the authorised scope, snapshotted at session
+  creation so a verdict does not depend on the environment of whichever process
+  serves the request later.
+
+You are responsible for having written authorisation before you run this
+against anything you do not own.
+
+## Third-party content
+
+Vendored corpora carry different licences, and the licence of a file is
+answerable from its path. See [`THIRD_PARTY_LICENSES.md`](THIRD_PARTY_LICENSES.md).
+HackTricks (CC BY-NC) is referenced by index only and never vendored.

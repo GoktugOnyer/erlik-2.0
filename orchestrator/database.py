@@ -215,6 +215,14 @@ async def init_db():
             # another. A legal boundary must not be re-derived from ambient
             # state months after the engagement.
             ("scope_extra", "TEXT DEFAULT NULL"),
+            # WHO authorised this test, and under what reference. The audit
+            # trail that makes a pentest lawful. Nullable and NOT enforced:
+            # an operator assertion in a mutable column is an audit trail, not
+            # audit proof, and gating a run on it buys a status race and a
+            # chain hang for no added assurance. Absence is made LOUD in the
+            # report instead — the failure mode of a governance field is that
+            # nobody notices it is empty.
+            ("authorization_ref", "TEXT DEFAULT NULL"),
         ]
         for col_name, col_def in migrations:
             try:
@@ -227,6 +235,8 @@ async def init_db():
             ("toolset_preset", "TEXT DEFAULT NULL"),
             ("disable_stagnation", "INTEGER DEFAULT 0"),
             ("run_config", "TEXT DEFAULT NULL"),  # per-session automation flow (JSON)
+            ("scope_extra", "TEXT DEFAULT NULL"),
+            ("authorization_ref", "TEXT DEFAULT NULL"),
         ]
         for col_name, col_def in chain_migrations:
             try:

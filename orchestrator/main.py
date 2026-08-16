@@ -1846,6 +1846,28 @@ def current_scope_extra() -> list[str]:
     return extra
 
 
+def render_authorization_block(authorization_ref: str | None) -> list[str]:
+    """The engagement's authorisation reference, or a loud statement of absence.
+
+    Deliberately NOT a gate. An operator assertion in a mutable column is an
+    audit trail, not audit proof, so refusing to run without one buys a status
+    race and a chain hang for no added assurance. What it buys instead is that
+    a report which cannot say who authorised the test says so in the same place
+    a reader looks for the answer.
+    """
+    lines = ["## Authorisation", ""]
+    ref = (authorization_ref or "").strip()
+    if ref:
+        lines.append(f"- Engagement reference: `{ref}`")
+    else:
+        lines.append("**AUTHORIZATION: NOT RECORDED** — no engagement reference "
+                     "was supplied for this session. Testing without recorded "
+                     "authorisation may be unlawful; do not distribute this "
+                     "report until the reference is established.")
+    lines.append("")
+    return lines
+
+
 def _scope_audit(findings: list[dict], target_url: str,
                  scope_extra: list[str] | None) -> dict:
     """Classify each finding's URL host against the session's authorised scope.
@@ -2037,21 +2059,26 @@ async def _generate_report(session_id: str, model: str, target_url: str,
     # Reads the snapshot taken at session creation, never ambient env, so the
     # verdict does not depend on which process serves the request.
     _scope_extra_snapshot = None
+    _authorization_ref = None
     _db2 = await get_db()
     try:
         _cur2 = await _db2.execute(
-            "SELECT scope_extra FROM sessions WHERE id = ?", (session_id,))
+            "SELECT scope_extra, authorization_ref FROM sessions WHERE id = ?",
+            (session_id,))
         _row2 = await _cur2.fetchone()
-        if _row2 and _row2[0]:
-            try:
-                _scope_extra_snapshot = json.loads(_row2[0])
-            except (ValueError, TypeError):
-                _scope_extra_snapshot = None
+        if _row2:
+            if _row2[0]:
+                try:
+                    _scope_extra_snapshot = json.loads(_row2[0])
+                except (ValueError, TypeError):
+                    _scope_extra_snapshot = None
+            _authorization_ref = _row2[1]
     except Exception:
         _scope_extra_snapshot = None
     finally:
         await _db2.close()
 
+    report_lines.extend(render_authorization_block(_authorization_ref))
     _audit = _scope_audit(findings, target_url, _scope_extra_snapshot)
     report_lines.extend(render_scope_block(_audit, target_url))
 
@@ -3018,14 +3045,15 @@ async def _create_chain_session(chain_id: str, chain_row, phase: str, position: 
         await db.execute(
             "INSERT INTO sessions (id, target_url, scope_mode, system_prompt, model, enabled_tools, "
             "session_type, no_timeout, max_turns, chain_id, chain_position, chain_phase, "
-            "toolset_preset, disable_stagnation, run_config, scope_extra) "
-            "VALUES (?, ?, ?, ?, ?, ?, 'chain', ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "toolset_preset, disable_stagnation, run_config, scope_extra, authorization_ref) "
+            "VALUES (?, ?, ?, ?, ?, ?, 'chain', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (session_id, chain_row["target_url"], chain_row["scope_mode"],
              chain_row["system_prompt"], chain_row["model"], enabled_tools_str,
              1 if no_timeout else 0, max_turns,
              chain_id, position, phase,
              toolset_preset, 1 if disable_stagnation else 0, _chain_run_config,
-             json.dumps(current_scope_extra())),
+             json.dumps(current_scope_extra()),
+             (chain_row["authorization_ref"] if "authorization_ref" in chain_row.keys() else None)),
         )
         await db.commit()
     finally:
@@ -4950,13 +4978,14 @@ async def create_session(data: SessionCreate):
         await db.execute(
             "INSERT INTO sessions (id, target_url, scope_mode, system_prompt, model, enabled_tools, "
             "session_type, parent_session_id, vuln_category, no_timeout, max_turns, "
-            "toolset_preset, disable_stagnation, tool_timeout, run_config, scope_extra) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "toolset_preset, disable_stagnation, tool_timeout, run_config, scope_extra, "
+            "authorization_ref) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (session_id, data.target_url, data.scope_mode.value, data.system_prompt, data.model,
              enabled_tools_str, data.session_type, data.parent_session_id, data.vuln_category,
              1 if data.no_timeout else 0, effective_max_turns, data.toolset_preset,
              1 if data.disable_stagnation else 0, data.tool_timeout, _run_config_json,
-             json.dumps(current_scope_extra())),
+             json.dumps(current_scope_extra()), data.authorization_ref),
         )
         await db.commit()
         row = await db.execute("SELECT * FROM sessions WHERE id = ?", (session_id,))
@@ -5392,13 +5421,16 @@ async def create_chain(data: ChainCreate):
         await db.execute(
             "INSERT INTO chains (id, target_url, scope_mode, system_prompt, model, enabled_tools, "
             "current_phase, current_position, total_sessions, status, auto_progress, "
-            "max_turns_per_session, no_timeout, toolset_preset, disable_stagnation, run_config) "
-            "VALUES (?, ?, ?, ?, ?, ?, 'recon', 0, 1, 'running', ?, ?, ?, ?, ?, ?)",
+            "max_turns_per_session, no_timeout, toolset_preset, disable_stagnation, run_config, "
+            "scope_extra, authorization_ref) "
+            "VALUES (?, ?, ?, ?, ?, ?, 'recon', 0, 1, 'running', ?, ?, ?, ?, ?, ?, ?, ?)",
             (chain_id, data.target_url, data.scope_mode.value, data.system_prompt, data.model,
              enabled_tools_str, 1 if data.auto_progress else 0, effective_max_turns,
              1 if data.no_timeout else 0, data.toolset_preset,
              1 if data.disable_stagnation else 0,
-             json.dumps(data.run_config) if data.run_config else None),
+             json.dumps(data.run_config) if data.run_config else None,
+             json.dumps(current_scope_extra()),
+             getattr(data, "authorization_ref", None)),
         )
         await db.commit()
 
@@ -7383,11 +7415,13 @@ async def _run_benchmark_sequence(benchmark_id: str, data: BenchmarkCreate):
             try:
                 await db.execute(
                     "INSERT INTO sessions (id, target_url, scope_mode, system_prompt, model, enabled_tools, "
-                    "session_type, no_timeout, max_turns, run_config, scope_extra) VALUES (?, ?, ?, ?, ?, ?, 'cold', ?, ?, ?, ?)",
+                    "session_type, no_timeout, max_turns, run_config, scope_extra, authorization_ref) "
+                    "VALUES (?, ?, ?, ?, ?, ?, 'cold', ?, ?, ?, ?, ?)",
                     (cold_session_id, data.target_url, "full", data.system_prompt, data.model,
                      enabled_tools_str, 1 if data.no_timeout else 0, effective_max_turns,
                      json.dumps(data.run_config) if data.run_config else None,
-                     json.dumps(current_scope_extra()))
+                     json.dumps(current_scope_extra()),
+                     getattr(data, "authorization_ref", None))
                 )
                 await db.execute(
                     "UPDATE benchmark_runs SET cold_session_id = ? WHERE id = ?",
@@ -7465,11 +7499,12 @@ async def _run_benchmark_sequence(benchmark_id: str, data: BenchmarkCreate):
                 await db.execute(
                     "INSERT INTO sessions (id, target_url, scope_mode, system_prompt, model, enabled_tools, "
                     "session_type, parent_session_id, no_timeout, max_turns, run_config, "
-                    "scope_extra) VALUES (?, ?, ?, ?, ?, ?, 'warm', ?, ?, ?, ?, ?)",
+                    "scope_extra, authorization_ref) VALUES (?, ?, ?, ?, ?, ?, 'warm', ?, ?, ?, ?, ?, ?)",
                     (warm_session_id, data.target_url, "full", data.system_prompt, data.model,
                      enabled_tools_str, cold_session_id, 1 if data.no_timeout else 0, effective_max_turns,
                      json.dumps(data.run_config) if data.run_config else None,
-                     json.dumps(current_scope_extra()))
+                     json.dumps(current_scope_extra()),
+                     getattr(data, "authorization_ref", None))
                 )
                 await db.execute(
                     "UPDATE benchmark_runs SET warm_session_id = ? WHERE id = ?",
@@ -7529,10 +7564,13 @@ async def _run_benchmark_sequence(benchmark_id: str, data: BenchmarkCreate):
                 await db.execute(
                     "INSERT INTO chains (id, target_url, scope_mode, system_prompt, model, enabled_tools, "
                     "current_phase, current_position, total_sessions, status, auto_progress, "
-                    "max_turns_per_session, no_timeout, run_config) VALUES (?, ?, ?, ?, ?, ?, 'recon', 0, 1, 'running', 1, ?, ?, ?)",
+                    "max_turns_per_session, no_timeout, run_config, scope_extra, authorization_ref) "
+                    "VALUES (?, ?, ?, ?, ?, ?, 'recon', 0, 1, 'running', 1, ?, ?, ?, ?, ?)",
                     (chain_id_result, data.target_url, "full", data.system_prompt, data.model,
                      enabled_tools_str, effective_max_turns, 1 if data.no_timeout else 0,
-                     json.dumps(data.run_config) if data.run_config else None)
+                     json.dumps(data.run_config) if data.run_config else None,
+                     json.dumps(current_scope_extra()),
+                     getattr(data, "authorization_ref", None))
                 )
                 await db.execute(
                     "UPDATE benchmark_runs SET chain_id = ? WHERE id = ?",
