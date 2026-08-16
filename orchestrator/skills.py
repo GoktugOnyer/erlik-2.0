@@ -26,6 +26,19 @@ from pathlib import Path
 
 SKILLS_ROOT = Path(__file__).resolve().parents[1] / "skills_catalog" / "skills"
 
+# Largest slice of any ONE file that may be injected. The vendored Claude-BugHunter
+# sheets have a median size of 16.5 KB and 60 of 101 exceed the whole 14 KB budget
+# — hunt-xss alone is 30 KB — so without an excerpt cap the most valuable files are
+# never selectable at all, and the budget logic silently prefers small reference
+# prose over step-by-step methodology.
+#
+# Excerpting rather than raising the budget is deliberate: a measured 12-run
+# experiment found injected volume is inversely correlated with recall on a local
+# 7B (0.171 -> 0.095, r = -0.796). Total injected bytes must NOT grow. These files
+# lead with the actionable part (What actually pays -> Crown Jewel Targets ->
+# Attack Surface Signals -> Phase 1 …), so the head is the part worth keeping.
+MAX_FILE_EXCERPT = 7000
+
 # Expand erlik's short vuln-category / jargon tokens into the corpus vocabulary
 # so a preset like "sqli_focused" matches the sql-injection references.
 ALIASES = {
@@ -58,7 +71,14 @@ ALIASES = {
 # that matched more query tokens. Category directories share tokens ("client-side"
 # and "server-side" both yield "side"), so letting a filename-shape bonus
 # outweigh real overlap made e.g. an "ssrf" hint select client-side quickstarts.
-_BOOST = (("quickstart", 3), ("cheat-sheet", 2), ("advanced", 1), ("principles", 1))
+# "hunt-" ranks with quickstart because those files ARE the action-oriented form
+# this boost exists to reward: each is a step-by-step methodology with real
+# commands (Attack Surface Signals -> Phase 1 -> Phase 2 …), where "-principles"
+# and "-resources" are reference prose. Without an entry here every vendored
+# hunt-* file scored boost 0 and lost to the older corpus on every tie, leaving
+# 100 newly-vendored files effectively unreachable.
+_BOOST = (("quickstart", 3), ("hunt-", 3), ("cheat-sheet", 2),
+          ("advanced", 1), ("principles", 1))
 
 _STOP = {
     "the", "and", "for", "with", "mission", "test", "testing", "focused",
@@ -193,7 +213,7 @@ def select_skill_files(hint: str, max_files: int = 3, max_chars: int = 14000,
         nonlocal used
         if path in chosen:
             return False
-        size = path.stat().st_size
+        size = min(path.stat().st_size, MAX_FILE_EXCERPT)
         if chosen and used + size > max_chars:
             return False          # skip; a later, smaller file may still fit
         chosen.append(path)
@@ -226,8 +246,9 @@ def select_skill_files(hint: str, max_files: int = 3, max_chars: int = 14000,
             # class has. Picking one explicitly matters: _take always accepts the
             # very first file regardless of size, so letting it iterate let class
             # one spend most of the budget and starve the rest.
-            fits = [c for c in cands if c.stat().st_size <= share]
-            _take(fits[0] if fits else min(cands, key=lambda p: p.stat().st_size))
+            fits = [c for c in cands if min(c.stat().st_size, MAX_FILE_EXCERPT) <= share]
+            _take(fits[0] if fits else min(
+                cands, key=lambda p: min(p.stat().st_size, MAX_FILE_EXCERPT)))
 
     # 2. Fill any remaining budget by keyword overlap, as before.
     scored: list[tuple[int, int, Path]] = []
@@ -274,6 +295,9 @@ def render_skills(hint: str, max_chars: int = 14000,
     for p in files:
         rel = p.relative_to(SKILLS_ROOT)
         body = p.read_text(encoding="utf-8", errors="replace").strip()
+        if len(body) > MAX_FILE_EXCERPT:
+            body = (body[:MAX_FILE_EXCERPT].rsplit("\n", 1)[0]
+                    + "\n…(excerpt — this sheet continues beyond what fits the budget)")
         parts.append(f"\n----- skill: {rel.parent.name} / {p.stem} -----\n{body}")
     return "\n".join(parts) + "\n"
 

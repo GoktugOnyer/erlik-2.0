@@ -24,6 +24,27 @@ The MIT license requires that the copyright notice and permission notice be
 retained in copies or substantial portions. Adapted source files carry an
 attribution header pointing here.
 
+## elementalsouls/Claude-BugHunter (CC BY 4.0 content, MIT code)
+
+- Source: https://github.com/elementalsouls/Claude-BugHunter
+- Author: Sachin Sharma
+- Content licence: **CC BY 4.0** — https://creativecommons.org/licenses/by/4.0/
+- Code licence: MIT, Copyright (c) 2026 Sachin Sharma
+
+| erlik-2.0 path | Vendored from | Notes |
+|----------------|---------------|-------|
+| `skills_catalog/skills/bughunter/*.md` (100 files) | `skills/**/ *.md` | Every skill in the upstream repo — 57 `hunt-<class>` methodologies plus reporting, triage, methodology, OSINT and platform-chain skills. Text unmodified; only the layout was flattened (`<name>/SKILL.md` → `<name>.md`) so `orchestrator/skills.py` indexes them. See [`skills_catalog/skills/bughunter/NOTICE.md`](skills_catalog/skills/bughunter/NOTICE.md). |
+
+CC BY 4.0 permits commercial use and redistribution inside an MIT project
+provided attribution is given and modifications are indicated — both are
+satisfied by this entry and the NOTICE file. This differs from HackTricks
+(CC BY-**NC**), whose NonCommercial clause is incompatible with erlik's MIT
+grant and which is therefore referenced by index only, never vendored.
+
+These files are a corpus the router SELECTS from, not text injected wholesale:
+any session receives a few excerpts under a character budget. Growing the pool
+does not grow what a run receives.
+
 ## Runtime tools (invoked, not vendored)
 
 erlik can shell out to external scanners it does not bundle. Their code is not

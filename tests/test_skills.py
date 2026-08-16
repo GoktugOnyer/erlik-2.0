@@ -36,7 +36,10 @@ def test_ssrf_selects_server_side_not_client_side():
     """The headline regression: 'ssrf' must not return client-side sheets."""
     picked = _rel(S.select_skill_files("ssrf"))
     assert picked, "ssrf should match something in the corpus"
-    assert all(p.startswith("server-side/") for p in picked), picked
+    # Asserts the CLASS, not a directory: since the Claude-BugHunter corpus was
+    # vendored, the best SSRF sheet is bughunter/hunt-ssrf.md rather than
+    # server-side/. What must never happen is client-side content coming back.
+    assert all("ssrf" in p or p.startswith("server-side/") for p in picked), picked
     assert not any("clickjacking" in p or "cors" in p for p in picked), picked
 
 
@@ -55,28 +58,42 @@ def test_sqli_uses_the_budget_instead_of_stopping_at_the_first_overflow():
 
 
 @pytest.mark.parametrize(
-    "hint, expected_category",
+    "hint, expected_token",
     [
-        ("jwt", "authentication"),
-        ("idor", "web-app-logic"),
-        ("sqli", "injection"),
-        ("ssrf", "server-side"),
+        ("jwt", "jwt"),
+        ("idor", "idor"),
+        ("sqli", "sql"),
+        ("ssrf", "ssrf"),
     ],
 )
-def test_hint_routes_to_the_expected_category(hint, expected_category):
+def test_hint_routes_to_the_expected_class(hint, expected_token):
+    """Asserts the topic of the top pick, not its directory — the corpus now
+    spans two vendored trees with different licences, so a class's best sheet may
+    live in either."""
     picked = _rel(S.select_skill_files(hint))
     assert picked, hint
-    assert picked[0].startswith(f"{expected_category}/"), (hint, picked)
+    assert expected_token in picked[0].lower(), (hint, picked)
 
 
 def test_selection_respects_the_character_budget():
+    """Measured on the EXCERPT that actually gets injected, not the file on disk.
+    60 of the 101 vendored bughunter sheets are individually larger than the whole
+    budget (hunt-xss is 30 KB), so raw size is no longer the quantity the budget
+    governs — MAX_FILE_EXCERPT caps each file's contribution."""
     for hint in ("sqli", "xss", "ssrf", "jwt", "idor"):
         picked = S.select_skill_files(hint, max_chars=14000)
-        total = sum(p.stat().st_size for p in picked)
-        # The first pick is always taken (never return empty on a real match),
-        # so only a multi-file selection is required to fit.
+        total = sum(min(p.stat().st_size, S.MAX_FILE_EXCERPT) for p in picked)
         if len(picked) > 1:
             assert total <= 14000, (hint, total, _rel(picked))
+
+
+def test_injected_volume_never_grows_with_corpus_size():
+    """The invariant the whole design rests on: a measured 12-run experiment found
+    injected bytes inversely correlated with recall (r = -0.796). Vendoring 100
+    more files must grow the POOL, never what any one run receives."""
+    for hint in ("sqli", "xss", "ssrf", "Test for SSRF and XXE and CSRF",
+                 "Assess for injection, authentication and access-control flaws"):
+        assert len(S.render_skills(hint)) <= 20000, hint
 
 
 def test_no_match_returns_empty():
@@ -198,7 +215,7 @@ def test_classes_are_detected_from_the_mission():
     ("Look for NoSQL injection in the API", "nosql-injection"),
     ("Check command injection", "os-command-injection"),
     ("Check JWT handling", "jwt"),
-    ("Look for IDOR and broken access control", "access-control"),
+    ("Look for IDOR and broken access control", "idor"),
     ("Test file upload handling", "file-upload"),
 ])
 def test_a_named_class_selects_its_own_sheet(mission, expect):
@@ -229,5 +246,6 @@ def test_observed_tech_influences_selection():
 
 def test_single_class_missions_do_not_inflate_the_budget():
     """Only a three-class mission widens the budget; one class must not."""
-    total = sum(p.stat().st_size for p in S.select_skill_files("Test for SQL injection"))
+    total = sum(min(p.stat().st_size, S.MAX_FILE_EXCERPT)
+                for p in S.select_skill_files("Test for SQL injection"))
     assert total <= 14000
