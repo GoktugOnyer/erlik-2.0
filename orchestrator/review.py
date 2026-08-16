@@ -178,21 +178,19 @@ def redact_secrets(text: str | None) -> str:
     the primitives lever is on. The reviewer may be a REMOTE model, so sending
     those verbatim would exfiltrate session credentials to a third party.
 
-    Reuses the extractor's own patterns, so anything primitives can capture is
-    something this can mask.
-    """
-    from orchestrator.primitives import _PATTERNS
+    Thin wrapper over orchestrator.redaction.mask, which is the single
+    redaction authority. This wrapper keeps the "" coercion for the review
+    path's existing callers; `mask` itself is None-preserving on purpose.
 
-    out = text or ""
-    for kind, rx, grp, _hint in _PATTERNS:
-        def _mask(m, _kind=kind, _grp=grp):
-            whole = m.group(0)
-            secret = m.group(_grp) if _grp else whole
-            if not secret or len(secret) < 6:
-                return whole
-            return whole.replace(secret, f"<{_kind}:redacted>")
-        out = rx.sub(_mask, out)
-    return out
+    This function used to reuse `primitives._PATTERNS` directly. Those are an
+    EXTRACTOR's patterns — they describe how a secret looks in a RESPONSE —
+    while `primitives.inject_credentials` writes secrets into REQUESTS. The
+    mismatch meant 11 of the 20 templates in `primitives._AUTH_FLAGS` leaked
+    the secret verbatim, every cookie form among them.
+    """
+    from orchestrator.redaction import mask
+
+    return mask(text) or ""
 
 
 def summarise_commands(steps: list[dict], per_tool: int = 4,

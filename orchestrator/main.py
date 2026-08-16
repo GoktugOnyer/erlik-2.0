@@ -2463,6 +2463,15 @@ async def _save_report_file(session_id: str, target_url: str, session_type: str,
     lines.append("")
 
     # Add FULL untruncated step log (for archival — the main report has noise-stripped versions)
+    #
+    # This block is the largest secret-leak surface in the repo: it writes the
+    # complete, untruncated command and output of every step, straight from
+    # memory, so no SQL-level filter reaches it — and this file is what
+    # /report/download serves to whoever is handed the report. Any credential
+    # primitives.inject_credentials wrote into a command is here verbatim.
+    from orchestrator.redaction import mask as _mask, census as _census
+    _secret_counts: dict[str, int] = {}
+
     lines.append("## Full Untruncated Step Log")
     lines.append("")
     if full_steps:
@@ -2473,6 +2482,11 @@ async def _save_report_file(session_id: str, target_url: str, session_type: str,
             duration = s.get("duration_ms", 0)
             cmd = s.get("command", "N/A")
             output = s.get("output", "")
+            for _blob in (cmd, output):
+                for _k, _n in _census(_blob).items():
+                    _secret_counts[_k] = _secret_counts.get(_k, 0) + _n
+            cmd = _mask(cmd)
+            output = _mask(output)
             line_count = len(output.split("\n")) if output else 0
 
             lines.append(
@@ -2491,6 +2505,24 @@ async def _save_report_file(session_id: str, target_url: str, session_type: str,
     else:
         lines.append("*No steps were recorded for this session.*")
         lines.append("")
+
+    # Declare the redaction. `applied` and `total` are SEPARATE facts:
+    # applied=true with total=0 means the pass ran and found nothing, which a
+    # reader cannot otherwise distinguish from a report that never had one.
+    lines.append("---")
+    lines.append("")
+    lines.append("## Redaction")
+    lines.append("")
+    _total = sum(_secret_counts.values())
+    lines.append(f"- Applied: **yes** (orchestrator/redaction.py)")
+    lines.append(f"- Distinct secrets masked: **{_total}**")
+    if _secret_counts:
+        for _k in sorted(_secret_counts):
+            lines.append(f"  - {_k}: {_secret_counts[_k]}")
+    lines.append("")
+    lines.append("Each placeholder carries a short digest of the value it "
+                 "replaced, so two different secrets stay distinguishable.")
+    lines.append("")
 
     # Write file
     report_path = REPORTS_DIR / f"{session_id}.md"
