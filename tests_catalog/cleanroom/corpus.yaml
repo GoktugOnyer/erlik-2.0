@@ -1,0 +1,1896 @@
+# False-positive cleanroom corpus.
+#
+# Zone A: deliberate collisions — benign behaviour by a clean app that a
+#         detector nonetheless fires on. These emissions ARE the measured
+#         false positives, so they are EXPECTED to be non-empty.
+# Zone B: ordinary benign traffic. Any finding here is an unambiguous FP.
+#
+# `expected` is MEASURED, never authored: it is re-derived by running the
+# real detectors, and tests/test_cleanroom.py fails on any drift.
+# Each fixture carries a COMMAND, because DetectContext parses the URL from
+# it — with an empty command 11 of 15 curl rules are structurally dead.
+
+fixtures:
+- route: /api/v1/health
+  zone: A
+  family: ''
+  tool: curl
+  command: curl -s -i https://api.acme.example.com/api/v1/health
+  response: 'HTTP/1.1 200 OK
+
+    Date: Sat, 16 Aug 2026 09:14:02 GMT
+
+    Content-Type: application/json; charset=utf-8
+
+    Strict-Transport-Security: max-age=31536000; includeSubDomains; preload
+
+    X-Content-Type-Options: nosniff
+
+    Cache-Control: no-store
+
+    Content-Length: 96
+
+
+    {"status":"ok","version":"2.4.1","checks":{"database":"ok","cache":"ok","queue":"ok"}}
+
+    '
+  expected:
+  - vuln_type: Security Misconfiguration
+    severity: medium
+    detector: curl:_curl_missing_headers
+  rationale: 'A JSON-only API correctly omits CSP and X-Frame-Options: it never returns a document a browser
+    renders or frames, so both headers are inert there. The two that do apply (HSTS, nosniff) are set.
+    Two ''missing'' headers is exactly the rule''s >=2 threshold, so correct hardening scores identically
+    to none. Evidence emitted: ''Missing security headers: Content-Security-Policy, X-Frame-Options''.'
+- route: /api/status-intranet
+  zone: A
+  family: ''
+  tool: curl
+  command: curl -s -i http://reports.corp.internal:9100/api/status
+  response: 'HTTP/1.1 200 OK
+
+    Date: Sat, 16 Aug 2026 09:15:44 GMT
+
+    Content-Type: application/json; charset=utf-8
+
+    X-Frame-Options: DENY
+
+    X-Content-Type-Options: nosniff
+
+    Content-Length: 74
+
+
+    {"service":"reports","state":"healthy","queue_depth":0,"workers":4}
+
+    '
+  expected:
+  - vuln_type: Security Misconfiguration
+    severity: medium
+    detector: curl:_curl_missing_headers
+  rationale: Intranet-only service on plain HTTP. Strict-Transport-Security over http:// is ignored by
+    browsers per RFC 6797, so omitting it is correct, and CSP is inert on a JSON endpoint. Both omissions
+    are deliberate and right; together they cross the threshold. The rule never inspects the scheme, so
+    it recommends HSTS on a URL where HSTS cannot work.
+- route: /status-page-root
+  zone: A
+  family: ''
+  tool: curl
+  command: curl -s -i https://status.acme.example.com/
+  response: 'HTTP/1.1 200 OK
+
+    Date: Sat, 16 Aug 2026 09:16:10 GMT
+
+    Server: nginx
+
+    X-Powered-By: Express
+
+    Content-Type: text/html; charset=utf-8
+
+    Content-Security-Policy: default-src ''self''
+
+    X-Frame-Options: DENY
+
+    Strict-Transport-Security: max-age=31536000; includeSubDomains
+
+    X-Content-Type-Options: nosniff
+
+
+    <!doctype html><title>Acme Status</title>
+
+    <h1>All systems operational</h1>
+
+    <p>Last incident: none in 94 days.</p>
+
+    '
+  expected:
+  - vuln_type: Information Disclosure
+    severity: medium
+    detector: curl:_curl_server_header
+  rationale: 'A deliberately public, unauthenticated status page. The operator leaves the framework banner
+    on because the page holds nothing to protect; no version is disclosed, so there is nothing to pivot
+    on. Note the emitted evidence is ''Server header exposes: nginx'' -- the condition tripped on X-Powered-By
+    but the regex alternation matched the earlier ''Server:'' line, so the finding names a header value
+    that is not the one that triggered it.'
+- route: /v1/orders/8842
+  zone: A
+  family: ''
+  tool: curl
+  command: curl -s -i https://api.acme.example.com/v1/orders/8842
+  response: 'HTTP/1.1 500 Internal Server Error
+
+    Date: Sat, 16 Aug 2026 09:17:31 GMT
+
+    Content-Type: application/json; charset=utf-8
+
+    Content-Security-Policy: default-src ''self''
+
+    X-Frame-Options: DENY
+
+    Strict-Transport-Security: max-age=31536000; includeSubDomains
+
+    X-Content-Type-Options: nosniff
+
+
+    {"error":{"code":"internal_error","message":"An unexpected error occurred.","request_id":"req_01J8Z4","stacktrace":null}}
+
+    '
+  expected:
+  - vuln_type: Information Disclosure
+    severity: info
+    detector: curl:_curl_stack_trace
+  rationale: A designed, non-leaking error envelope. The schema always carries a 'stacktrace' key so responses
+    have a stable shape; in production it is always null and the real trace goes to the log pipeline.
+    The word appears as a FIELD NAME and the field is empty, but _STACKTRACE_MARKERS is a bare substring
+    test over the lowercased body, so an explicitly suppressed trace reads as a disclosed one.
+- route: /docs/errors
+  zone: A
+  family: ''
+  tool: curl
+  command: curl -s -i https://developers.acme.example.com/docs/errors
+  response: "HTTP/1.1 200 OK\nDate: Sat, 16 Aug 2026 09:18:02 GMT\nContent-Type: text/html; charset=utf-8\n\
+    Content-Security-Policy: default-src 'self'\nX-Frame-Options: DENY\nStrict-Transport-Security: max-age=31536000;\
+    \ includeSubDomains\nX-Content-Type-Options: nosniff\n\n<!doctype html><title>Error handling - Acme\
+    \ Developers</title>\n<h1>Error handling</h1>\n<p>In <code>development</code> mode only, the API appends\
+    \ a trace. Example:</p>\n<pre>TypeError: Cannot read properties of undefined\n    at getOrder (/srv/app/server.js:42:15)</pre>\n\
+    <p>Never enable this in production. See the deployment guide.</p>\n"
+  expected:
+  - vuln_type: Information Disclosure
+    severity: info
+    detector: curl:_curl_stack_trace
+  rationale: Public developer documentation. The stack frame is a fabricated illustration inside a <pre>
+    block written by the docs team to show what NOT to ship; the live API never emits it. It satisfies
+    two of the three markers at once (the /app/ filesystem substring and the .js:LINE:COL frame regex)
+    on a 200 OK page that is not an error at all -- and the emitted evidence still reads 'Server error
+    with stack trace'.
+- route: /http-to-https-redirect
+  zone: A
+  family: ''
+  tool: curl
+  command: curl -s -I http://www.acme.example.com/
+  response: 'HTTP/1.1 301 Moved Permanently
+
+    Date: Sat, 16 Aug 2026 09:19:20 GMT
+
+    Location: https://www.acme.example.com/
+
+    Content-Length: 0
+
+    Connection: keep-alive
+
+    '
+  expected:
+  - vuln_type: Security Misconfiguration
+    severity: medium
+    detector: curl:_curl_missing_headers
+  rationale: 'The canonical, recommended edge behaviour: an empty 301 that upgrades the scheme. It has
+    no body, so CSP/XFO/nosniff have nothing to govern, and HSTS must not be sent over plain HTTP. All
+    four headers are absent precisely because sending any of them would be wrong -- and this is the maximal-severity
+    shape of the finding (all four listed). Every HTTPS-enforcing site on earth produces this fixture.'
+- route: /api/v1/shipping/options
+  zone: A
+  family: ''
+  tool: curl
+  command: curl -s -i https://shop.acme.example.com/api/v1/shipping/options
+  response: 'HTTP/1.1 200 OK
+
+    Date: Sat, 16 Aug 2026 09:20:05 GMT
+
+    Server: nginx
+
+    Content-Type: application/json; charset=utf-8
+
+    Content-Security-Policy: default-src ''self''
+
+    X-Frame-Options: DENY
+
+    Strict-Transport-Security: max-age=31536000; includeSubDomains
+
+    X-Content-Type-Options: nosniff
+
+
+    {"options":[{"code":"standard","label":"Standard (5-7 days)","price":0},{"code":"express","label":"Express
+    (next day)","price":1200}]}
+
+    '
+  expected:
+  - vuln_type: Information Disclosure
+    severity: medium
+    detector: curl:_curl_server_header
+  rationale: 'A hardened response: bare ''Server: nginx'' with the version suppressed (nothing actually
+    disclosed) plus a full security-header set. The only occurrence of ''express'' anywhere is the shipping
+    tier in the JSON body. The rule''s second clause ANDs two whole-output substring tests without distinguishing
+    headers from body, so any body containing the word ''express'' converts a benign server banner into
+    a medium Information Disclosure.'
+- route: /pricing
+  zone: B
+  family: ''
+  tool: curl
+  command: curl -s -i https://www.acme.example.com/pricing
+  response: 'HTTP/1.1 200 OK
+
+    Date: Sat, 16 Aug 2026 09:21:44 GMT
+
+    Content-Type: text/html; charset=utf-8
+
+    Content-Security-Policy: default-src ''self''
+
+    X-Frame-Options: DENY
+
+    Strict-Transport-Security: max-age=31536000; includeSubDomains
+
+    X-Content-Type-Options: nosniff
+
+    Referrer-Policy: strict-origin-when-cross-origin
+
+
+    <!doctype html><title>Pricing - Acme</title>
+
+    <h1>Plans</h1><ul><li>Starter</li><li>Team</li><li>Enterprise</li></ul>
+
+    '
+  expected: []
+  rationale: 'Ordinary hardened marketing page with nothing sensitive. The silent baseline: proves the
+    three rules in this family are actually reachable-but-quiet rather than dead, so a zero elsewhere
+    means something.'
+- route: /account/sign-in
+  zone: B
+  family: ''
+  tool: curl
+  command: curl -s https://www.acme.example.com/account/sign-in
+  response: "<!doctype html>\n<title>Sign in - Acme</title>\n<form method=\"post\" action=\"/account/sign-in\"\
+    >\n  <label>Email <input type=\"email\" name=\"email\"></label>\n  <label>Password <input type=\"\
+    password\" name=\"password\"></label>\n  <button>Sign in</button>\n</form>\n<script src=\"/static/auth.js\"\
+    ></script>\n"
+  expected:
+  - vuln_type: Security Misconfiguration
+    severity: medium
+    detector: curl:_curl_missing_headers
+  - vuln_type: Sensitive Data Exposure
+    severity: medium
+    detector: curl:_curl_exposed_user_data
+  rationale: 'A body-only fetch of an ordinary login page; no -i/-I/--head was passed, so the operator
+    never saw a single response header. It still gets header-audited because the -i gate is a bare substring
+    test and the path ''sign-in'' contains ''-i''. Confirmed by control: the identical body at /account/login
+    (no ''-i'' substring) yields no header finding. The response also trips _curl_exposed_user_data, whose
+    evidence self-refutes: ''API exposes user data: 0 user records found''.'
+- route: /api/v1/inventory
+  zone: B
+  family: ''
+  tool: curl
+  command: curl -s https://inventory.corp.internal/api/v1/inventory --insecure
+  response: '{"items":[{"sku":"ACME-100","qty":42},{"sku":"ACME-220","qty":7}],"page":1}
+
+    '
+  expected:
+  - vuln_type: Security Misconfiguration
+    severity: medium
+    detector: curl:_curl_missing_headers
+  rationale: 'Body-only fetch against an internal host with a private-CA certificate, hence --insecure.
+    No header flag was used, yet the finding lists all four headers as missing. Cause confirmed by control:
+    ''--insecure'' contains the substring ''-i''. The same command with -k instead of --insecure produces
+    nothing, so the finding depends on which spelling of the TLS flag the operator typed.'
+- route: /spa-shell
+  zone: B
+  family: ''
+  tool: curl
+  command: curl -s -i https://app.acme.example.com/
+  response: 'HTTP/1.1 200 OK
+
+    Date: Sat, 16 Aug 2026 09:23:11 GMT
+
+    Content-Type: text/html; charset=utf-8
+
+    Content-Security-Policy: default-src ''self''
+
+    X-Frame-Options: DENY
+
+    Strict-Transport-Security: max-age=31536000; includeSubDomains
+
+    X-Content-Type-Options: nosniff
+
+
+    <!doctype html><html><head><title>Acme</title>
+
+    <link rel="stylesheet" href="/app/styles.4f2a.css">
+
+    </head><body><app-root></app-root>
+
+    <script src="/app/runtime.9c1e.js" defer></script>
+
+    <script src="/app/main.9c1e.js" defer></script>
+
+    </body></html>
+
+    '
+  expected:
+  - vuln_type: Information Disclosure
+    severity: info
+    detector: curl:_curl_stack_trace
+  rationale: The index shell of a compiled front-end, fully hardened, no error and no server state. Its
+    bundles are served under the /app/ path prefix, which is a framework default. _FILESYSTEM_MARKERS
+    matches '/app/' anywhere in the output with no requirement that the status be an error, so a 200 OK
+    asset reference is reported as 'Server error with stack trace'. The same fires for any page mentioning
+    /usr/, /var/, /home/ or /root/ in ordinary prose or hrefs.
+- route: /api/version-hsts-only
+  zone: B
+  family: ''
+  tool: curl
+  command: curl -s -i http://reports.corp.internal:9100/api/version
+  response: 'HTTP/1.1 200 OK
+
+    Date: Sat, 16 Aug 2026 09:24:02 GMT
+
+    Content-Type: application/json; charset=utf-8
+
+    Content-Security-Policy: default-src ''none''
+
+    X-Frame-Options: DENY
+
+    X-Content-Type-Options: nosniff
+
+
+    {"version":"2.4.1","commit":"a91f0c2"}
+
+    '
+  expected: []
+  rationale: 'Same intranet service as the Zone A plain-HTTP fixture but with CSP also set, so only HSTS
+    is absent and only because the transport is plain HTTP. Threshold control: proves the >=2 guard genuinely
+    suppresses, and that the Zone A sibling fires on count alone rather than on anything about the target.'
+- route: /api/public/fx-rates
+  zone: A
+  family: ''
+  tool: curl
+  command: 'curl -s -i "https://api.acme-cleanroom.test/api/public/fx-rates" -H "Origin: https://widgets.partner.example"'
+  response: "HTTP/1.1 200 OK\r\nDate: Sat, 15 Aug 2026 09:14:02 GMT\r\nServer: nginx\r\nContent-Security-Policy:\
+    \ default-src 'self'\r\nX-Frame-Options: DENY\r\nStrict-Transport-Security: max-age=63072000; includeSubDomains\r\
+    \nX-Content-Type-Options: nosniff\r\nReferrer-Policy: strict-origin-when-cross-origin\r\nContent-Type:\
+    \ application/json; charset=utf-8\r\nAccess-Control-Allow-Origin: *\r\nCache-Control: public, max-age=300\r\
+    \nContent-Length: 118\r\n\r\n{\"base\":\"GBP\",\"published\":\"2026-08-15T09:00:00Z\",\"rates\":{\"\
+    EUR\":1.1642,\"USD\":1.2711,\"JPY\":187.44,\"CHF\":1.0903}}\n"
+  expected: []
+  rationale: 'COLLISION TARGET: bare wildcard ACAO. A genuinely public, unauthenticated rates API. A wildcard
+    origin with no Access-Control-Allow-Credentials is the correct way to serve one: browsers refuse to
+    attach cookies to a wildcard origin, so a cross-origin read returns only what any anonymous client
+    could already fetch. This is the positive control for the recent _curl_cors correction -- MEASURED
+    SILENT, so the credentials gate holds.'
+- route: /api/v1/me
+  zone: A
+  family: ''
+  tool: curl
+  command: 'curl -s -i "https://api.acme-cleanroom.test/api/v1/me" -H "Origin: https://app.acme-cleanroom.test"
+    -b "sid=8f2c1ab9"'
+  response: "HTTP/1.1 200 OK\r\nDate: Sat, 15 Aug 2026 09:14:02 GMT\r\nServer: nginx\r\nContent-Security-Policy:\
+    \ default-src 'self'\r\nX-Frame-Options: DENY\r\nStrict-Transport-Security: max-age=63072000; includeSubDomains\r\
+    \nX-Content-Type-Options: nosniff\r\nReferrer-Policy: strict-origin-when-cross-origin\r\nContent-Type:\
+    \ application/json; charset=utf-8\r\nVary: Origin, Cookie\r\nAccess-Control-Allow-Origin: https://app.acme-cleanroom.test\r\
+    \nAccess-Control-Allow-Credentials: true\r\nCache-Control: no-store\r\n\r\n{\"id\":\"usr_8812\",\"\
+    displayName\":\"Dana Whitfield\",\"locale\":\"en-GB\",\"timeZone\":\"Europe/London\"}\n"
+  expected:
+  - vuln_type: CORS Misconfiguration
+    severity: high
+    detector: curl:_curl_cors
+  rationale: 'COLLISION TARGET: allowlist echo read as reflection. Access-Control-Allow-Origin cannot
+    hold a list, so a server that allows exactly one first-party origin MUST echo that origin back and
+    set Vary: Origin -- this is the spec-mandated correct implementation, and app.acme-cleanroom.test
+    is the same operator''s own SPA. _curl_cors computes `reflected` as `echoed origin == origin we sent`
+    and cannot distinguish a one-entry allowlist from an echo-anything policy, so the single most common
+    correct credentialed-CORS deployment scores HIGH. This is the largest false positive in the family.'
+- route: /redirect?url=/dashboard [absolute Location]
+  zone: A
+  family: ''
+  tool: curl
+  command: curl -s -i "https://portal.acme-cleanroom.test/redirect?url=/dashboard"
+  response: "HTTP/1.1 302 Found\r\nDate: Sat, 15 Aug 2026 09:14:02 GMT\r\nServer: nginx\r\nContent-Security-Policy:\
+    \ default-src 'self'\r\nX-Frame-Options: DENY\r\nStrict-Transport-Security: max-age=63072000; includeSubDomains\r\
+    \nX-Content-Type-Options: nosniff\r\nReferrer-Policy: strict-origin-when-cross-origin\r\nLocation:\
+    \ https://portal.acme-cleanroom.test/dashboard\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length:\
+    \ 0\r\n\r\n"
+  expected:
+  - vuln_type: Open Redirect
+    severity: medium
+    detector: curl:_curl_open_redirect
+  rationale: 'COLLISION TARGET: the hardcoded ''juice'' guard. A legitimate post-login bounce endpoint
+    that validates its url parameter against an allowlist of in-app paths and redirects SAME-ORIGIN. RFC
+    7231 historically required an absolute URI in Location and many frameworks (plus any reverse proxy
+    that rewrites it) still emit one. The only anti-FP guard in _curl_open_redirect is `''juice'' not
+    in location`, so on any non-Juice-Shop target this correct redirect fires. Known live defect; recorded
+    honestly. Note the emitted parameter is the hardcoded "to" while the real parameter is "url".'
+- route: /redirect?url=/dashboard [relative Location]
+  zone: A
+  family: ''
+  tool: curl
+  command: curl -s -i "https://portal.acme-cleanroom.test/redirect?url=/dashboard"
+  response: "HTTP/1.1 302 Found\r\nDate: Sat, 15 Aug 2026 09:14:02 GMT\r\nServer: nginx\r\nContent-Security-Policy:\
+    \ default-src 'self'\r\nX-Frame-Options: DENY\r\nStrict-Transport-Security: max-age=63072000; includeSubDomains\r\
+    \nX-Content-Type-Options: nosniff\r\nReferrer-Policy: strict-origin-when-cross-origin\r\nLocation:\
+    \ /dashboard\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: 0\r\n\r\n"
+  expected: []
+  rationale: 'PAIRED CONTROL for the fixture above: byte-for-byte the same safe behaviour, expressed as
+    a relative Location. MEASURED SILENT. The pair proves the detector is keying on Location *syntax*
+    (does the value contain the substring ''http'') rather than on cross-origin-ness -- the same clean
+    endpoint is a medium finding or a non-finding depending on whether the framework emits an absolute
+    or relative Location.'
+- route: /download?name=report%00.pdf [rejected, -i]
+  zone: A
+  family: ''
+  tool: curl
+  command: curl -s -i "https://files.acme-cleanroom.test/download?name=report%00.pdf"
+  response: "HTTP/1.1 400 Bad Request\r\nDate: Sat, 15 Aug 2026 09:14:02 GMT\r\nServer: nginx\r\nContent-Security-Policy:\
+    \ default-src 'self'\r\nX-Frame-Options: DENY\r\nStrict-Transport-Security: max-age=63072000; includeSubDomains\r\
+    \nX-Content-Type-Options: nosniff\r\nReferrer-Policy: strict-origin-when-cross-origin\r\nContent-Type:\
+    \ application/json; charset=utf-8\r\nContent-Length: 121\r\n\r\n{\"error\":\"invalid_path\",\"message\"\
+    :\"The name parameter contains an illegal character sequence and was rejected.\"}\n"
+  expected:
+  - vuln_type: Sensitive Data Exposure
+    severity: high
+    detector: curl:_curl_null_byte
+  rationale: 'COLLISION TARGET: the output[:100] ''error'' guard. The clean app CORRECTLY rejects the
+    null-byte traversal with 400 and serves no file at all. _curl_null_byte''s only anti-FP guard is `''error''
+    not in output_lower[:100]`, and under -i the first 100 bytes are always the status line and Date/Server
+    headers, so the guard never sees the body. Emitted evidence reads "Null byte bypass successful --
+    restricted file accessible (476 bytes returned)": the 476 bytes are the refusal itself.'
+- route: /download?name=report%00.pdf [rejected, body only]
+  zone: A
+  family: ''
+  tool: curl
+  command: curl -s "https://files.acme-cleanroom.test/download?name=report%00.pdf"
+  response: '{"error":"invalid_path","message":"The name parameter contains an illegal character sequence
+    and was rejected."}
+
+    '
+  expected: []
+  rationale: 'PAIRED CONTROL: identical rejection, identical clean behaviour, fetched without -i so the
+    body starts at byte 0 and the ''error'' token lands inside the 100-byte window. MEASURED SILENT. The
+    pair isolates the cause precisely -- the same clean 400 is HIGH or nothing depending only on whether
+    headers were requested.'
+- route: /api/feedbacks [authenticated POST]
+  zone: A
+  family: ''
+  tool: curl
+  command: 'curl -s -i -X POST "https://portal.acme-cleanroom.test/api/feedbacks" -H "Content-Type: application/json"
+    -b "sid=8f2c1ab9" -d ''{"comment":"Checkout was quick","rating":5,"UserId":9999}'''
+  response: "HTTP/1.1 201 Created\r\nDate: Sat, 15 Aug 2026 09:14:02 GMT\r\nServer: nginx\r\nContent-Security-Policy:\
+    \ default-src 'self'\r\nX-Frame-Options: DENY\r\nStrict-Transport-Security: max-age=63072000; includeSubDomains\r\
+    \nX-Content-Type-Options: nosniff\r\nReferrer-Policy: strict-origin-when-cross-origin\r\nContent-Type:\
+    \ application/json; charset=utf-8\r\nLocation: /api/feedbacks/70314\r\n\r\n{\"data\":{\"id\":70314,\"\
+    comment\":\"Checkout was quick\",\"rating\":5,\"UserId\":4412,\"createdAt\":\"2026-08-15T09:14:03Z\"\
+    }}\n"
+  expected:
+  - vuln_type: Broken Access Control
+    severity: high
+    detector: curl:_curl_forged_feedback
+  rationale: 'COLLISION TARGET: presence of the string "userid" in a response body. The request supplies
+    UserId 9999 and the server IGNORES it, stamping the session owner 4412 instead -- this response is
+    the *proof the app is not vulnerable*. Echoing the stored row back in a 201 is ordinary REST. _curl_forged_feedback
+    tests only url contains /api/feedbacks AND body contains "userid" AND command contains "POST"; it
+    never compares the submitted UserId with the returned one, so correct server-side ownership enforcement
+    scores HIGH.'
+- route: /api/feedbacks?sort=postedAt
+  zone: A
+  family: ''
+  tool: curl
+  command: curl -s -i "https://portal.acme-cleanroom.test/api/feedbacks?sort=postedAt&limit=2" -b "sid=8f2c1ab9"
+  response: "HTTP/1.1 200 OK\r\nDate: Sat, 15 Aug 2026 09:14:02 GMT\r\nServer: nginx\r\nContent-Security-Policy:\
+    \ default-src 'self'\r\nX-Frame-Options: DENY\r\nStrict-Transport-Security: max-age=63072000; includeSubDomains\r\
+    \nX-Content-Type-Options: nosniff\r\nReferrer-Policy: strict-origin-when-cross-origin\r\nContent-Type:\
+    \ application/json; charset=utf-8\r\n\r\n{\"data\":[{\"id\":70314,\"userId\":4412,\"rating\":5,\"\
+    postedAt\":\"2026-08-15T09:14:03Z\"},{\"id\":70201,\"userId\":4412,\"rating\":4,\"postedAt\":\"2026-08-14T18:02:55Z\"\
+    }]}\n"
+  expected:
+  - vuln_type: Broken Access Control
+    severity: high
+    detector: curl:_curl_forged_feedback
+  rationale: 'COLLISION TARGET: `"POST" in ctx.command.upper()` is a bare substring test over the whole
+    command line. This is a read-only GET of the caller''s OWN feedback list -- no write, no forgery,
+    no cross-user data -- but the ordinary query parameter sort=postedAt uppercases to POSTEDAT and satisfies
+    the method check. Verified by control probe: the same GET with `?limit=2` alone is silent, so the
+    sort parameter is the sole cause.'
+- route: /
+  zone: B
+  family: ''
+  tool: curl
+  command: curl -s -i "https://portal.acme-cleanroom.test/"
+  response: "HTTP/1.1 200 OK\r\nDate: Sat, 15 Aug 2026 09:14:02 GMT\r\nServer: nginx\r\nContent-Security-Policy:\
+    \ default-src 'self'\r\nX-Frame-Options: DENY\r\nStrict-Transport-Security: max-age=63072000; includeSubDomains\r\
+    \nX-Content-Type-Options: nosniff\r\nReferrer-Policy: strict-origin-when-cross-origin\r\nContent-Type:\
+    \ text/html; charset=utf-8\r\nContent-Length: 214\r\n\r\n<!doctype html><html lang=\"en\"><head><title>Acme\
+    \ Portal</title></head><body><main><h1>Acme Portal</h1><p>Sign in to continue.</p><a href=\"/session/new\"\
+    >Sign in</a></main></body></html>\n"
+  expected: []
+  rationale: 'Ordinary homepage fetch from a fully hardened clean app: all four security headers present,
+    no X-Powered-By, nginx rather than Express, no CORS headers. MEASURED SILENT. This is the corpus''s
+    baseline negative control -- it proves the whole curl rule chain is reachable-but-quiet, so a silent
+    Zone B is a real result rather than a dead harness.'
+- route: /assets/inter-var.woff2
+  zone: B
+  family: ''
+  tool: curl
+  command: 'curl -s -i "https://cdn.acme-cleanroom.test/assets/inter-var.woff2" -H "Origin: https://portal.acme-cleanroom.test"'
+  response: "HTTP/1.1 200 OK\r\nDate: Sat, 15 Aug 2026 09:14:02 GMT\r\nServer: nginx\r\nContent-Security-Policy:\
+    \ default-src 'self'\r\nX-Frame-Options: DENY\r\nStrict-Transport-Security: max-age=63072000; includeSubDomains\r\
+    \nX-Content-Type-Options: nosniff\r\nReferrer-Policy: strict-origin-when-cross-origin\r\nContent-Type:\
+    \ font/woff2\r\nVary: Origin\r\nAccess-Control-Allow-Origin: https://app.acme-cleanroom.test\r\nCache-Control:\
+    \ public, max-age=31536000, immutable\r\nContent-Length: 38104\r\n\r\nwOF2\0\x01... (binary font data\
+    \ omitted)\n"
+  expected: []
+  rationale: 'A CDN font served with a single fixed allowlist entry that does NOT match the Origin we
+    sent -- the CDN did not reflect us, it returned its one configured origin. MEASURED SILENT, confirming
+    _curl_cors''s allowlist fall-through is genuinely reachable. Contrast with the /api/v1/me fixture:
+    the only difference is whether the configured origin happens to equal the one the scanner sent.'
+- route: /session [login 302]
+  zone: B
+  family: ''
+  tool: curl
+  command: 'curl -s -i -X POST "https://portal.acme-cleanroom.test/session" -H "Content-Type: application/x-www-form-urlencoded"
+    -d "username=dana&otp=884213"'
+  response: "HTTP/1.1 302 Found\r\nDate: Sat, 15 Aug 2026 09:14:02 GMT\r\nServer: nginx\r\nContent-Security-Policy:\
+    \ default-src 'self'\r\nX-Frame-Options: DENY\r\nStrict-Transport-Security: max-age=63072000; includeSubDomains\r\
+    \nX-Content-Type-Options: nosniff\r\nReferrer-Policy: strict-origin-when-cross-origin\r\nLocation:\
+    \ https://portal.acme-cleanroom.test/dashboard\r\nSet-Cookie: sid=8f2c1ab9; HttpOnly; Secure; SameSite=Lax;\
+    \ Path=/\r\nContent-Length: 0\r\n\r\n"
+  expected: []
+  rationale: A successful login redirecting to the dashboard -- byte-for-byte the same 302 and absolute
+    Location as the Zone A open-redirect fixture, but on a path with no user-controlled destination parameter.
+    MEASURED SILENT. Shows _curl_open_redirect's only real discriminator is the literal '/redirect' in
+    the request URL, not any property of the response.
+- route: /healthz
+  zone: B
+  family: ''
+  tool: curl
+  command: curl -s "https://portal-internal.acme-cleanroom.test/healthz"
+  response: '{"status":"ok","version":"4.2.1","uptimeSeconds":183402}
+
+    '
+  expected:
+  - vuln_type: Security Misconfiguration
+    severity: medium
+    detector: curl:_curl_missing_headers
+  rationale: 'A body-only health check against an internal hostname. No headers were requested, so no
+    header-based conclusion is available from this response at all -- yet _curl_missing_headers gates
+    on `"-i" in ctx.command` as a bare substring, and the hostname portal-internal contains ''-i''. The
+    rule then reports all four headers missing from a response that contains no headers. Out of my four
+    rules but it landed in my corpus, so it is recorded: this is the one straightforward Zone B false
+    positive.'
+- route: /api/public/team
+  zone: A
+  family: ''
+  tool: curl
+  command: curl -s -i https://www.acme-robotics.example/api/public/team
+  response: "HTTP/2 200 \r\ndate: Sat, 15 Aug 2026 09:12:44 GMT\r\ncontent-type: application/json; charset=utf-8\r\
+    \nserver: nginx\r\nstrict-transport-security: max-age=63072000; includeSubDomains; preload\r\nx-content-type-options:\
+    \ nosniff\r\nx-frame-options: DENY\r\ncontent-security-policy: default-src 'none'; frame-ancestors\
+    \ 'none'\r\ncache-control: public, max-age=300\r\n\r\n{\"team\":[{\"name\":\"Alice Moreau\",\"role\"\
+    :\"Chief Technology Officer\",\"email\":\"alice.moreau@acme-robotics.example\",\"bio\":\"Leads platform\
+    \ engineering.\"},{\"name\":\"Ben Okafor\",\"role\":\"VP of Sales\",\"email\":\"ben.okafor@acme-robotics.example\"\
+    ,\"bio\":\"Runs EMEA sales.\"},{\"name\":\"Chika Adeyemi\",\"role\":\"Head of Support\",\"email\"\
+    :\"support@acme-robotics.example\",\"bio\":\"Support and onboarding.\"}]}"
+  expected:
+  - vuln_type: Sensitive Data Exposure
+    severity: medium
+    detector: curl:_curl_exposed_user_data
+  rationale: 'A public team page. The company deliberately publishes these names, titles and contact addresses;
+    they are already on the marketing site and indexed by search engines. The rule''s trigger is the co-occurrence
+    of the literal strings "email" and "role" anywhere in the body, which is the natural shape of any
+    staff directory, author list, or org chart. Emitted evidence: ''API exposes user data: 3 user records
+    found / Sample: alice.moreau@acme-robotics.example''.'
+- route: /api/users/me
+  zone: A
+  family: ''
+  tool: curl
+  command: 'curl -s -i -H "Authorization: Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOjg4NDEsInNjb3BlIjoic2VsZiJ9.Yk3rQ2"
+    https://api.acme-robotics.example/api/users/me'
+  response: "HTTP/2 200 \r\ndate: Sat, 15 Aug 2026 09:12:44 GMT\r\ncontent-type: application/json; charset=utf-8\r\
+    \nserver: nginx\r\nstrict-transport-security: max-age=63072000; includeSubDomains; preload\r\nx-content-type-options:\
+    \ nosniff\r\nx-frame-options: DENY\r\ncontent-security-policy: default-src 'none'; frame-ancestors\
+    \ 'none'\r\n\r\n{\"id\":8841,\"email\":\"alice.moreau@acme-robotics.example\",\"displayName\":\"Alice\
+    \ Moreau\",\"role\":\"owner\",\"createdAt\":\"2024-03-02T10:00:00Z\"}"
+  expected:
+  - vuln_type: Broken Access Control
+    severity: high
+    detector: curl:_curl_api_users_bac
+  - vuln_type: Sensitive Data Exposure
+    severity: medium
+    detector: curl:_curl_exposed_user_data
+  rationale: 'The self-service profile endpoint. The caller presents their own bearer token and receives
+    exactly one record: their own. _curl_api_users_bac matches ''/api/users'' as a substring, so /api/users/me,
+    /api/users/8841/preferences and /api/users/me/avatar all qualify. The emitted evidence asserts ''GET
+    /api/Users returns 1 user records WITHOUT AUTH'' on a command that visibly carries an Authorization
+    header -- the string is hardcoded, not derived from the observation.'
+- route: /api/users (401, problem+json with support contact)
+  zone: A
+  family: ''
+  tool: curl
+  command: curl -s -i https://api.acme-robotics.example/api/users
+  response: "HTTP/2 401 \r\ndate: Sat, 15 Aug 2026 09:12:44 GMT\r\ncontent-type: application/problem+json\r\
+    \nserver: nginx\r\nstrict-transport-security: max-age=63072000; includeSubDomains; preload\r\nx-content-type-options:\
+    \ nosniff\r\nx-frame-options: DENY\r\ncontent-security-policy: default-src 'none'; frame-ancestors\
+    \ 'none'\r\nwww-authenticate: Bearer realm=\"acme-api\", error=\"invalid_token\"\r\n\r\n{\"type\"\
+    :\"https://docs.acme-robotics.example/errors/unauthorized\",\"title\":\"Unauthorized\",\"status\"\
+    :401,\"detail\":\"A bearer token is required to list users.\",\"support\":{\"email\":\"api-support@acme-robotics.example\"\
+    }}"
+  expected:
+  - vuln_type: Broken Access Control
+    severity: high
+    detector: curl:_curl_api_users_bac
+  rationale: 'The listing endpoint does exactly the right thing: anonymous request, 401, WWW-Authenticate
+    challenge, no user data. The RFC 7807 envelope carries a support mailbox, as many API style guides
+    require. The rule never reads the status line -- its whole gate is ''/api/users'' in the URL plus
+    one "email":"..." match anywhere in the response -- so a correct refusal is reported as HIGH user
+    enumeration. Compare with the Zone B twin, which differs only by the absence of that one address.'
+- route: /rest/basket/7 (own basket)
+  zone: A
+  family: ''
+  tool: curl
+  command: 'curl -s -i -H "Authorization: Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOjg4NDEsInNjb3BlIjoic2VsZiJ9.Yk3rQ2"
+    https://shop.acme-robotics.example/rest/basket/7'
+  response: "HTTP/2 200 \r\ndate: Sat, 15 Aug 2026 09:12:44 GMT\r\ncontent-type: application/json; charset=utf-8\r\
+    \nserver: nginx\r\nstrict-transport-security: max-age=63072000; includeSubDomains; preload\r\nx-content-type-options:\
+    \ nosniff\r\nx-frame-options: DENY\r\ncontent-security-policy: default-src 'none'; frame-ancestors\
+    \ 'none'\r\n\r\n{\"status\":\"success\",\"data\":{\"id\":7,\"userId\":8841,\"products\":[{\"id\":12,\"\
+    name\":\"Servo Kit\",\"quantity\":2,\"price\":41.5}],\"total\":83.0}}"
+  expected:
+  - vuln_type: Broken Access Control
+    severity: critical
+    detector: curl:_curl_idor_basket
+  rationale: 'User 8841 reads basket 7, which belongs to user 8841. Authorisation passed; the app is working.
+    The rule has no notion of whose token was presented, so authorised self-access and IDOR are the same
+    event to it: any 200 on /rest/basket/<digits> whose body says "products" is CRITICAL. Viewing your
+    own shopping cart is the most common authenticated request an e-commerce app serves.'
+- route: /rest/basket/12 (403, another user's basket)
+  zone: A
+  family: ''
+  tool: curl
+  command: 'curl -s -i -H "Authorization: Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOjg4NDEsInNjb3BlIjoic2VsZiJ9.Yk3rQ2"
+    https://shop.acme-robotics.example/rest/basket/12'
+  response: "HTTP/2 403 \r\ndate: Sat, 15 Aug 2026 09:12:44 GMT\r\ncontent-type: application/problem+json\r\
+    \nserver: nginx\r\nstrict-transport-security: max-age=63072000; includeSubDomains; preload\r\nx-content-type-options:\
+    \ nosniff\r\nx-frame-options: DENY\r\ncontent-security-policy: default-src 'none'; frame-ancestors\
+    \ 'none'\r\n\r\n{\"type\":\"https://docs.acme-robotics.example/errors/forbidden\",\"title\":\"Forbidden\"\
+    ,\"status\":403,\"detail\":\"Basket 12 belongs to another account.\",\"_links\":{\"self\":{\"href\"\
+    :\"/rest/basket/7\"},\"products\":{\"href\":\"/rest/products\"}}}"
+  expected:
+  - vuln_type: Broken Access Control
+    severity: critical
+    detector: curl:_curl_idor_basket
+  rationale: 'The single most expensive false positive in the corpus: the access check WORKS, the cross-user
+    read is refused with 403, and erlik reports CRITICAL ''IDOR: basket 12 accessible -- response contains
+    product data''. All that was needed was the token "products" in the HAL-style _links block of the
+    error envelope. Measured separately: the identical body emits the identical CRITICAL finding under
+    a 200, a 403 and a 500 status line.'
+- route: /api/orders/A1B2C3 (own order, express delivery)
+  zone: A
+  family: ''
+  tool: curl
+  command: 'curl -s -i -H "Authorization: Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOjg4NDEsInNjb3BlIjoic2VsZiJ9.Yk3rQ2"
+    https://shop.acme-robotics.example/api/orders/A1B2C3'
+  response: "HTTP/2 200 \r\ndate: Sat, 15 Aug 2026 09:12:44 GMT\r\ncontent-type: application/json; charset=utf-8\r\
+    \nserver: nginx\r\nstrict-transport-security: max-age=63072000; includeSubDomains; preload\r\nx-content-type-options:\
+    \ nosniff\r\nx-frame-options: DENY\r\ncontent-security-policy: default-src 'none'; frame-ancestors\
+    \ 'none'\r\n\r\n{\"orderId\":\"A1B2C3\",\"userId\":8841,\"totalPrice\":128.75,\"currency\":\"EUR\"\
+    ,\"deliveryMethod\":\"express\",\"placedAt\":\"2026-08-11T14:02:11Z\"}"
+  expected:
+  - vuln_type: Broken Access Control
+    severity: high
+    detector: curl:_curl_idor_order
+  - vuln_type: Information Disclosure
+    severity: medium
+    detector: curl:_curl_server_header
+  rationale: 'User 8841 opens their own order confirmation. HIGH IDOR from _curl_idor_order for the same
+    reason as the basket: a URL shape plus the word totalPrice, with no identity check. The second finding
+    is an unplanned but honest catch and belongs to another family: _curl_server_header greps the WHOLE
+    response for the word ''express'', hits the shipping field "deliveryMethod":"express", and then reports
+    ''Server header exposes: nginx'' -- wrong trigger and wrong evidence in one finding. Any order with
+    express shipping produces it.'
+- route: /rest/user/login (401, SQLi payload correctly rejected)
+  zone: A
+  family: ''
+  tool: curl
+  command: 'curl -s -i -X POST https://shop.acme-robotics.example/rest/user/login -H "Content-Type: application/json"
+    -d "{\"email\":\"alice.moreau@acme-robotics.example\",\"password\":\"'' OR 1=1--\"}"'
+  response: "HTTP/2 401 \r\ndate: Sat, 15 Aug 2026 09:12:44 GMT\r\ncontent-type: application/json; charset=utf-8\r\
+    \nserver: nginx\r\nstrict-transport-security: max-age=63072000; includeSubDomains; preload\r\nx-content-type-options:\
+    \ nosniff\r\nx-frame-options: DENY\r\ncontent-security-policy: default-src 'none'; frame-ancestors\
+    \ 'none'\r\n\r\n{\"authenticated\":false,\"token\":null,\"error\":\"invalid_credentials\",\"message\"\
+    :\"Email or password is incorrect.\"}"
+  expected:
+  - vuln_type: SQL Injection
+    severity: critical
+    detector: curl:_curl_sqli_login
+  rationale: 'A textbook SQLi login payload is REJECTED: 401, authenticated false, token null. Because
+    the API contract is fully typed, the token field is present on every response, and the rule''s success
+    gate is only the substring "token" appearing anywhere in the response -- it never checks that the
+    value is non-null, non-empty or JWT-shaped. Emitted evidence: ''SQL injection on login: server returned
+    JWT token''. The server returned no token. Any typed API that always serialises its nullable fields
+    turns every rejected injection attempt into a CRITICAL.'
+- route: /rest/user/login (200, legitimate tenant-scoped login)
+  zone: A
+  family: ''
+  tool: curl
+  command: 'curl -s -i -X POST https://shop.acme-robotics.example/rest/user/login -H "Content-Type: application/json"
+    -d "{\"email\":\"alice.moreau@acme-robotics.example\",\"password\":\"corr3ct-horse-battery\",\"organization\":\"acme-robotics\"}"'
+  response: "HTTP/2 200 \r\ndate: Sat, 15 Aug 2026 09:12:44 GMT\r\ncontent-type: application/json; charset=utf-8\r\
+    \nserver: nginx\r\nstrict-transport-security: max-age=63072000; includeSubDomains; preload\r\nx-content-type-options:\
+    \ nosniff\r\nx-frame-options: DENY\r\ncontent-security-policy: default-src 'none'; frame-ancestors\
+    \ 'none'\r\n\r\n{\"authenticated\":true,\"token\":\"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOjg4NDEsInJvbGUiOiJvd25lciJ9.7QwK1sBvE9\"\
+    ,\"expiresIn\":3600,\"user\":{\"id\":8841,\"email\":\"alice.moreau@acme-robotics.example\",\"role\"\
+    :\"owner\"}}"
+  expected:
+  - vuln_type: SQL Injection
+    severity: critical
+    detector: curl:_curl_sqli_login
+  - vuln_type: Sensitive Data Exposure
+    severity: medium
+    detector: curl:_curl_exposed_user_data
+  rationale: 'A correct B2B login with the correct password, returning a legitimate JWT. It is reported
+    as CRITICAL SQL Injection because one of the five payload patterns is the three-character literal
+    ''"or'' (Python source "\"or\""), and the tenant field \"organization\" contains it. Measured: ''\"organization\"''
+    is the only pattern that matches this command. \"orderId\" would match identically. The evidence pastes
+    the user''s live session JWT into the finding. The second finding is _curl_exposed_user_data on the
+    embedded user object -- the shape of every login response ever written.'
+- route: /rest/user/login (429, rate limited, CSRF re-issue)
+  zone: A
+  family: ''
+  tool: curl
+  command: 'curl -s -i -X POST https://shop.acme-robotics.example/rest/user/login -H "Content-Type: application/json"
+    -d "{\"email\":\"alice.moreau@acme-robotics.example\",\"password\":\"admin''--\"}"'
+  response: "HTTP/2 429 \r\ndate: Sat, 15 Aug 2026 09:12:44 GMT\r\ncontent-type: application/json; charset=utf-8\r\
+    \nserver: nginx\r\nstrict-transport-security: max-age=63072000; includeSubDomains; preload\r\nx-content-type-options:\
+    \ nosniff\r\nx-frame-options: DENY\r\ncontent-security-policy: default-src 'none'; frame-ancestors\
+    \ 'none'\r\nretry-after: 60\r\n\r\n{\"error\":\"too_many_attempts\",\"message\":\"Too many failed\
+    \ sign-in attempts. Try again in 60 seconds.\",\"csrf\":{\"token\":\"KJ8s2Ld0Qm4Zx1Vb7Rn9Tp3Wc6Ye5Ua\"\
+    }}"
+  expected:
+  - vuln_type: SQL Injection
+    severity: critical
+    detector: curl:_curl_sqli_login
+  rationale: 'Brute-force protection fires and the attempt never reaches the database at all -- 429, Retry-After,
+    no authentication performed. The response re-issues a fresh CSRF token so the login form stays usable,
+    and the token_match regex ''"token"\s*:\s*"([^"]{20,})"'' grabs that CSRF secret and writes it into
+    the finding as ''Token: KJ8s2Ld0Qm4Zx1Vb7Rn9Tp3Wc6Ye5Ua...''. So the rule reports CRITICAL SQLi against
+    a rate limiter, and carries a live anti-CSRF secret into the findings table and the client report.'
+- route: /rest/user/login (401, browser replay carrying Origin)
+  zone: A
+  family: ''
+  tool: curl
+  command: 'curl -s -i -X POST https://shop.acme-robotics.example/rest/user/login -H "Origin: https://shop.acme-robotics.example"
+    -H "Content-Type: application/json" -d "{\"email\":\"bob.tran@acme-robotics.example\",\"password\":\"Tr0ub4dor&3\"}"'
+  response: "HTTP/2 401 \r\ndate: Sat, 15 Aug 2026 09:12:44 GMT\r\ncontent-type: application/json; charset=utf-8\r\
+    \nserver: nginx\r\nstrict-transport-security: max-age=63072000; includeSubDomains; preload\r\nx-content-type-options:\
+    \ nosniff\r\nx-frame-options: DENY\r\ncontent-security-policy: default-src 'none'; frame-ancestors\
+    \ 'none'\r\n\r\n{\"authenticated\":false,\"token\":null,\"error\":\"invalid_credentials\",\"message\"\
+    :\"Email or password is incorrect.\"}"
+  expected:
+  - vuln_type: SQL Injection
+    severity: critical
+    detector: curl:_curl_sqli_login
+  rationale: 'The sharpest fixture in the set: an ordinary mistyped password, no attack payload of any
+    kind, correctly rejected with 401 and a null token, replayed from a captured browser request that
+    carried its same-origin Origin header. CRITICAL SQL Injection. The sole trigger is that ''-H \"Origin:''
+    contains the literal ''\"or''. This fixture and the Zone B ''/rest/user/login (401, plain)'' fixture
+    are byte-identical except for that one -H flag: [] versus CRITICAL. Any tooling that adds an Origin
+    header while probing a login endpoint -- including erlik''s own CORS testing -- manufactures this
+    finding.'
+- route: /api/users (401, plain)
+  zone: B
+  family: ''
+  tool: curl
+  command: curl -s -i https://api.acme-robotics.example/api/users
+  response: "HTTP/2 401 \r\ndate: Sat, 15 Aug 2026 09:12:44 GMT\r\ncontent-type: application/problem+json\r\
+    \nserver: nginx\r\nstrict-transport-security: max-age=63072000; includeSubDomains; preload\r\nx-content-type-options:\
+    \ nosniff\r\nx-frame-options: DENY\r\ncontent-security-policy: default-src 'none'; frame-ancestors\
+    \ 'none'\r\nwww-authenticate: Bearer realm=\"acme-api\", error=\"invalid_token\"\r\n\r\n{\"type\"\
+    :\"https://docs.acme-robotics.example/errors/unauthorized\",\"title\":\"Unauthorized\",\"status\"\
+    :401,\"detail\":\"A bearer token is required.\"}"
+  expected: []
+  rationale: The same correct refusal as its Zone A twin, minus the support mailbox in the error envelope.
+    Silent. Negative control proving _curl_api_users_bac discriminates on nothing but the presence of
+    an email-shaped string -- not on the status code, not on whether any user data was actually disclosed.
+- route: /api/orders/A7C9 (403, another user's order)
+  zone: B
+  family: ''
+  tool: curl
+  command: 'curl -s -i -H "Authorization: Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOjg4NDEsInNjb3BlIjoic2VsZiJ9.Yk3rQ2"
+    https://shop.acme-robotics.example/api/orders/A7C9'
+  response: "HTTP/2 403 \r\ndate: Sat, 15 Aug 2026 09:12:44 GMT\r\ncontent-type: application/problem+json\r\
+    \nserver: nginx\r\nstrict-transport-security: max-age=63072000; includeSubDomains; preload\r\nx-content-type-options:\
+    \ nosniff\r\nx-frame-options: DENY\r\ncontent-security-policy: default-src 'none'; frame-ancestors\
+    \ 'none'\r\n\r\n{\"type\":\"https://docs.acme-robotics.example/errors/forbidden\",\"title\":\"Forbidden\"\
+    ,\"status\":403,\"detail\":\"Order A7C9 belongs to another account.\"}"
+  expected: []
+  rationale: Cross-user order read correctly refused, and this error envelope happens to name no order
+    fields. Silent -- but note it is silent for the wrong reason. It is not the 403 that saved it; it
+    is the absence of the strings totalPrice and products. Contrast the basket 403 fixture, whose envelope
+    does carry a products link and which fires CRITICAL.
+- route: /rest/user/login (401, plain)
+  zone: B
+  family: ''
+  tool: curl
+  command: 'curl -s -i -X POST https://shop.acme-robotics.example/rest/user/login -H "Content-Type: application/json"
+    -d "{\"email\":\"bob.tran@acme-robotics.example\",\"password\":\"hunter2\"}"'
+  response: "HTTP/2 401 \r\ndate: Sat, 15 Aug 2026 09:12:44 GMT\r\ncontent-type: application/json; charset=utf-8\r\
+    \nserver: nginx\r\nstrict-transport-security: max-age=63072000; includeSubDomains; preload\r\nx-content-type-options:\
+    \ nosniff\r\nx-frame-options: DENY\r\ncontent-security-policy: default-src 'none'; frame-ancestors\
+    \ 'none'\r\n\r\n{\"authenticated\":false,\"token\":null,\"error\":\"invalid_credentials\"}"
+  expected: []
+  rationale: 'Ordinary failed login: no Origin header, no tenant field, no payload. Silent. This is the
+    matched control for the Origin-replay Zone A fixture -- same endpoint, same 401 body containing "token",
+    and the only delta is one -H flag. It proves the corpus is not silent by construction and that the
+    login rule''s payload gate is the whole story.'
+- route: /api/products
+  zone: B
+  family: ''
+  tool: curl
+  command: curl -s -i "https://shop.acme-robotics.example/api/products?page=1"
+  response: "HTTP/2 200 \r\ndate: Sat, 15 Aug 2026 09:12:44 GMT\r\ncontent-type: application/json; charset=utf-8\r\
+    \nserver: nginx\r\nstrict-transport-security: max-age=63072000; includeSubDomains; preload\r\nx-content-type-options:\
+    \ nosniff\r\nx-frame-options: DENY\r\ncontent-security-policy: default-src 'none'; frame-ancestors\
+    \ 'none'\r\ncache-control: public, max-age=60\r\n\r\n{\"page\":1,\"pageSize\":2,\"total\":184,\"items\"\
+    :[{\"id\":12,\"name\":\"Servo Kit\",\"price\":41.5,\"stock\":38},{\"id\":13,\"name\":\"Lidar Module\"\
+    ,\"price\":219.0,\"stock\":4}]}"
+  expected: []
+  rationale: Anonymous catalogue browsing, the most common request a shop serves, with a full security-header
+    set and no user data. Silent across all 15 curl rules. Baseline control for the whole zone.
+- route: /robots.txt + /.well-known/security.txt
+  zone: A
+  family: ''
+  tool: gobuster
+  command: gobuster dir -u https://app.cleanroom.test -w /usr/share/dirb/wordlists/common.txt -t 20 --exclude-length
+    3748
+  response: '===============================================================
+
+    Gobuster v3.6
+
+    by OJ Reeves (@TheColonial) & Christian Mehlmauer (@firefart)
+
+    ===============================================================
+
+    [+] Url:                     https://app.cleanroom.test
+
+    [+] Method:                  GET
+
+    [+] Threads:                 20
+
+    [+] Wordlist:                /usr/share/dirb/wordlists/common.txt
+
+    [+] Negative Status codes:   404
+
+    [+] Exclude Length:          3748
+
+    [+] User Agent:              gobuster/3.6
+
+    [+] Timeout:                 10s
+
+    ===============================================================
+
+    Starting gobuster in directory enumeration mode
+
+    ===============================================================
+
+    /.well-known/security.txt (Status: 200) [Size: 412]
+
+    /about                (Status: 200) [Size: 5120]
+
+    /contact              (Status: 200) [Size: 4402]
+
+    /humans.txt           (Status: 200) [Size: 188]
+
+    /login                (Status: 200) [Size: 7311]
+
+    /robots.txt           (Status: 200) [Size: 274]
+
+    /sitemap.xml          (Status: 200) [Size: 9042]
+
+    Progress: 4614 / 4615 (99.98%)
+
+    ===============================================================
+
+    Finished
+
+    ==============================================================='
+  expected:
+  - vuln_type: Information Disclosure
+    severity: info
+    detector: gobuster:_detect_content_discovery
+  - vuln_type: Security Misconfiguration
+    severity: info
+    detector: gobuster:_detect_content_discovery
+  rationale: robots.txt (RFC 9309) and security.txt (RFC 9116) are standards-track files a well-run site
+    is SUPPOSED to publish; RFC 9116 exists precisely so researchers can find a disclosure contact. Publishing
+    them is the correct behaviour and the detector reports both. Findings resolve to https://app.cleanroom.test/.well-known/security.txt
+    and /robots.txt. /about, /contact, /humans.txt, /login, /sitemap.xml are correctly ignored, so the
+    zero on the rest of the run is real.
+- route: /api-docs (deliberately public API)
+  zone: A
+  family: ''
+  tool: curl
+  command: curl -s -i https://api.cleanroom.test/api-docs
+  response: "HTTP/2 200 \ncontent-type: application/json; charset=utf-8\ncontent-length: 421\ndate: Sat,\
+    \ 15 Aug 2026 09:14:02 GMT\nserver: nginx\nstrict-transport-security: max-age=63072000; includeSubDomains;\
+    \ preload\nx-content-type-options: nosniff\nx-frame-options: DENY\ncontent-security-policy: default-src\
+    \ 'none'; frame-ancestors 'none'\ncache-control: public, max-age=300\n\n{\"openapi\":\"3.1.0\",\"\
+    info\":{\"title\":\"Cleanroom Public API\",\"version\":\"2.4.0\",\"license\":{\"name\":\"Apache-2.0\"\
+    },\"description\":\"Public, unauthenticated read-only API. Spec published intentionally.\"},\"servers\"\
+    :[{\"url\":\"https://api.cleanroom.test\"}],\"paths\":{\"/v2/status\":{\"get\":{\"summary\":\"Service\
+    \ status\",\"responses\":{\"200\":{\"description\":\"ok\"}}}},\"/v2/regions\":{\"get\":{\"summary\"\
+    :\"List regions\",\"responses\":{\"200\":{\"description\":\"ok\"}}}}}}"
+  expected:
+  - vuln_type: Security Misconfiguration
+    severity: medium
+    detector: curl:_curl_swagger
+  rationale: A deliberately public API publishes its OpenAPI spec so clients can generate SDKs -- exactly
+    what Stripe, GitHub and Kubernetes do. Nothing behind it is private. _curl_swagger only asks 'is /api-docs
+    in the URL and does the body contain swagger/paths/openapi'. The full security-header set is present,
+    so _curl_missing_headers correctly stays silent and this fixture isolates one rule -- proof the emission
+    is the swagger rule and not header noise.
+- route: /api/v2/metrics (customer-facing usage counters)
+  zone: A
+  family: ''
+  tool: curl
+  command: 'curl -s -i -H "Authorization: Bearer sk_live_REDACTED" "https://api.cleanroom.test/api/v2/metrics?window=24h"'
+  response: "HTTP/2 200 \ncontent-type: application/json; charset=utf-8\ncontent-length: 236\ndate: Sat,\
+    \ 15 Aug 2026 09:15:40 GMT\ncache-control: no-store\nserver: nginx\nstrict-transport-security: max-age=63072000;\
+    \ includeSubDomains; preload\nx-content-type-options: nosniff\nx-frame-options: DENY\ncontent-security-policy:\
+    \ default-src 'none'; frame-ancestors 'none'\n\n{\"window\":\"24h\",\"account\":\"acct_9f31\",\"series\"\
+    :{\"http_requests_total\":128403,\"http_requests_failed\":37,\"bytes_egress\":98213445},\"quota\"\
+    :{\"limit\":500000,\"used\":128403}}"
+  expected:
+  - vuln_type: Security Misconfiguration
+    severity: low
+    detector: curl:_curl_metrics
+  rationale: 'An authenticated, documented, per-tenant usage endpoint returning only the caller''s own
+    counters. It is not Prometheus and leaks no internal server state. Both gates are satisfied by coincidence:
+    the word ''metrics'' in the path, and the substring ''http_request'' inside a business field name
+    (http_requests_total). The Bearer token in the command is never consulted -- the rule cannot distinguish
+    an authenticated endpoint from an exposed one, yet the evidence string asserts ''Prometheus metrics
+    endpoint exposed''. Also exposes the quoting defect in note 3: the emitted url is https://api.cleanroom.test/api/v2/metrics?window=24h"
+    with a trailing double-quote.'
+- route: /guides/ftp-migration (docs page)
+  zone: A
+  family: ''
+  tool: curl
+  command: curl -s -i https://docs.cleanroom.test/guides/ftp-migration
+  response: "HTTP/2 200 \ncontent-type: text/html; charset=utf-8\ncontent-length: 1180\ndate: Sat, 15\
+    \ Aug 2026 09:16:11 GMT\nserver: nginx\nstrict-transport-security: max-age=63072000; includeSubDomains;\
+    \ preload\nx-content-type-options: nosniff\nx-frame-options: DENY\ncontent-security-policy: default-src\
+    \ 'none'; frame-ancestors 'none'\n\n<!doctype html>\n<html lang=\"en\"><head><title>Migrating off\
+    \ FTP - Cleanroom Docs</title>\n<link rel=\"stylesheet\" href=\"/static/docs.css\"></head>\n<body><main><h1>Migrating\
+    \ off FTP</h1>\n<p>FTP transfers were retired in release 2.1. Use the signed-upload API instead.</p>\n\
+    <h2>Steps</h2><ol><li>Rotate your transfer credentials in the console.</li>\n<li>Switch your client\
+    \ to the signed-upload endpoint.</li>\n<li>Disable the legacy transfer user.</li></ol>\n<footer><a\
+    \ href=\"https://github.com/cleanroom/docs/edit/main/guides/ftp-migration.md\">Edit this page</a></footer></main></body></html>"
+  expected:
+  - vuln_type: Sensitive Data Exposure
+    severity: medium
+    detector: curl:_curl_ftp
+  rationale: A static documentation page explaining how to STOP using FTP. There is no file server and
+    no directory listing anywhere on the host. It fires because _curl_ftp tests '/ftp' as a loose substring
+    of the URL (it lands inside '/guides/ftp-migration') and '.md' as a loose substring of the body (it
+    lands inside the 'edit this page on GitHub' link). The emitted evidence -- 'FTP directory listing
+    exposes sensitive files' -- describes something that does not exist. This is the same string class
+    that _path_hits explicitly rejects on the content-discovery side; see note 4.
+- route: soft-404 host, gobuster
+  zone: A
+  family: ''
+  tool: gobuster
+  command: gobuster dir -u https://soft404.cleanroom.test -w /usr/share/dirb/wordlists/common.txt -t 20
+    --exclude-length 3748
+  response: '===============================================================
+
+    Gobuster v3.6
+
+    ===============================================================
+
+    [+] Url:                     https://soft404.cleanroom.test
+
+    [+] Method:                  GET
+
+    [+] Threads:                 20
+
+    [+] Wordlist:                /usr/share/dirb/wordlists/common.txt
+
+    [+] Exclude Length:          3748
+
+    ===============================================================
+
+    /.well-known/security.txt (Status: 200) [Size: 1402]
+
+    /admin                (Status: 200) [Size: 1402]
+
+    /api-docs             (Status: 200) [Size: 1402]
+
+    /backup               (Status: 200) [Size: 1402]
+
+    /config.php           (Status: 200) [Size: 1402]
+
+    /ftp                  (Status: 200) [Size: 1402]
+
+    /main.6f3a1c.js.map   (Status: 200) [Size: 1402]
+
+    /metrics              (Status: 200) [Size: 1402]
+
+    /phpmyadmin           (Status: 200) [Size: 1402]
+
+    /robots.txt           (Status: 200) [Size: 1402]
+
+    /server-status        (Status: 200) [Size: 1402]
+
+    /wp-admin             (Status: 200) [Size: 1402]
+
+    Progress: 4614 / 4615 (99.98%)
+
+    ===============================================================
+
+    Finished
+
+    ==============================================================='
+  expected:
+  - vuln_type: Information Disclosure
+    severity: info
+    detector: gobuster:_detect_content_discovery
+  - vuln_type: Security Misconfiguration
+    severity: medium
+    detector: gobuster:_detect_content_discovery
+  - vuln_type: Security Misconfiguration
+    severity: low
+    detector: gobuster:_detect_content_discovery
+  - vuln_type: Security Misconfiguration
+    severity: info
+    detector: gobuster:_detect_content_discovery
+  - vuln_type: Sensitive Data Exposure
+    severity: medium
+    detector: gobuster:_detect_content_discovery
+  - vuln_type: Sensitive Data Exposure
+    severity: medium
+    detector: gobuster:_detect_content_discovery
+  rationale: 'THE HEADLINE FIXTURE. A single-page app behind a catch-all route: every unmatched path returns
+    HTTP 200 with the same 1402-byte app shell. NONE of these twelve paths exist. Six findings are emitted
+    (security.txt, /api-docs, /ftp, /main.6f3a1c.js.map, /metrics, /robots.txt), each one a confident
+    claim about a nonexistent resource, complete with a target URL a report would print. The control that
+    is supposed to suppress this is --exclude-length, but erlik hardcodes 3748 -- the Juice Shop shell
+    size -- at five prompt sites in orchestrator/main.py, so on this host it filters nothing. The uniform
+    [Size: 1402] across every hit is the soft-404 tell, and _detect_content_discovery never reads the
+    size field at all.'
+- route: soft-404 host, ffuf
+  zone: A
+  family: ''
+  tool: ffuf
+  command: ffuf -u https://soft404.cleanroom.test/FUZZ -w /usr/share/dirb/wordlists/common.txt -fs 3748
+  response: "        /'___\\  /'___\\           /'___\\\n       /\\ \\__/ /\\ \\__/  __  __  /\\ \\__/\n\
+    \       \\ \\ ,__\\\\ \\ ,__\\/\\ \\/\\ \\ \\ \\ ,__\\\n        \\ \\ \\_/ \\ \\ \\_/\\ \\ \\_\\ \\\
+    \ \\ \\ \\_/\n         \\ \\_\\   \\ \\_\\  \\ \\____/  \\ \\_\\\n          \\/_/    \\/_/   \\/___/\
+    \    \\/_/\n\n       v2.1.0-dev\n________________________________________________\n\n :: Method  \
+    \         : GET\n :: URL              : https://soft404.cleanroom.test/FUZZ\n :: Wordlist        \
+    \ : FUZZ: /usr/share/dirb/wordlists/common.txt\n :: Follow redirects : false\n :: Calibration    \
+    \  : false\n :: Timeout          : 10\n :: Threads          : 40\n :: Matcher          : Response\
+    \ status: 200-299,301,302,307,401,403,405\n :: Filter           : Response size: 3748\n________________________________________________\n\
+    \napi-docs                [Status: 200, Size: 1402, Words: 84, Lines: 22, Duration: 31ms]\nftp   \
+    \                  [Status: 200, Size: 1402, Words: 84, Lines: 22, Duration: 28ms]\nmetrics      \
+    \           [Status: 200, Size: 1402, Words: 84, Lines: 22, Duration: 30ms]\nrobots.txt          \
+    \    [Status: 200, Size: 1402, Words: 84, Lines: 22, Duration: 27ms]\n.well-known/security.txt [Status:\
+    \ 200, Size: 1402, Words: 84, Lines: 22, Duration: 33ms]\n:: Progress: [4614/4614] :: Job [1/1] ::\
+    \ 412 req/sec :: Duration [0:00:12] :: Errors: 0 ::"
+  expected:
+  - vuln_type: Information Disclosure
+    severity: info
+    detector: ffuf:_detect_content_discovery
+  - vuln_type: Security Misconfiguration
+    severity: medium
+    detector: ffuf:_detect_content_discovery
+  - vuln_type: Security Misconfiguration
+    severity: low
+    detector: ffuf:_detect_content_discovery
+  - vuln_type: Security Misconfiguration
+    severity: info
+    detector: ffuf:_detect_content_discovery
+  - vuln_type: Sensitive Data Exposure
+    severity: medium
+    detector: ffuf:_detect_content_discovery
+  rationale: 'The same soft-404 host through the other discovery tool erlik''s prompts hardcode. The ffuf
+    form of the magic number is ''-fs 3748'' (orchestrator/main.py:967, docs/METHODOLOGY.md:352). Five
+    findings, all for nonexistent paths. Note the banner line '':: Calibration : false'' -- ffuf ships
+    --auto-calibrate/-ac, which learns the target''s own soft-404 length at runtime and would have solved
+    this correctly for ANY target; erlik never emits it. The ffuf ASCII-art banner and the '':: Filter''
+    lines are correctly skipped by the parser, so the five are the whole emission.'
+- route: clean app, ordinary paths (gobuster)
+  zone: B
+  family: ''
+  tool: gobuster
+  command: gobuster dir -u https://app.cleanroom.test -w /usr/share/dirb/wordlists/common.txt -t 20 --exclude-length
+    3748
+  response: '===============================================================
+
+    Gobuster v3.6
+
+    ===============================================================
+
+    [+] Url:                     https://app.cleanroom.test
+
+    [+] Negative Status codes:   404
+
+    ===============================================================
+
+    /about                (Status: 200) [Size: 5120]
+
+    /assets               (Status: 301) [Size: 178]
+
+    /contact              (Status: 200) [Size: 4402]
+
+    /health               (Status: 200) [Size: 27]
+
+    /login                (Status: 200) [Size: 7311]
+
+    /logout               (Status: 302) [Size: 0]
+
+    /pricing              (Status: 200) [Size: 6644]
+
+    /admin                (Status: 403) [Size: 146]
+
+    /api                  (Status: 401) [Size: 89]
+
+    Progress: 4614 / 4615 (99.98%)
+
+    ===============================================================
+
+    Finished
+
+    ==============================================================='
+  expected: []
+  rationale: 'Ordinary enumeration of a clean marketing/app host: real 404s are real 404s, the admin area
+    is 403 and the API is 401. NEGATIVE CONTROL paired with the soft-404 gobuster fixture -- identical
+    tool, identical command shape, identical output grammar -- so this zero proves the parser is live
+    rather than mute. Zero findings is the correct result.'
+- route: clean app, same sensitive hits via wfuzz
+  zone: B
+  family: ''
+  tool: wfuzz
+  command: wfuzz -c -z file,/usr/share/dirb/wordlists/common.txt --hc 404 https://app.cleanroom.test/FUZZ
+  response: '********************************************************
+
+    * Wfuzz 3.1.0 - The Web Fuzzer                         *
+
+    ********************************************************
+
+
+    Target: https://app.cleanroom.test/FUZZ
+
+    Total requests: 4614
+
+
+    =====================================================================
+
+    ID           Response   Lines    Word         Chars       Payload
+
+    =====================================================================
+
+
+    000000123:   200        3 L      12 W         412 Ch      "ftp"
+
+    000000456:   200        1 L      4 W          2184 Ch     "api-docs"
+
+    000000789:   200        1 L      9 W          900 Ch      "metrics"
+
+    000001204:   200        4 L      11 W         274 Ch      "robots.txt"
+
+    000002991:   200        1 L      1 W          99999 Ch    "main.6f3a1c.js.map"
+
+
+    Total time: 12.40218
+
+    Processed Requests: 4614
+
+    Filtered Requests: 4609
+
+    Requests/sec.: 372.0'
+  expected: []
+  rationale: 'STRUCTURAL DEAD PATH, not benign traffic. wfuzz is registered in _DETECTORS (detection.py:638)
+    and routed to _detect_content_discovery, but _content_discovery_pairs (detection.py:565-574) carries
+    only gobuster ''(Status: N)'', ffuf ''[Status: N'', and dirb ''(CODE:N'' patterns -- none match wfuzz''s
+    native ID/Response/Lines/Word/Chars table. This fixture deliberately carries the SAME five sensitive
+    200s the soft-404 gobuster fixture reports, so the zero is provably a parser failure. Measured: _content_discovery_pairs(''000000123:   200
+    ... "ftp"'') yields [], while the identical hit as ''/ftp (Status: 200)'' yields [(''/ftp'',''200'')]
+    and one finding. A zero here would be scored as ''no false positives'' by a naive cleanroom -- it
+    is the lab-coat defect the brief warns about.'
+- route: /metrics behind auth (401)
+  zone: B
+  family: ''
+  tool: curl
+  command: curl -s -i https://app.cleanroom.test/metrics
+  response: "HTTP/2 401 \nwww-authenticate: Basic realm=\"metrics\"\ncontent-type: text/plain; charset=utf-8\n\
+    content-length: 12\ndate: Sat, 15 Aug 2026 09:18:03 GMT\nserver: nginx\nstrict-transport-security:\
+    \ max-age=63072000; includeSubDomains; preload\nx-content-type-options: nosniff\nx-frame-options:\
+    \ DENY\ncontent-security-policy: default-src 'none'; frame-ancestors 'none'\n\nUnauthorized"
+  expected: []
+  rationale: 'The correct way to run a Prometheus exporter: reachable but authenticated. NEGATIVE CONTROL
+    for _curl_metrics -- same rule, same ''/metrics'' in the URL as the Zone A metrics fixture, but the
+    body gate (process_ / nodejs_ / http_request) is not satisfied. Confirms the body gate is load-bearing
+    and that the Zone A emission came from the body substring, not from the path alone.'
+- route: /api-docs behind auth (403)
+  zone: B
+  family: ''
+  tool: curl
+  command: curl -s -i https://app.cleanroom.test/api-docs
+  response: "HTTP/2 403 \ncontent-type: application/json; charset=utf-8\ncontent-length: 96\ndate: Sat,\
+    \ 15 Aug 2026 09:18:44 GMT\nserver: nginx\nstrict-transport-security: max-age=63072000; includeSubDomains;\
+    \ preload\nx-content-type-options: nosniff\nx-frame-options: DENY\ncontent-security-policy: default-src\
+    \ 'none'; frame-ancestors 'none'\n\n{\"error\":\"forbidden\",\"message\":\"API documentation is restricted\
+    \ to signed-in staff accounts.\"}"
+  expected: []
+  rationale: Internal API docs correctly gated behind staff auth. NEGATIVE CONTROL for _curl_swagger --
+    same rule, same '/api-docs' in the URL as the Zone A swagger fixture, body gate not satisfied. Note
+    the rule looks only at the body, never at the 403 status line, so a 403 whose error body happened
+    to echo the word 'paths' would still fire.
+- route: /v2/regions (ordinary JSON API response)
+  zone: B
+  family: ''
+  tool: curl
+  command: curl -s -i https://api.cleanroom.test/v2/regions
+  response: "HTTP/2 200 \ncontent-type: application/json; charset=utf-8\ncontent-length: 148\ndate: Sat,\
+    \ 15 Aug 2026 09:19:20 GMT\nserver: nginx\nstrict-transport-security: max-age=63072000; includeSubDomains;\
+    \ preload\nx-content-type-options: nosniff\ncache-control: public, max-age=600\n\n{\"regions\":[{\"\
+    code\":\"eu-west-1\",\"name\":\"Ireland\"},{\"code\":\"us-east-1\",\"name\":\"N. Virginia\"},{\"code\"\
+    :\"ap-south-1\",\"name\":\"Mumbai\"}]}"
+  expected:
+  - vuln_type: Security Misconfiguration
+    severity: medium
+    detector: curl:_curl_missing_headers
+  rationale: A plain public JSON list -- the most ordinary traffic in the corpus, and the only Zone B
+    fixture that emits. It sends HSTS and nosniff, the two headers that actually matter for a JSON response,
+    and omits CSP and X-Frame-Options, which govern HTML script sources and framing and have no effect
+    on a non-HTML body. The rule counts absent header names and emits MEDIUM at a threshold of two. Included
+    deliberately so the 'curl -s ... -i' header class is genuinely exercised rather than assumed silent,
+    per the brief's warning; the rule belongs to another agent's family but this is a measured emission
+    on benign traffic and should be counted.
+- route: clean static site (dirb)
+  zone: B
+  family: ''
+  tool: dirb
+  command: dirb https://www.cleanroom.test /usr/share/dirb/wordlists/common.txt
+  response: '-----------------
+
+    DIRB v2.22
+
+    By The Dark Raver
+
+    -----------------
+
+
+    START_TIME: Sat Aug 15 09:20:01 2026
+
+    URL_BASE: https://www.cleanroom.test/
+
+    WORDLIST_FILES: /usr/share/dirb/wordlists/common.txt
+
+
+    -----------------
+
+
+    GENERATED WORDS: 4612
+
+
+    ---- Scanning URL: https://www.cleanroom.test/ ----
+
+    + https://www.cleanroom.test/index.html (CODE:200|SIZE:8123)
+
+    + https://www.cleanroom.test/favicon.ico (CODE:200|SIZE:1150)
+
+    ==> DIRECTORY: https://www.cleanroom.test/images/
+
+    ==> DIRECTORY: https://www.cleanroom.test/css/
+
+    + https://www.cleanroom.test/contact (CODE:200|SIZE:4402)
+
+
+    -----------------
+
+    END_TIME: Sat Aug 15 09:22:47 2026
+
+    DOWNLOADED: 4612 - FOUND: 3'
+  expected: []
+  rationale: 'A brochure site with nothing sensitive. NEGATIVE CONTROL for the dirb branch of the parser,
+    which is otherwise unexercised in this corpus. The zero is non-vacuous: measured separately, ''+ https://x.test/ftp
+    (CODE:200|SIZE:1)'' through the same dirb path does emit one Sensitive Data Exposure finding. Note
+    the ''==> DIRECTORY:'' lines are never parsed at all -- see note 5.'
+- route: sqlmap-false-positive-warning
+  zone: A
+  family: ''
+  tool: sqlmap
+  command: sqlmap -u "https://app.cleanroom.test/catalog?q=widget" --batch --level=3 --risk=2
+  response: "        ___\n       __H__\n ___ ___[.]_____ ___ ___  {1.8.2#stable}\n|_ -| . [.]     | .'|\
+    \ . |\n|___|_  [.]_|_|_|__,|  _|\n      |_|V...       |_|   https://sqlmap.org\n\n[!] legal disclaimer:\
+    \ Usage of sqlmap for attacking targets without prior mutual consent is illegal.\n\n[*] starting @\
+    \ 10:14:02 /2026-08-15/\n\n[10:14:02] [INFO] testing connection to the target URL\n[10:14:03] [INFO]\
+    \ checking if the target is protected by some kind of WAF/IPS\n[10:14:03] [INFO] testing if the target\
+    \ URL content is stable\n[10:14:04] [WARNING] target URL content is not stable (i.e. content differs).\
+    \ sqlmap will base the page comparison on a sequence matcher\n[10:14:05] [INFO] testing if GET parameter\
+    \ 'q' is dynamic\n[10:14:05] [INFO] GET parameter 'q' appears to be dynamic\n[10:14:06] [INFO] heuristic\
+    \ (basic) test shows that GET parameter 'q' might be injectable (possible DBMS: 'SQLite')\n[10:14:07]\
+    \ [INFO] testing for SQL injection on GET parameter 'q'\n[10:14:20] [INFO] GET parameter 'q' appears\
+    \ to be 'AND boolean-based blind - WHERE or HAVING clause' injectable\n[10:14:22] [WARNING] false\
+    \ positive or unexploitable injection point detected\n[10:14:22] [WARNING] GET parameter 'q' does\
+    \ not seem to be injectable\n[10:14:23] [CRITICAL] all tested parameters do not appear to be injectable.\
+    \ Try to increase values for '--level'/'--risk' options if you wish to perform more tests.\n\n[*]\
+    \ ending @ 10:14:23 /2026-08-15/"
+  expected:
+  - vuln_type: SQL Injection
+    severity: high
+    detector: sqlmap:_detect_sqlmap
+  rationale: 'The catalog page renders a ''no results / did you mean'' block whose wording varies with
+    the query, so page content is not stable (a normal, correct rendering choice). sqlmap''s own sequence
+    matcher briefly flags ''q'' and then RETRACTS it in writing: it prints the literal words ''false positive
+    or unexploitable injection point detected'' and closes with ''all tested parameters do not appear
+    to be injectable''. Nothing is injectable. The query is a bound parameter.'
+- route: sqlmap-time-based-jitter
+  zone: A
+  family: ''
+  tool: sqlmap
+  command: sqlmap -u "https://app.cleanroom.test/api/report?range=30d" --batch --technique=T --time-sec=5
+  response: "[10:41:09] [INFO] testing connection to the target URL\n[10:41:10] [INFO] testing if GET\
+    \ parameter 'range' is dynamic\n[10:41:11] [INFO] GET parameter 'range' appears to be dynamic\n[10:41:12]\
+    \ [INFO] testing for SQL injection on GET parameter 'range'\n[10:44:55] [INFO] GET parameter 'range'\
+    \ appears to be 'MySQL >= 5.0.12 AND time-based blind (query SLEEP)' injectable\n[10:44:56] [INFO]\
+    \ checking if the injection point on GET parameter 'range' is a false positive\nsqlmap identified\
+    \ the following injection point(s) with a total of 302 HTTP(s) requests:\n---\nParameter: range (GET)\n\
+    \    Type: time-based blind\n    Title: MySQL >= 5.0.12 AND time-based blind (query SLEEP)\n    Payload:\
+    \ range=30d' AND (SELECT 5678 FROM (SELECT(SLEEP(5)))abc)-- wXyZ\n---\n[10:44:57] [INFO] the back-end\
+    \ DBMS is MySQL\nback-end DBMS: MySQL >= 5.0.12\n[10:44:57] [WARNING] HTTP error codes detected during\
+    \ run: 500 (Internal Server Error) - 4 times"
+  expected:
+  - vuln_type: SQL Injection
+    severity: high
+    detector: sqlmap:_detect_sqlmap
+  rationale: 'The /api/report endpoint aggregates over a date range and its latency is genuinely variable
+    (2-9s on cache misses, plus occasional 500s under load). A time-based-blind oracle IS a latency comparison,
+    so a slow analytics endpoint reproduces the ''the sleep worked'' signal with no injection present.
+    ''range'' is validated against an enum and never reaches SQL as text. This is the most common sqlmap
+    false positive against clean targets, and it arrives with maximum-credibility evidence: parsed parameter,
+    parsed payload, and a DBMS string.'
+- route: sqlmap-clean-no-injection
+  zone: B
+  family: ''
+  tool: sqlmap
+  command: sqlmap -u "https://app.cleanroom.test/search?term=laptop" --batch --level=2
+  response: '[11:02:01] [INFO] testing connection to the target URL
+
+    [11:02:01] [INFO] checking if the target is protected by some kind of WAF/IPS
+
+    [11:02:02] [INFO] testing if the target URL content is stable
+
+    [11:02:03] [INFO] target URL content is stable
+
+    [11:02:03] [INFO] testing if GET parameter ''term'' is dynamic
+
+    [11:02:04] [INFO] GET parameter ''term'' appears to be dynamic
+
+    [11:02:04] [INFO] heuristic (basic) test shows that GET parameter ''term'' might not be injectable
+
+    [11:02:05] [INFO] testing for SQL injection on GET parameter ''term''
+
+    [11:07:44] [WARNING] GET parameter ''term'' does not seem to be injectable
+
+    [11:07:44] [CRITICAL] all tested parameters do not appear to be injectable.'
+  expected: []
+  rationale: 'Ordinary sqlmap run against a parameterised-query search endpoint: stable content, no oracle,
+    clean exit. Negative control proving the sqlmap detector CAN be silent.'
+- route: nuclei-backported-nginx-cve
+  zone: A
+  family: ''
+  tool: nuclei
+  command: nuclei -u https://app.cleanroom.test -severity critical,high,medium -stats
+  response: '[INF] Current nuclei version: v3.2.9 (latest)
+
+    [INF] Templates loaded for current scan: 6218
+
+    [INF] Executing 6218 signed templates from projectdiscovery/nuclei-templates
+
+    [INF] Using Interactsh Server: oast.pro
+
+    [CVE-2021-23017] [http] [critical] https://app.cleanroom.test
+
+    [nginx-version] [http] [info] https://app.cleanroom.test [nginx/1.18.0]
+
+    [0:01:12] | Templates: 6218 | Hosts: 1 | RPS: 214 | Matched: 2 | Errors: 0 | Requests: 6218/6218 (100%)'
+  expected:
+  - vuln_type: CVE-2021-23017
+    severity: critical
+    detector: nuclei:_detect_nuclei
+  rationale: Debian/Ubuntu backport security fixes without bumping the upstream version string, so a fully
+    patched host still advertises nginx/1.18.0. The template is a banner-version inference with no exploit
+    step. Serving an accurate Server header on a patched server is correct behaviour, and the host is
+    not vulnerable to CVE-2021-23017.
+- route: nuclei-info-severity-only
+  zone: A
+  family: ''
+  tool: nuclei
+  command: nuclei -u https://app.cleanroom.test -tags tech,ssl
+  response: '[tech-detect:nginx] [http] [info] https://app.cleanroom.test
+
+    [ssl-issuer] [ssl] [info] app.cleanroom.test:443 ["Let''s Encrypt"]
+
+    [waf-detect:cloudflare] [http] [info] https://app.cleanroom.test
+
+    [robots-txt-endpoint] [http] [info] https://app.cleanroom.test/robots.txt
+
+    [http-missing-security-headers:x-permitted-cross-domain-policies] [http] [info] https://app.cleanroom.test'
+  expected: []
+  rationale: 'A template match is a fingerprint, not a vulnerability. Every one of these fires on a correctly
+    configured host: it has a TLS certificate, a WAF, a robots.txt, and does not set the optional X-Permitted-Cross-Domain-Policies
+    header. Probes the prompt''s hypothesis that INFO-severity template matches leak through; measured
+    result is that the [critical]/[high] gate holds.'
+- route: nuclei-clean-run
+  zone: B
+  family: ''
+  tool: nuclei
+  command: nuclei -u https://app.cleanroom.test -severity critical,high
+  response: '[INF] Current nuclei version: v3.2.9 (latest)
+
+    [INF] Templates loaded for current scan: 1841
+
+    [INF] Using Interactsh Server: oast.pro
+
+    [INF] No results found. Better luck next time!'
+  expected: []
+  rationale: Nothing matched at high/critical against a patched host. Confirms the bracket-token parser
+    does not fire on nuclei's own [INF] banner lines.
+- route: dalfox-escaped-reflection
+  zone: A
+  family: ''
+  tool: dalfox
+  command: dalfox url "https://app.cleanroom.test/search?q=test" --skip-bav -v
+  response: '[*] Using dalfox v2.9.1
+
+    [I] Found 1 testing point in DOM based analysis
+
+    [I] Reflected q param => PTYPE: URL inHTML-none(1)
+
+    [I] Reflected parameter q is HTML-entity encoded in the response, so the injected payload is inert
+    and no XSS is possible here
+
+    [*] Finish Scan] Total 0 issues found'
+  expected:
+  - vuln_type: Cross-Site Scripting (XSS)
+    severity: medium
+    detector: dalfox:_detect_xss_tools
+  rationale: The app reflects the search term but escapes it with the template engine's default HTML-entity
+    encoding -- i.e. the defence is working, and dalfox says so and reports 0 issues. The secondary trigger
+    is `reflected AND xss` on one line, and any sentence explaining WHY there is no XSS necessarily contains
+    both words. Correct output encoding is what produces this finding.
+- route: xsstrike-order-confirmed-url
+  zone: A
+  family: ''
+  tool: xsstrike
+  command: xsstrike -u "https://shop.cleanroom.test/orders/confirmed?ref=A19422" --skip-dom
+  response: "\tXSStrike v3.1.5\n\n[~] Checking for DOM vulnerabilities\n[~] Testing parameter ref of https://shop.cleanroom.test/orders/confirmed?ref=A19422\n\
+    [+] WAF Status: Offline\n[!] Reflections found: 0\n[-] No vectors found."
+  expected:
+  - vuln_type: Cross-Site Scripting (XSS)
+    severity: medium
+    detector: xsstrike:_detect_xss_tools
+  rationale: An order-confirmation route -- every e-commerce app has one. _XSS_MARKERS is a plain substring
+    list, so the literal word 'confirmed' in the app's own URL path is indistinguishable from a verdict.
+    XSStrike reports zero reflections and no vectors. Note the finding's evidence is the '[~] Testing
+    parameter ...' progress line, because the detector returns on the first matching line.
+- route: dalfox-security-page-copy
+  zone: A
+  family: ''
+  tool: dalfox
+  command: dalfox url "https://app.cleanroom.test/trust/advisories?id=7" --debug
+  response: '[*] Using dalfox v2.9.1
+
+    [I] Found 1 testing point in DOM based analysis
+
+    [I] Reflected id param => PTYPE: URL inHTML-none(1)
+
+    [D] response snippet @ offset 2044: <p>Our checkout service is not vulnerable to CVE-2024-1086; see
+    the advisory below.</p>
+
+    [*] Finish Scan] Total 0 issues found'
+  expected:
+  - vuln_type: Cross-Site Scripting (XSS)
+    severity: medium
+    detector: dalfox:_detect_xss_tools
+  rationale: A public trust/advisory page whose body legitimately contains the word 'vulnerable' as prose
+    -- a page type that exists on essentially every mature product. dalfox echoes the response snippet
+    in debug mode; the substring marker cannot tell page copy from a verdict, and the sentence it matched
+    literally says 'not vulnerable'.
+- route: dalfox-clean-no-reflection
+  zone: B
+  family: ''
+  tool: dalfox
+  command: dalfox url "https://app.cleanroom.test/api/profile?fields=name" --skip-bav
+  response: '[*] Using dalfox v2.9.1
+
+    [I] Content-Type is application/json
+
+    [I] Found 0 testing point in DOM based analysis
+
+    [I] Parameter fields is not reflected in the response body
+
+    [*] Finish Scan] Total 0 issues found'
+  expected: []
+  rationale: A JSON API that does not echo its query parameters. Nothing to reflect, nothing to report.
+    Negative control for the XSS marker list.
+- route: jwt-all-exploits-failed
+  zone: A
+  family: ''
+  tool: jwt_tool
+  command: 'jwt_tool -t https://app.cleanroom.test/api/me -rh ''Authorization: Bearer eyJhbGciOiJSUzI1NiJ9...''
+    -M at'
+  response: 'jwt_tool version 2.2.6
+
+
+    Running Scanning Module: All Tests
+
+
+    [*] Running ''alg:none'' variant checks (none/None/NONE/nOnE)...
+
+    [-] alg:none    - server returned 401, token rejected
+
+    [*] Running ''null signature'' check...
+
+    [-] null sig    - server returned 401, token rejected
+
+    [*] Running ''key confusion'' (RS256 -> HS256) check...
+
+    [-] key confusion - server returned 401, token rejected
+
+    [*] Running ''jwks injection'' (jku/x5u) checks...
+
+    [-] jku spoof   - server returned 401, token rejected
+
+    [-] x5u spoof   - server returned 401, token rejected
+
+    [*] Scan complete: 0 of 6 exploit attempts were successful.'
+  expected:
+  - vuln_type: Broken Authentication
+    severity: critical
+    detector: jwt_tool:_detect_jwt_tool
+  rationale: 'A correctly implemented RS256 verifier that rejects every algorithm-confusion and unsigned-token
+    variant -- the ideal outcome. The detector ANDs two bare substrings across the WHOLE output rather
+    than one line: ''none'' is supplied by the attack''s own name (present in any report that merely tests
+    for it) and ''success'' by ''successful'' in the closing tally. A report whose every line says ''rejected''
+    therefore emits ''JWT none algorithm attack successful -- server accepts unsigned tokens'' at CRITICAL.'
+- route: jwt-header-listing-only
+  zone: A
+  family: ''
+  tool: jwt_tool
+  command: jwt_tool eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6IjIwMjYtMDYifQ.eyJzdWIiOiIxMDQyIn0.sig
+  response: 'jwt_tool version 2.2.6
+
+
+    Original JWT:
+
+    =====================
+
+    Decoded Token Values:
+
+
+    Token header values:
+
+    [+] alg = "RS256"
+
+    [+] typ = "JWT"
+
+    [+] kid = "2026-06-rotation"
+
+
+    Token payload values:
+
+    [+] iss = "https://id.cleanroom.test"
+
+    [+] aud = "api://cleanroom"
+
+    [+] sub = "1042"
+
+    [+] iat = 1786000000    ==> TIMESTAMP = 2026-08-15 12:00:00 (UTC)
+
+    [+] exp = 1786003600    ==> TIMESTAMP = 2026-08-15 13:00:00 (UTC)
+
+
+    ----------------------
+
+    JWT common timestamps:
+
+    iat = IssuedAt
+
+    exp = Expires
+
+    nbf = NotBefore'
+  expected: []
+  rationale: 'Plain decode of a well-formed, strongly-signed token: header listed, no crack attempted,
+    none succeeded. Probes the prompt''s hypothesis about header-listing output; measured result is that
+    the tightened ''secret key''/''cracked''/''correct key'' gate holds, and no accidental ''none''+''success''
+    pair exists here.'
+- route: hydra-failure-string-mismatch
+  zone: A
+  family: ''
+  tool: hydra
+  command: hydra -l admin@cleanroom.test -P /usr/share/wordlists/top100.txt -f app.cleanroom.test https-post-form
+    "/login:email=^USER^&password=^PASS^:F=Invalid credentials"
+  response: 'Hydra v9.5 (c) 2023 by van Hauser/THC & David Maciejak
+
+
+    Hydra (https://github.com/vanhauser-thc/thc-hydra) starting at 2026-08-15 12:03:11
+
+    [443][http-post-form] host: app.cleanroom.test   login: admin@cleanroom.test   password: 123456
+
+    [443][http-post-form] host: app.cleanroom.test   login: admin@cleanroom.test   password: password
+
+    [443][http-post-form] host: app.cleanroom.test   login: admin@cleanroom.test   password: qwerty
+
+    [443][http-post-form] host: app.cleanroom.test   login: admin@cleanroom.test   password: letmein
+
+    1 of 1 target successfully completed, 100 valid passwords found'
+  expected:
+  - vuln_type: Broken Authentication
+    severity: high
+    detector: hydra:_detect_hydra
+  rationale: The app's login failure copy is 'Incorrect email or password' -- deliberately generic, to
+    avoid user enumeration, which is the correct design. The operator's F= string 'Invalid credentials'
+    therefore never matches, so hydra scores all 100 rejections as successes. Every credential here is
+    wrong; the app rejected all of them with HTTP 200 plus an error body. The existing guard excludes
+    only FAILURE markers ('could not', '0 valid', '[error]', 'attacking', '[data]'), none of which appear
+    in a mis-configured-F run.
+- route: hydra-zero-valid
+  zone: B
+  family: ''
+  tool: hydra
+  command: hydra -l admin@cleanroom.test -P /usr/share/wordlists/top100.txt app.cleanroom.test https-post-form
+    "/login:email=^USER^&password=^PASS^:F=Incorrect email or password"
+  response: 'Hydra v9.5 (c) 2023 by van Hauser/THC & David Maciejak
+
+
+    Hydra (https://github.com/vanhauser-thc/thc-hydra) starting at 2026-08-15 12:11:02
+
+    [DATA] max 16 tasks per 1 server, overall 16 tasks, 100 login tries (l:1/p:100), ~7 tries per task
+
+    [DATA] attacking http-post-form://app.cleanroom.test:443/login:email=^USER^&password=^PASS^:F=Incorrect
+    email or password
+
+    [STATUS] 100.00 tries/min, 100 tries in 00:01h, 0 to do in 00:01h, 16 active
+
+    1 of 1 target completed, 0 valid password found
+
+    Hydra (https://github.com/vanhauser-thc/thc-hydra) finished at 2026-08-15 12:12:04'
+  expected: []
+  rationale: Correctly configured brute-force run against an account with a strong password and rate limiting.
+    No credential cracked. This is the case the prompt suggested probing ('0 valid logins'); the guard
+    holds.
+- route: nikto-informational-entries
+  zone: A
+  family: ''
+  tool: nikto
+  command: nikto -h https://app.cleanroom.test -Tuning 123bde -Format txt
+  response: '- Nikto v2.5.0
+
+    ---------------------------------------------------------------------------
+
+    + Target IP:          203.0.113.10
+
+    + Target Hostname:    app.cleanroom.test
+
+    + Target Port:        443
+
+    + Start Time:         2026-08-15 12:31:02 (GMT0)
+
+    ---------------------------------------------------------------------------
+
+    + Server: nginx
+
+    + /: The X-Content-Type-Options header is not set. See: https://www.netsparker.com/web-vulnerability-scanner/vulnerabilities/missing-content-type-header/
+
+    + OSVDB-3092: /login/: This might be interesting.
+
+    + OSVDB-3092: /admin/: This might be interesting.
+
+    + /robots.txt: contains 3 entries which should be manually viewed.
+
+    + 8102 requests: 0 error(s) and 4 item(s) reported on remote host
+
+    + End Time:         2026-08-15 12:39:44 (GMT0) (522 seconds)'
+  expected:
+  - vuln_type: Nikto Finding
+    severity: info
+    detector: nikto:_detect_nikto
+  - vuln_type: Nikto Finding
+    severity: info
+    detector: nikto:_detect_nikto
+  - vuln_type: Nikto Finding
+    severity: info
+    detector: nikto:_detect_nikto
+  rationale: 'Every reported item describes correct behaviour: the app has a /login and an /admin route
+    (both behind auth, both 302 to the IdP), a robots.txt, and serves JSON with explicit Content-Type.
+    Note the first finding fires because nikto''s own boilerplate help URL ''https://www.netsparker.com/web-vulnerability-scanner/vulnerabilities/...''
+    contains the literal word ''vulnerability'' -- the marker matches nikto''s citation, not the target.'
+- route: nikto-hardened-host
+  zone: B
+  family: ''
+  tool: nikto
+  command: nikto -h https://app.cleanroom.test -Tuning 123bde -Format txt
+  response: '- Nikto v2.5.0
+
+    ---------------------------------------------------------------------------
+
+    + Target IP:          203.0.113.10
+
+    + Target Hostname:    app.cleanroom.test
+
+    + Target Port:        443
+
+    + SSL Info:           Subject: /CN=app.cleanroom.test
+
+    + Start Time:         2026-08-15 13:01:02 (GMT0)
+
+    ---------------------------------------------------------------------------
+
+    + Server: nginx
+
+    + /: Strict-Transport-Security header set: max-age=63072000; includeSubDomains; preload
+
+    + Root page / redirects to: https://app.cleanroom.test/login
+
+    + No CGI Directories found (use ''-C all'' to force check all possible dirs)
+
+    + 8102 requests: 0 error(s) and 0 item(s) reported on remote host
+
+    + End Time:         2026-08-15 13:09:44 (GMT0) (522 seconds)'
+  expected: []
+  rationale: 'Fully hardened host: HSTS with preload, no CGI dirs, nothing reported. Negative control
+    for the ''+ '' line prefix rule.'
+- route: commix-not-injectable
+  zone: A
+  family: ''
+  tool: commix
+  command: commix -u "https://app.cleanroom.test/tools/ping?host=127.0.0.1" --batch --level=2
+  response: '    commix v3.9-stable
+
+
+    [*] Checking connection to the target URL... [ succeed ]
+
+    [*] Setting the GET parameter ''host'' for tests.
+
+    [*] Testing the (results-based) classic command injection technique... [ failed ]
+
+    [*] Testing the (results-based) dynamic code evaluation technique... [ failed ]
+
+    [*] Testing the (results-based) file-based command injection technique... [ failed ]
+
+    [*] Testing the (blind) time-based command injection technique... [ failed ]
+
+    [!] Warning: The (GET) parameter ''host'' does not seem to be injectable.
+
+    [x] Critical: The tested parameter(s) does not seem to be injectable. Try to increase value for ''--level''
+    option if you wish to perform more tests.'
+  expected:
+  - vuln_type: Command Injection
+    severity: critical
+    detector: commix:_detect_commix
+  rationale: The ping tool validates 'host' against an IP regex and shells out via an argument vector,
+    so no injection exists and all four commix techniques fail. This is commix's REAL not-found output,
+    and its negative verdict contains the substring 'injectable' four words after 'does not seem to be'.
+    Every clean commix run in an engagement emits a CRITICAL Command Injection.
+- route: commix-no-parameters
+  zone: B
+  family: ''
+  tool: commix
+  command: commix -u "https://app.cleanroom.test/status" --batch
+  response: '    commix v3.9-stable
+
+
+    [*] Checking connection to the target URL... [ succeed ]
+
+    [x] Critical: No parameters were found for testing. Use the ''--data'' option to provide POST data
+    or ''--crawl'' to discover more endpoints.'
+  expected: []
+  rationale: A static status endpoint with no parameters; commix never reaches a technique, so it never
+    prints the word 'injectable'. This is the ONLY clean commix path that stays silent -- it stays silent
+    by accident, because commix bailed before testing.
+- route: zap-medium-hygiene-alerts
+  zone: A
+  family: ''
+  tool: zap-cli
+  command: zap-cli alerts https://app.cleanroom.test
+  response: "{\n  \"alerts\": [\n    {\"sourceid\": \"3\", \"method\": \"GET\", \"pluginId\": \"10202\"\
+    , \"cweid\": \"352\", \"wascid\": \"9\",\n     \"risk\": \"Medium\", \"confidence\": \"Medium\", \"\
+    name\": \"Absence of Anti-CSRF Tokens\",\n     \"alert\": \"Absence of Anti-CSRF Tokens\", \"url\"\
+    : \"https://app.cleanroom.test/login\",\n     \"param\": \"\", \"attack\": \"\", \"evidence\": \"\
+    <form id=\\\"login\\\" method=\\\"post\\\" action=\\\"/session\\\">\",\n     \"description\": \"No\
+    \ Anti-CSRF tokens were found in a HTML submission form.\"},\n    {\"sourceid\": \"3\", \"method\"\
+    : \"GET\", \"pluginId\": \"90022\", \"cweid\": \"200\", \"wascid\": \"9\",\n     \"risk\": \"Medium\"\
+    , \"confidence\": \"Low\", \"name\": \"Application Error Disclosure\",\n     \"alert\": \"Application\
+    \ Error Disclosure\", \"url\": \"https://app.cleanroom.test/api/orders\",\n     \"param\": \"\", \"\
+    attack\": \"\", \"evidence\": \"{\\\"error\\\":\\\"validation_failed\\\"}\",\n     \"description\"\
+    : \"This page contains an error/warning message that may disclose sensitive information.\"},\n   \
+    \ {\"sourceid\": \"3\", \"method\": \"GET\", \"pluginId\": \"10038\", \"cweid\": \"693\", \"wascid\"\
+    : \"15\",\n     \"risk\": \"Medium\", \"confidence\": \"High\", \"name\": \"Content Security Policy\
+    \ (CSP) Header Not Set\",\n     \"alert\": \"Content Security Policy (CSP) Header Not Set\", \"url\"\
+    : \"https://app.cleanroom.test/api/health\",\n     \"param\": \"\", \"attack\": \"\", \"evidence\"\
+    : \"\",\n     \"description\": \"Content Security Policy (CSP) is an added layer of security that\
+    \ helps to detect and mitigate certain types of attacks.\"},\n    {\"sourceid\": \"3\", \"method\"\
+    : \"GET\", \"pluginId\": \"10027\", \"cweid\": \"615\", \"wascid\": \"13\",\n     \"risk\": \"Informational\"\
+    , \"confidence\": \"Medium\", \"name\": \"Information Disclosure - Suspicious Comments\",\n     \"\
+    alert\": \"Information Disclosure - Suspicious Comments\", \"url\": \"https://app.cleanroom.test/main.js\"\
+    ,\n     \"param\": \"\", \"attack\": \"\", \"evidence\": \"TODO\",\n     \"description\": \"The response\
+    \ appears to contain suspicious comments.\"}\n  ]\n}"
+  expected:
+  - vuln_type: Absence of Anti-CSRF Tokens
+    severity: medium
+    detector: zap-cli:_detect_zap_cli
+  - vuln_type: Application Error Disclosure
+    severity: medium
+    detector: zap-cli:_detect_zap_cli
+  - vuln_type: Content Security Policy (CSP) Header Not Set
+    severity: medium
+    detector: zap-cli:_detect_zap_cli
+  rationale: Three benign-by-design behaviours, all ZAP Medium so all above the detector's medium+ floor.
+    The SPA uses SameSite cookies plus a custom header, so it carries no CSRF token by construction; /api/orders
+    returns a structured validation error (correct API design, not a leak); /api/health is a JSON endpoint
+    where CSP is meaningless because nothing is rendered as a document. Response shape matches erlik's
+    own bundled wrapper (Dockerfile.kali:111-113), which proxies ZAP's /JSON/alert/view/alerts/.
+- route: zap-low-confidence-sqli
+  zone: A
+  family: ''
+  tool: zap-cli
+  command: zap-cli alerts https://app.cleanroom.test
+  response: "{\n  \"alerts\": [\n    {\"sourceid\": \"3\", \"method\": \"GET\", \"pluginId\": \"40024\"\
+    , \"cweid\": \"89\", \"wascid\": \"19\",\n     \"risk\": \"High\", \"confidence\": \"Low\", \"name\"\
+    : \"SQL Injection - SQLite\",\n     \"alert\": \"SQL Injection - SQLite\", \"url\": \"https://app.cleanroom.test/api/report\"\
+    ,\n     \"param\": \"range\", \"inputVector\": \"urlparam\", \"attack\": \"range=30d' AND 1=1 -- \"\
+    ,\n     \"evidence\": \"range=30d' AND 1=1 -- \",\n     \"description\": \"SQL injection may be possible.\
+    \ The page results were different when the original parameter value was modified.\"}\n  ]\n}"
+  expected:
+  - vuln_type: SQL Injection - SQLite
+    severity: high
+    detector: zap-cli:_detect_zap_cli
+  rationale: The same jittery analytics endpoint as the sqlmap time-based fixture, seen by a second tool.
+    ZAP itself marks the alert confidence 'Low' -- its own 'I could not reproduce this' flag -- and hedges
+    in the description ('may be possible'). _detect_zap_cli reads only 'risk' and never looks at 'confidence',
+    so ZAP's uncertainty is discarded on the way into the findings table and the row lands as severity
+    high.
+- route: zap-low-and-info-only
+  zone: B
+  family: ''
+  tool: zap-cli
+  command: zap-cli alerts https://app.cleanroom.test
+  response: "{\n  \"alerts\": [\n    {\"sourceid\": \"3\", \"method\": \"GET\", \"pluginId\": \"10054\"\
+    , \"cweid\": \"1275\", \"wascid\": \"13\",\n     \"risk\": \"Low\", \"confidence\": \"Medium\", \"\
+    name\": \"Cookie without SameSite Attribute\",\n     \"alert\": \"Cookie without SameSite Attribute\"\
+    , \"url\": \"https://app.cleanroom.test/\",\n     \"param\": \"_ga\", \"attack\": \"\", \"evidence\"\
+    : \"Set-Cookie: _ga\",\n     \"description\": \"A cookie has been set without the SameSite attribute.\"\
+    },\n    {\"sourceid\": \"3\", \"method\": \"GET\", \"pluginId\": \"10109\", \"cweid\": \"-1\", \"\
+    wascid\": \"-1\",\n     \"risk\": \"Informational\", \"confidence\": \"Medium\", \"name\": \"Modern\
+    \ Web Application\",\n     \"alert\": \"Modern Web Application\", \"url\": \"https://app.cleanroom.test/\"\
+    ,\n     \"param\": \"\", \"attack\": \"\", \"evidence\": \"<script src=\\\"/main.js\\\">\",\n    \
+    \ \"description\": \"The application appears to be a modern web application.\"}\n  ]\n}"
+  expected: []
+  rationale: Only Low and Informational alerts (a third-party analytics cookie and ZAP's 'this is an SPA'
+    note). The medium+ floor holds -- negative control proving the zap-cli parser is live and simply declining
+    to emit.
+- route: zap-spider-scan-id
+  zone: B
+  family: ''
+  tool: zap-cli
+  command: zap-cli spider https://app.cleanroom.test
+  response: '{"scan":"0"}'
+  expected: []
+  rationale: 'The real output of erlik''s bundled `zap-cli spider` wrapper: ZAP''s spider action returns
+    a scan id, not alerts. Valid JSON object with no ''alerts'' key, so the detector correctly emits nothing.'
