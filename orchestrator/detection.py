@@ -134,12 +134,22 @@ def _curl_exposed_user_data(ctx: DetectContext) -> list[Finding]:
     if (('"email"' in ol and '"password"' in ol) or
             ('"email"' in ol and ('"role"' in ol or '"isadmin"' in ol))):
         emails = re.findall(r'"email"\s*:\s*"([^"]+)"', ctx.output)
-        evidence = f"API exposes user data: {len(emails)} user records found"
-        if emails:
-            evidence += f"\nSample: {emails[0]}"
+        if not emails:
+            # No record could be extracted, so nothing is evidenced. This used
+            # to report `0 user records found` AS the finding — a claim of data
+            # exposure whose own evidence string says no data was found.
+            #
+            # It fired on any ordinary HTML login form, because `name="email"`
+            # and `name="password"` put the quoted tokens in the body:
+            #   <input type="email" name="email">
+            #   <input type="password" name="password">
+            # Caught by the false-positive cleanroom on a plain sign-in page.
+            return []
         return [{
             "vuln_type": "Sensitive Data Exposure", "severity": "medium",
-            "url": ctx.url, "parameter": "", "evidence": evidence,
+            "url": ctx.url, "parameter": "",
+            "evidence": (f"API exposes user data: {len(emails)} user records found"
+                         f"\nSample: {emails[0]}"),
         }]
     return []
 
@@ -386,12 +396,25 @@ _FILESYSTEM_MARKERS = ("/node_modules/", "/usr/", "/home/", "/root/",
                        "/app/", "/var/", "/juice-shop/")
 
 
+# A server-side error has to be VISIBLE for a path in the body to be a leak.
+# Without this, `has_fs_path` alone fired on any page that merely links to an
+# asset under one of the marker prefixes — `/app/main.js` in a compiled
+# front-end is a URL path, not a filesystem path, and every SPA serving bundles
+# from `/app/` was reported. Caught by the false-positive cleanroom.
+_ERROR_SIGNALS = ("error:", "exception", "fatal", "warning:", "notice:")
+_ERROR_PAGE_RX = re.compile(r'<h2><em>\d+</em>')
+
+
 def _curl_stack_trace(ctx: DetectContext) -> list[Finding]:
     frame_pattern = re.search(r'\.(?:js|ts|py|rb|php):\d+:\d+', ctx.output)
     has_stacktrace = any(m in ctx.output_lower for m in _STACKTRACE_MARKERS)
     has_fs_path = any(m in ctx.output for m in _FILESYSTEM_MARKERS)
     has_frame = bool(frame_pattern)
-    if has_stacktrace or has_fs_path or has_frame:
+    has_error = (any(m in ctx.output_lower for m in _ERROR_SIGNALS)
+                 or bool(_ERROR_PAGE_RX.search(ctx.output)))
+    # A stack marker or a real stack frame stands on its own. A bare filesystem
+    # path only counts when the response is actually showing an error.
+    if has_stacktrace or has_frame or (has_fs_path and has_error):
         err_match = re.search(r'<h2><em>\d+</em>\s*(.+?)</h2>', ctx.output)
         err_msg = err_match.group(1).strip() if err_match else "Server error with stack trace"
         return [{

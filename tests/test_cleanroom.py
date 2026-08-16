@@ -173,24 +173,24 @@ class TestCommittedCorpus:
         rep = C.measure(corpus)
         assert rep.mismatches == [], C.format_report(rep)
 
-    # Zone B SHOULD be silent. It is not. Asserting 0 would leave the suite
-    # red; asserting nothing would let the number grow unnoticed. So the
-    # measured baseline is pinned, and the test fails BOTH ways — an increase
-    # is a regression, a decrease says "lower this and lock the win in".
+    # Zone B SHOULD be silent. Asserting 0 would leave the suite red while one
+    # known case stands; asserting nothing would let the number grow unnoticed.
+    # The measured baseline is pinned and the test fails BOTH ways — an
+    # increase is a regression, a decrease says "lower this and lock the win".
     #
-    # 6 -> 3 when _curl_missing_headers' header-flag gate was anchored: `-i`
-    # had been an unanchored substring, matching inside `sign-in`, `--insecure`
-    # and `portal-internal`, so body-only fetches were judged on headers the
-    # operator never requested. That accounted for 3 of the original 6.
+    # Trajectory, each step a measured drop rather than a claim:
+    #   6 -> 3  anchored _curl_missing_headers' header-flag gate (`-i` had been
+    #           an unanchored substring, matching inside `sign-in`,
+    #           `--insecure`, `portal-internal`)
+    #   3 -> 1  _curl_exposed_user_data no longer reports "0 user records
+    #           found" as a finding; _curl_stack_trace no longer treats a bare
+    #           `/app/` URL prefix as a filesystem leak
     #
-    # The 3 that remain are NOT that bug:
-    #   * _curl_missing_headers on /v2/regions — a real `curl -s -i` where two
-    #     of the four headers genuinely are absent. Whether CSP and
-    #     X-Frame-Options matter on a JSON API is a triage question, and C4's
-    #     submission policy already demotes it to informational.
-    #   * _curl_exposed_user_data on an ordinary sign-in page.
-    #   * _curl_stack_trace on a compiled SPA shell.
-    ZONE_B_BASELINE = 3
+    # The 1 that remains is NOT a code defect: _curl_missing_headers on
+    # /v2/regions is a real `curl -s -i` where CSP and X-Frame-Options genuinely
+    # are absent. Whether they matter on a JSON API is a triage question, and
+    # C4's submission policy already demotes it to informational.
+    ZONE_B_BASELINE = 1
 
     def test_zone_b_findings_do_not_grow(self):
         corpus = C.load_corpus()

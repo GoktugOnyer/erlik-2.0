@@ -15,6 +15,8 @@ broadened/tightened trigger cannot regress in the other direction.
 
 import json
 
+import pytest
+
 import orchestrator.main as m
 
 
@@ -504,3 +506,52 @@ class TestHeaderFlagIsAnchored:
         """The core of it: no header flag means no header evidence exists."""
         assert detect("curl", self.NO_HEADERS,
                       "curl -s https://x.test/account/sign-in") == []
+
+
+class TestEvidenceGatesHold:
+    """Two rules that claimed a finding without evidencing it.
+
+    Both were found by the false-positive cleanroom on benign traffic, and both
+    are the module's stated philosophy failing in its own code: this file is
+    "evidence-gated vulnerability detection", and each rule reported a
+    vulnerability its own evidence did not support.
+    """
+
+    def test_user_data_needs_an_actual_record(self):
+        """It reported `API exposes user data: 0 user records found` — a claim
+        of exposure whose evidence string says nothing was found.
+
+        It fired on any ordinary HTML login form, because `name="email"` and
+        `name="password"` put the quoted tokens in the body.
+        """
+        form = ('<form method="post" action="/account/sign-in">'
+                '<input type="email" name="email">'
+                '<input type="password" name="password"></form>')
+        assert detect("curl", form, "curl -s https://x.test/account/sign-in") == []
+
+    def test_user_data_still_fires_on_a_real_dump(self):
+        out = '{"users":[{"email":"a@b.c","password":"x","role":"admin"}]}'
+        f = detect("curl", out, "curl -s https://x.test/api/users")
+        assert any(x["vuln_type"] == "Sensitive Data Exposure" for x in f)
+        assert "1 user records found" in next(
+            x["evidence"] for x in f if x["vuln_type"] == "Sensitive Data Exposure")
+
+    def test_asset_path_is_not_a_filesystem_leak(self):
+        """`/app/main.js` in a script tag is a URL path. Every SPA serving
+        bundles from `/app/` was reported as disclosing server internals."""
+        spa = ('HTTP/1.1 200 OK\r\nContent-Security-Policy: default-src \'self\'\r\n'
+               'X-Frame-Options: DENY\r\nStrict-Transport-Security: max-age=1\r\n'
+               'X-Content-Type-Options: nosniff\r\n\r\n'
+               '<script src="/app/main.9c1e.js" defer></script>')
+        assert detect("curl", spa, "curl -s -i https://x.test/") == []
+
+    @pytest.mark.parametrize("out", [
+        "Error: boom\n    at /juice-shop/routes/order.js:42:13\n",
+        "<b>Fatal error</b>: Uncaught Error: x in /var/www/html/index.php on line 12",
+        "{'stacktrace': 'at foo'}",
+    ])
+    def test_real_leaks_still_fire(self, out):
+        """A stack marker or a real frame stands alone; a filesystem path
+        counts when the response is actually showing an error."""
+        f = detect("curl", out, "curl -s https://x.test/boom")
+        assert any(x["vuln_type"] == "Information Disclosure" for x in f), out[:40]

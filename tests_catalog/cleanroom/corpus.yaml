@@ -261,10 +261,7 @@ fixtures:
     >\n  <label>Email <input type=\"email\" name=\"email\"></label>\n  <label>Password <input type=\"\
     password\" name=\"password\"></label>\n  <button>Sign in</button>\n</form>\n<script src=\"/static/auth.js\"\
     ></script>\n"
-  expected:
-  - vuln_type: Sensitive Data Exposure
-    severity: medium
-    detector: curl:_curl_exposed_user_data
+  expected: []
   rationale: 'A body-only fetch of an ordinary login page; no -i/-I/--head was passed, so the operator
     never saw a single response header. It still gets header-audited because the -i gate is a bare substring
     test and the path ''sign-in'' contains ''-i''. Confirmed by control: the identical body at /account/login
@@ -316,10 +313,7 @@ fixtures:
     </body></html>
 
     '
-  expected:
-  - vuln_type: Information Disclosure
-    severity: info
-    detector: curl:_curl_stack_trace
+  expected: []
   rationale: The index shell of a compiled front-end, fully hardened, no error and no server state. Its
     bundles are served under the /app/ path prefix, which is a framework default. _FILESYSTEM_MARKERS
     matches '/app/' anywhere in the output with no requirement that the status be an error, so a 200 OK
