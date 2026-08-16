@@ -4947,6 +4947,123 @@ async def get_skills_catalog():
     return {"root": str(SKILLS_ROOT), "enabled": skills_enabled(), "categories": cats}
 
 
+@app.get("/api/library/overview")
+async def library_overview():
+    """Headline counts for the ARSENAL view.
+
+    Reports `listed` and `routable` separately: /api/skills counts every .md via
+    glob and therefore overstates by 15, because the router skips
+    NOTICE/INDEX/SKILL files. A dashboard that shows the bigger number tells an
+    operator they have capabilities the router will never select.
+    """
+    from orchestrator import capabilities as C
+    return C.overview()
+
+
+@app.get("/api/library/classes")
+async def library_classes():
+    """Every attack class with its two execution-path verdicts."""
+    from orchestrator import capabilities as C
+    return {"classes": [{**c, "verdicts": C.verdicts(c)} for c in C.CLASSES]}
+
+
+@app.get("/api/library/classes/audit")
+async def library_classes_audit():
+    """Declared-vs-real integrity of the join table.
+
+    Declared BEFORE /classes/{key} so the literal path wins over the parameter.
+    """
+    from orchestrator import capabilities as C
+    a = C.audit()
+    return {"ok": all(not v for v in a.values()), **a}
+
+
+@app.get("/api/library/classes/{key}")
+async def library_class_detail(key: str):
+    from orchestrator import capabilities as C
+    d = C.class_detail(key)
+    if d is None:
+        raise HTTPException(404, f"unknown attack class {key!r}")
+    return d
+
+
+@app.get("/api/library/detectors")
+async def library_detectors():
+    """Detection rules, and which are exercised by the false-positive cleanroom.
+
+    Never reports a bare count: an unexercised rule is indistinguishable from a
+    dead one until something actually fires it.
+    """
+    from orchestrator.bench.cleanroom import all_rule_names, load_corpus, measure
+    names = all_rule_names()
+    try:
+        rep = measure(load_corpus())
+        exercised, unreachable = set(rep.exercised), rep.unreachable
+        fps, zone_b = rep.false_positives, rep.zone_b_findings
+    except Exception:
+        exercised, unreachable, fps, zone_b = set(), [], None, None
+    return {
+        "total": len(names),
+        "detectors": [{"name": n, "exercised": n in exercised} for n in names],
+        "unreachable": unreachable,
+        "cleanroom": {"false_positives": fps, "zone_b_findings": zone_b},
+    }
+
+
+@app.get("/api/library/testcases")
+async def library_testcases():
+    """Deterministic WSTG cases, including any that failed to parse.
+
+    `load_catalog()` swallows parse errors, so a malformed case silently
+    vanishes from the engine. Surfacing it here is the only place it is visible.
+    """
+    import yaml
+    from orchestrator import capabilities as C
+    cases, errors = [], []
+    for p in sorted(C.WSTG_DIR.glob("*.yaml")):
+        try:
+            doc = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+            cases.append({"id": doc.get("id"), "title": doc.get("title", ""),
+                          "file": p.name,
+                          "steps": len(doc.get("steps") or [])})
+        except Exception as e:  # noqa: BLE001
+            errors.append({"file": p.name, "error": str(e)[:200]})
+    return {"count": len(cases), "cases": cases, "load_errors": errors}
+
+
+@app.post("/api/library/routing/explain")
+async def library_routing_explain(payload: dict):
+    """Which sheets the router selects for a mission, and what they cost.
+
+    POST because a mission prompt is multi-KB; it also inherits the API-token
+    guard, which is correct for something that reads the whole corpus.
+    """
+    from orchestrator.skills import (select_skill_files, detect_classes,
+                                     license_of, SKILLS_ROOT, MAX_FILE_EXCERPT)
+    mission = (payload or {}).get("mission", "") or ""
+    files = select_skill_files(mission)
+    chosen, total = [], 0
+    for p in files:
+        body = p.read_text(encoding="utf-8", errors="replace").strip()
+        injected = min(len(body), MAX_FILE_EXCERPT)
+        total += injected
+        chosen.append({
+            "path": str(p.relative_to(SKILLS_ROOT)), "stem": p.stem,
+            "licence": license_of(p), "file_bytes": len(body),
+            "injected_bytes": injected, "excerpted": len(body) > MAX_FILE_EXCERPT,
+        })
+    return {
+        "mission": mission[:400],
+        "classes_detected": sorted(detect_classes(mission)),
+        "selected": chosen,
+        "injected_total": total,
+        "note": ("injected_total is what this mission would ADD to the prompt. "
+                 "Corpus size does not change it — the router selects under a "
+                 "budget. A measured 12-run experiment found recall FELL as "
+                 "injected bytes rose (r = -0.796 on a 7B)."),
+    }
+
+
 @app.get("/api/skills-preview")
 async def preview_skills(hint: str = "injection"):
     """Which reference sheets the router would inject for a given hint."""

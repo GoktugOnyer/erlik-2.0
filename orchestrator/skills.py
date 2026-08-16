@@ -105,6 +105,42 @@ def _tokens(text: str) -> set[str]:
     return out
 
 
+# Licence by corpus directory. The licence of a file must be answerable from
+# its PATH — that is why the vendored corpora live in separate directories in
+# the first place (see skills_catalog/skills/bughunter/NOTICE.md).
+#
+# Before this existed, render_skills stamped one blanket line above every
+# selection: "Source: transilienceai/communitytools (MIT)." Since the BugHunter
+# import that header sat above 100 CC BY 4.0 sheets, so the text erlik fed the
+# model — and anything derived from it — misattributed the work AND asserted a
+# licence that does not apply. CC BY 4.0 requires attribution; a blanket MIT
+# line is not it.
+_LICENCES = {
+    "bughunter": "CC BY 4.0 — elementalsouls/Claude-BugHunter",
+}
+_DEFAULT_LICENCE = "MIT — transilienceai/communitytools"
+UNKNOWN_LICENCE = "UNKNOWN — provenance not recorded"
+
+
+def license_of(path: Path) -> str:
+    """Licence string for a corpus file, keyed on its top-level directory.
+
+    An unrecognised directory returns UNKNOWN rather than the MIT default: a
+    new corpus dropped in without a licence entry must be visibly unattributed,
+    never silently relabelled as MIT.
+    """
+    try:
+        rel = Path(path).resolve().relative_to(SKILLS_ROOT.resolve())
+    except (ValueError, OSError):
+        return UNKNOWN_LICENCE
+    top = rel.parts[0] if rel.parts else ""
+    if top in _LICENCES:
+        return _LICENCES[top]
+    known_mit = {"api-security", "authentication", "client-side", "injection",
+                 "reconnaissance", "server-side", "web-app-logic"}
+    return _DEFAULT_LICENCE if top in known_mit else UNKNOWN_LICENCE
+
+
 def _catalog() -> list[tuple[Path, set[str]]]:
     """All corpus files with the tokens derived from their skill + filename."""
     if not SKILLS_ROOT.exists():
@@ -289,16 +325,19 @@ def render_skills(hint: str, max_chars: int = 14000,
         "═══════════════════════════════════════════════════════════════\n"
         "Reference material for the vulnerability classes most relevant here.\n"
         "Use the payloads/techniques as a guide; adapt them to the real target.\n"
-        "Source: transilienceai/communitytools (MIT).\n"
+        "Each sheet below carries its own source and licence.\n"
     )
     parts = [header]
     for p in files:
         rel = p.relative_to(SKILLS_ROOT)
         body = p.read_text(encoding="utf-8", errors="replace").strip()
-        if len(body) > MAX_FILE_EXCERPT:
+        excerpted = len(body) > MAX_FILE_EXCERPT
+        if excerpted:
             body = (body[:MAX_FILE_EXCERPT].rsplit("\n", 1)[0]
                     + "\n…(excerpt — this sheet continues beyond what fits the budget)")
-        parts.append(f"\n----- skill: {rel.parent.name} / {p.stem} -----\n{body}")
+        parts.append(
+            f"\n----- skill: {rel.parent.name} / {p.stem}"
+            f"  [{license_of(p)}]{' (EXCERPTED)' if excerpted else ''} -----\n{body}")
     return "\n".join(parts) + "\n"
 
 

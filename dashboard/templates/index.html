@@ -652,6 +652,11 @@
                 style="font-size: 0.55rem;">
                 &#9670; SKILLS
             </button>
+            <button id="nav-arsenal" onclick="switchView('arsenal')"
+                class="nav-tab font-pixel px-4 py-2 rounded"
+                style="font-size: 0.55rem;">
+                &#9876; ARSENAL
+            </button>
         </nav>
         <div class="flex items-center gap-2">
             <span id="health-dot" class="w-3 h-3 rounded-full" style="background:#3a3a4a;"></span>
@@ -1594,6 +1599,62 @@
             </div>
         </div><!-- /view-skills -->
 
+
+        <!-- ===== ARSENAL: every attack erlik can run ===== -->
+        <div id="view-arsenal" class="hidden space-y-5">
+            <div class="panel rounded p-4">
+                <div class="flex items-baseline justify-between flex-wrap gap-2">
+                    <h2 class="font-pixel" style="font-size:0.7rem;">&#9876; ARSENAL</h2>
+                    <div id="arsenal-meta" class="font-mono" style="font-size:0.6rem; opacity:.75;">loading…</div>
+                </div>
+                <p class="font-mono mt-2" style="font-size:0.6rem; opacity:.7; max-width:78ch;">
+                    Every attack class erlik knows, and what it can actually bring to bear on each.
+                    Two verdicts per class because they are two execution paths that never meet:
+                    an <b>agent session</b> only produces deterministic evidence where a detector
+                    exists, while the <b>WSTG engine</b> runs committed test cases and is reachable
+                    only from its own endpoint.
+                </p>
+            </div>
+
+            <div class="panel rounded p-4">
+                <h3 class="font-pixel" style="font-size:0.62rem;">COVERAGE GAPS</h3>
+                <p class="font-mono mt-1" style="font-size:0.58rem; opacity:.7;">
+                    Classes with reference material but <b>no detector</b>. An agent can report these;
+                    nothing re-checks the claim.
+                </p>
+                <div id="arsenal-gaps" class="mt-2 flex flex-wrap gap-1"></div>
+            </div>
+
+            <div class="panel rounded p-4">
+                <h3 class="font-pixel" style="font-size:0.62rem;">ATTACK CLASSES</h3>
+                <div id="arsenal-classes" class="mt-3 space-y-2"></div>
+            </div>
+
+            <div class="panel rounded p-4">
+                <h3 class="font-pixel" style="font-size:0.62rem;">ROUTING EXPLAINER</h3>
+                <p class="font-mono mt-1" style="font-size:0.58rem; opacity:.7; max-width:78ch;">
+                    Which sheets a mission would actually receive, and what they cost in prompt bytes.
+                    Growing the corpus does not grow this — the router selects under a budget.
+                </p>
+                <div class="flex gap-2 mt-2">
+                    <input id="arsenal-mission" class="input-field font-mono flex-1 px-2 py-1 rounded"
+                        style="font-size:0.6rem;" placeholder="Assess for SQL injection and broken access control"
+                        onkeydown="if(event.key==='Enter')explainRouting()">
+                    <button onclick="explainRouting()" class="font-pixel px-3 py-1 rounded border"
+                        style="font-size:0.55rem;">EXPLAIN</button>
+                </div>
+                <div id="arsenal-routing" class="mt-3"></div>
+            </div>
+
+            <div class="panel rounded p-4">
+                <h3 class="font-pixel" style="font-size:0.62rem;">DETECTION RULES</h3>
+                <p class="font-mono mt-1" style="font-size:0.58rem; opacity:.7; max-width:78ch;">
+                    A rule nothing exercises is indistinguishable from a dead one, so coverage
+                    is shown beside the count, measured by the false-positive cleanroom.
+                </p>
+                <div id="arsenal-detectors" class="mt-2"></div>
+            </div>
+        </div>
     </main>
 
     <!-- Scanline Overlay -->
@@ -1612,13 +1673,14 @@
 
         // ===== View Switching =====
         function switchView(view) {
-            const views = ['scanner', 'reports', 'benchmark', 'monitor', 'skills'];
+            const views = ['scanner', 'reports', 'benchmark', 'monitor', 'skills', 'arsenal'];
             const panels = {
                 scanner: document.getElementById('view-scanner'),
                 reports: document.getElementById('view-reports'),
                 benchmark: document.getElementById('view-benchmark'),
                 monitor: document.getElementById('view-monitor'),
                 skills: document.getElementById('view-skills'),
+                arsenal: document.getElementById('view-arsenal'),
             };
             const navs = {
                 scanner: document.getElementById('nav-scanner'),
@@ -1626,6 +1688,7 @@
                 benchmark: document.getElementById('nav-benchmark'),
                 monitor: document.getElementById('nav-monitor'),
                 skills: document.getElementById('nav-skills'),
+                arsenal: document.getElementById('nav-arsenal'),
             };
 
             // Start the monitor polling loop the first time the user opens the tab
@@ -1644,6 +1707,141 @@
             if (view === 'reports') loadReportsList();
             if (view === 'benchmark') loadBenchmarkHistory();
             if (view === 'skills') loadSkills();
+            if (view === 'arsenal') loadArsenal();
+        }
+
+
+        // ===== ARSENAL: cross-catalogue attack library =====
+        // Everything here READS the same code paths a run uses (capabilities.py
+        // calls select_skill_files, not a copy of the ranking logic), so the
+        // guide cannot drift from what the runs actually do.
+        let __arsenal = null;
+
+        function pill(text, tone) {
+            const c = {ok:'#31d67a', warn:'#ffb545', bad:'#ff4466', dim:'#8b95a3'}[tone] || '#8b95a3';
+            return `<span class="font-mono" style="font-size:0.52rem; border:1px solid ${c};
+                color:${c}; padding:1px 5px; border-radius:2px; white-space:nowrap;">${escapeHtml(text)}</span>`;
+        }
+
+        async function loadArsenal() {
+            if (__arsenal) { renderArsenal(); return; }
+            try {
+                const [ov, cl, det] = await Promise.all([
+                    fetch('/api/library/overview').then(r => r.json()),
+                    fetch('/api/library/classes').then(r => r.json()),
+                    fetch('/api/library/detectors').then(r => r.json()),
+                ]);
+                __arsenal = {ov, classes: cl.classes, det};
+            } catch (e) {
+                document.getElementById('arsenal-classes').innerHTML =
+                    '<div class="font-mono" style="color:#ff4466; font-size:0.6rem;">Failed to load the library.</div>';
+                return;
+            }
+            renderArsenal();
+        }
+
+        function renderArsenal() {
+            const {ov, classes, det} = __arsenal;
+            // listed vs routable stated separately: /api/skills counts every .md
+            // and overstates by 15, because the router skips NOTICE/INDEX/SKILL.
+            document.getElementById('arsenal-meta').textContent =
+                `${classes.length} classes · ${ov.skills.routable} routable sheets ` +
+                `(${ov.skills.listed} files on disk) · ${ov.wstg_cases} WSTG cases · ` +
+                `${ov.detectors} detection rules`;
+
+            document.getElementById('arsenal-gaps').innerHTML =
+                ov.model_only_classes.length
+                    ? ov.model_only_classes.map(k => {
+                        const c = classes.find(x => x.key === k);
+                        return pill((c ? c.label : k) + ' — model-only', 'warn');
+                      }).join(' ')
+                    : '<span class="font-mono" style="font-size:0.58rem; color:#31d67a;">none</span>';
+
+            document.getElementById('arsenal-classes').innerHTML = classes.map(c => {
+                const agent = c.verdicts.agent_session === 'confirmable'
+                    ? pill('agent: confirmable', 'ok') : pill('agent: model-only', 'warn');
+                const wstg = c.verdicts.wstg_engine === 'deterministic'
+                    ? pill('wstg: deterministic', 'ok') : pill('wstg: not covered', 'dim');
+                const dets = c.detectors.length
+                    ? c.detectors.map(d => `<code style="font-size:0.52rem;">${escapeHtml(d)}</code>`).join(', ')
+                    : '<span style="opacity:.5">no detector</span>';
+                const cases = c.wstg.length ? c.wstg.map(escapeHtml).join(', ')
+                    : '<span style="opacity:.5">none</span>';
+                return `<div style="border:1px solid var(--border,#2a3038); border-radius:3px; padding:8px 10px;">
+                    <div class="flex items-center justify-between flex-wrap gap-2">
+                      <div class="font-mono" style="font-size:0.64rem;">
+                        <b>${escapeHtml(c.label)}</b>
+                        <span style="opacity:.55"> · ${escapeHtml(c.owasp)}</span>
+                      </div>
+                      <div class="flex gap-1">${agent} ${wstg}</div>
+                    </div>
+                    <div class="font-mono mt-1" style="font-size:0.55rem; opacity:.75;">
+                      confirms: ${dets}<br>test cases: ${cases}
+                    </div>
+                    <button onclick="explainClass('${escapeHtml(c.key)}')"
+                      class="font-mono mt-1" style="font-size:0.52rem; opacity:.7; text-decoration:underline;">
+                      which sheets route here?</button>
+                    <div id="arsenal-cls-${escapeHtml(c.key)}" class="font-mono mt-1" style="font-size:0.53rem;"></div>
+                  </div>`;
+            }).join('');
+
+            const cr = det.cleanroom || {};
+            const fp = (cr.false_positives === null || cr.false_positives === undefined)
+                ? 'not measured' : `${cr.false_positives} false positives on a clean target`;
+            document.getElementById('arsenal-detectors').innerHTML =
+                `<div class="font-mono" style="font-size:0.58rem;">
+                   ${det.detectors.filter(d => d.exercised).length}/${det.total} exercised ·
+                   <span style="opacity:.8">${escapeHtml(fp)}</span>
+                   ${cr.zone_b_findings ? ' · ' + pill(cr.zone_b_findings + ' on benign traffic', 'warn') : ''}
+                 </div>
+                 <div class="mt-2 flex flex-wrap gap-1">` +
+                det.detectors.map(d =>
+                    pill(d.name, d.exercised ? 'ok' : 'bad')).join(' ') +
+                `</div>` +
+                (det.unreachable.length
+                    ? `<div class="font-mono mt-2" style="font-size:0.55rem; color:#ff4466;">
+                         never fires under any input: ${det.unreachable.map(escapeHtml).join(', ')}</div>` : '');
+        }
+
+        async function explainClass(key) {
+            const el = document.getElementById('arsenal-cls-' + key);
+            if (!el) return;
+            el.textContent = 'loading…';
+            try {
+                const d = await (await fetch('/api/library/classes/' + encodeURIComponent(key))).json();
+                el.innerHTML = d.skills.length
+                    ? d.skills.map(s =>
+                        `<div>· ${escapeHtml(s.stem)}
+                          <span style="opacity:.55">[${escapeHtml(s.licence)}]</span></div>`).join('')
+                    : '<span style="opacity:.5">no sheet routes to this class</span>';
+            } catch (e) { el.textContent = 'failed'; }
+        }
+
+        async function explainRouting() {
+            const mission = document.getElementById('arsenal-mission').value.trim();
+            const out = document.getElementById('arsenal-routing');
+            if (!mission) { out.textContent = ''; return; }
+            out.textContent = 'measuring…';
+            try {
+                const d = await (await fetch('/api/library/routing/explain', {
+                    method: 'POST', headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({mission}),
+                })).json();
+                out.innerHTML =
+                    `<div class="font-mono" style="font-size:0.58rem;">
+                       classes detected: ${d.classes_detected.map(escapeHtml).join(', ') || '<span style="opacity:.5">none</span>'}
+                       · <b>${d.injected_total.toLocaleString()}</b> bytes injected
+                     </div>
+                     <div class="mt-2">` +
+                    d.selected.map(s =>
+                        `<div class="font-mono" style="font-size:0.55rem;">
+                           · ${escapeHtml(s.stem)} — ${s.injected_bytes.toLocaleString()}B
+                           ${s.excerpted ? pill('excerpted', 'warn') : ''}
+                           <span style="opacity:.55">[${escapeHtml(s.licence)}]</span></div>`).join('') +
+                    `</div>
+                     <div class="font-mono mt-2" style="font-size:0.53rem; opacity:.65; max-width:78ch;">
+                       ${escapeHtml(d.note)}</div>`;
+            } catch (e) { out.textContent = 'failed'; }
         }
 
         // ===== Skills library browser =====
