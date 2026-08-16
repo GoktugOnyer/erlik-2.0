@@ -432,6 +432,81 @@ CHAIN_PHASE_DIRECTIVES = {
 }
 
 
+async def _record_finding(session_id: str, f: dict, *, source: str,
+                          collected: list | None = None,
+                          announce: str | None = None,
+                          dedup: bool = False,
+                          db=None) -> bool:
+    """The ONE place a row is written to the `findings` table.
+
+    There used to be three bespoke inline INSERTs (nettacker, auto-detect and
+    LLM-reported), each with its own subset of the bookkeeping that has to
+    happen alongside the write. Three features in the plan need to intercept
+    finding persistence, and each would otherwise have had to find and patch
+    all three independently — the shape of gap that has bitten this project
+    repeatedly.
+
+    Keeping the DB write and the in-memory mirror in one call is the point:
+    `collected` (the report's finding list) can no longer drift from the table,
+    and callers derive their counter from `len(collected)` rather than
+    incrementing a second, independent tally.
+
+    Args:
+        source:    which writer this is — persisted, so a row is attributable.
+        collected: report accumulator to append to; None to skip (nettacker
+                   findings are deliberately not part of the agent narrative).
+        announce:  label for the `!!` progress broadcast; None to stay quiet.
+        dedup:     skip when `collected` already holds this (vuln_type, url).
+        db:        reuse an open connection; the caller then owns commit/close.
+
+    Returns True when a row was written, False when deduplicated.
+    """
+    if dedup and collected is not None:
+        if any(c.get("vuln_type") == f.get("vuln_type") and c.get("url") == f.get("url")
+               for c in collected):
+            return False
+
+    owns_db = db is None
+    if owns_db:
+        db = await get_db()
+    try:
+        await db.execute(
+            "INSERT INTO findings (session_id, vuln_type, severity, url, parameter, "
+            "evidence, source, detector) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (session_id, f.get("vuln_type", ""), f.get("severity", "info"),
+             f.get("url", "") or "", f.get("parameter", "") or "",
+             (f.get("evidence") or "")[:2000], source, f.get("detector")),
+        )
+        if owns_db:
+            await db.commit()
+    finally:
+        if owns_db:
+            await db.close()
+
+    if announce:
+        await manager.broadcast(session_id, {
+            "type": "log", "phase": "test",
+            "message": f"!! {announce}: [{(f.get('severity') or 'info').upper()}] {f.get('vuln_type')}",
+        })
+        if f.get("url"):
+            await manager.broadcast(session_id, {
+                "type": "log", "phase": "test",
+                "message": f"   URL: {f['url']}  Param: {f.get('parameter', '')}",
+            })
+        await manager.broadcast(session_id, {
+            "type": "finding",
+            "vuln_type": f.get("vuln_type", ""),
+            "severity": f.get("severity", "info"),
+            "url": f.get("url", "") or "",
+            "parameter": f.get("parameter", "") or "",
+            "evidence": f.get("evidence", "") or "",
+        })
+
+    if collected is not None:
+        collected.append(f)
+    return True
+
+
 def _get_phase_coverage(tools_executed: set, enabled_tools: list) -> tuple:
     """Return (completed_phases_set, uncovered_phase_descriptions_list).
 
@@ -1736,6 +1811,40 @@ async def poc_reverify_session(session_id: str, target_url: str, enabled_tools: 
     return confirmed
 
 
+def _deliverable_view(findings: list[dict]) -> tuple[list[dict], list[dict]]:
+    """THE split between what a client deliverable shows and what it withholds.
+
+    Every render point in a report derives from this ONE call. Before it, four
+    render points each iterated `findings` independently — the session-info
+    count, the `## Vulnerabilities Found (N)` heading and detail loop, the
+    summary tables, and the text handed to the executive-summary model — so a
+    filter added to any one of them contradicted the other three inside the same
+    file.
+
+    Nothing is withheld yet: the submission policy (C4), the export redactor
+    (C6) and the scope stamp (C7) are what will populate `withheld`. The seam
+    exists first and on purpose, so those three land in one place instead of
+    each hunting down four render points and missing some.
+
+    IMPORTANT: filter HERE, at render — never in the SQL that loads findings.
+    The calibration pass runs exactly once over whatever list it is given, so a
+    finding filtered out of the query is never calibrated, and anything later
+    un-withheld comes back uncharacterised.
+
+    Returns (included, withheld).
+    """
+    return list(findings), []
+
+
+# Report-producing paths that deliberately do NOT pass through
+# _deliverable_view, each with the reason. tests/test_deliverable.py asserts
+# this list stays exhaustive, so a new report route cannot be added without
+# either routing it through the boundary or declaring it here.
+ALLOWED_UNGATED_REPORT_PATHS = {
+    "/api/thesis/export": "research artifact, not a client deliverable — exports the raw corpus by design",
+}
+
+
 async def _generate_report(session_id: str, model: str, target_url: str,
                            session_type: str, vuln_category: str,
                            total_steps: int, total_findings: int,
@@ -1785,6 +1894,9 @@ async def _generate_report(session_id: str, model: str, target_url: str,
     finally:
         await db.close()
 
+    # The one split. Every count and every render point below derives from it.
+    findings, withheld = _deliverable_view(findings)
+
     # Format duration
     duration_str = f"{total_duration_ms / 1000:.1f} seconds" if total_duration_ms else "Unknown"
     timestamp = datetime.now().strftime("%H:%M %d/%m/%Y")
@@ -1804,7 +1916,12 @@ async def _generate_report(session_id: str, model: str, target_url: str,
     report_lines.append(f"| **Model** | {model} |")
     report_lines.append(f"| **Duration** | {duration_str} |")
     report_lines.append(f"| **Steps** | {total_steps} |")
-    report_lines.append(f"| **Findings** | {total_findings} |")
+    # Derived from the split, NOT from the `total_findings` argument. That
+    # argument is the agent loop's own counter, which by design excludes
+    # nettacker pre-scan findings — while the SELECT above returns them. With
+    # `nettacker_findings` enabled the header therefore disagreed with the
+    # `## Vulnerabilities Found (N)` section beneath it, in the same file.
+    report_lines.append(f"| **Findings** | {len(findings)} |")
     report_lines.append(f"| **Date** | {timestamp} |")
     report_lines.append("")
 
@@ -3271,12 +3388,11 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
                         _db = await get_db()
                         try:
                             for _f in _parsed["findings"]:
-                                await _db.execute(
-                                    "INSERT INTO findings (session_id, vuln_type, severity, url, parameter, evidence) "
-                                    "VALUES (?, ?, ?, ?, ?, ?)",
-                                    (session_id, _f["vuln_type"], _f["severity"], _f["url"],
-                                     _f["parameter"], _f["evidence"][:2000]),
-                                )
+                                # Neither collected nor announced: pre-scan
+                                # findings stay outside the agent narrative and
+                                # its counter, exactly as before.
+                                await _record_finding(session_id, _f,
+                                                      source="nettacker", db=_db)
                             await _db.commit()
                         finally:
                             await _db.close()
@@ -3781,50 +3897,13 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
                     # === Auto-detect findings programmatically ===
                     auto_findings = _auto_detect_findings(tool_name, tool_output, command)
                     for af in auto_findings:
-                        # Check for duplicates (same vuln_type + url)
-                        is_dup = any(
-                            f["vuln_type"] == af["vuln_type"] and f["url"] == af["url"]
-                            for f in full_findings_data
-                        )
-                        if is_dup:
-                            continue
-
-                        findings_count += 1
-                        await manager.broadcast(session_id, {
-                            "type": "log", "phase": "test",
-                            "message": f"!! AUTO-FINDING: [{af['severity'].upper()}] {af['vuln_type']}",
-                        })
-                        if af.get("url"):
-                            await manager.broadcast(session_id, {
-                                "type": "log", "phase": "test",
-                                "message": f"   URL: {af['url']}  Param: {af.get('parameter', '')}",
-                            })
-
-                        # Send to UI
-                        await manager.broadcast(session_id, {
-                            "type": "finding",
-                            "vuln_type": af["vuln_type"],
-                            "severity": af["severity"],
-                            "url": af.get("url", ""),
-                            "parameter": af.get("parameter", ""),
-                            "evidence": af.get("evidence", ""),
-                        })
-
-                        # Save to DB
-                        db = await get_db()
-                        await db.execute(
-                            "INSERT INTO findings (session_id, vuln_type, severity, url, parameter, evidence) "
-                            "VALUES (?, ?, ?, ?, ?, ?)",
-                            (session_id, af["vuln_type"], af["severity"],
-                             af.get("url", ""), af.get("parameter", ""),
-                             af.get("evidence", "")[:2000]),
-                        )
-                        await db.commit()
-                        await db.close()
-                        db = None
-
-                        # Collect for report
-                        full_findings_data.append(af)
+                        # Dedup, DB write, broadcasts and report collection all
+                        # happen together in _record_finding, so the counter can
+                        # be derived rather than tracked separately.
+                        await _record_finding(session_id, af, source="auto_detect",
+                                              collected=full_findings_data,
+                                              announce="AUTO-FINDING", dedup=True)
+                        findings_count = len(full_findings_data)
 
                     # Feed result back to LLM with structured feedback
                     messages.append({"role": "assistant", "content": response})
@@ -4049,46 +4128,18 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
                     continue
 
                 # === Finding passed validation ===
-                findings_count += 1
-                await manager.broadcast(session_id, {
-                    "type": "log", "phase": "test",
-                    "message": f"!! FINDING: [{severity.upper()}] {vuln_type}",
-                })
-                if vuln_url:
-                    await manager.broadcast(session_id, {
-                        "type": "log", "phase": "test",
-                        "message": f"   URL: {vuln_url}  Param: {parameter}",
-                    })
-
-                # Send finding to UI
-                await manager.broadcast(session_id, {
-                    "type": "finding",
+                # No `detector` — this row came from the model's own report, not
+                # a deterministic rule, and must stay distinguishable from one
+                # that did.
+                await _record_finding(session_id, {
                     "vuln_type": vuln_type,
                     "severity": severity,
                     "url": vuln_url,
                     "parameter": parameter,
                     "evidence": evidence,
-                })
-
-                # Save finding to DB
-                db = await get_db()
-                await db.execute(
-                    "INSERT INTO findings (session_id, vuln_type, severity, url, parameter, evidence) "
-                    "VALUES (?, ?, ?, ?, ?, ?)",
-                    (session_id, vuln_type, severity, vuln_url, parameter, evidence[:2000]),
-                )
-                await db.commit()
-                await db.close()
-                db = None
-
-                # Collect full untruncated finding for file report
-                full_findings_data.append({
-                    "vuln_type": vuln_type,
-                    "severity": severity,
-                    "url": vuln_url,
-                    "parameter": parameter,
-                    "evidence": evidence,
-                })
+                }, source="llm_reported", collected=full_findings_data,
+                    announce="FINDING")
+                findings_count = len(full_findings_data)
 
                 # Continue the loop — ask LLM what to do next
                 messages.append({"role": "assistant", "content": response})

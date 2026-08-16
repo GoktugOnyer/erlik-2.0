@@ -355,6 +355,25 @@ async def init_db():
                 except Exception:
                     pass  # column already exists
 
+        # Finding provenance — additive, nullable.
+        #   source   : which writer produced the row (auto_detect | llm_reported
+        #              | nettacker | v2_testcase)
+        #   detector : the specific rule, namespaced `tool:rule`
+        #              (e.g. `gobuster:_detect_content_discovery`)
+        # Nullable on purpose: rows written before this migration genuinely have
+        # no attribution and must read as unattributed rather than be silently
+        # credited to whichever writer happens to be the default.
+        provenance_columns = [
+            ("source", "TEXT DEFAULT NULL"),
+            ("detector", "TEXT DEFAULT NULL"),
+        ]
+        for table in ("findings", "v2_findings"):
+            for col_name, col_def in provenance_columns:
+                try:
+                    await db.execute(f"ALTER TABLE {table} ADD COLUMN {col_name} {col_def}")
+                except Exception:
+                    pass  # column already exists
+
         await db.commit()
 
 

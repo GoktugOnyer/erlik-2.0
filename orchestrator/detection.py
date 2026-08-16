@@ -410,7 +410,11 @@ _CURL_RULES = (
 def _detect_curl(ctx: DetectContext) -> list[Finding]:
     findings: list[Finding] = []
     for rule in _CURL_RULES:
-        findings.extend(rule(ctx))
+        for f in rule(ctx):
+            # Namespaced `tool:rule` so `GROUP BY detector` keys are consistent
+            # with the non-curl detectors stamped in auto_detect_findings().
+            f.setdefault("detector", f"curl:{rule.__name__}")
+            findings.append(f)
     return findings
 
 
@@ -645,4 +649,9 @@ def auto_detect_findings(tool_name: str, output: str, command: str) -> list[Find
     detector = _DETECTORS.get(tool_name)
     if detector is None:
         return []
-    return detector(DetectContext(tool_name, output, command))
+    findings = detector(DetectContext(tool_name, output, command))
+    # Provenance for every row that reaches the findings table. `setdefault`
+    # leaves the finer-grained `curl:<rule>` stamp from _detect_curl in place.
+    for f in findings:
+        f.setdefault("detector", f"{tool_name}:{detector.__name__}")
+    return findings

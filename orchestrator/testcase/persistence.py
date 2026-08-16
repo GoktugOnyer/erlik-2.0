@@ -34,12 +34,19 @@ async def save_run(result: RunResult, *, provider: str | None, model: str | None
             ),
         )
         for f in result.findings:
+            # Provenance mirrors the `findings` table (see _record_finding in
+            # main.py). This is a different table with a different schema, so it
+            # keeps its own INSERT — but a v2 row must be attributable too, or a
+            # "which rule produced this?" query silently returns fewer rows than
+            # the corpus actually holds.
             await db.execute(
                 """INSERT INTO v2_findings
-                   (run_id, test_case_id, step, vuln_type, severity, url, parameter, evidence)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                   (run_id, test_case_id, step, vuln_type, severity, url, parameter,
+                    evidence, source, detector)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (run_id, f.test_case_id, f.step, f.vuln_type, f.severity,
-                 f.url, f.parameter, f.evidence),
+                 f.url, f.parameter, f.evidence,
+                 "v2_testcase", f"v2:{f.test_case_id}:{f.step}"),
             )
         await db.commit()
     finally:
