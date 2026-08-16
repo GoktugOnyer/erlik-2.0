@@ -328,6 +328,96 @@ _SAFE_FILTERS = frozenset({
 })
 
 
+# --- Safe mode: refuse DESTRUCTIVE actions against an IN-SCOPE host --------- #
+# The scope guard answers "may I touch this host?". It says nothing about
+# whether an action is destructive, so an in-scope `curl -X DELETE /api/Users/1`
+# was always permitted. On a client engagement that is an incident, not a
+# finding.
+#
+# Separators are percent- and plus-aware. A rule written as `DROP\s+TABLE`
+# denies the literal-space form while PASSING `?q=1;DELETE+FROM+users` — the
+# URL-encoded shape an agent actually emits — which would have made this whole
+# gate look present and do nothing on the payloads that matter.
+_SEP = r"(?:[\s+]|%20|%09|%0[aAdD])+"
+# `\b` is WRONG at the edge of these keywords. In `q=1%09DELETE%09FROM%09x` the
+# character before `DELETE` is `9` — a word character — so `\bDELETE` does not
+# match and the percent-encoded payload sails through, which is precisely the
+# looks-right-never-fires shape this rule set exists to avoid. Anchor on
+# "not a letter" instead.
+_KW_L = r"(?<![A-Za-z])"
+_KW_R = r"(?![A-Za-z])"
+
+
+def _rx(pattern: str):
+    return re.compile(pattern, re.IGNORECASE).search
+
+
+def _http_write_verb(cmd: str) -> bool:
+    """A write verb explicitly requested of an HTTP client."""
+    if not _rx(r"(?:^|\s)(?:curl|http|https|wget|httpie)(?:\s|$)")(cmd):
+        return False
+    return bool(_rx(r"(?:-X|--request)[=\s]+['\"]?(?:DELETE|PUT|PATCH)\b")(cmd))
+
+
+def _sql_ddl_dml(cmd: str) -> bool:
+    return any(_rx(p)(cmd) for p in (
+        rf"{_KW_L}DROP{_SEP}TABLE{_KW_R}",
+        rf"{_KW_L}DROP{_SEP}DATABASE{_KW_R}",
+        rf"{_KW_L}DELETE{_SEP}FROM{_KW_R}",
+        rf"{_KW_L}TRUNCATE{_SEP}TABLE{_KW_R}",
+        rf"{_KW_L}INSERT{_SEP}INTO{_KW_R}",
+        rf"{_KW_L}UPDATE{_SEP}\S+?{_SEP}SET{_KW_R}",
+    ))
+
+
+def _sqlmap_os_takeover(cmd: str) -> bool:
+    if not _rx(r"(?:^|\s)sqlmap(?:\s|$)")(cmd):
+        return False
+    return bool(_rx(r"--(?:os-shell|os-pwn|os-cmd|file-write|file-dest|sql-shell)\b")(cmd))
+
+
+def _sqlmap_max_risk(cmd: str) -> bool:
+    # `--risk 3` enables OR-based and time-based payloads that can UPDATE rows.
+    # Deliberately NOT `--technique`: `--technique[= ]\S*S` would deny sqlmap's
+    # own default BEUSTQ and the literal `--technique BEUST` in
+    # tests_catalog/wstg/INPV-05_sqli.yaml, gutting the smallest and
+    # highest-value finding class in the corpus.
+    if not _rx(r"(?:^|\s)sqlmap(?:\s|$)")(cmd):
+        return False
+    return bool(_rx(r"--risk[=\s]+3\b")(cmd))
+
+
+# (rule_id, predicate, human reason). Predicates, not bare regexes: several of
+# these are conjunctions ("is a curl AND names a write verb") that a single
+# re.search cannot express without either over-denying or never firing.
+_SAFE_MODE_RULES: list[tuple[str, "callable", str]] = [
+    ("http-write-verb", _http_write_verb,
+     "HTTP write verb (DELETE/PUT/PATCH) — can modify or destroy client data"),
+    ("sql-ddl-dml", _sql_ddl_dml,
+     "SQL statement that writes or drops data"),
+    ("sqlmap-os-takeover", _sqlmap_os_takeover,
+     "sqlmap OS/file takeover switch — command execution or file write on the target"),
+    ("sqlmap-max-risk", _sqlmap_max_risk,
+     "sqlmap --risk 3 enables payloads that can UPDATE rows"),
+]
+
+
+def _safe_mode_enabled() -> bool:
+    return os.environ.get("ERLIK_SAFE_MODE", "1").strip().lower() not in ("0", "false", "no", "off")
+
+
+def _safe_mode_violation(command: str) -> str | None:
+    """Return a reason if `command` is destructive. None otherwise."""
+    if not _safe_mode_enabled():
+        return None
+    for rule_id, predicate, reason in _SAFE_MODE_RULES:
+        if predicate(command):
+            return (f"{reason} [{rule_id}]. Safe mode is on; this engagement has "
+                    f"not authorised destructive testing. Set ERLIK_SAFE_MODE=0 "
+                    f"only with written authorisation.")
+    return None
+
+
 def _safe_hostname(url: str) -> str:
     """`urlparse(...).hostname`, but never raises.
 
@@ -566,11 +656,22 @@ async def execute_tool(command: str, enabled_tools: list[str], no_timeout: bool 
         tool: str (detected tool name)
         duration_ms: int
         error: str | None
+        executed: bool — whether the command actually reached a shell.
+
+    `executed` exists because main.py sets
+        raw_output = result.get("output") or result.get("error") or "No output"
+    and then runs the deterministic detectors over it. A refusal string
+    therefore became detection input: a scope-refused
+    `curl -s -i http://evil.com/` reports every security header absent — from a
+    request that was never sent — as a MEDIUM Security Misconfiguration, and the
+    null-byte rule does the same at HIGH. Verified live before this change.
+    Callers must skip detection when this is False.
     """
     # Validate
     error = _validate_command(command)
     if error:
-        return {"success": False, "output": "", "tool": "blocked", "duration_ms": 0, "error": error}
+        return {"success": False, "output": "", "tool": "blocked", "duration_ms": 0,
+                "error": error, "executed": False}
 
     # Test cases (v2) declare the tool explicitly via `tool:`. Trust that
     # declaration for whitelist checking — commands like `bash -c '... curl ...'`
@@ -579,7 +680,8 @@ async def execute_tool(command: str, enabled_tools: list[str], no_timeout: bool 
     extracted = _extract_tool_name(command)
     tool_name = tool_hint or extracted
     if not tool_name:
-        return {"success": False, "output": "", "tool": "unknown", "duration_ms": 0, "error": "Could not parse tool name"}
+        return {"success": False, "output": "", "tool": "unknown", "duration_ms": 0,
+                "error": "Could not parse tool name", "executed": False}
 
     # Check if tool is enabled
     # Map some tool names (e.g. ncat -> netcat, nc -> netcat)
@@ -587,14 +689,15 @@ async def execute_tool(command: str, enabled_tools: list[str], no_timeout: bool 
     check_name = tool_aliases.get(tool_name, tool_name)
     if check_name not in enabled_tools and tool_name not in enabled_tools:
         return {"success": False, "output": "", "tool": tool_name, "duration_ms": 0,
-                "error": f"Tool '{tool_name}' is not enabled for this session"}
+                "error": f"Tool '{tool_name}' is not enabled for this session",
+                "executed": False}
 
     # The toolset check above reads the FIRST token only, so every chained or
     # piped program used to run unchecked. Enforce it on every segment.
     seg_err = _segment_violation(command, enabled_tools, tool_hint, tool_aliases)
     if seg_err:
         return {"success": False, "output": "", "tool": tool_name, "duration_ms": 0,
-                "error": f"TOOLSET: {seg_err}"}
+                "error": f"TOOLSET: {seg_err}", "executed": False}
 
     # Resolve timeout (seconds). Precedence:
     #   no_timeout=True       -> truly unlimited (None). Optional ERLIK_NO_TIMEOUT_CAP>0
@@ -616,12 +719,24 @@ async def execute_tool(command: str, enabled_tools: list[str], no_timeout: bool 
     scope_err = _scope_violation(sanitized, target_url)
     if scope_err:
         return {"success": False, "output": "", "tool": tool_name, "duration_ms": 0,
-                "error": f"SCOPE: {scope_err}"}
+                "error": f"SCOPE: {scope_err}", "executed": False, "denied": True}
+
+    # Safe mode: the scope guard says WHERE we may act; this says WHAT we may
+    # do there. Applies to the v2 test-case lane too, deliberately: CONF-06's
+    # `curl -X PUT .../erlik_put_test.txt` writes a file to a client server, and
+    # "it is the standard probe" is not authorisation. That case still detects
+    # the issue from its OPTIONS step and simply reports it at medium instead of
+    # confirming at high — the right trade on a real engagement.
+    safe_err = _safe_mode_violation(sanitized)
+    if safe_err:
+        return {"success": False, "output": "", "tool": tool_name, "duration_ms": 0,
+                "error": f"SAFE_MODE: {safe_err}", "executed": False, "denied": True}
 
     # Check container is running
     if not await check_container_running():
         return {"success": False, "output": "", "tool": tool_name, "duration_ms": 0,
-                "error": "kali-tools container is not running. Start it with: docker compose up -d kali-tools"}
+                "error": "kali-tools container is not running. Start it with: docker compose up -d kali-tools",
+                "executed": False}
 
     # Execute in docker via sync subprocess in thread pool (Windows compatible)
     start = time.time()
@@ -653,12 +768,15 @@ async def execute_tool(command: str, enabled_tools: list[str], no_timeout: bool 
             "tool": tool_name,
             "duration_ms": duration_ms,
             "error": result.get("error"),
+            "executed": True,
         }
 
     except Exception as e:
+        # The command DID reach a shell; the wrapper failed around it. Marked
+        # executed so a genuine tool crash is not silently reclassified.
         duration_ms = int((time.time() - start) * 1000)
         return {"success": False, "output": "", "tool": tool_name,
-                "duration_ms": duration_ms, "error": str(e)}
+                "duration_ms": duration_ms, "error": str(e), "executed": True}
 
 
 def _sync_docker_exec(command: str, timeout: int) -> dict:

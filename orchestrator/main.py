@@ -3934,7 +3934,18 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
                             })
 
                     # === Auto-detect findings programmatically ===
-                    auto_findings = _auto_detect_findings(tool_name, tool_output, command)
+                    # Only run the deterministic detectors when the command
+                    # actually reached a shell. `tool_output` above falls back
+                    # to `result["error"]`, so a REFUSAL string was being fed to
+                    # the detectors: a scope-refused `curl -s -i http://evil.com/`
+                    # produced a MEDIUM Security Misconfiguration ("every header
+                    # missing") and the null-byte rule a HIGH Sensitive Data
+                    # Exposure — both from a request that was never sent.
+                    # Verified live against this code before the fix.
+                    auto_findings = (
+                        _auto_detect_findings(tool_name, tool_output, command)
+                        if result.get("executed", True) else []
+                    )
                     for af in auto_findings:
                         # Dedup, DB write, broadcasts and report collection all
                         # happen together in _record_finding, so the counter can
