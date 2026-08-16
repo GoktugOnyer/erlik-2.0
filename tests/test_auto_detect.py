@@ -555,3 +555,73 @@ class TestEvidenceGatesHold:
         counts when the response is actually showing an error."""
         f = detect("curl", out, "curl -s https://x.test/boom")
         assert any(x["vuln_type"] == "Information Disclosure" for x in f), out[:40]
+
+
+class TestDeadDiscoveryPathsNowFire:
+    """Two content-discovery branches that could not produce a finding.
+
+    Both were found by the cleanroom's rule-reachability check, which is the
+    control that separates "0 false positives" from "0 rules could run".
+    """
+
+    def test_wfuzz_native_table_is_parsed(self):
+        """wfuzz was in _DETECTORS and routed to _detect_content_discovery, but
+        that parser had only gobuster/ffuf/dirb patterns — so the detector was
+        registered and structurally incapable of firing."""
+        out = '000000123:   200        3 L      12 W       412 Ch      "ftp"\n'
+        f = detect("wfuzz", out, "wfuzz -w /w.txt http://t/FUZZ")
+        assert f, "wfuzz still cannot fire"
+        assert f[0]["detector"] == "wfuzz:_detect_content_discovery"
+
+    def test_wfuzz_colourised_output_is_parsed(self):
+        """-c is wfuzz's colourise flag, so real output carries ANSI escapes.
+        Adding the table pattern alone would not have been enough."""
+        out = '\x1b[0m000000123:\x1b[0m   200   3 L   12 W   412 Ch   "robots.txt"\n'
+        assert detect("wfuzz", out, "wfuzz -c -w /w.txt http://t/FUZZ")
+
+    def test_dirb_directory_lines_are_parsed(self):
+        """dirb announces DIRECTORIES only on these lines, so a live /ftp/ found
+        by dirb was dropped while the same directory found by gobuster was
+        reported — a recall gap, not a false positive."""
+        f = detect("dirb", "==> DIRECTORY: http://t/ftp/\n", "dirb http://t/ /w.txt")
+        assert f and f[0]["vuln_type"] == "Sensitive Data Exposure"
+
+    def test_existing_shapes_are_unaffected(self):
+        for tool, out in (("gobuster", "/ftp    (Status: 200) [Size: 1]\n"),
+                          ("ffuf", "/ftp   [Status: 200, Size: 1]\n"),
+                          ("dirb", "+ http://t/ftp (CODE:200|SIZE:412)\n")):
+            assert detect(tool, out, f"{tool} http://t/ -w /w.txt"), tool
+
+
+class TestOpenRedirectIsOriginBased:
+    """The rule's only anti-false-positive guard was the literal string
+    `"juice" not in location`, so on any target that is not Juice Shop every
+    same-origin redirect under a /redirect path fired — a target-specific check
+    in a tool used on real client engagements."""
+
+    @staticmethod
+    def _redirect(loc, url="http://clean.test/redirect?url=/dash"):
+        out = (f"HTTP/1.1 302 Found\r\nLocation: {loc}\r\n"
+               "Content-Security-Policy: x\r\nX-Frame-Options: DENY\r\n"
+               "Strict-Transport-Security: m\r\nX-Content-Type-Options: nosniff\r\n\r\n")
+        return [f for f in detect("curl", out, f"curl -s -i '{url}'")
+                if f["vuln_type"] == "Open Redirect"]
+
+    @pytest.mark.parametrize("loc", [
+        "/dashboard",                       # relative: same origin by definition
+        "http://clean.test/dashboard",
+        "https://clean.test/x",             # scheme change, same host
+        "http://app.clean.test/x",          # subdomain
+    ])
+    def test_same_origin_does_not_fire(self, loc):
+        assert self._redirect(loc) == []
+
+    @pytest.mark.parametrize("loc", ["http://evil.example/",
+                                     "https://attacker.test/steal"])
+    def test_off_origin_fires(self, loc):
+        assert self._redirect(loc)
+
+    def test_juice_shop_is_no_longer_special_cased(self):
+        j = "http://juice-shop:3000/redirect?to=x"
+        assert self._redirect("http://juice-shop:3000/x", j) == []
+        assert self._redirect("http://evil.example/", j)

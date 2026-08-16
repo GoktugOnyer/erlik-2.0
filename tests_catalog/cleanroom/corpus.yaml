@@ -393,10 +393,7 @@ fixtures:
     \nX-Content-Type-Options: nosniff\r\nReferrer-Policy: strict-origin-when-cross-origin\r\nLocation:\
     \ https://portal.acme-cleanroom.test/dashboard\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length:\
     \ 0\r\n\r\n"
-  expected:
-  - vuln_type: Open Redirect
-    severity: medium
-    detector: curl:_curl_open_redirect
+  expected: []
   rationale: 'COLLISION TARGET: the hardcoded ''juice'' guard. A legitimate post-login bounce endpoint
     that validates its url parameter against an allowlist of in-app paths and redirects SAME-ORIGIN. RFC
     7231 historically required an absolute URI in Location and many frameworks (plus any reverse proxy
@@ -1145,7 +1142,7 @@ fixtures:
     tool, identical command shape, identical output grammar -- so this zero proves the parser is live
     rather than mute. Zero findings is the correct result.'
 - route: clean app, same sensitive hits via wfuzz
-  zone: B
+  zone: A
   family: ''
   tool: wfuzz
   command: wfuzz -c -z file,/usr/share/dirb/wordlists/common.txt --hc 404 https://app.cleanroom.test/FUZZ
@@ -1186,15 +1183,26 @@ fixtures:
     Filtered Requests: 4609
 
     Requests/sec.: 372.0'
-  expected: []
-  rationale: 'STRUCTURAL DEAD PATH, not benign traffic. wfuzz is registered in _DETECTORS (detection.py:638)
-    and routed to _detect_content_discovery, but _content_discovery_pairs (detection.py:565-574) carries
-    only gobuster ''(Status: N)'', ffuf ''[Status: N'', and dirb ''(CODE:N'' patterns -- none match wfuzz''s
-    native ID/Response/Lines/Word/Chars table. This fixture deliberately carries the SAME five sensitive
-    200s the soft-404 gobuster fixture reports, so the zero is provably a parser failure. Measured: _content_discovery_pairs(''000000123:   200
-    ... "ftp"'') yields [], while the identical hit as ''/ftp (Status: 200)'' yields [(''/ftp'',''200'')]
-    and one finding. A zero here would be scored as ''no false positives'' by a naive cleanroom -- it
-    is the lab-coat defect the brief warns about.'
+  expected:
+  - vuln_type: Security Misconfiguration
+    severity: medium
+    detector: wfuzz:_detect_content_discovery
+  - vuln_type: Security Misconfiguration
+    severity: low
+    detector: wfuzz:_detect_content_discovery
+  - vuln_type: Security Misconfiguration
+    severity: info
+    detector: wfuzz:_detect_content_discovery
+  - vuln_type: Sensitive Data Exposure
+    severity: medium
+    detector: wfuzz:_detect_content_discovery
+  - vuln_type: Sensitive Data Exposure
+    severity: medium
+    detector: wfuzz:_detect_content_discovery
+  rationale: A clean site publishing robots.txt/security.txt, scanned with wfuzz. Authored as Zone B only
+    because wfuzz was structurally dead — it was registered in _DETECTORS but _content_discovery_pairs
+    had no pattern for its native table, so it could not fire under any input. With the parser fixed this
+    is the same deliberate collision as the gobuster fixture, so it is Zone A.
 - route: /metrics behind auth (401)
   zone: B
   family: ''
@@ -1907,3 +1915,19 @@ fixtures:
   - vuln_type: Sensitive Data Exposure
     severity: medium
     detector: dirb:_detect_content_discovery
+- route: /redirect?url=<identity-provider> (legitimate SSO handoff)
+  zone: A
+  family: curl-cors-redirect
+  tool: curl
+  command: curl -s -i 'https://portal.cleanroom.test/redirect?url=https%3A%2F%2Flogin.identity-provider.test%2Foauth2%2Fauthorize'
+  response: "HTTP/1.1 302 Found\r\nLocation: https://login.identity-provider.test/oauth2/authorize?client_id=abc\r\
+    \nContent-Security-Policy: default-src 'self'\r\nX-Frame-Options: DENY\r\nStrict-Transport-Security:\
+    \ max-age=31536000\r\nX-Content-Type-Options: nosniff\r\n\r\n"
+  rationale: 'A documented /redirect endpoint performing an SSO handoff to the identity provider. Correct,
+    necessary behaviour, and genuinely off-origin, so the origin-comparison rule fires. This is the honest
+    residual cost of the fix: same-origin redirects no longer false-positive, but a legitimate outbound
+    redirect still cannot be told from an abusable one without knowing the app''s intent.'
+  expected:
+  - vuln_type: Open Redirect
+    severity: medium
+    detector: curl:_curl_open_redirect

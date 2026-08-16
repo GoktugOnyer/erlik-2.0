@@ -211,19 +211,22 @@ class TestCommittedCorpus:
         if not corpus:
             pytest.skip("no committed cleanroom corpus yet")
         rep = C.measure(corpus)
-        # 27 of 28 exercised. The one that is not is wfuzz, and its zero is a
-        # DIFFERENT KIND of zero from every other — worth stating, because
-        # pooling them is how a dead code path hides inside a coverage number:
+        # 28 of 28. Both former dead paths now fire:
         #
-        #   dirb  — LIVE. _content_discovery_pairs parses its
-        #           `+ url (CODE:200|SIZE:n)` lines correctly; the corpus simply
-        #           had no Zone A case until one was added.
-        #   wfuzz — DEAD. Registered in _DETECTORS and routed to
-        #           _detect_content_discovery, but that parser carries only
-        #           gobuster/ffuf/dirb patterns. wfuzz's native
+        #   wfuzz — was registered in _DETECTORS and routed to
+        #           _detect_content_discovery, but that parser carried only
+        #           gobuster/ffuf/dirb patterns, so wfuzz's native
         #           `ID / Response / Lines / Word / Chars / Payload` table
-        #           matches none of them, so the detector cannot fire under any
-        #           input. Recorded, not fixed.
-        assert len(rep.exercised) >= 27, C.format_report(rep)
-        assert rep.unreachable == ["wfuzz:_detect_content_discovery"], (
-            "the set of unreachable detectors changed:\n" + C.format_report(rep))
+        #           matched nothing and the detector could not fire under any
+        #           input. Its parser (and ANSI stripping, since -c is
+        #           colourise) now exists.
+        #   dirb  — parsed its `+ url (CODE:n)` lines but dropped
+        #           `==> DIRECTORY:`, which is the ONLY way dirb announces a
+        #           directory. A live /ftp/ found by dirb was lost while the
+        #           same directory found by gobuster was reported.
+        #
+        # Asserting the SET, not a count: a newly dead detector must fail even
+        # if the total happens to hold.
+        assert len(rep.exercised) == 28, C.format_report(rep)
+        assert rep.unreachable == [], (
+            "a detector became unreachable:\n" + C.format_report(rep))

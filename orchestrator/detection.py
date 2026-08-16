@@ -26,6 +26,17 @@ import re
 
 Finding = dict
 
+_ANSI_RX = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
+
+def _host_of(url: str) -> str:
+    """Hostname from a URL, or "" for a relative path or unparseable input."""
+    from urllib.parse import urlparse
+    try:
+        return (urlparse(url).hostname or "").lower()
+    except ValueError:
+        return ""
+
 
 class DetectContext:
     """Everything a detector needs about one tool invocation (computed once)."""
@@ -366,16 +377,33 @@ def _curl_null_byte(ctx: DetectContext) -> list[Finding]:
 def _curl_open_redirect(ctx: DetectContext) -> list[Finding]:
     if "/redirect" not in ctx.url.lower():
         return []
-    if "301" in ctx.output or "302" in ctx.output or "location:" in ctx.output_lower:
-        loc_match = re.search(r'location:\s*(\S+)', ctx.output, re.IGNORECASE)
-        if loc_match and ("evil" in loc_match.group(1).lower() or
-                          "http" in loc_match.group(1).lower() and "juice" not in loc_match.group(1).lower()):
-            return [{
-                "vuln_type": "Open Redirect", "severity": "medium",
-                "url": ctx.url, "parameter": "to",
-                "evidence": f"Open redirect: server redirects to {loc_match.group(1)}",
-            }]
-    return []
+    if not ("301" in ctx.output or "302" in ctx.output or "location:" in ctx.output_lower):
+        return []
+    loc_match = re.search(r'location:\s*(\S+)', ctx.output, re.IGNORECASE)
+    if not loc_match:
+        return []
+    target = loc_match.group(1).strip()
+
+    # An open redirect is a redirect OFF THE ORIGIN. A same-origin redirect is
+    # ordinary application behaviour.
+    #
+    # The guard here used to be the literal `"juice" not in location`, so on any
+    # target that is not Juice Shop every same-origin redirect under a /redirect
+    # path fired — a target-specific check in a tool used on real client
+    # engagements. Caught by the false-positive cleanroom.
+    origin_host = _host_of(ctx.url)
+    dest_host = _host_of(target)
+    if not dest_host:
+        return []                      # relative redirect: same origin by definition
+    if origin_host and (dest_host == origin_host
+                        or dest_host.endswith("." + origin_host)
+                        or origin_host.endswith("." + dest_host)):
+        return []
+    return [{
+        "vuln_type": "Open Redirect", "severity": "medium",
+        "url": ctx.url, "parameter": "to",
+        "evidence": f"Open redirect: server redirects off-origin to {target}",
+    }]
 
 
 def _curl_forged_feedback(ctx: DetectContext) -> list[Finding]:
@@ -601,15 +629,34 @@ def _content_discovery_pairs(output: str):
     summary agree on what was discovered.
     """
     for line in output.split("\n"):
+        # wfuzz's -c flag is colourise, so real output carries ANSI escapes.
+        # Stripping defensively costs nothing and is the difference between the
+        # wfuzz branch working and silently matching nothing.
+        line = _ANSI_RX.sub("", line)
         m = (re.search(r'(/?\S+)\s+\(Status:\s*(\d+)\)', line)          # gobuster
              or re.search(r'(\S+)\s+\[Status:\s*(\d+)', line)           # ffuf
              or re.search(r'(https?://\S+)\s+\(CODE:(\d+)', line))      # dirb
-        if not m:
+        if m:
+            path, status = m.group(1), m.group(2)
+        else:
+            # wfuzz's native table: ID / Response / Lines / Word / Chars / Payload.
+            # It matched none of the three patterns above, so the detector was
+            # REGISTERED for wfuzz in _DETECTORS and could never fire under any
+            # input. Found by the false-positive cleanroom's reachability check.
+            wm = re.search(r'^\s*\d+:\s+(\d{3})\s+.*?"([^"]*)"\s*$', line)
+            if wm:
+                path, status = wm.group(2), wm.group(1)
+            else:
+                # dirb announces DIRECTORIES only on these lines, so a live
+                # /ftp/ found by dirb was dropped while the same directory
+                # found by gobuster was reported. A recall gap, not an FP.
+                dm = re.search(r'==>\s*DIRECTORY:\s*(https?://\S+)', line)
+                if not dm:
+                    continue
+                path, status = dm.group(1), "200"
+        if not path or path in ("Progress:", "::", "---", "===") or path.startswith("==="):
             continue
-        path = m.group(1)
-        if path in ("Progress:", "::", "---", "===") or path.startswith("==="):
-            continue
-        yield path, m.group(2)
+        yield path, status
 
 
 def _normalize_disc_path(path: str) -> str:

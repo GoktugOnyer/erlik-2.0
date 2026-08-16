@@ -137,7 +137,11 @@ class TestReadApi:
         d = client.get("/api/library/detectors").json()
         assert d["total"] == len(C.detector_names())
         assert any(x["exercised"] for x in d["detectors"])
-        assert d["unreachable"] == ["wfuzz:_detect_content_discovery"]
+        # Was ["wfuzz:_detect_content_discovery"] — a detector registered in
+        # _DETECTORS that could not fire under any input. Its parser now exists,
+        # as does dirb's `==> DIRECTORY:` branch, so the corpus reaches all 28.
+        assert d["unreachable"] == []
+        assert all(x["exercised"] for x in d["detectors"])
 
     def test_testcases_surface_load_errors(self, client):
         d = client.get("/api/library/testcases").json()
