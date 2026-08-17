@@ -223,6 +223,14 @@ async def init_db():
             # report instead — the failure mode of a governance field is that
             # nobody notices it is empty.
             ("authorization_ref", "TEXT DEFAULT NULL"),
+            # What the skills router actually gave this run (JSON): the hint,
+            # detected classes, each sheet with its licence and injected size,
+            # and a sha256 of the block appended to the system prompt.
+            #
+            # Recorded rather than re-derived. The corpus is writable now, so
+            # asking the selector again months later answers a different
+            # question than "what did this session receive".
+            ("skills_trace", "TEXT DEFAULT NULL"),
         ]
         for col_name, col_def in migrations:
             try:

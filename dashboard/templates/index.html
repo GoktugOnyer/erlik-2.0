@@ -2022,17 +2022,30 @@
             // which the router ever picks has added nothing, and is told so HERE
             // — in the same panel inviting them to add more — rather than being
             // left to assume the corpus grew.
+            // Two different questions, reported separately:
+            //   reachable            — COULD the router ever pick this sheet
+            //   runs_selected_in     — did a REAL run actually receive it
+            // A sheet can be reachable and still have reached nothing, if your
+            // missions do not look like the probe list. Only the second number
+            // says whether authoring changed what erlik does.
             const inert = document.getElementById('authoring-inert');
+            const msgs = [];
             if (d.files.length && d.inert_count) {
-                inert.style.display = '';
-                inert.innerHTML =
-                    `<span style="color:#ffb545;">${d.inert_count} of ${d.files.length} of your sheets ` +
-                    `are never selected by the router.</span> They are on disk but no run receives them — ` +
+                msgs.push(`<span style="color:#ffb545;">${d.inert_count} of ${d.files.length} of your sheets ` +
+                    `are never selected by the router.</span> They are on disk but no mission reaches them — ` +
                     `usually because a vendored sheet out-ranks them for every class they match. ` +
-                    `Adding more files will not change that.`;
-            } else {
-                inert.style.display = 'none';
+                    `Adding more files will not change that.`);
             }
+            if (d.files.length && d.runs_examined > 0 && !d.local_skills_selected_in_last_50_runs) {
+                msgs.push(`<span style="color:#ffb545;">None of your sheets appeared in the last ` +
+                    `${d.runs_examined} run(s).</span> They may be reachable in principle, but no real ` +
+                    `mission has selected one — so nothing you have written has changed what erlik did.`);
+            } else if (d.local_skills_selected_in_last_50_runs) {
+                msgs.push(`<span style="color:#31d67a;">${d.local_skills_selected_in_last_50_runs} of your ` +
+                    `sheets appeared in the last ${d.runs_examined} run(s).</span>`);
+            }
+            if (msgs.length) { inert.style.display = ''; inert.innerHTML = msgs.join('<br>'); }
+            else { inert.style.display = 'none'; }
 
             document.getElementById('authoring-files').innerHTML = d.files.length
                 ? d.files.map(f => `
@@ -2043,8 +2056,11 @@
                       </span>
                       <span class="flex items-center gap-1">
                         ${f.reachable
-                            ? pill('selected for: ' + f.selected_for.slice(0,3).join(', '), 'ok')
-                            : pill('never selected', 'warn')}
+                            ? pill('reachable: ' + f.selected_for.slice(0,3).join(', '), 'ok')
+                            : pill('unreachable', 'warn')}
+                        ${f.runs_selected_in
+                            ? pill('used in ' + f.runs_selected_in + ' run(s)', 'ok')
+                            : pill('never used in a run', 'dim')}
                         <button onclick="deleteSkill('${escapeHtml(f.name)}')"
                           class="font-mono" style="font-size:0.52rem; opacity:.6; text-decoration:underline;">delete</button>
                       </span>

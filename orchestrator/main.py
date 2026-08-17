@@ -3678,23 +3678,48 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
         # after tech detection — it used to run before _observed_tech existed, so
         # selection saw only the mission prose and every run against every target
         # received the same two files.
-        try:
-            from orchestrator.skills import render_skills
-        except ImportError:
-            from skills import render_skills
+        # No `except ImportError: from skills import ...` fallback. That
+        # imported the SAME module under a second name, so monkeypatching one
+        # identity left the other live and every wiring test was blind.
+        from orchestrator.skills import plan_skills, render_plan
         try:
             _sk_hint = " ".join(filter(None, [vuln_category or "", system_prompt or ""]))
             # Operator tunables, per-session from run_config. Never a global
             # store: two runs labelled the same must not differ silently.
-            _sk_ctx = render_skills(
-                _sk_hint, tech=_observed_tech,
-                max_chars=runcfg.get("skills_max_chars", 14000),
-                exclude=runcfg.get("skills_exclude") or None,
-                pin=runcfg.get("skills_pin") or None,
-            ) if runcfg["skills"] else ""
+            if runcfg["skills"]:
+                _sk_files, _sk_plan = plan_skills(
+                    _sk_hint, tech=_observed_tech,
+                    max_chars=runcfg.get("skills_max_chars", 14000),
+                    exclude=runcfg.get("skills_exclude") or None,
+                    pin=runcfg.get("skills_pin") or None,
+                )
+                _sk_ctx = render_plan(_sk_files)
+                # Record the RENDERED size and a hash of the exact text, not
+                # just the sum of file sizes: the block also carries a header
+                # and a per-sheet provenance marker, so the raw-file total
+                # understates what the prompt actually receives.
+                import hashlib as _hashlib
+                _sk_plan["rendered_chars"] = len(_sk_ctx)
+                _sk_plan["sha256"] = _hashlib.sha256(
+                    _sk_ctx.encode("utf-8", "replace")).hexdigest()
+            else:
+                _sk_ctx, _sk_plan = "", None
         except Exception as _sk_err:  # noqa: BLE001 — never break the loop over knowledge injection
             _sk_ctx = ""
             print(f"[skills {session_id[:8]}] error (non-fatal): {_sk_err}", flush=True)
+        if _sk_plan is not None:
+            try:
+                _db_t = await get_db()
+                try:
+                    await _db_t.execute(
+                        "UPDATE sessions SET skills_trace = ? WHERE id = ?",
+                        (json.dumps(_sk_plan), session_id))
+                    await _db_t.commit()
+                finally:
+                    await _db_t.close()
+            except Exception as _te:  # noqa: BLE001 — never break a run over telemetry
+                print(f"[skills-trace {session_id[:8]}] not recorded: {_te}", flush=True)
+
         if _sk_ctx:
             combined_system += f"\n\n{_sk_ctx}"
             print(f"[skills {session_id[:8]}] injected {len(_sk_ctx)} chars "
@@ -5171,14 +5196,47 @@ async def library_authoring_status():
     for probe in probes:
         for f in select_skill_files(probe):
             selected.setdefault(f.name, []).append(probe)
+
+    # And what REAL runs received, from sessions.skills_trace. The probe list
+    # answers "could this ever be selected"; only the trace answers "was it".
+    # They differ whenever an operator's missions do not look like the probes,
+    # and it is the second number that says whether authoring changed anything.
+    used_in_runs: dict[str, int] = {}
+    runs_with_trace = 0
+    try:
+        db = await get_db()
+        try:
+            cur = await db.execute(
+                "SELECT skills_trace FROM sessions WHERE skills_trace IS NOT NULL "
+                "ORDER BY created_at DESC LIMIT 50")
+            for (raw,) in await cur.fetchall():
+                try:
+                    tr = json.loads(raw)
+                except (ValueError, TypeError):
+                    continue
+                runs_with_trace += 1
+                for e in tr.get("selected") or []:
+                    n = e.get("name")
+                    if n:
+                        used_in_runs[n] = used_in_runs.get(n, 0) + 1
+        finally:
+            await db.close()
+    except Exception:  # noqa: BLE001
+        pass
+
     files = [{**f, "selected_for": selected.get(f["name"], []),
-              "reachable": f["name"] in selected} for f in A.listing()]
+              "reachable": f["name"] in selected,
+              "runs_selected_in": used_in_runs.get(f["name"], 0)}
+             for f in A.listing()]
     inert = [f["name"] for f in files if not f["reachable"]]
     return {"enabled": not blockers, "gates": g, "blockers": blockers,
             "local_root": str(A.local_root()),
             "files": files,
             "inert_count": len(inert),
             "probes": probes,
+            "runs_examined": runs_with_trace,
+            "local_skills_selected_in_last_50_runs":
+                sum(1 for f in files if f["runs_selected_in"]),
             "warning": ("Authored text is injected into the system prompt of an "
                         "agent that executes shell commands. erlik does not "
                         "filter it and cannot — review it like code that runs "

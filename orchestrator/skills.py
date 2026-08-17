@@ -405,16 +405,57 @@ def select_skill_files(hint: str, max_files: int = 3, max_chars: int = 14000,
     return chosen
 
 
-def render_skills(hint: str, max_chars: int = 14000,
-                  exclude: list[str] | None = None, pin: list[str] | None = None,
-                  tech: list[str] | None = None) -> str:
-    """Compose the selected knowledge block for a hint — WITHOUT the
-    ``ERLIK_SKILLS`` gate. Provider-agnostic: the result is plain text you can
-    drop into the system prompt of ANY model or API (local Ollama, an
-    OpenAI-compatible gateway, Anthropic, etc.). Returns "" when nothing matches.
+def plan_skills(hint: str, max_chars: int = 14000,
+                exclude: list[str] | None = None, pin: list[str] | None = None,
+                tech: list[str] | None = None) -> tuple[list[Path], dict]:
+    """Select sheets AND record why, in one pass.
+
+    Returns (files, plan). The plan is what actually happened — not a
+    re-derivation. Anything that asks "which sheets did this run receive?"
+    later must read this, because calling the selector again answers a
+    different question: the corpus is now writable, so a second call can return
+    a different answer than the run got.
+
+    The plan carries a sha256 of the rendered block, so a claim about what a
+    session received can be checked against the text that was really appended
+    to its system prompt rather than trusted.
     """
     files = select_skill_files(hint, max_chars=max_chars, tech=tech,
                                exclude=exclude, pin=pin)
+    entries = []
+    for f in files:
+        size = f.stat().st_size
+        entries.append({
+            "path": str(rel_of(f)),
+            "name": f.name,
+            "stem": f.stem,
+            "licence": license_of(f),
+            "root": "local" if root_of(f) != SKILLS_ROOT else "corpus",
+            "file_bytes": size,
+            "injected_bytes": min(size, MAX_FILE_EXCERPT),
+            "excerpted": size > MAX_FILE_EXCERPT,
+        })
+    plan = {
+        "hint": (hint or "")[:400],
+        "classes": sorted(detect_classes(hint or "")),
+        "max_chars": max_chars,
+        "exclude": list(exclude or []),
+        "pin": list(pin or []),
+        "tech": list(tech or []),
+        "selected": entries,
+        "injected_total": sum(e["injected_bytes"] for e in entries),
+    }
+    return files, plan
+
+
+def render_plan(files: list[Path]) -> str:
+    """Render an ALREADY-SELECTED list of sheets into the knowledge block.
+
+    Split out of render_skills so the text a run receives and the trace
+    recorded about it come from ONE selection. Selecting twice — once to render,
+    once to explain — is a re-derivation racing a now-writable corpus, and the
+    two can legitimately disagree.
+    """
     if not files:
         return ""
     header = (
@@ -437,6 +478,22 @@ def render_skills(hint: str, max_chars: int = 14000,
             f"\n----- skill: {rel.parent.name if rel.parent.name != '.' else 'local'} / {p.stem}"
             f"  [{license_of(p)}]{' (EXCERPTED)' if excerpted else ''} -----\n{body}")
     return "\n".join(parts) + "\n"
+
+
+def render_skills(hint: str, max_chars: int = 14000,
+                  exclude: list[str] | None = None, pin: list[str] | None = None,
+                  tech: list[str] | None = None) -> str:
+    """Compose the selected knowledge block for a hint — WITHOUT the
+    ``ERLIK_SKILLS`` gate. Provider-agnostic: the result is plain text you can
+    drop into the system prompt of ANY model or API (local Ollama, an
+    OpenAI-compatible gateway, Anthropic, etc.). Returns "" when nothing matches.
+
+    Thin wrapper over plan_skills + render_plan, kept for callers that do not
+    need the trace.
+    """
+    files, _plan = plan_skills(hint, max_chars=max_chars, tech=tech,
+                               exclude=exclude, pin=pin)
+    return render_plan(files)
 
 
 def get_skills_context(target_url: str, hint: str, max_chars: int = 14000,
