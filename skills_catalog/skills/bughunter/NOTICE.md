@@ -41,8 +41,15 @@ preserved because class routing anchors on it (`_class_candidates` matches
 
 They are a **corpus the router selects from**, not text injected wholesale. Any
 one session receives at most a few files under a character budget
-(`select_skill_files`, default 14 KB). This matters: a measured 12-run experiment
-found that increasing *injected* guidance halved recall on a local 7B model
-(0.171 → 0.095, r = −0.796 against injected bytes). Growing the pool the router
-chooses from is a different thing from growing what any run receives, and the
-budget cap is what keeps them different.
+(`select_skill_files`, default 14 KB). Growing the pool the router chooses from
+is a different thing from growing what any run receives, and the budget cap is
+what keeps them different.
+
+**Measured caveat.** That distinction is about corpus SIZE. What a run actually
+receives is a separate question, and the answer is currently unfavourable: on
+both a 7B and a 27B, injecting this material COSTS recall — −0.100 and −0.071
+respectively — with precision falling alongside it, so it is not trading breadth
+for accuracy. See [`docs/CONTEXT_ALLOCATION_EXPERIMENT.md`](../../../docs/CONTEXT_ALLOCATION_EXPERIMENT.md).
+An earlier reading blamed context crowding (r = −0.796 under a 4,096-token
+window); giving the models their real windows made the effect worse, not better,
+which rules that explanation out.

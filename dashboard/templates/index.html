@@ -1714,12 +1714,14 @@
                 <div class="mt-3" style="border-left:2px solid #ffb545; padding-left:8px;">
                     <div class="font-mono" style="font-size:0.57rem; color:#ffb545;">What was actually measured</div>
                     <div class="font-mono mt-1" style="font-size:0.55rem; opacity:.78; max-width:78ch;">
-                        A 12-run experiment varied <b>skills on/off</b> and <b>playbook on/off</b> only.
-                        Recall fell as injected bytes rose (0.171&nbsp;&rarr;&nbsp;0.095, r&nbsp;=&nbsp;&minus;0.796
-                        against injected bytes) on a 7B model; precision moved the other way
-                        (0.730&nbsp;&rarr;&nbsp;0.917). A preliminary 27B run (n&nbsp;=&nbsp;1 per arm) held recall flat.
+                        Experiments varied <b>skills on/off</b> and <b>playbook on/off</b> only.
+                        Injecting this material costs recall on both models tested:
+                        <b>7B</b> 0.114&nbsp;&rarr;&nbsp;0.014, <b>27B</b> 0.086&nbsp;&rarr;&nbsp;0.014
+                        (n&nbsp;=&nbsp;2 per cell). Precision falls with it (0.90&nbsp;&rarr;&nbsp;0.07 on the 7B),
+                        so it is not trading breadth for accuracy. Giving the models their real
+                        context windows made this <b>worse</b>, not better, so it is not crowding.
                         <b>No arm varied this budget</b>, so no value here carries a recall figure &mdash;
-                        the readout above is a measurement of bytes, not of outcome.
+                        the readout above measures bytes, not outcome.
                     </div>
                 </div>
             </div>

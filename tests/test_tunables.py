@@ -172,9 +172,27 @@ class TestUiCarriesOnlyWhatWasMeasured:
         assert "recall" not in near.lower()
 
     def test_evidence_panel_states_what_was_actually_varied(self, client):
+        """The panel must cite the CURRENT measurement, not a superseded one.
+
+        It previously quoted r = -0.796 under a 4,096-token window. Giving the
+        models their real windows made the effect worse, not better, which
+        ruled out the crowding explanation that number was cited for — so the
+        panel now carries the direct recall figures instead.
+        """
         h = self._html(client)
         assert "No arm varied this budget" in h
-        assert "-0.796" in h or "&minus;0.796" in h
+        # both models, both directions of the result
+        assert "0.114" in h and "0.014" in h, "7B recall delta missing"
+        assert "0.086" in h, "27B recall delta missing"
+        assert "0.90" in h and "0.07" in h, "precision collapse missing"
+        assert "not crowding" in h, "the ruled-out explanation must be stated"
+
+    def test_evidence_panel_does_not_cite_the_superseded_reading(self, client):
+        """-0.796 described erlik under a 4,096-token cap, not the models. It
+        belongs in the experiment write-up with that context, not on a control
+        an operator reads while choosing a budget."""
+        h = self._html(client)
+        assert "0.796" not in h
 
     def test_untouched_controls_emit_null(self, client):
         """Emitting a default would overwrite a value the chosen preset pinned."""
