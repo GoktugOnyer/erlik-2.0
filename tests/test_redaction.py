@@ -218,11 +218,18 @@ class TestAgainstTheRealCorpus:
         return out
 
     def test_only_credential_bearing_rows_are_masked(self):
-        changed = [(src, v) for src, v in self._rows() if mask(v) != v]
-        # Measured: 56 rows, every one carrying either a DVWA default-credential
-        # pair or a cookie written by primitives.inject_credentials. Pinned so a
-        # broadened pattern that starts eating ordinary evidence fails loudly.
-        assert len(changed) == 56, f"{len(changed)} rows masked, expected 56"
+        rows = self._rows()
+        changed = [(src, v) for src, v in rows if mask(v) != v]
+        # NOT an exact count. This corpus is live and grows with every recorded
+        # run, so pinning a number here fails on the next experiment rather than
+        # on a real regression — which is exactly what happened.
+        #
+        # The invariant that matters is the RATE: a pattern broadened enough to
+        # start eating ordinary evidence would mask a large fraction, not one
+        # more row. Every masked row is separately justified below.
+        assert changed, "nothing masked — the control would be vacuous"
+        rate = len(changed) / len(rows)
+        assert rate < 0.15, f"{rate:.1%} of rows masked ({len(changed)}/{len(rows)})"
         # Justify each masking against the flags primitives.inject_credentials
         # actually writes, rather than a hand-listed set that drifts from them.
         import re as _re

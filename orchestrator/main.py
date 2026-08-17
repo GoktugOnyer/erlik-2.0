@@ -588,7 +588,76 @@ def _is_duplicate_command(command: str, recent_commands: list[str], max_similar:
 # --- Smart Message Trimming ---
 
 # Rough token estimation: ~4 chars per token for English text
-MAX_ESTIMATED_TOKENS = 3600  # leave ~496 tokens for LLM response within 4096 window
+# Absolute ceiling per LLM call. 300s suits a 7B; a 27B on local hardware
+# legitimately exceeds it on a long turn, and the ceiling then kills a run that
+# is 45 minutes in — losing the whole measurement, not just the turn. Kept at
+# 300 by default so nothing changes for existing deployments.
+LLM_CALL_TIMEOUT_S = float(os.environ.get("ERLIK_LLM_CALL_TIMEOUT", "300"))
+
+# Legacy fallback, sized for a 4096-token window. Kept only for a model whose
+# window cannot be discovered — see context_budget_tokens().
+MAX_ESTIMATED_TOKENS = 3600
+
+# Fraction of a model's real window erlik will fill with conversation, leaving
+# the rest for the reply and for tokenizer slack (the estimator is ~4 chars per
+# token, which under-counts on code and payload text).
+CONTEXT_FILL_FRACTION = float(os.environ.get("ERLIK_CONTEXT_FILL", "0.55"))
+
+# Ceiling regardless of window size. A 262k-token model would otherwise be fed
+# prompts that are slow to process and dominated by stale history; this is a
+# practical bound, not a capability one.
+CONTEXT_BUDGET_CEILING = int(os.environ.get("ERLIK_CONTEXT_CEILING", "24000"))
+
+_CTX_CACHE: dict[str, int] = {}
+
+
+def model_context_window(model: str) -> int | None:
+    """The model's real context length, asked of the provider. None if unknown.
+
+    erlik is model- and hardware-agnostic by design: it is run against 7B local
+    models and 70B ones, on laptops and servers. A single hardcoded budget
+    therefore cannot be right — and the one that shipped was sized for a 4096
+    window, so a 32k model was held to 11% of its capacity and a 262k model to
+    1.4%.
+    """
+    if not model:
+        return None
+    if model in _CTX_CACHE:
+        return _CTX_CACHE[model] or None
+    win = None
+    try:
+        import httpx
+        base = os.environ.get("OLLAMA_HOST", "http://localhost:11434").rstrip("/")
+        r = httpx.post(f"{base}/api/show", json={"name": model}, timeout=8.0)
+        info = (r.json() or {}).get("model_info") or {}
+        for k, v in info.items():
+            if k.endswith("context_length") and isinstance(v, int):
+                win = v
+                break
+    except Exception:  # noqa: BLE001 — unknown window is not an error
+        win = None
+    _CTX_CACHE[model] = win or 0
+    return win
+
+
+def context_budget_tokens(model: str = "") -> int:
+    """How many tokens of conversation this model may hold.
+
+    Explicit override wins; otherwise derived from the model's real window;
+    otherwise the legacy 4096-era value, so an undiscoverable model behaves
+    exactly as before.
+    """
+    override = os.environ.get("ERLIK_MAX_CONTEXT_TOKENS", "").strip()
+    if override:
+        try:
+            return max(512, int(override))
+        except ValueError:
+            pass
+    win = model_context_window(model)
+    if not win:
+        return MAX_ESTIMATED_TOKENS
+    return max(MAX_ESTIMATED_TOKENS,
+               min(int(win * CONTEXT_FILL_FRACTION), CONTEXT_BUDGET_CEILING))
 
 # Cap on the refusal text fed back to the model. A refusal is erlik's own
 # deterministic string; the model needs to know THAT it was blocked and roughly
@@ -605,7 +674,8 @@ def _estimate_tokens(messages: list[dict]) -> int:
 
 def _trim_messages(messages: list[dict], recent_commands: list[str] = None,
                    findings_data: list[dict] = None,
-                   discoveries: list[str] = None) -> list[dict]:
+                   discoveries: list[str] = None,
+                   budget: int | None = None) -> list[dict]:
     """Keep messages within context window. Preserves system prompt and recent turns,
     summarizes older conversation into a compact recap.
 
@@ -617,7 +687,8 @@ def _trim_messages(messages: list[dict], recent_commands: list[str] = None,
     The 'discoveries' list contains key findings (paths, params, endpoints) that
     must survive trimming so the LLM never forgets what was discovered.
     """
-    if _estimate_tokens(messages) <= MAX_ESTIMATED_TOKENS:
+    budget = budget or MAX_ESTIMATED_TOKENS
+    if _estimate_tokens(messages) <= budget:
         return messages  # fits, no trimming needed
 
     # Always keep system message (index 0)
@@ -3576,6 +3647,15 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
         _observed_ports: list[int] = []
         _observed_tech: list[str] = []
 
+        # Context budget for THIS model. erlik runs against everything from a
+        # 7B laptop model to a 70B server one, so this is discovered per run
+        # rather than fixed. Logged because a run's prompt budget silently
+        # differing between models makes two runs incomparable.
+        _ctx_budget = context_budget_tokens(model)
+        _ctx_window = model_context_window(model)
+        print(f"[ctx {session_id[:8]}] model={model} window={_ctx_window or 'unknown'} "
+              f"budget={_ctx_budget} tokens", flush=True)
+
         # Measure how this target answers a path that does not exist, BEFORE any
         # discovery command is rendered into a prompt. Replaces a hardcoded
         # `--exclude-length 3748` — Juice Shop's catch-all size — that shipped in
@@ -3920,7 +4000,8 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
                     break
 
             # Trim messages to fit context window (prevents Ollama silent truncation)
-            messages = _trim_messages(messages, recent_commands=recent_commands,
+            messages = _trim_messages(messages, budget=_ctx_budget,
+                                      recent_commands=recent_commands,
                                       findings_data=full_findings_data,
                                       discoveries=sticky_discoveries)
 
@@ -3934,13 +4015,14 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
             try:
                 response = await asyncio.wait_for(
                     llm_client.chat(messages, model=model),
-                    timeout=300.0,  # 5-minute absolute ceiling per LLM call
+                    timeout=LLM_CALL_TIMEOUT_S,
                 )
                 duration = int((time.time() - start_time) * 1000)
                 response = _strip_reasoning(response)   # drop <think>…</think> before parse/history
                 print(f"[agent {session_id[:8]}] turn {turn+1}/{max_turns} ← LLM ok ({duration}ms)", flush=True)
             except asyncio.TimeoutError:
-                print(f"[agent {session_id[:8]}] turn {turn+1}/{max_turns} ← LLM TIMEOUT after 300s", flush=True)
+                print(f"[agent {session_id[:8]}] turn {turn+1}/{max_turns} "
+                      f"← LLM TIMEOUT after {LLM_CALL_TIMEOUT_S:.0f}s", flush=True)
                 await manager.broadcast(session_id, {
                     "type": "log", "phase": "error",
                     "message": f"LLM call exceeded 300s ceiling on turn {turn+1} — aborting session",

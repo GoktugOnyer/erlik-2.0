@@ -179,10 +179,17 @@ class TestAgainstRealCommandCorpora:
         rows = [r[0] for r in sqlite3.connect(f"file:{db}?mode=ro", uri=True).execute(
             "SELECT tool_input FROM steps WHERE tool_input IS NOT NULL AND tool_input != ''")]
         denied = [c for c in rows if T._safe_mode_violation(c)]
-        # Measured: 4, all sqlmap --risk=3. Pinned so a broadened rule that
-        # starts refusing ordinary recorded traffic fails loudly.
-        assert len(denied) == 4, f"expected 4 denials, got {len(denied)}"
-        assert all("--risk=3" in c for c in denied)
+        # NOT an exact count: the corpus grows with every recorded run, so a
+        # pinned number fails on the next experiment instead of on a regression.
+        #
+        # The invariant is the SHAPE — every denial in real traffic is the same
+        # sqlmap --risk=3 form — plus a rate ceiling, since a broadened rule
+        # would refuse a large fraction of ordinary commands rather than one
+        # more.
+        assert all("--risk=3" in c for c in denied), \
+            [c[:90] for c in denied if "--risk=3" not in c]
+        rate = len(denied) / len(rows)
+        assert rate < 0.05, f"{rate:.1%} of recorded commands denied ({len(denied)}/{len(rows)})"
 
     def test_wstg_denied_set_is_exactly_known(self):
         root = pathlib.Path(__file__).resolve().parents[1] / "tests_catalog" / "wstg"

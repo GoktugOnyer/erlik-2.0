@@ -52,6 +52,10 @@ BASE = {
     "cve_enrich": False, "nettacker": False, "techniques": False,
     "primitives": False, "target_memory": False, "poc_verify": False,
     "ai_review": False,
+    # Pinned explicitly. Safe mode did not exist when the first 12 runs were
+    # recorded, and it now defaults ON — so leaving it implicit would vary a
+    # lever between arms and across generations of the corpus without saying so.
+    "safe_mode": True,
 }
 
 ARMS = {
@@ -75,6 +79,54 @@ def injected_chars(server_log: Path, sid: str) -> int:
         if m:
             total += int(m.group(1))
     return total
+
+
+def _code_version() -> str:
+    """The commit under test. Recorded per row because detection changed a lot:
+    two dead detectors were revived, four false-positive sources fixed, and
+    refusals stopped manufacturing findings — so a recall number is only
+    comparable against runs from the same code."""
+    import subprocess
+    try:
+        return subprocess.run(["git", "rev-parse", "--short", "HEAD"],
+                              capture_output=True, text=True,
+                              cwd=Path(__file__).resolve().parents[1]
+                              ).stdout.strip() or "unknown"
+    except Exception:
+        return "unknown"
+
+
+CODE_VERSION = _code_version()
+
+
+async def run_facts(session_id: str) -> dict:
+    """Per-run facts the old harness could not record: how much guidance the
+    router ACTUALLY delivered, and how many commands were refused."""
+    import json as _json
+    import orchestrator.database as db_mod
+
+    db = await db_mod.get_db()
+    try:
+        cur = await db.execute(
+            "SELECT skills_trace FROM sessions WHERE id = ?", (session_id,))
+        row = await cur.fetchone()
+        trace = {}
+        if row and row[0]:
+            try:
+                trace = _json.loads(row[0])
+            except (ValueError, TypeError):
+                trace = {}
+        cur = await db.execute(
+            "SELECT COUNT(*) FROM steps WHERE session_id = ? AND denied = 1",
+            (session_id,))
+        denied = (await cur.fetchone())[0]
+    finally:
+        await db.close()
+    return {
+        "skills_sheets": len(trace.get("selected") or []),
+        "skills_rendered_chars": trace.get("rendered_chars", 0),
+        "denied_steps": denied,
+    }
 
 
 async def _wait(client: httpx.AsyncClient, sid: str, timeout_s: int = 3600) -> str:
@@ -113,7 +165,12 @@ async def score(session_id: str) -> dict:
 async def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--reps", type=int, default=3)
-    ap.add_argument("--out", default="data/context_test.jsonl")
+    # New file, not an append. The first 12 runs measured a DIFFERENT detector
+    # set: wfuzz and dirb could not fire, four false-positive sources were live,
+    # and refusals manufactured findings. Mixing them in one file would invite
+    # exactly the comparison that is not valid.
+    ap.add_argument("--out", default="data/context_test_v2.jsonl")
+    ap.add_argument("--arms", default="", help="comma-separated subset of arms")
     ap.add_argument("--server-log", default="")
     ap.add_argument("--model", default="qwen2.5-coder:7b",
                     help="attack model under test")
@@ -135,10 +192,12 @@ async def main() -> int:
     if done:
         print(f"[resume] skipping {len(done)} scored run(s)", flush=True)
 
-    total = len(ARMS) * ns.reps
+    arms = ({a: ARMS[a] for a in ns.arms.split(",") if a.strip() in ARMS}
+            if ns.arms.strip() else ARMS)
+    total = len(arms) * ns.reps
     n = 0
     async with httpx.AsyncClient(timeout=60.0) as client:
-        for arm, flags in ARMS.items():
+        for arm, flags in arms.items():
             for rep in range(1, ns.reps + 1):
                 n += 1
                 if (ns.model, arm, rep) in done:
@@ -159,8 +218,10 @@ async def main() -> int:
                            "session_id": sid, "status": status,
                            "turns": sess.get("total_steps"),
                            "duration_s": round(time.time() - t0),
+                           "commit": CODE_VERSION,
                            "injected_chars": injected_chars(log, sid) if log else -1}
                     row.update(await score(sid))
+                    row.update(await run_facts(sid))
                 except Exception as e:  # noqa: BLE001
                     row = {"arm": arm, "rep": rep, "status": "error", "error": str(e)[:200]}
                 with out.open("a") as fh:
