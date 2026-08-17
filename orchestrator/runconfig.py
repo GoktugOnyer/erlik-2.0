@@ -138,7 +138,8 @@ def resolve(run_config=None) -> dict:
     for k in ("cve_enrich", "skills", "nettacker", "nettacker_findings",
               "nettacker_scenario", "playbooks", "poc_verify", "primitives",
               "target_memory", "techniques", "ai_review", "review_model",
-              "skills_exclude", "skills_pin", "skills_max_chars"):
+              "skills_exclude", "skills_pin", "skills_max_chars",
+              "safe_mode", "safe_mode_ack"):
         if k in cfg and cfg[k] is not None:
             base[k] = cfg[k]
 
@@ -149,7 +150,8 @@ def resolve(run_config=None) -> dict:
     _known = {"cve_enrich", "skills", "nettacker", "nettacker_findings",
               "nettacker_scenario", "playbooks", "poc_verify", "primitives",
               "target_memory", "techniques", "ai_review", "review_model",
-              "skills_exclude", "skills_pin", "skills_max_chars", "preset"}
+              "skills_exclude", "skills_pin", "skills_max_chars",
+              "safe_mode", "safe_mode_ack", "preset"}
     for k in cfg:
         if k not in _known:
             warnings.append(f"run_config key {k!r} is not recognised and was ignored")
@@ -196,8 +198,32 @@ def resolve(run_config=None) -> dict:
             return [x.strip() for x in v.split(",") if x.strip()]
         return [str(x).strip() for x in v if str(x).strip()]
 
+    # Safe mode: ON unless the operator BOTH turns it off AND names the
+    # engagement authorising destructive testing.
+    #
+    # A bare `safe_mode: false` is not honoured. The dashboard's
+    # applyRunPreset() blanket-assigns every control from the chosen preset, so
+    # a checkbox wired the ordinary way would post `safe_mode: false` the moment
+    # someone touched the preset dropdown — silently disarming a guard nobody
+    # meant to disarm. Requiring a non-empty ack makes that impossible to do by
+    # accident, and leaves a record of who claimed the authorisation.
+    _ack = (base.get("safe_mode_ack") or "").strip() if isinstance(
+        base.get("safe_mode_ack"), str) else ""
+    safe_mode = True
+    if base.get("safe_mode") is False:
+        if _ack:
+            safe_mode = False
+        else:
+            warnings.append(
+                "safe_mode: false ignored — destructive testing requires "
+                "safe_mode_ack naming the engagement that authorises it")
+    elif base.get("safe_mode") is None:
+        safe_mode = _env_bool("ERLIK_SAFE_MODE") if os.environ.get("ERLIK_SAFE_MODE") else True
+
     return {
         "preset": preset or "custom",
+        "safe_mode": safe_mode,
+        "safe_mode_ack": _ack or None,
         "skills_exclude": _as_list(base.get("skills_exclude")),
         "skills_pin": _as_list(base.get("skills_pin")),
         "skills_max_chars": skills_max_chars,

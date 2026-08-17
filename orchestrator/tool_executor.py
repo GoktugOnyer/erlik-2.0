@@ -406,9 +406,14 @@ def _safe_mode_enabled() -> bool:
     return os.environ.get("ERLIK_SAFE_MODE", "1").strip().lower() not in ("0", "false", "no", "off")
 
 
-def _safe_mode_violation(command: str) -> str | None:
-    """Return a reason if `command` is destructive. None otherwise."""
-    if not _safe_mode_enabled():
+def _safe_mode_violation(command: str, enabled: bool | None = None) -> str | None:
+    """Return a reason if `command` is destructive. None otherwise.
+
+    `enabled=None` falls back to the environment. A caller passing an explicit
+    value is a per-session run_config override, which resolve() only produces
+    when the operator supplied safe_mode_ack.
+    """
+    if not (_safe_mode_enabled() if enabled is None else enabled):
         return None
     for rule_id, predicate, reason in _SAFE_MODE_RULES:
         if predicate(command):
@@ -659,7 +664,7 @@ def _sync_check_container() -> bool:
         return False
 
 
-async def execute_tool(command: str, enabled_tools: list[str], no_timeout: bool = False, target_url: str = None, tool_hint: str = None, custom_timeout: int = None) -> dict:
+async def execute_tool(command: str, enabled_tools: list[str], no_timeout: bool = False, target_url: str = None, tool_hint: str = None, custom_timeout: int = None, safe_mode: bool | None = None) -> dict:
     """
     Execute a command in the kali-tools Docker container.
 
@@ -745,7 +750,7 @@ async def execute_tool(command: str, enabled_tools: list[str], no_timeout: bool 
     # "it is the standard probe" is not authorisation. That case still detects
     # the issue from its OPTIONS step and simply reports it at medium instead of
     # confirming at high — the right trade on a real engagement.
-    safe_err = _safe_mode_violation(sanitized)
+    safe_err = _safe_mode_violation(sanitized, enabled=safe_mode)
     if safe_err:
         return {"success": False, "output": "", "tool": tool_name, "duration_ms": 0,
                 "error": f"SAFE_MODE: {safe_err}", "executed": False, "denied": True}

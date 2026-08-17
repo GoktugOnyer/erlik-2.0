@@ -590,6 +590,13 @@ def _is_duplicate_command(command: str, recent_commands: list[str], max_similar:
 # Rough token estimation: ~4 chars per token for English text
 MAX_ESTIMATED_TOKENS = 3600  # leave ~496 tokens for LLM response within 4096 window
 
+# Cap on the refusal text fed back to the model. A refusal is erlik's own
+# deterministic string; the model needs to know THAT it was blocked and roughly
+# why, not to re-read the full message. Kept small because every message is
+# resent each turn and _trim_messages evicts older content to fit, so a verbose
+# refusal displaces real tool output.
+DENIED_FEEDBACK_MAX = 160
+
 
 def _estimate_tokens(messages: list[dict]) -> int:
     """Rough token count: ~4 chars per token."""
@@ -1711,7 +1718,8 @@ async def _set_poc_status(finding_id: int, status: str, verified: bool = False,
 
 
 async def poc_reverify_session(session_id: str, target_url: str, enabled_tools: list,
-                               force: bool | None = None) -> int:
+                               force: bool | None = None,
+                               safe_mode: bool | None = None) -> int:
     """Re-run a lightweight PoC for high/critical findings and confirm by signature.
 
     Off unless enabled (run-config `poc_verify` / ERLIK_POC_VERIFY). For each
@@ -1784,7 +1792,8 @@ async def poc_reverify_session(session_id: str, target_url: str, enabled_tools: 
             quoted = "'" + url.replace("'", "'\\''") + "'"  # POSIX single-quote escape
             res = await execute_tool(f"curl -sS -i -m 15 {quoted}",
                                      enabled_tools, target_url=target_url,
-                                     tool_hint="curl", custom_timeout=20)
+                                     tool_hint="curl", custom_timeout=20,
+                                     safe_mode=safe_mode)
             out = (res.get("output") or "")
             out_l = out.lower()
             hit = next((s for s in sigs if re.search(s, out_l, re.IGNORECASE)), None)
@@ -4069,7 +4078,10 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
 
                 # Execute the tool
                 if kali_running:
-                    result = await execute_tool(command, enabled_tools, no_timeout=no_timeout, target_url=target_url, custom_timeout=tool_timeout)
+                    result = await execute_tool(
+                        command, enabled_tools, no_timeout=no_timeout,
+                        target_url=target_url, custom_timeout=tool_timeout,
+                        safe_mode=runcfg.get("safe_mode", True))
 
                     tool_name = result["tool"]
                     # Only count a tool the command actually reached a shell
@@ -4242,6 +4254,24 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
                             tool_feedback += "All phases covered. You may use 'done' when testing is complete.\n"
                         tool_feedback += "If you found vulnerabilities in the output, report them with a 'finding' action FIRST.\n"
                         tool_feedback += "Respond with a JSON action."
+                    elif not result.get("executed", True):
+                        # A refusal is erlik's OWN deterministic message, so
+                        # echoing 1500 characters of it wastes prompt budget on
+                        # text the model gains nothing from re-reading.
+                        #
+                        # This matters more than it looks. Every message is
+                        # resent each turn under MAX_ESTIMATED_TOKENS (3600),
+                        # and _trim_messages evicts OLDER content to fit — so a
+                        # long refusal does not just add bytes, it DISPLACES
+                        # real tool output. That displacement is the mechanism
+                        # behind the measured r = -0.796 between injected volume
+                        # and recall, which makes an over-long refusal a direct
+                        # cost to the run.
+                        _why = (tool_output or "").strip().split("\n")[0][:DENIED_FEEDBACK_MAX]
+                        tool_feedback = (
+                            f"REFUSED (not run, no output): {_why}\n"
+                            "Do not retry this or a variant. Different approach. JSON action."
+                        )
                     else:
                         tool_feedback = (
                             f"Tool: {tool_name} | Status: FAILED | Duration: {tool_duration}ms\n"
@@ -4549,7 +4579,8 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
         # Re-run PoCs for high/critical findings (driven by run config; default off).
         try:
             n_pocv = await poc_reverify_session(session_id, target_url, enabled_tools,
-                                                force=runcfg["poc_verify"])
+                                                force=runcfg["poc_verify"],
+                                                safe_mode=runcfg.get("safe_mode", True))
             if n_pocv:
                 await manager.broadcast(session_id, {
                     "type": "log", "phase": "report",
