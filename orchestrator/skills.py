@@ -457,7 +457,8 @@ def select_skill_files(hint: str, max_files: int = DEFAULT_SKILLS_FILES,
 
 def plan_skills(hint: str, max_chars: int = DEFAULT_SKILLS_BUDGET,
                 exclude: list[str] | None = None, pin: list[str] | None = None,
-                tech: list[str] | None = None) -> tuple[list[Path], dict]:
+                tech: list[str] | None = None,
+                max_files: int = DEFAULT_SKILLS_FILES) -> tuple[list[Path], dict]:
     """Select sheets AND record why, in one pass.
 
     Returns (files, plan). The plan is what actually happened — not a
@@ -470,8 +471,8 @@ def plan_skills(hint: str, max_chars: int = DEFAULT_SKILLS_BUDGET,
     session received can be checked against the text that was really appended
     to its system prompt rather than trusted.
     """
-    files = select_skill_files(hint, max_chars=max_chars, tech=tech,
-                               exclude=exclude, pin=pin)
+    files = select_skill_files(hint, max_files=max_files, max_chars=max_chars,
+                               tech=tech, exclude=exclude, pin=pin)
     entries = []
     for f in files:
         size = f.stat().st_size
@@ -489,6 +490,7 @@ def plan_skills(hint: str, max_chars: int = DEFAULT_SKILLS_BUDGET,
         "hint": (hint or "")[:400],
         "classes": sorted(detect_classes(hint or "")),
         "max_chars": max_chars,
+        "max_files": max_files,
         "exclude": list(exclude or []),
         "pin": list(pin or []),
         "tech": list(tech or []),

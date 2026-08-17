@@ -3771,7 +3771,7 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
         # imported the SAME module under a second name, so monkeypatching one
         # identity left the other live and every wiring test was blind.
         from orchestrator.skills import (plan_skills, render_plan,
-                                         DEFAULT_SKILLS_BUDGET)
+                                         DEFAULT_SKILLS_BUDGET, DEFAULT_SKILLS_FILES)
         try:
             _sk_hint = " ".join(filter(None, [vuln_category or "", system_prompt or ""]))
             # Operator tunables, per-session from run_config. Never a global
@@ -3780,6 +3780,7 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
                 _sk_files, _sk_plan = plan_skills(
                     _sk_hint, tech=_observed_tech,
                     max_chars=runcfg.get("skills_max_chars", DEFAULT_SKILLS_BUDGET),
+                    max_files=runcfg.get("skills_max_files", DEFAULT_SKILLS_FILES),
                     exclude=runcfg.get("skills_exclude") or None,
                     pin=runcfg.get("skills_pin") or None,
                 )

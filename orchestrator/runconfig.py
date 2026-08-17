@@ -139,7 +139,7 @@ def resolve(run_config=None) -> dict:
               "nettacker_scenario", "playbooks", "poc_verify", "primitives",
               "target_memory", "techniques", "ai_review", "review_model",
               "skills_exclude", "skills_pin", "skills_max_chars",
-              "safe_mode", "safe_mode_ack"):
+              "safe_mode", "safe_mode_ack", "skills_max_files"):
         if k in cfg and cfg[k] is not None:
             base[k] = cfg[k]
 
@@ -151,7 +151,7 @@ def resolve(run_config=None) -> dict:
               "nettacker_scenario", "playbooks", "poc_verify", "primitives",
               "target_memory", "techniques", "ai_review", "review_model",
               "skills_exclude", "skills_pin", "skills_max_chars",
-              "safe_mode", "safe_mode_ack", "preset"}
+              "safe_mode", "safe_mode_ack", "skills_max_files", "preset"}
     for k in cfg:
         if k not in _known:
             warnings.append(f"run_config key {k!r} is not recognised and was ignored")
@@ -194,6 +194,25 @@ def resolve(run_config=None) -> dict:
             warnings.append(f"skills_max_chars {_mc!r} is not a number; "
                             f"using {DEFAULT_SKILLS_BUDGET}")
 
+    # Sheets injected per run. This is the DOSE LEVER — measured on a 7B,
+    # recall fell monotonically with every sheet added — so it has to be
+    # settable, both to tune it and to measure it. Clamped to 1-5: 0 would be
+    # "skills on but nothing injected", which is what `skills: false` means.
+    from orchestrator.skills import DEFAULT_SKILLS_FILES
+    _mf = base.get("skills_max_files")
+    skills_max_files = DEFAULT_SKILLS_FILES
+    if _mf is not None:
+        try:
+            _mf = int(_mf)
+            if 1 <= _mf <= 5:
+                skills_max_files = _mf
+            else:
+                warnings.append(f"skills_max_files {_mf} is outside 1-5; "
+                                f"using {DEFAULT_SKILLS_FILES}")
+        except (TypeError, ValueError):
+            warnings.append(f"skills_max_files {_mf!r} is not a number; "
+                            f"using {DEFAULT_SKILLS_FILES}")
+
     def _as_list(v):
         if v is None:
             return []
@@ -230,6 +249,7 @@ def resolve(run_config=None) -> dict:
         "skills_exclude": _as_list(base.get("skills_exclude")),
         "skills_pin": _as_list(base.get("skills_pin")),
         "skills_max_chars": skills_max_chars,
+        "skills_max_files": skills_max_files,
         "run_config_warnings": warnings,
         "cve_enrich": tri("cve_enrich"),
         "skills": tri("skills"),

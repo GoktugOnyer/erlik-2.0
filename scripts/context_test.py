@@ -75,9 +75,13 @@ ARMS = {
     #     dose_3  18,166 chars   3 sheets
     # Deliberately stops at 14000: at 24000 the router SUBSTITUTES different
     # sheets rather than adding, which would confound dose with content.
-    "dose_1": {"skills": True, "playbooks": "", "skills_max_chars": 2000},
-    "dose_2": {"skills": True, "playbooks": "", "skills_max_chars": 10000},
-    "dose_3": {"skills": True, "playbooks": "", "skills_max_chars": 14000},
+    # Keyed on skills_max_files, which is what varies the dose since the
+    # default became one sheet. The earlier 7B ladder used skills_max_chars,
+    # which reached the same volumes by STARVING the per-class share — and so
+    # also selected worse sheets. These arms hold sheet QUALITY fixed.
+    "dose_1": {"skills": True, "playbooks": "", "skills_max_files": 1},
+    "dose_2": {"skills": True, "playbooks": "", "skills_max_files": 2},
+    "dose_3": {"skills": True, "playbooks": "", "skills_max_files": 3},
 }
 
 
