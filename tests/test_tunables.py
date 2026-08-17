@@ -90,10 +90,18 @@ class TestSelectorHonoursTheKnobs:
 
     def test_pin_consumes_budget(self):
         """Exempting a pin would let it quietly raise injected volume above the
-        stated cap — the one number an operator must be able to trust."""
-        pinned = stems(pin=["hunt-ssrf.md"], max_chars=8000)
+        stated cap — the one number an operator must be able to trust.
+
+        Uses max_files=3 explicitly: at the one-sheet default a pin fills the
+        only slot, so there is no room left for the budget to affect."""
+        pinned = stems(pin=["hunt-ssrf.md"], max_files=3, max_chars=8000)
         assert pinned[0] == "hunt-ssrf.md"
-        assert len(pinned) < len(stems(pin=["hunt-ssrf.md"], max_chars=40000))
+        assert len(pinned) < len(stems(pin=["hunt-ssrf.md"], max_files=3, max_chars=40000))
+
+    def test_pin_fills_the_only_slot_at_the_default(self):
+        """Consequence of a one-sheet default worth stating: a pin displaces
+        class routing entirely rather than sitting alongside it."""
+        assert stems(pin=["hunt-ssrf.md"]) == ["hunt-ssrf.md"]
 
     def test_exclude_accepts_a_stem_without_the_extension(self):
         base = stems()

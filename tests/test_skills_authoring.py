@@ -295,19 +295,37 @@ class TestReachabilityIsReportedNotAssumed:
         assert f["selected_for"] == []
         assert d["inert_count"] == 1
 
-    def test_reachable_sheet_names_the_missions(self, sandbox, client):
+    def test_authored_sheet_must_outrank_the_whole_corpus_at_the_default(
+            self, sandbox, client):
+        """Consequence of the one-sheet default, stated rather than hidden.
+
+        With three sheets an authored file could ride along beside the vendored
+        one; with one slot it has to WIN outright. hunt-ssrf-clientx sits behind
+        hunt-ssrf for the "ssrf" probe, so it reaches nothing by routing alone.
+        `skills_pin` is the route — see test_pinning_is_how_an_authored_sheet_runs.
+        """
         A.save("hunt-ssrf-clientx.md", "# ssrf notes for client x\n" * 40)
         d = client.get("/api/library/authoring/status").json()
         f = next(x for x in d["files"] if x["name"] == "hunt-ssrf-clientx.md")
-        assert f["reachable"] is True
-        assert "ssrf" in f["selected_for"]
+        assert f["reachable"] is False
+        assert f["selected_for"] == []
 
-    def test_inert_count_is_a_subset_not_a_total(self, sandbox, client):
+    def test_pinning_is_how_an_authored_sheet_runs(self, sandbox):
+        """Explicit beats hoping to out-rank: a pin fills the only slot."""
+        from orchestrator.skills import select_skill_files
+        A.save("hunt-ssrf-clientx.md", "# ssrf notes for client x\n" * 40)
+        assert [p.stem for p in select_skill_files("ssrf")] == ["hunt-ssrf"]
+        pinned = select_skill_files("ssrf", pin=["hunt-ssrf-clientx.md"])
+        assert [p.stem for p in pinned] == ["hunt-ssrf-clientx"]
+
+    def test_inert_count_counts_every_unreachable_sheet(self, sandbox, client):
+        """At a one-sheet default most authored files are unreachable by
+        routing, and the panel must say so rather than flatter the operator."""
         A.save("zzz-obscure-notes.md", "# nothing\n" * 30)
         A.save("hunt-ssrf-clientx.md", "# ssrf notes\n" * 40)
         d = client.get("/api/library/authoring/status").json()
         assert len(d["files"]) == 2
-        assert d["inert_count"] == 1
+        assert d["inert_count"] == len([f for f in d["files"] if not f["reachable"]])
 
     def test_status_explains_the_refusal_rather_than_going_blank(self, client, monkeypatch):
         """A disabled feature must say what to do, not leave a dead button."""

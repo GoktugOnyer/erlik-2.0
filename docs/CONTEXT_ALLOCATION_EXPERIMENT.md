@@ -84,10 +84,53 @@ recap. The summary appears to be better input than the transcript it replaces.
 7B `both` precision goes 0.900 → 0.071: it produces *more wrong* findings. The
 27B `both` arm averaged 1 finding per run.
 
+## Dose-response (added 17 Aug, `data/dose_test.jsonl`)
+
+The arms above cannot separate "too much guidance" from "this guidance is
+wrong", because none of them varied the amount. This one does: skills on,
+budget varied, sheets accumulating additively.
+
+| arm | injected | sheets | n | recall | precision |
+|---|---|---|---|---|---|
+| `none` | 0 | 0 | 2 | 0.1429 | 0.929 |
+| `playbook_only` | ~9k | 0 | 2 | 0.1143 | 0.667 |
+| `dose_1` | 6,452 | 1 | 2 | 0.0857 | 0.786 |
+| `dose_2` | 11,496 | 2 | 2 | 0.0714 | 0.875 |
+| `dose_3` | 18,166 | 3 | 2 | 0.0428 | 0.625 |
+
+```
+none            [0.1714, 0.1143]
+playbook_only   [0.1143, 0.1143]
+dose_1          [0.1143, 0.0571]
+dose_2          [0.0857, 0.0571]
+dose_3          [0.0571, 0.0286]
+```
+
+**Monotonic across four levels.** It is dose-dependent, not a cliff — one sheet
+does not collapse it — so the corpus content is not the problem and a smaller
+dose is usable.
+
+The `none` arm came back `[0.1714, 0.1143]`, the same spread previously reported
+as two clean matching reps. **Within-arm variance is ±0.03, comparable to the
+effects measured.** The ladder is convincing because it is four points in one
+direction; no single pairwise delta here should be quoted alone.
+
 ## Consequences
 
-- **Skills should default off.** As measured, the corpus is a net negative on
-  both models tested.
+- **The default dose is now ONE sheet** (`DEFAULT_SKILLS_FILES = 1`, was 3).
+  Halves the damage while keeping the lever. Every guided arm still scores below
+  injecting nothing, so this is damage limitation rather than a win.
+- **Capped by FILE COUNT, not by shrinking the budget.** They are not
+  equivalent: the per-class share is `max_chars // min(len(classes), max_files)`,
+  so a small budget starves the share and the router substitutes a lower-ranked
+  sheet that fits. Hint `idor` at budget 2000 yields the generic
+  `access-control-resources`; a file cap yields `hunt-idor`. Same volume, better
+  sheet. The measured arm used budget starvation, so the shipped configuration
+  should be at least as good — but that inference is not itself measured.
+- **Authored sheets now need a pin.** With one slot, an operator sheet must
+  out-rank the entire vendored corpus to be routed. `skills_pin` fills the slot
+  explicitly, which is better than hoping to win a ranking; the dashboard says
+  so where it reports a sheet as unreachable.
 - **Do not raise `ERLIK_CONTEXT_CEILING` expecting improvement.** The 3,600-token
   trim was written for a 4096 window and is close to optimal by accident. The
   model-aware sizing in `3d91f85` exists so the budget can be tuned per model,

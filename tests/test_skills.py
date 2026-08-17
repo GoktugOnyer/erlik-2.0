@@ -44,15 +44,17 @@ def test_ssrf_selects_server_side_not_client_side():
 
 
 def test_xss_prefers_dom_xss_sheets_over_unrelated_quickstart():
+    # max_files is explicit: this tests RANKING across several sheets, which is
+    # still the behaviour when an operator asks for more than the default one.
     """'xss' previously spent half its budget on clickjacking-quickstart."""
-    picked = _rel(S.select_skill_files("xss"))
+    picked = _rel(S.select_skill_files("xss", max_files=3))
     assert any("dom-xss" in p for p in picked), picked
     assert not any("clickjacking" in p for p in picked), picked
 
 
 def test_sqli_uses_the_budget_instead_of_stopping_at_the_first_overflow():
     """An oversized rank-2 candidate must not truncate the selection to one."""
-    picked = S.select_skill_files("sqli")
+    picked = S.select_skill_files("sqli", max_files=3)
     assert len(picked) > 1, _rel(picked)
     assert any("sql-injection" in str(p) for p in picked), _rel(picked)
 
@@ -196,8 +198,10 @@ GENERIC_MISSION = ("Assess the instance for injection, authentication and "
 
 
 def test_every_named_class_is_represented():
-    """The regression: a three-class mission must not answer with one class."""
-    names = " ".join(p.stem for p in S.select_skill_files(GENERIC_MISSION))
+    """A three-class mission must not answer with one CLASS when asked for
+    several sheets. max_files is explicit because the DEFAULT is now one sheet
+    — see test_default_injects_a_single_sheet for that contract."""
+    names = " ".join(p.stem for p in S.select_skill_files(GENERIC_MISSION, max_files=3))
     assert "authentication" in names
     assert "access-control" in names
     assert "injection" in names
@@ -249,3 +253,25 @@ def test_single_class_missions_do_not_inflate_the_budget():
     total = sum(min(p.stat().st_size, S.MAX_FILE_EXCERPT)
                 for p in S.select_skill_files("Test for SQL injection"))
     assert total <= 14000
+
+
+def test_default_injects_a_single_sheet():
+    """The measured default. A dose-response run varied injected volume only and
+    recall fell monotonically with every sheet added (0.1429 none, 0.0857 one,
+    0.0714 two, 0.0428 three), so the default is one sheet."""
+    assert S.DEFAULT_SKILLS_FILES == 1
+    picked = S.select_skill_files(GENERIC_MISSION)
+    assert len(picked) == 1, _rel(picked)
+
+
+def test_one_sheet_is_the_RIGHT_sheet_not_a_starved_one():
+    """Dose is capped by FILE COUNT, not by shrinking the budget.
+
+    A small budget starves the per-class share and the router falls back to a
+    lower-ranked sheet that fits: hint 'idor' at budget=2000 yields the generic
+    access-control-resources, where a file cap yields hunt-idor. Same volume,
+    better sheet."""
+    for hint, expect in (("idor", "hunt-idor"), ("ssrf", "hunt-ssrf")):
+        assert S.select_skill_files(hint)[0].stem == expect
+        starved = S.select_skill_files(hint, max_files=3, max_chars=2000)[0].stem
+        assert starved != expect, "budget starvation no longer degrades choice"

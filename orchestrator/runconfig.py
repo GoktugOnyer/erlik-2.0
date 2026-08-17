@@ -178,8 +178,9 @@ def resolve(run_config=None) -> dict:
     # Budget: clamped, not trusted. 0 does NOT mean "off" — the selector takes
     # the first file unconditionally — so a 0 here would be a knob whose label
     # lies. Values outside the sane band fall back to the default and warn.
+    from orchestrator.skills import DEFAULT_SKILLS_BUDGET
     _mc = base.get("skills_max_chars")
-    skills_max_chars = 14000
+    skills_max_chars = DEFAULT_SKILLS_BUDGET
     if _mc is not None:
         try:
             _mc = int(_mc)
@@ -187,9 +188,11 @@ def resolve(run_config=None) -> dict:
                 skills_max_chars = _mc
             else:
                 warnings.append(
-                    f"skills_max_chars {_mc} is outside 2000-40000; using 14000")
+                    f"skills_max_chars {_mc} is outside 2000-40000; "
+                    f"using {DEFAULT_SKILLS_BUDGET}")
         except (TypeError, ValueError):
-            warnings.append(f"skills_max_chars {_mc!r} is not a number; using 14000")
+            warnings.append(f"skills_max_chars {_mc!r} is not a number; "
+                            f"using {DEFAULT_SKILLS_BUDGET}")
 
     def _as_list(v):
         if v is None:

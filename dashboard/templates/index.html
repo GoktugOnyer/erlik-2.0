@@ -2034,9 +2034,11 @@
             const msgs = [];
             if (d.files.length && d.inert_count) {
                 msgs.push(`<span style="color:#ffb545;">${d.inert_count} of ${d.files.length} of your sheets ` +
-                    `are never selected by the router.</span> They are on disk but no mission reaches them — ` +
-                    `usually because a vendored sheet out-ranks them for every class they match. ` +
-                    `Adding more files will not change that.`);
+                    `are never selected by the router.</span> Only ONE sheet is injected per run ` +
+                    `by default (measured: every extra sheet costs recall), so an authored file ` +
+                    `has to out-rank the whole vendored corpus to be picked. ` +
+                    `To use one anyway, <b>pin it</b> in TUNING &mdash; a pin fills the slot. ` +
+                    `Adding more files will not change this.`);
             }
             if (d.files.length && d.runs_examined > 0 && !d.local_skills_selected_in_last_50_runs) {
                 msgs.push(`<span style="color:#ffb545;">None of your sheets appeared in the last ` +

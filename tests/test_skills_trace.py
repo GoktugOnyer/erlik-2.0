@@ -119,7 +119,7 @@ class TestNoDualModuleIdentity:
         import orchestrator.main as M
         src = inspect.getsource(M)
         assert "from skills import render_skills" not in src
-        assert "from orchestrator.skills import plan_skills, render_plan" in src
+        assert "from orchestrator.skills import (plan_skills, render_plan" in src
 
 
 class TestPersistedTrace:

@@ -63,6 +63,21 @@ ARMS = {
     "playbook_only": {"skills": False, "playbooks": "juiceshop"},
     "skills_only":   {"skills": True,  "playbooks": ""},
     "both":          {"skills": True,  "playbooks": "juiceshop"},
+
+    # DOSE LADDER — skills on, budget varied. No previous arm did this, so
+    # nothing so far can tell "too much guidance" from "this guidance is wrong".
+    #
+    # Measured with the real selector, the sheets ACCUMULATE across these three
+    # (authentication-quickstart, +access-control-resources, +injection-principles),
+    # so it is genuinely more-of-the-same rather than a different corpus:
+    #     dose_1   6,452 chars   1 sheet
+    #     dose_2  11,496 chars   2 sheets
+    #     dose_3  18,166 chars   3 sheets
+    # Deliberately stops at 14000: at 24000 the router SUBSTITUTES different
+    # sheets rather than adding, which would confound dose with content.
+    "dose_1": {"skills": True, "playbooks": "", "skills_max_chars": 2000},
+    "dose_2": {"skills": True, "playbooks": "", "skills_max_chars": 10000},
+    "dose_3": {"skills": True, "playbooks": "", "skills_max_chars": 14000},
 }
 
 

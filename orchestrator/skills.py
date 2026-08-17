@@ -39,6 +39,55 @@ SKILLS_ROOT = Path(__file__).resolve().parents[1] / "skills_catalog" / "skills"
 # Attack Surface Signals -> Phase 1 …), so the head is the part worth keeping.
 MAX_FILE_EXCERPT = 7000
 
+# Default character budget for injected guidance.
+#
+# Was 14,000. Lowered on measurement: a dose-response run on a 7B varied ONLY
+# this value, with the sheets accumulating additively, and recall fell
+# monotonically with every sheet added —
+#
+#     0 chars (none)      recall 0.1429
+#     6,452  (1 sheet)           0.0857
+#    11,496  (2 sheets)          0.0714
+#    18,166  (3 sheets)          0.0428
+#
+# The dose is reduced by DEFAULT_SKILLS_FILES below, NOT by shrinking this.
+# Lowering the budget looked equivalent and is not: the per-class share is
+# `max_chars // min(len(classes), max_files)`, so a small budget starves the
+# share and the router falls back to a lower-ranked sheet that fits. Measured:
+#
+#     hint "idor"  budget=2000 -> access-control-resources   (generic)
+#                  max_files=1 -> hunt-idor                  (the right sheet)
+#     hint "ssrf"  budget=2000 -> server-side-principles
+#                  max_files=1 -> hunt-ssrf
+#
+# Both deliver ~6.5 KB. Capping the FILE COUNT gives the same volume without
+# degrading which sheet is chosen, so the budget stays where it was.
+DEFAULT_SKILLS_BUDGET = 14000
+
+# Sheets injected per run. Was 3.
+#
+# A dose-response run on a 7B varied injected volume only, with sheets
+# accumulating additively, and recall fell monotonically with every sheet:
+#
+#     0 chars (none)      recall 0.1429
+#     6,452  (1 sheet)           0.0857
+#    11,496  (2 sheets)          0.0714
+#    18,166  (3 sheets)          0.0428
+#
+# One sheet halves the damage relative to three. See
+# docs/CONTEXT_ALLOCATION_EXPERIMENT.md.
+#
+# It is NOT a win: every guided arm still scored below injecting nothing. This
+# is damage limitation, and the honest default for the lever would arguably be
+# off — but that is a behaviour change for operators who rely on it, so the
+# dose drops and the on/off decision stays with the run config.
+#
+# CAVEAT: the measured arm used budget=2000, which selects one sheet BY
+# STARVATION and therefore a worse one. This configuration delivers the same
+# volume with a better-targeted sheet, so it should be at least as good — but
+# that exact inference is not itself measured.
+DEFAULT_SKILLS_FILES = 1
+
 # Expand erlik's short vuln-category / jargon tokens into the corpus vocabulary
 # so a preset like "sqli_focused" matches the sql-injection references.
 ALIASES = {
@@ -298,7 +347,8 @@ def _resolve_refs(refs, kind: str) -> tuple[list[str], list[str]]:
     return ok, warn
 
 
-def select_skill_files(hint: str, max_files: int = 3, max_chars: int = 14000,
+def select_skill_files(hint: str, max_files: int = DEFAULT_SKILLS_FILES,
+                       max_chars: int = DEFAULT_SKILLS_BUDGET,
                        tech: list[str] | None = None,
                        exclude: list[str] | None = None,
                        pin: list[str] | None = None) -> list[Path]:
@@ -405,7 +455,7 @@ def select_skill_files(hint: str, max_files: int = 3, max_chars: int = 14000,
     return chosen
 
 
-def plan_skills(hint: str, max_chars: int = 14000,
+def plan_skills(hint: str, max_chars: int = DEFAULT_SKILLS_BUDGET,
                 exclude: list[str] | None = None, pin: list[str] | None = None,
                 tech: list[str] | None = None) -> tuple[list[Path], dict]:
     """Select sheets AND record why, in one pass.
@@ -480,7 +530,7 @@ def render_plan(files: list[Path]) -> str:
     return "\n".join(parts) + "\n"
 
 
-def render_skills(hint: str, max_chars: int = 14000,
+def render_skills(hint: str, max_chars: int = DEFAULT_SKILLS_BUDGET,
                   exclude: list[str] | None = None, pin: list[str] | None = None,
                   tech: list[str] | None = None) -> str:
     """Compose the selected knowledge block for a hint — WITHOUT the
@@ -496,7 +546,7 @@ def render_skills(hint: str, max_chars: int = 14000,
     return render_plan(files)
 
 
-def get_skills_context(target_url: str, hint: str, max_chars: int = 14000,
+def get_skills_context(target_url: str, hint: str, max_chars: int = DEFAULT_SKILLS_BUDGET,
                        tech: list[str] | None = None) -> str:
     """Composed knowledge block to inject into erlik's agent loop, or "" when
     disabled (ERLIK_SKILLS) / no match. Thin gate over ``render_skills``.
@@ -520,7 +570,7 @@ def _cli(argv: list[str] | None = None) -> int:
                     "(model-agnostic — pipe into any model/API system prompt).",
     )
     ap.add_argument("hint", nargs="+", help="vuln class / mission keywords, e.g. 'sql injection'")
-    ap.add_argument("--max-chars", type=int, default=14000)
+    ap.add_argument("--max-chars", type=int, default=DEFAULT_SKILLS_BUDGET)
     ap.add_argument("--files", action="store_true", help="print only the selected file paths")
     ns = ap.parse_args(argv)
     hint = " ".join(ns.hint)
