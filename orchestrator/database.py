@@ -372,6 +372,19 @@ async def init_db():
                 except Exception:
                     pass  # column already exists
 
+        # Whether the command in this step was REFUSED before it ran (scope,
+        # toolset, safe mode, blocked pattern, container down). Additive.
+        #
+        # Without it, tool_coverage / tools_used / phases_covered are computed
+        # from steps.tool_called and count a refused command as coverage: a run
+        # that tried nmap once and was refused reports nmap "used" and the recon
+        # phase "covered". The agent-loop-side guard cannot fix that, because
+        # those metrics are recomputed from the DB long afterwards.
+        try:
+            await db.execute("ALTER TABLE steps ADD COLUMN denied INTEGER DEFAULT 0")
+        except Exception:
+            pass  # column already exists
+
         # Finding provenance — additive, nullable.
         #   source   : which writer produced the row (auto_detect | llm_reported
         #              | nettacker | v2_testcase)

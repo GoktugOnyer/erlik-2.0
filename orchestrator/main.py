@@ -2240,7 +2240,8 @@ async def _generate_report(session_id: str, model: str, target_url: str,
         "curl": "discovery",  # curl is used for exploring endpoints
     }
     all_phases = {"recon", "discovery", "vuln_scan", "exploitation"}
-    tools_used = [s["tool_called"] for s in steps]
+    # Refused commands reached no shell, so they are not phase coverage.
+    tools_used = [s["tool_called"] for s in steps if not s.get("denied")]
     completed_phases = set()
     for tool in tools_used:
         mapped = TOOL_PHASE_MAP.get(tool)
@@ -4071,7 +4072,12 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
                     result = await execute_tool(command, enabled_tools, no_timeout=no_timeout, target_url=target_url, custom_timeout=tool_timeout)
 
                     tool_name = result["tool"]
-                    tools_executed.add(tool_name)  # track for phase enforcement
+                    # Only count a tool the command actually reached a shell
+                    # with. Telling the model it has "covered recon" because an
+                    # nmap it never ran was refused would suppress the retry the
+                    # feedback exists to prompt.
+                    if result.get("executed", True):
+                        tools_executed.add(tool_name)  # track for phase enforcement
                     raw_output = result.get("output") or result.get("error") or "No output"
                     tool_output = _strip_ansi(raw_output)  # clean ANSI codes
                     tool_duration = result["duration_ms"]
@@ -4276,10 +4282,11 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
                     db = await get_db()
                     await db.execute(
                         "INSERT INTO steps (session_id, phase, step_number, prompt_sent, model_response, "
-                        "tool_called, tool_input, tool_output, duration_ms) "
-                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        "tool_called, tool_input, tool_output, duration_ms, denied) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                         (session_id, phase, step_number, reason[:500], response[:2000],
-                         tool_name, command[:1000], tool_output[:4000], tool_duration),
+                         tool_name, command[:1000], tool_output[:4000], tool_duration,
+                         0 if result.get("executed", True) else 1),
                     )
                     await db.commit()
                     await db.close()
@@ -7129,20 +7136,25 @@ async def _compute_benchmark_metrics(session_id: str, ground_truths: list[dict])
         # Findings per turn
         findings_per_turn = total_findings / total_steps if total_steps > 0 else 0.0
 
-        # Tool coverage
+        # Tool + phase coverage, counting only commands that actually RAN.
+        # A refused command (scope, toolset, safe mode, blocked pattern,
+        # container down) is recorded as a step but reached no shell, so
+        # counting it inflates coverage with work that never happened — and
+        # safe mode makes refusals routine rather than exceptional.
+        executed_steps = [s for s in steps if not s.get("denied")]
         unique_tools = set()
-        for s in steps:
+        for s in executed_steps:
             tool = s.get("tool_called")
             if tool:
                 unique_tools.add(tool)
         tool_coverage = len(unique_tools) / len(enabled_tools) if enabled_tools else 0.0
 
-        # Phase coverage
         phases = set()
-        for s in steps:
+        for s in executed_steps:
             phase = s.get("phase")
             if phase:
                 phases.add(phase)
+        denied_steps = len(steps) - len(executed_steps)
 
         # Time to first finding / first high
         session_created = session["created_at"]
@@ -7227,6 +7239,7 @@ async def _compute_benchmark_metrics(session_id: str, ground_truths: list[dict])
             "tool_coverage": round(tool_coverage, 4),
             "unique_tools_used": len(unique_tools),
             "tools_used": sorted(list(unique_tools)),
+            "denied_steps": denied_steps,
             "tool_path": tool_path,
             "total_tools_available": len(enabled_tools),
             "time_to_first_finding_ms": time_to_first_finding,
@@ -7398,6 +7411,7 @@ async def get_benchmark(benchmark_id: str):
             total_chain_duration = 0
             total_chain_steps_count = 0
             all_chain_tools = set()
+            all_chain_denied = 0
             all_chain_phases = set()
 
             db3 = await get_db()
@@ -7423,8 +7437,12 @@ async def get_benchmark(benchmark_id: str):
                     step_rows = [dict(r) for r in await scur.fetchall()]
                     all_chain_steps.extend(step_rows)
                     for s in step_rows:
-                        if s.get("tool_called"):
+                        # Same rule as the per-session site: a refused command
+                        # reached no shell, so it is not coverage.
+                        if s.get("tool_called") and not s.get("denied"):
                             all_chain_tools.add(s["tool_called"])
+                        if s.get("denied"):
+                            all_chain_denied += 1
             finally:
                 await db3.close()
 
@@ -7530,6 +7548,7 @@ async def get_benchmark(benchmark_id: str):
                 "tool_coverage": round(tool_coverage, 4),
                 "unique_tools_used": len(all_chain_tools),
                 "tools_used": sorted(list(all_chain_tools)),
+                "denied_steps": all_chain_denied,
                 "tool_path": chain_tool_path,
                 "total_tools_available": len(enabled_tools),
                 "time_to_first_finding_ms": time_to_first_finding,
