@@ -49,11 +49,25 @@ def _get_inference_seed() -> int | None:
 
 # ---------- Ollama (local inference) ----------
 
-async def _ollama_chat(messages: list[dict], model: str, max_retries: int) -> str:
+async def _ollama_chat(messages: list[dict], model: str, max_retries: int,
+                       num_ctx: int | None = None) -> str:
     body = {"model": model, "messages": messages, "stream": False}
+    options = {}
     seed = _get_inference_seed()
     if seed is not None:
-        body["options"] = {"seed": seed}
+        options["seed"] = seed
+    if num_ctx:
+        # WITHOUT THIS, OLLAMA SILENTLY TRUNCATES.
+        #
+        # Ollama allocates its own default context (4096) regardless of what the
+        # model supports — qwen2.5-coder:7b declares no num_ctx parameter and can
+        # do 32,768, but gets 4,096 unless asked. Anything past that is dropped
+        # with no error, which is why the caller's trim budget and this value
+        # MUST be derived from the same number. Raising one without the other
+        # trades a visible trim for an invisible truncation.
+        options["num_ctx"] = int(num_ctx)
+    if options:
+        body["options"] = options
 
     last_error = None
     for attempt in range(max_retries):
@@ -255,11 +269,17 @@ async def ensure_model_available(model: str | None = None) -> str:
         f"(or pick a model in the dashboard) to one that is installed.")
 
 
-async def chat(messages: list[dict], model: str | None = None, max_retries: int = 3) -> str:
+async def chat(messages: list[dict], model: str | None = None, max_retries: int = 3,
+               num_ctx: int | None = None) -> str:
+    """Send a conversation to the configured provider.
+
+    `num_ctx` sizes the LOCAL model's context allocation. It is ignored by
+    hosted providers, which size their own.
+    """
     use_model = model or _default_model()
     if PROVIDER == "openai":
         return await _openai_chat(messages, use_model, max_retries)
-    return await _ollama_chat(messages, use_model, max_retries)
+    return await _ollama_chat(messages, use_model, max_retries, num_ctx=num_ctx)
 
 
 async def chat_json(messages: list[dict], model: str | None = None) -> dict | None:

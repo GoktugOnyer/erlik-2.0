@@ -608,6 +608,9 @@ CONTEXT_FILL_FRACTION = float(os.environ.get("ERLIK_CONTEXT_FILL", "0.55"))
 # practical bound, not a capability one.
 CONTEXT_BUDGET_CEILING = int(os.environ.get("ERLIK_CONTEXT_CEILING", "24000"))
 
+# Tokens reserved for the model's reply on top of the conversation budget.
+CONTEXT_RESPONSE_HEADROOM = int(os.environ.get("ERLIK_CONTEXT_HEADROOM", "2048"))
+
 _CTX_CACHE: dict[str, int] = {}
 
 
@@ -3653,8 +3656,14 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
         # differing between models makes two runs incomparable.
         _ctx_budget = context_budget_tokens(model)
         _ctx_window = model_context_window(model)
+        # What we ASK the provider to allocate: the conversation budget plus
+        # room for the reply. Derived from the same number as the trim budget —
+        # raising one without the other trades a visible trim for an invisible
+        # truncation, because Ollama drops overflow without an error.
+        _ctx_alloc = min(_ctx_budget + CONTEXT_RESPONSE_HEADROOM,
+                         _ctx_window or (_ctx_budget + CONTEXT_RESPONSE_HEADROOM))
         print(f"[ctx {session_id[:8]}] model={model} window={_ctx_window or 'unknown'} "
-              f"budget={_ctx_budget} tokens", flush=True)
+              f"trim_budget={_ctx_budget} num_ctx={_ctx_alloc}", flush=True)
 
         # Measure how this target answers a path that does not exist, BEFORE any
         # discovery command is rendered into a prompt. Replaces a hardcoded
@@ -4014,7 +4023,7 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
             print(f"[agent {session_id[:8]}] turn {turn+1}/{max_turns} → LLM call (msgs={len(messages)})", flush=True)
             try:
                 response = await asyncio.wait_for(
-                    llm_client.chat(messages, model=model),
+                    llm_client.chat(messages, model=model, num_ctx=_ctx_alloc),
                     timeout=LLM_CALL_TIMEOUT_S,
                 )
                 duration = int((time.time() - start_time) * 1000)
