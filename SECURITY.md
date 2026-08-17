@@ -26,6 +26,7 @@ publicly. There is no bug bounty.
 | `steps.model_response` | The model's own text, which may quote a captured token |
 | `session_primitives.value` | Captured credentials, stored as plain `TEXT` — **not encrypted** |
 | `findings.evidence` | Proof text, which for a credential finding is the credential |
+| `steps.model_response` | The model's own text, which may quote a token it just captured |
 | `sessions.system_prompt` | Your mission text |
 
 `data/reports/*.md` contains the full untruncated step log for each session.
@@ -78,7 +79,6 @@ publicly. There is no bug bounty.
   mission text and tool output go to a third party. `redact_secrets`
   (`orchestrator/review.py`) masks credentials on the AI-review path only — it
   has three call sites, all within `review.py`.
-- **`thesis_export` is not redacted.** It ships raw columns by design.
 
 ## Authoring skills (off by default)
 

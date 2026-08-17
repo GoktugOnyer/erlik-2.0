@@ -1995,7 +1995,10 @@ def _policy_verdicts(findings: list[dict]) -> dict[int, str]:
 # this list stays exhaustive, so a new report route cannot be added without
 # either routing it through the boundary or declaring it here.
 ALLOWED_UNGATED_REPORT_PATHS = {
-    "/api/thesis/export": "research artifact, not a client deliverable — exports the raw corpus by design",
+    "/api/thesis/export": ("research artifact, not a client deliverable — it exports the "
+                           "whole corpus rather than one session's findings, so the "
+                           "submission policy and scope stamp do not apply. It IS "
+                           "redacted: see _mask_export_rows."),
 }
 
 
@@ -5699,9 +5702,67 @@ async def thesis_comparison(vuln_category: str = None):
         await db.close()
 
 
+# Columns that are ids, enums, timestamps, counts or controlled vocabulary —
+# never operator or target free text. EVERYTHING ELSE IS MASKED.
+#
+# Default-deny on purpose. A hand-listed set of fields TO mask omits whatever
+# nobody thought of: the original design's list missed steps.model_response
+# (where the model quotes the token it just captured), recon_context.value and
+# sessions.system_prompt, all shipped via SELECT *. Measured on the recorded
+# corpus, those three carry secrets in 10 rows that a field-list approach would
+# have exported in the clear while the artifact claimed redaction was applied.
+#
+# With the allowlist inverted, a column added later is masked until someone
+# deliberately declares it structural.
+_EXPORT_STRUCTURAL = frozenset({
+    # identity / linkage
+    "id", "session_id", "parent_session_id", "chain_id", "chain_position",
+    "chain_phase", "run_id", "test_case_id", "target_key",
+    # timestamps & counters
+    "created_at", "updated_at", "duration_ms", "total_duration_ms",
+    "total_steps", "total_findings", "step_number", "generation_duration_ms",
+    "cvss_score", "confidence",
+    # controlled vocabulary / flags
+    "status", "session_type", "scope_mode", "model", "generated_by_model",
+    "vuln_category", "toolset_preset", "enabled_tools", "no_timeout",
+    "tool_timeout", "max_turns", "disable_stagnation", "phase", "tool_called",
+    "vuln_type", "severity", "calibrated_severity", "severity_override",
+    "owasp_category", "cve_id", "cvss_vector", "cwe", "mitre", "verified",
+    "false_positive", "triage_status", "poc_status", "context_type",
+    "source_tool", "source", "detector", "denied", "step",
+})
+
+# Columns holding a URL. Masked so they still parse: scheme, host and path are
+# preserved and only query-parameter VALUES are replaced.
+_EXPORT_URL_COLUMNS = frozenset({"url", "target_url", "affected_url"})
+
+
+def _mask_export_rows(rows: list[dict], counts: dict) -> list[dict]:
+    """Mask every non-structural string column, accumulating a secret census."""
+    from orchestrator.redaction import mask, mask_url, census
+
+    out = []
+    for row in rows:
+        clean = {}
+        for col, val in row.items():
+            if col in _EXPORT_STRUCTURAL or not isinstance(val, str) or not val:
+                clean[col] = val
+                continue
+            for kind, n in census(val).items():
+                counts[kind] = counts.get(kind, 0) + n
+            clean[col] = mask_url(val) if col in _EXPORT_URL_COLUMNS else mask(val)
+        out.append(clean)
+    return out
+
+
 @app.get("/api/thesis/export")
 async def thesis_export():
-    """Export all thesis data as JSON for analysis in pandas/R/Excel."""
+    """Export all thesis data as JSON for analysis in pandas/R/Excel.
+
+    Redacted. Every table is fetched with SELECT *, so a new column reaches
+    this export the moment it exists — which is why masking is default-deny
+    against a structural allowlist rather than a list of fields to scrub.
+    """
     db = await get_db()
     try:
         # Sessions
@@ -5724,14 +5785,27 @@ async def thesis_export():
         c5 = await db.execute("SELECT * FROM recon_context ORDER BY session_id, context_type")
         recon = [dict(r) for r in await c5.fetchall()]
 
-        return {
+        counts: dict = {}
+        payload = {
             "exported_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            "sessions": sessions,
-            "findings": findings,
-            "steps": steps,
-            "reports": reports,
-            "recon_context": recon,
+            "sessions": _mask_export_rows(sessions, counts),
+            "findings": _mask_export_rows(findings, counts),
+            "steps": _mask_export_rows(steps, counts),
+            "reports": _mask_export_rows(reports, counts),
+            "recon_context": _mask_export_rows(recon, counts),
         }
+        # `applied` and `total` are SEPARATE facts: applied=true with total=0
+        # means the pass ran and found nothing, which a reader cannot otherwise
+        # tell from an export that never had one.
+        payload["redaction"] = {
+            "applied": True,
+            "total": sum(counts.values()),
+            "by_kind": counts,
+            "policy": ("every string column is masked except a declared "
+                       "structural allowlist, so a column added later is "
+                       "redacted until someone declares it structural"),
+        }
+        return payload
     finally:
         await db.close()
 
