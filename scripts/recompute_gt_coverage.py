@@ -1,15 +1,24 @@
 #!/usr/bin/env python3
 """Recompute GT coverage for ALL experiments using the canonical programmatic
-matcher from orchestrator/main.py. Produces one consistent table for thesis.
+matcher IMPORTED from orchestrator/main.py.
 
-Algorithm (verbatim from orchestrator's _match_finding_to_ground_truth_scored):
-  - type match (+1)  — required, with type aliases
-  - url match (+1)   — GT url_pattern in finding.url or finding.evidence
-                       (+0.5 if GT has no URL pattern = generic vuln)
-  - param match (+1) — GT param in finding.param or finding.evidence
-                       (+0.5 if GT has no param = generic)
-  - evidence (+1)    — confirmation keywords in finding text
-  Threshold: score >= 2.0 for TP match.
+This script used to carry its own copy of the matcher, introduced with the
+comment "verbatim from orchestrator's _match_finding_to_ground_truth_scored".
+It was not verbatim, and by the time anyone checked it had drifted badly enough
+to be unusable:
+
+  * `_TYPE_ALIASES` was a module-level table here, while the canonical matcher
+    keeps its aliases as a LOCAL dict — so main.py has no `_TYPE_ALIASES` at
+    all and the two tables could never be compared, let alone kept in sync.
+  * `match_finding` returned `best_gt["id"]`, but ground-truth rows have no
+    `id` key. Every call against JUICE_SHOP_GROUND_TRUTH raised KeyError, so
+    this script could not have produced a number for the thesis in its final
+    state.
+
+The copy is gone. It now imports `_match_finding_to_ground_truth_scored`, so a
+change to the matcher reaches every consumer at once and there is nothing left
+to drift. Gt rows are identified by INDEX, which is what the canonical matcher
+returns.
 """
 import json
 import sqlite3
@@ -17,98 +26,26 @@ import sys
 from collections import Counter, defaultdict
 from pathlib import Path
 
-# ═══ Canonical matcher ═══
+# ═══ Canonical matcher — IMPORTED, never re-implemented ═══
 
-_EVIDENCE_CONFIRMATION_KEYWORDS = {
-    "sql injection": ["vulnerable", "injection point", "payload", "union", "boolean-based",
-                      "time-based", "error-based", "1=1", "or 1=1", "dbms", "token",
-                      "sqli confirmed", "back-end dbms"],
-    "xss": ["vulnerable", "confirmed", "reflected", "alert(", "<script", "xss",
-            "payload", "dom-based", "stored xss"],
-    "broken access control": ["accessible", "unauthorized", "idor", "products",
-                              "basket", "user record", "enumeration", "without auth"],
-    "broken authentication": ["bypass", "token", "jwt", "brute", "weak password",
-                              "login success", "credential"],
-    "sensitive data exposure": ["email", "password", "user record", "ftp", "backup",
-                                "md5", "hash", "exposed", "api key"],
-    "security misconfiguration": ["missing", "header", "x-frame", "x-content-type",
-                                  "hsts", "csp", "swagger", "api-docs", "debug"],
-    "cors misconfiguration": ["access-control-allow-origin", "wildcard", "cors",
-                              "origin: null", "arbitrary origin"],
-    "ssrf": ["ssrf", "server-side", "internal", "127.0.0.1", "localhost"],
-    "open redirect": ["redirect", "location:", "302", "moved"],
-    "file upload": ["upload", "unrestricted", "file type", "extension"],
-    "xxe": ["xxe", "xml", "entity", "dtd", "external"],
-    "prototype pollution": ["__proto__", "prototype", "pollution", "constructor"],
-}
-
-_TYPE_ALIASES = {
-    "sql injection": ["sqli", "sql", "injection"],
-    "xss": ["cross-site", "xss", "script", "dom"],
-    "cors misconfiguration": ["cors", "cross-domain", "cross domain", "origin"],
-    "information disclosure": ["info", "disclosure", "error", "version", "header"],
-    "broken access control": ["access", "authorization", "idor", "privilege", "enumerat"],
-    "broken authentication": ["auth", "login", "brute", "jwt", "credential", "password", "token"],
-    "sensitive data exposure": ["sensitive", "data", "exposure", "ftp", "backup", "crypto", "hash", "md5"],
-    "security misconfiguration": ["misconfig", "header", "nikto", "swagger", "api-doc", "metric", "config"],
-    "ssrf": ["ssrf", "server-side", "request forgery"],
-    "open redirect": ["redirect", "open redirect", "url redirect"],
-    "file upload": ["upload", "file", "unrestricted"],
-    "xxe": ["xxe", "xml", "external entity"],
-    "prototype pollution": ["prototype", "pollution", "__proto__"],
-}
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from orchestrator.main import (  # noqa: E402
+    _match_finding_to_ground_truth_scored as _canonical_match,
+)
 
 
 def match_finding(finding: dict, gt_list: list) -> dict:
-    """Returns {match, score, gt_id} using canonical algorithm."""
-    f_type = (finding.get("vuln_type") or "").lower()
-    f_url = (finding.get("url") or "").lower()
-    f_param = (finding.get("parameter") or "").lower()
-    f_evidence = (finding.get("evidence") or "").lower()
-    f_all = f"{f_type} {f_url} {f_param} {f_evidence}"
+    """Thin adapter over the canonical matcher.
 
-    best_score = 0.0
-    best_gt = None
-
-    for g in gt_list:
-        gt_type = g["vuln_type"].lower()
-        gt_url = (g.get("url_pattern") or "").lower()
-        gt_param = (g.get("parameter") or "").lower()
-
-        type_ok = gt_type in f_type or f_type in gt_type
-        if not type_ok:
-            for alias in _TYPE_ALIASES.get(gt_type, []):
-                if alias in f_type:
-                    type_ok = True; break
-        if not type_ok:
-            continue
-
-        score = 1.0  # type match
-        if gt_url:
-            if gt_url in f_url or gt_url in f_evidence:
-                score += 1.0
-        else:
-            score += 0.5
-
-        if gt_param:
-            if gt_param in f_param or gt_param in f_evidence:
-                score += 1.0
-        else:
-            score += 0.5
-
-        kws = _EVIDENCE_CONFIRMATION_KEYWORDS.get(gt_type, [])
-        if kws and any(k in f_all for k in kws):
-            score += 1.0
-
-        if score > best_score:
-            best_score = score
-            best_gt = g
-
-    return {
-        "match": best_score >= 2.0,
-        "score": best_score,
-        "gt_id": best_gt["id"] if (best_gt and best_score >= 2.0) else None,
-    }
+    Kept only so this script's callers keep their shape; it contains no
+    matching logic of its own, and `gt_id` is now the ground-truth INDEX the
+    canonical matcher returns rather than an `id` field that does not exist.
+    """
+    m = _canonical_match(finding, gt_list)
+    return {"match": bool(m.get("match")),
+            "score": m.get("score", 0),
+            "gt_id": m.get("gt_index") if m.get("match") else None,
+            "reason": m.get("reason", "")}
 
 
 # ═══ Data collection helpers ═══
