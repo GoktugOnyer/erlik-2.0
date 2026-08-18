@@ -1290,6 +1290,13 @@
                     style="border-bottom: 1px solid var(--panel-border);">
                 </div>
 
+                <!-- Run critique. The AI REVIEW toggle pays for a second LLM pass
+                     and writes session_reviews; until now nothing ever read it back,
+                     so five critiques sat in the database unseen. -->
+                <div id="report-detail-review" class="px-4 py-3 hidden"
+                    style="border-bottom: 1px solid var(--panel-border); background: rgba(160,92,255,0.03);">
+                </div>
+
                 <!-- Full Report Markdown -->
                 <div id="report-detail-content" class="p-4 overflow-y-auto report-rendered"
                     style="max-height: 700px;">
@@ -2656,6 +2663,63 @@
             }
         }
 
+        // ===== Run critique =====
+        // The AI REVIEW toggle spends a second LLM pass per run and writes
+        // session_reviews. The dashboard shipped the switch that turns it on
+        // and then never fetched the result — five critiques accumulated
+        // unread, holding exactly the thing an operator wants next ("SQL
+        // Injection testing was omitted despite mission requirements").
+        //
+        // Rendered as ADVICE, explicitly outside the metrics: the critique is
+        // written by a model about a model's run, and must never read as
+        // evidence about the target.
+        async function renderRunReview(sid) {
+            const el = document.getElementById('report-detail-review');
+            el.classList.add('hidden');
+            el.innerHTML = '';
+            let r;
+            try {
+                const resp = await fetch(`/api/sessions/${sid}/review`);
+                if (!resp.ok) return;
+                r = await resp.json();
+            } catch (e) { return; }
+            if (!r || !Object.keys(r).length) return;   // toggle was off — say nothing
+
+            const list = (v) => {
+                let a = v;
+                if (typeof a === 'string') { try { a = JSON.parse(a); } catch (e) { a = [a]; } }
+                if (!Array.isArray(a)) a = a ? [a] : [];
+                return a.filter(Boolean);
+            };
+            const block = (label, items, colour) => {
+                if (!items.length) return '';
+                return `<div class="mt-2">
+                    <div class="font-pixel" style="font-size:0.42rem; color:${colour};">${label}</div>
+                    ${items.map(t => `<div class="font-mono mt-0.5" style="font-size:0.78rem; color:#c0c0d0;">— ${tlEsc(t)}</div>`).join('')}
+                </div>`;
+            };
+
+            const conf = (r.confidence || '').toLowerCase();
+            const confCol = {high:'var(--neon-green)', medium:'var(--neon-yellow)', low:'var(--neon-orange)'}[conf] || '#6a6a8a';
+
+            el.innerHTML = `
+                <div class="flex items-baseline gap-3 flex-wrap">
+                    <span class="font-pixel" style="font-size:0.45rem; color:var(--neon-purple);">RUN CRITIQUE</span>
+                    <span class="font-mono" style="font-size:0.6rem; opacity:.6;">${tlEsc(r.model || '')}</span>
+                    ${conf ? `<span class="font-mono" style="font-size:0.6rem; color:${confCol};">confidence: ${tlEsc(conf)}</span>` : ''}
+                    <span class="font-mono" style="font-size:0.58rem; opacity:.45;">advice about the RUN — not evidence about the target</span>
+                </div>
+                ${block('COVERAGE GAPS', list(r.coverage_gaps), 'var(--neon-red)')}
+                ${block('WASTED EFFORT', list(r.wasted_effort), 'var(--neon-orange)')}
+                ${block('CONFIG SUGGESTIONS', list(r.config_suggestions), 'var(--neon-cyan)')}
+                ${r.recommended_next_run ? `<div class="mt-2">
+                    <div class="font-pixel" style="font-size:0.42rem; color:var(--neon-green);">RECOMMENDED NEXT RUN</div>
+                    <div class="font-mono mt-0.5" style="font-size:0.78rem; color:#c0c0d0;">${tlEsc(r.recommended_next_run)}</div>
+                </div>` : ''}`;
+            el.classList.remove('hidden');
+        }
+
+
         // ===== View Report Detail =====
         async function viewReport(sid) {
             reportDetailSessionId = sid;
@@ -2676,6 +2740,7 @@
 
             renderRunConfigBadges(sid);  // reproducibility: which automation flow this session used
             renderTriageTable(sid);      // accept / reject / severity-override controls
+            renderRunReview(sid);        // the critique the AI REVIEW toggle paid for
 
             try {
                 const [reportResp, findingsResp] = await Promise.all([

@@ -175,3 +175,52 @@ class TestReadApi:
     def test_empty_mission_is_handled(self, client):
         d = client.post("/api/library/routing/explain", json={"mission": ""}).json()
         assert "injected_total" in d
+
+
+class TestProducedOutputIsActuallyRead:
+    """A path that emits confident output nothing consumes is this codebase's
+    recurring defect. These guard the producer/consumer join at the UI edge.
+
+    The AI REVIEW toggle spends a SECOND LLM pass per run and writes
+    session_reviews. The dashboard shipped the switch that turns it on and then
+    never fetched the result — five critiques accumulated unread, holding
+    exactly what an operator wants next ("SQL Injection testing was omitted
+    despite mission requirements").
+    """
+
+    UI = (__import__("pathlib").Path(__file__).resolve().parents[1]
+          / "dashboard" / "templates" / "index.html")
+
+    def test_the_review_endpoint_is_fetched_by_the_dashboard(self):
+        src = self.UI.read_text()
+        assert "/review" in src, "AI REVIEW is billable and its result is never read"
+        assert "renderRunReview" in src
+
+    def test_the_review_renderer_is_actually_called(self):
+        """Defining it is not wiring it."""
+        src = self.UI.read_text()
+        assert "renderRunReview(sid)" in src
+
+    def test_toggle_and_consumer_both_exist(self):
+        """If the toggle is ever removed, this test should be removed with it —
+        it exists to keep the pair together, not the toggle alone."""
+        src = self.UI.read_text()
+        assert "rc-aireview" in src and "ai_review" in src
+
+    def test_the_deterministic_lane_is_reachable_from_the_ui(self):
+        """All six /api/v2/* endpoints had zero callers: the 22 committed WSTG
+        cases could not be listed, run or reviewed from the dashboard."""
+        src = self.UI.read_text()
+        assert "/api/v2/testcases" in src
+        assert "/api/v2/sweep/plan" in src
+        assert "view-testlab" in src
+
+    def test_not_assessed_is_distinguishable_from_clean(self):
+        """WSTG-CLNT-09 against a host that 302s emits
+        ERLIK_FRAMING_NOT_ASSESSED_REDIRECT — it declined to assess. Rendering
+        that as "clean" tells an operator there is no clickjacking issue when
+        the truth is that it was never tested."""
+        src = self.UI.read_text()
+        assert "NOT_ASSESSED" in src
+        assert "not assessed" in src
+        assert "tlVerdict" in src
