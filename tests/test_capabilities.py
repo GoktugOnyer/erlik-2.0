@@ -137,11 +137,14 @@ class TestReadApi:
         d = client.get("/api/library/detectors").json()
         assert d["total"] == len(C.detector_names())
         assert any(x["exercised"] for x in d["detectors"])
-        # Was ["wfuzz:_detect_content_discovery"] — a detector registered in
-        # _DETECTORS that could not fire under any input. Its parser now exists,
-        # as does dirb's `==> DIRECTORY:` branch, so the corpus reaches all 28.
-        assert d["unreachable"] == []
-        assert all(x["exercised"] for x in d["detectors"])
+        # NOT all 28 any more, and that is correct. On a CLEAN corpus a rule
+        # that fires is producing a false positive, so full coverage was
+        # measuring OVER-FIRING. Four rules went quiet when their false
+        # positives were fixed — they only fire on a real vulnerability, which
+        # a cleanroom by definition does not contain. Capability is proven by
+        # positive controls in test_auto_detect.py instead.
+        assert len(d["unreachable"]) <= 4, d["unreachable"]
+        assert sum(1 for x in d["detectors"] if x["exercised"]) >= 24
 
     def test_testcases_surface_load_errors(self, client):
         d = client.get("/api/library/testcases").json()

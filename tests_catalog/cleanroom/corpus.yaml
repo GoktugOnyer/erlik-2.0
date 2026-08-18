@@ -425,10 +425,7 @@ fixtures:
     \nX-Content-Type-Options: nosniff\r\nReferrer-Policy: strict-origin-when-cross-origin\r\nContent-Type:\
     \ application/json; charset=utf-8\r\nContent-Length: 121\r\n\r\n{\"error\":\"invalid_path\",\"message\"\
     :\"The name parameter contains an illegal character sequence and was rejected.\"}\n"
-  expected:
-  - vuln_type: Sensitive Data Exposure
-    severity: high
-    detector: curl:_curl_null_byte
+  expected: []
   rationale: 'COLLISION TARGET: the output[:100] ''error'' guard. The clean app CORRECTLY rejects the
     null-byte traversal with 400 and serves no file at all. _curl_null_byte''s only anti-FP guard is `''error''
     not in output_lower[:100]`, and under -i the first 100 bytes are always the status line and Date/Server
@@ -481,10 +478,7 @@ fixtures:
     \ application/json; charset=utf-8\r\n\r\n{\"data\":[{\"id\":70314,\"userId\":4412,\"rating\":5,\"\
     postedAt\":\"2026-08-15T09:14:03Z\"},{\"id\":70201,\"userId\":4412,\"rating\":4,\"postedAt\":\"2026-08-14T18:02:55Z\"\
     }]}\n"
-  expected:
-  - vuln_type: Broken Access Control
-    severity: high
-    detector: curl:_curl_forged_feedback
+  expected: []
   rationale: 'COLLISION TARGET: `"POST" in ctx.command.upper()` is a bare substring test over the whole
     command line. This is a read-only GET of the caller''s OWN feedback list -- no write, no forgery,
     no cross-user data -- but the ordinary query parameter sort=postedAt uppercases to POSTEDAT and satisfies
@@ -587,9 +581,6 @@ fixtures:
     \ 'none'\r\n\r\n{\"id\":8841,\"email\":\"alice.moreau@acme-robotics.example\",\"displayName\":\"Alice\
     \ Moreau\",\"role\":\"owner\",\"createdAt\":\"2024-03-02T10:00:00Z\"}"
   expected:
-  - vuln_type: Broken Access Control
-    severity: high
-    detector: curl:_curl_api_users_bac
   - vuln_type: Sensitive Data Exposure
     severity: medium
     detector: curl:_curl_exposed_user_data
@@ -610,10 +601,7 @@ fixtures:
     :\"https://docs.acme-robotics.example/errors/unauthorized\",\"title\":\"Unauthorized\",\"status\"\
     :401,\"detail\":\"A bearer token is required to list users.\",\"support\":{\"email\":\"api-support@acme-robotics.example\"\
     }}"
-  expected:
-  - vuln_type: Broken Access Control
-    severity: high
-    detector: curl:_curl_api_users_bac
+  expected: []
   rationale: 'The listing endpoint does exactly the right thing: anonymous request, 401, WWW-Authenticate
     challenge, no user data. The RFC 7807 envelope carries a support mailbox, as many API style guides
     require. The rule never reads the status line -- its whole gate is ''/api/users'' in the URL plus
@@ -650,10 +638,7 @@ fixtures:
     \ 'none'\r\n\r\n{\"type\":\"https://docs.acme-robotics.example/errors/forbidden\",\"title\":\"Forbidden\"\
     ,\"status\":403,\"detail\":\"Basket 12 belongs to another account.\",\"_links\":{\"self\":{\"href\"\
     :\"/rest/basket/7\"},\"products\":{\"href\":\"/rest/products\"}}}"
-  expected:
-  - vuln_type: Broken Access Control
-    severity: critical
-    detector: curl:_curl_idor_basket
+  expected: []
   rationale: 'The single most expensive false positive in the corpus: the access check WORKS, the cross-user
     read is refused with 403, and erlik reports CRITICAL ''IDOR: basket 12 accessible -- response contains
     product data''. All that was needed was the token "products" in the HAL-style _links block of the
@@ -694,10 +679,7 @@ fixtures:
     \ nosniff\r\nx-frame-options: DENY\r\ncontent-security-policy: default-src 'none'; frame-ancestors\
     \ 'none'\r\n\r\n{\"authenticated\":false,\"token\":null,\"error\":\"invalid_credentials\",\"message\"\
     :\"Email or password is incorrect.\"}"
-  expected:
-  - vuln_type: SQL Injection
-    severity: critical
-    detector: curl:_curl_sqli_login
+  expected: []
   rationale: 'A textbook SQLi login payload is REJECTED: 401, authenticated false, token null. Because
     the API contract is fully typed, the token field is present on every response, and the rule''s success
     gate is only the substring "token" appearing anywhere in the response -- it never checks that the
@@ -741,10 +723,7 @@ fixtures:
     \ 'none'\r\nretry-after: 60\r\n\r\n{\"error\":\"too_many_attempts\",\"message\":\"Too many failed\
     \ sign-in attempts. Try again in 60 seconds.\",\"csrf\":{\"token\":\"KJ8s2Ld0Qm4Zx1Vb7Rn9Tp3Wc6Ye5Ua\"\
     }}"
-  expected:
-  - vuln_type: SQL Injection
-    severity: critical
-    detector: curl:_curl_sqli_login
+  expected: []
   rationale: 'Brute-force protection fires and the attempt never reaches the database at all -- 429, Retry-After,
     no authentication performed. The response re-issues a fresh CSRF token so the login form stays usable,
     and the token_match regex ''"token"\s*:\s*"([^"]{20,})"'' grabs that CSRF secret and writes it into
@@ -761,10 +740,7 @@ fixtures:
     \ nosniff\r\nx-frame-options: DENY\r\ncontent-security-policy: default-src 'none'; frame-ancestors\
     \ 'none'\r\n\r\n{\"authenticated\":false,\"token\":null,\"error\":\"invalid_credentials\",\"message\"\
     :\"Email or password is incorrect.\"}"
-  expected:
-  - vuln_type: SQL Injection
-    severity: critical
-    detector: curl:_curl_sqli_login
+  expected: []
   rationale: 'The sharpest fixture in the set: an ordinary mistyped password, no attack payload of any
     kind, correctly rejected with 401 and a null token, replayed from a captured browser request that
     carried its same-origin Origin header. CRITICAL SQL Injection. The sole trigger is that ''-H \"Origin:''
@@ -1773,10 +1749,7 @@ fixtures:
 
     [x] Critical: The tested parameter(s) does not seem to be injectable. Try to increase value for ''--level''
     option if you wish to perform more tests.'
-  expected:
-  - vuln_type: Command Injection
-    severity: critical
-    detector: commix:_detect_commix
+  expected: []
   rationale: The ping tool validates 'host' against an IP regex and shells out via an argument vector,
     so no injection exists and all four commix techniques fail. This is commix's REAL not-found output,
     and its negative verdict contains the substring 'injectable' four words after 'does not seem to be'.

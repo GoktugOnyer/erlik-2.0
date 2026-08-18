@@ -211,22 +211,26 @@ class TestCommittedCorpus:
         if not corpus:
             pytest.skip("no committed cleanroom corpus yet")
         rep = C.measure(corpus)
-        # 28 of 28. Both former dead paths now fire:
+        # NOT 28/28 any more, and that is the correct direction.
         #
-        #   wfuzz — was registered in _DETECTORS and routed to
-        #           _detect_content_discovery, but that parser carried only
-        #           gobuster/ffuf/dirb patterns, so wfuzz's native
-        #           `ID / Response / Lines / Word / Chars / Payload` table
-        #           matched nothing and the detector could not fire under any
-        #           input. Its parser (and ANSI stripping, since -c is
-        #           colourise) now exists.
-        #   dirb  — parsed its `+ url (CODE:n)` lines but dropped
-        #           `==> DIRECTORY:`, which is the ONLY way dirb announces a
-        #           directory. A live /ftp/ found by dirb was lost while the
-        #           same directory found by gobuster was reported.
+        # On a CLEAN corpus a rule that fires is producing a false positive, so
+        # full coverage here was measuring OVER-FIRING, not capability. Three
+        # rules went quiet when their false positives were fixed —
+        # _curl_api_users_bac, _curl_sqli_login and _detect_commix each had
+        # every one of their cleanroom emissions removed, because each was
+        # firing on a 401/403/429 or on the tool's own negative result.
         #
-        # Asserting the SET, not a count: a newly dead detector must fail even
-        # if the total happens to hold.
-        assert len(rep.exercised) == 28, C.format_report(rep)
-        assert rep.unreachable == [], (
-            "a detector became unreachable:\n" + C.format_report(rep))
+        # Capability is proven by positive controls in test_auto_detect.py,
+        # which feed each rule a REAL vulnerability. This asserts the opposite
+        # property: that the clean corpus still exercises enough of the detector
+        # surface to be a meaningful test, and that the set of quiet rules is
+        # the one we decided on rather than one that drifted.
+        QUIET_ON_CLEAN = {
+            "curl:_curl_api_users_bac",     # only fires on unauth enumeration
+            "curl:_curl_sqli_login",        # only fires on a successful bypass
+            "commix:_detect_commix",        # only fires on a real injection
+            "curl:_curl_null_byte",         # only fires when the file is served
+        }
+        assert set(rep.unreachable) <= QUIET_ON_CLEAN, (
+            "a rule went quiet that we did not expect to:\n" + C.format_report(rep))
+        assert len(rep.exercised) >= 24, C.format_report(rep)

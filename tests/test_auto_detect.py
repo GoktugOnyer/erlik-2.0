@@ -625,3 +625,98 @@ class TestOpenRedirectIsOriginBased:
         j = "http://juice-shop:3000/redirect?to=x"
         assert self._redirect("http://juice-shop:3000/x", j) == []
         assert self._redirect("http://evil.example/", j)
+
+
+class TestRefusedAttacksAreNotFindings:
+    """The single largest false-positive source: no rule checked the HTTP status.
+
+    A 401, 403 or 429 was treated exactly like a 200, so a CORRECTLY REFUSED
+    attack was reported as a successful one — including "SQL injection on login:
+    server returned JWT token" printed against a 401 whose body was
+    `"token": null`. The cleanroom found 9 CRITICAL and 11 HIGH findings on a
+    clean target this way.
+    """
+
+    OK = "HTTP/1.1 200 OK\r\n\r\n"
+
+    @pytest.mark.parametrize("status", ["401 Unauthorized", "403 Forbidden",
+                                        "429 Too Many Requests"])
+    def test_refused_login_is_not_sql_injection(self, status):
+        out = (f"HTTP/1.1 {status}\r\n\r\n"
+               '{"authentication":{"token":null},"error":"Invalid credentials"}')
+        cmd = "curl -s -i -X POST -d \"email=a' or 1=1--\" http://t/rest/user/login"
+        assert [f for f in detect("curl", out, cmd)
+                if f["vuln_type"] == "SQL Injection"] == []
+
+    def test_successful_bypass_still_fires(self):
+        out = (self.OK + '{"authentication":{"token":'
+               '"eyJhbGciOiJIUzI1NiJ9.abcdefghijklmnopqrst"}}')
+        cmd = "curl -s -i -X POST -d \"email=a' or 1=1--\" http://t/rest/user/login"
+        assert [f for f in detect("curl", out, cmd)
+                if f["vuln_type"] == "SQL Injection"]
+
+    def test_legitimate_login_is_not_sql_injection(self):
+        """No payload in the command at all — an ordinary successful login."""
+        out = self.OK + '{"authentication":{"token":"eyJhbGciOiJIUzI1NiJ9.abcdefghij"}}'
+        cmd = 'curl -s -i -X POST -d "email=user@corp.test&password=hunter2" http://t/rest/user/login'
+        assert [f for f in detect("curl", out, cmd)
+                if f["vuln_type"] == "SQL Injection"] == []
+
+    def test_refused_basket_read_is_not_idor(self):
+        """The access check WORKING was reported as CRITICAL broken access
+        control — the most expensive false positive in the corpus."""
+        out = 'HTTP/1.1 403 Forbidden\r\n\r\n{"error":"not yours","products":[]}'
+        assert [f for f in detect("curl", out, "curl -s -i http://t/rest/basket/12")
+                if f["vuln_type"] == "Broken Access Control"] == []
+
+    def test_granted_basket_read_still_fires(self):
+        out = self.OK + '{"products":[{"id":1}]}'
+        assert [f for f in detect("curl", out, "curl -s -i http://t/rest/basket/12")
+                if f["vuln_type"] == "Broken Access Control"]
+
+    def test_401_challenge_is_not_user_enumeration(self):
+        out = ('HTTP/1.1 401 Unauthorized\r\n\r\n'
+               '{"detail":"auth required","contact":{"email":"support@t"}}')
+        assert [f for f in detect("curl", out, "curl -s -i http://t/api/users")
+                if f["vuln_type"] == "Broken Access Control"] == []
+
+    def test_self_service_endpoint_is_not_enumeration(self):
+        """/api/users/me with the caller's OWN token returns one record — theirs."""
+        out = self.OK + '{"email":"me@corp.test","id":8841}'
+        assert [f for f in detect("curl", out, "curl -s -i http://t/api/users/me")
+                if f["vuln_type"] == "Broken Access Control"] == []
+
+    def test_sort_param_is_not_a_post(self):
+        """`"POST" in command.upper()` matched `?sort=postedAt` — a plain GET
+        read as a forged write."""
+        out = self.OK + '{"data":[{"UserId":1}]}'
+        assert [f for f in detect("curl", out,
+                                  "curl -s -i http://t/api/feedbacks?sort=postedAt")
+                if f["vuln_type"] == "Broken Access Control"] == []
+
+    def test_commix_negative_result_is_not_command_injection(self):
+        """"does not seem to be injectable" contains "injectable"."""
+        out = "[!] Warning: The (GET) parameter 'host' does not seem to be injectable."
+        assert detect("commix", out, "commix -u http://t/p?host=1") == []
+
+    def test_commix_positive_still_fires(self):
+        out = "[+] The (GET) parameter 'host' is injectable."
+        assert detect("commix", out, "commix -u http://t/p?host=1")
+
+    def test_rejected_null_byte_is_not_a_bypass(self):
+        out = ('HTTP/1.1 400 Bad Request\r\n\r\n'
+               '{"detail":"The supplied filename is invalid and was rejected."}')
+        assert [f for f in detect("curl", out, "curl -s -i http://t/d?name=r%00.pdf")
+                if f["detector"] == "curl:_curl_null_byte"] == []
+
+    def test_served_file_after_null_byte_still_fires(self):
+        out = "HTTP/1.1 200 OK\r\n\r\n" + "A" * 400
+        assert [f for f in detect("curl", out, "curl -s -i http://t/d?name=r%00.pdf")
+                if f["detector"] == "curl:_curl_null_byte"]
+
+    def test_unknown_status_preserves_old_behaviour(self):
+        """A curl without -i captures no status line. Those rules must behave
+        exactly as before rather than going silent."""
+        out = '{"products":[{"id":1}]}'
+        assert [f for f in detect("curl", out, "curl -s http://t/rest/basket/12")
+                if f["vuln_type"] == "Broken Access Control"]

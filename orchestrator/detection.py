@@ -139,6 +139,36 @@ def _detect_xss_tools(ctx: DetectContext) -> list[Finding]:
     return []
 
 
+# ── response status ─────────────────────────────────────────────────────────
+_STATUS_RX = re.compile(r"^HTTP/[\d.]+\s+(\d{3})", re.MULTILINE)
+
+
+def _http_status(output: str) -> int | None:
+    """Status of the LAST HTTP response in the output, or None if absent.
+
+    Last, not first, because a redirect chain (`curl -L`) emits several and the
+    final one is what the client actually got.
+    """
+    m = _STATUS_RX.findall(output or "")
+    return int(m[-1]) if m else None
+
+
+def _succeeded(ctx: "DetectContext") -> bool:
+    """Did the request the rule is judging actually SUCCEED?
+
+    Rules that claim an attack worked were treating 401/403/429 exactly like
+    200, so a CORRECTLY REFUSED attack was reported as a successful one. The
+    false-positive cleanroom found nine CRITICAL and eleven HIGH findings on a
+    clean target this way — including "SQL injection on login: server returned
+    JWT token" printed against a 401 with `"token": null`.
+
+    Unknown status (no headers captured, e.g. a `curl` without -i) returns True,
+    so a rule that never saw a status line behaves exactly as before.
+    """
+    st = _http_status(ctx.output)
+    return st is None or 200 <= st < 400
+
+
 # ── curl sub-rules ──────────────────────────────────────────────────────────
 def _curl_exposed_user_data(ctx: DetectContext) -> list[Finding]:
     ol = ctx.output_lower
@@ -166,7 +196,10 @@ def _curl_exposed_user_data(ctx: DetectContext) -> list[Finding]:
 
 
 def _curl_api_users_bac(ctx: DetectContext) -> list[Finding]:
-    if "/api/users" in ctx.url.lower() and '"email"' in ctx.output_lower:
+    # Fired on a 401 challenge body and on /api/users/me with the caller's OWN
+    # token. Neither is enumeration.
+    if ("/api/users" in ctx.url.lower() and '"email"' in ctx.output_lower
+            and _succeeded(ctx) and not re.search(r"/users?/(me|self|current)\b", ctx.url, re.I)):
         emails = re.findall(r'"email"\s*:\s*"([^"]+)"', ctx.output)
         if emails:
             return [{
@@ -178,7 +211,10 @@ def _curl_api_users_bac(ctx: DetectContext) -> list[Finding]:
 
 
 def _curl_idor_basket(ctx: DetectContext) -> list[Finding]:
-    if "/rest/basket/" in ctx.url.lower() and '"products"' in ctx.output_lower:
+    # Fired on a 403 refusal — the access check WORKING was reported as CRITICAL
+    # broken access control.
+    if ("/rest/basket/" in ctx.url.lower() and '"products"' in ctx.output_lower
+            and _succeeded(ctx)):
         basket_id = re.search(r'/rest/basket/(\d+)', ctx.url)
         if basket_id:
             return [{
@@ -190,7 +226,8 @@ def _curl_idor_basket(ctx: DetectContext) -> list[Finding]:
 
 
 def _curl_idor_order(ctx: DetectContext) -> list[Finding]:
-    if "/api/orders" in ctx.url.lower() and ('"totalprice"' in ctx.output_lower or '"products"' in ctx.output_lower):
+    if ("/api/orders" in ctx.url.lower() and _succeeded(ctx)
+            and ('"totalprice"' in ctx.output_lower or '"products"' in ctx.output_lower)):
         order_id = re.search(r'/api/orders/(\w+)', ctx.url, re.IGNORECASE)
         if order_id:
             return [{
@@ -204,11 +241,13 @@ def _curl_idor_order(ctx: DetectContext) -> list[Finding]:
 def _curl_sqli_login(ctx: DetectContext) -> list[Finding]:
     if "/rest/user/login" in ctx.url.lower() and '"token"' in ctx.output_lower:
         sqli_patterns = ["or 1=1", "' or", "\"or", "1=1--", "admin'--", "' --"]
-        if any(p in ctx.command_lower for p in sqli_patterns):
-            token_match = re.search(r'"token"\s*:\s*"([^"]{20,})"', ctx.output)
-            evidence = "SQL injection on login: server returned JWT token"
-            if token_match:
-                evidence += f"\nToken: {token_match.group(1)[:50]}..."
+        # `\'"token"\' in output` matched `"token": null` on a 401, so a REJECTED
+        # payload was reported as CRITICAL SQL injection. A token is only
+        # evidence when the login actually succeeded and the field holds one.
+        token_match = re.search(r'"token"\s*:\s*"([^"]{20,})"', ctx.output)
+        if any(p in ctx.command_lower for p in sqli_patterns) and _succeeded(ctx) and token_match:
+            evidence = ("SQL injection on login: server returned JWT token"
+                        f"\nToken: {token_match.group(1)[:50]}...")
             return [{
                 "vuln_type": "SQL Injection", "severity": "critical",
                 "url": ctx.url, "parameter": "email", "evidence": evidence,
@@ -364,8 +403,13 @@ def _curl_ftp(ctx: DetectContext) -> list[Finding]:
 
 
 def _curl_null_byte(ctx: DetectContext) -> list[Finding]:
+    # `"error" not in output[:100]` was the only guard, so a correct 400/403
+    # rejection whose body said "Invalid filename" past character 100 counted as
+    # a successful bypass. A bypass means the server SERVED the file.
     if "%2500" in ctx.url or "%00" in ctx.url:
-        if len(ctx.output.strip()) > 50 and "error" not in ctx.output_lower[:100]:
+        if (_succeeded(ctx) and len(ctx.output.strip()) > 50
+                and not re.search(r"\b(invalid|reject|denied|forbidden|not allowed|"
+                                  r"bad request|illegal)\b", ctx.output_lower)):
             return [{
                 "vuln_type": "Sensitive Data Exposure", "severity": "high",
                 "url": ctx.url, "parameter": "",
@@ -407,7 +451,11 @@ def _curl_open_redirect(ctx: DetectContext) -> list[Finding]:
 
 
 def _curl_forged_feedback(ctx: DetectContext) -> list[Finding]:
-    if "/api/feedbacks" in ctx.url.lower() and '"userid"' in ctx.output_lower and "POST" in ctx.command.upper():
+    # `"POST" in command.upper()` matched `?sort=postedAt` in the URL — a plain
+    # GET read as a forged write. Require an actual POST and a 2xx.
+    is_post = bool(re.search(r"(?:^|\s)-X\s+POST(?:\s|$)|--request\s+POST", ctx.command, re.I))
+    if ("/api/feedbacks" in ctx.url.lower() and '"userid"' in ctx.output_lower
+            and is_post and _succeeded(ctx)):
         return [{
             "vuln_type": "Broken Access Control", "severity": "high",
             "url": ctx.url, "parameter": "UserId",
@@ -542,9 +590,19 @@ def _detect_nikto(ctx: DetectContext) -> list[Finding]:
 
 
 # ── commix ───────────────────────────────────────────────────────────────────
+# commix prints its NEGATIVE result as "does not seem to be injectable", which
+# contains the substring "injectable" — so a clean scan was reported as CRITICAL
+# command injection. Found by the false-positive cleanroom.
+_COMMIX_NEGATIVE = ("does not seem to be injectable", "not injectable",
+                    "no injection point", "unable to exploit")
+
+
 def _detect_commix(ctx: DetectContext) -> list[Finding]:
     for line in ctx.output.split("\n"):
-        if "injectable" in line.lower() or "is vulnerable" in line.lower():
+        low = line.lower()
+        if any(neg in low for neg in _COMMIX_NEGATIVE):
+            continue
+        if "injectable" in low or "is vulnerable" in low:
             url = _url_from_dash_u(ctx.command)
             return [{
                 "vuln_type": "Command Injection", "severity": "critical",
