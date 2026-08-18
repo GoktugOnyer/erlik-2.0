@@ -417,6 +417,96 @@ async def init_db():
                 except Exception:
                     pass  # column already exists
 
+        # ===== Engagements: the customer a run belongs to =====
+        #
+        # Until now nothing in the schema had a customer concept. 108 sessions
+        # and 91 deterministic runs were keyed only by target URL, and scope was
+        # declared per session. Scope is the LEGAL BOUNDARY of a test, so it
+        # belongs to the engagement — stated once, with an authorisation window,
+        # and inherited by everything run under it.
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS engagements (
+                id TEXT PRIMARY KEY,
+                client_name TEXT NOT NULL,
+                root_domain TEXT,
+                status TEXT DEFAULT 'active',
+                authorised_by TEXT,
+                authorised_from TEXT,
+                authorised_until TEXT,
+                notes TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        # One row per host/pattern, IN or OUT of scope, and where it came from.
+        # `source` matters: a host a human typed is authorised, a host discovered
+        # by enumeration is a CANDIDATE and must stay inert until approved —
+        # passive results routinely include shared hosting, CDN endpoints and
+        # parked third-party names that are not the customer's to test.
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS engagement_scope (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                engagement_id TEXT NOT NULL,
+                pattern TEXT NOT NULL,
+                kind TEXT DEFAULT 'domain',
+                in_scope INTEGER DEFAULT 1,
+                source TEXT DEFAULT 'declared',
+                approved_at TIMESTAMP DEFAULT NULL,
+                approved_by TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(engagement_id, pattern)
+            )
+        """)
+        # An application under the engagement. Replaces the hardcoded PROFILES
+        # dict in orchestrator/testcase/sweep.py: endpoint knowledge becomes
+        # data an operator enters for their own customer.
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS engagement_targets (
+                id TEXT PRIMARY KEY,
+                engagement_id TEXT NOT NULL,
+                base_url TEXT NOT NULL,
+                title TEXT,
+                tech TEXT,
+                auth_state TEXT DEFAULT 'none',
+                notes TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS target_endpoints (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                target_id TEXT NOT NULL,
+                test_case_id TEXT,
+                path TEXT,
+                method TEXT DEFAULT 'GET',
+                params TEXT,
+                source TEXT DEFAULT 'declared',
+                notes TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        for tbl, idx, cols in (
+            ("engagement_scope", "idx_scope_engagement", "engagement_id"),
+            ("engagement_targets", "idx_targets_engagement", "engagement_id"),
+            ("target_endpoints", "idx_endpoints_target", "target_id"),
+        ):
+            try:
+                await db.execute(
+                    f"CREATE INDEX IF NOT EXISTS {idx} ON {tbl}({cols})")
+            except Exception:
+                pass
+
+        # Additive, nullable link from existing work to its owner. Nullable on
+        # purpose: the 108 sessions recorded before engagements existed genuinely
+        # have no customer, and must read as unassigned rather than be silently
+        # attributed to whichever engagement happens to be first.
+        for table, col in (("sessions", "engagement_id"), ("v2_runs", "engagement_id"),
+                           ("v2_runs", "target_id"), ("sessions", "target_id")):
+            try:
+                await db.execute(
+                    f"ALTER TABLE {table} ADD COLUMN {col} TEXT DEFAULT NULL")
+            except Exception:
+                pass  # column already exists
+
         await db.commit()
 
 

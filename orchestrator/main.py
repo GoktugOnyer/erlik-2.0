@@ -5105,6 +5105,121 @@ async def get_models():
 
 # --- v2: test-case driven automation (replaces freeform sessions) ---
 
+# ===== Engagements =====
+# The customer a run belongs to. Scope lives here rather than on the session
+# because scope is the legal boundary of the test: declared once, with an
+# authorisation window, inherited by everything run beneath it.
+
+@app.get("/api/engagements")
+async def list_engagements():
+    from orchestrator import engagement as E
+    db = await get_db()
+    try:
+        return {"engagements": await E.list_all(db)}
+    finally:
+        await db.close()
+
+
+@app.post("/api/engagements")
+async def create_engagement(body: dict):
+    from orchestrator import engagement as E
+    name = (body.get("client_name") or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="client_name required")
+    db = await get_db()
+    try:
+        eid = await E.create(
+            db, name, (body.get("root_domain") or "").strip(),
+            authorised_by=body.get("authorised_by"),
+            authorised_from=body.get("authorised_from"),
+            authorised_until=body.get("authorised_until"),
+            notes=body.get("notes"))
+        return await E.summary(db, eid)
+    finally:
+        await db.close()
+
+
+@app.get("/api/engagements/{engagement_id}")
+async def get_engagement(engagement_id: str):
+    from orchestrator import engagement as E
+    db = await get_db()
+    try:
+        out = await E.summary(db, engagement_id)
+    finally:
+        await db.close()
+    if not out:
+        raise HTTPException(status_code=404, detail="engagement not found")
+    return out
+
+
+@app.post("/api/engagements/{engagement_id}/scope")
+async def add_engagement_scope(engagement_id: str, body: dict):
+    """Add a scope rule. `source=discovered` rows land UNAPPROVED and authorise
+    nothing until a human approves them — enumeration returns hosts that are
+    not the customer's to test."""
+    from orchestrator import engagement as E
+    pattern = (body.get("pattern") or "").strip()
+    if not pattern:
+        raise HTTPException(status_code=400, detail="pattern required")
+    db = await get_db()
+    try:
+        await E.add_scope(db, engagement_id, pattern,
+                          kind=body.get("kind") or "domain",
+                          in_scope=bool(body.get("in_scope", True)),
+                          source=body.get("source") or "declared")
+        await db.commit()
+        return await E.summary(db, engagement_id)
+    finally:
+        await db.close()
+
+
+@app.post("/api/engagements/{engagement_id}/scope/approve")
+async def approve_engagement_scope(engagement_id: str, body: dict):
+    from orchestrator import engagement as E
+    db = await get_db()
+    try:
+        n = await E.approve_scope(db, engagement_id, body.get("pattern") or "",
+                                  body.get("approved_by") or "operator")
+        await db.commit()
+        return {"approved": n, **(await E.summary(db, engagement_id))}
+    finally:
+        await db.close()
+
+
+@app.post("/api/engagements/{engagement_id}/scope/check")
+async def check_engagement_scope(engagement_id: str, body: dict):
+    """Would this target be allowed? Read-only — used by the UI before a run so
+    an operator sees the boundary decision and its reason."""
+    from orchestrator import engagement as E
+    db = await get_db()
+    try:
+        allowed, reason = await E.check(db, engagement_id,
+                                        (body.get("target") or "").strip())
+    finally:
+        await db.close()
+    return {"allowed": allowed, "reason": reason}
+
+
+@app.post("/api/engagements/{engagement_id}/targets")
+async def add_engagement_target(engagement_id: str, body: dict):
+    """Add an application under this engagement. Refuses anything the
+    engagement's own scope does not authorise."""
+    from orchestrator import engagement as E
+    base = (body.get("base_url") or "").strip()
+    if not base:
+        raise HTTPException(status_code=400, detail="base_url required")
+    db = await get_db()
+    try:
+        allowed, reason = await E.check(db, engagement_id, base)
+        if not allowed:
+            raise HTTPException(status_code=403, detail=f"out of scope — {reason}")
+        await E.add_target(db, engagement_id, base, title=body.get("title"),
+                           tech=body.get("tech"), notes=body.get("notes"))
+        return await E.summary(db, engagement_id)
+    finally:
+        await db.close()
+
+
 @app.get("/api/v2/providers")
 async def list_providers():
     """Available LLM providers the user can pick at run-time."""

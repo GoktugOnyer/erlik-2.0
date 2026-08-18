@@ -652,6 +652,11 @@
                 style="font-size: 0.55rem;">
                 &#9670; SKILLS
             </button>
+            <button id="nav-engagements" onclick="switchView('engagements')"
+                class="nav-tab font-pixel px-4 py-2 rounded"
+                style="font-size: 0.55rem;">
+                &#9707; ENGAGEMENTS
+            </button>
             <button id="nav-testlab" onclick="switchView('testlab')"
                 class="nav-tab font-pixel px-4 py-2 rounded"
                 style="font-size: 0.55rem;">
@@ -1613,6 +1618,46 @@
         </div><!-- /view-skills -->
 
 
+        <!-- ===== ENGAGEMENTS: one customer, one page, one boundary ===== -->
+        <!-- Nothing in the schema had a customer concept: 108 sessions and 91
+             deterministic runs were keyed only by target URL, and scope was
+             retyped per run. Scope is the LEGAL boundary of a test, so it is
+             declared once here and inherited by everything run beneath it. -->
+        <div id="view-engagements" class="hidden space-y-5">
+
+            <div class="panel rounded p-4">
+                <div class="flex items-baseline justify-between flex-wrap gap-2">
+                    <h2 class="font-pixel" style="font-size:0.7rem;">&#9707; ENGAGEMENTS</h2>
+                    <div id="eng-meta" class="font-mono" style="font-size:0.6rem; opacity:.75;"></div>
+                </div>
+                <p class="font-mono mt-2" style="font-size:0.6rem; opacity:.7; max-width:82ch;">
+                    A customer, the assets they authorised, and everything ever run against them.
+                    Scope is enforced here rather than per run &mdash; an engagement with no scope
+                    rules authorises <b>nothing</b>, an explicit exclusion beats any wildcard, and a
+                    host found by enumeration stays inert until a human approves it.
+                </p>
+                <div class="flex gap-2 mt-3 flex-wrap items-center">
+                    <input id="eng-name" class="input-field font-mono px-2 py-1 rounded"
+                        style="font-size:0.65rem; width:190px;" placeholder="client name">
+                    <input id="eng-domain" class="input-field font-mono px-2 py-1 rounded"
+                        style="font-size:0.65rem; width:190px;" placeholder="root domain (acme.com)">
+                    <input id="eng-auth" class="input-field font-mono px-2 py-1 rounded"
+                        style="font-size:0.65rem; width:170px;" placeholder="authorised by">
+                    <button onclick="engCreate()" class="font-pixel px-3 py-1 rounded border"
+                        style="font-size:0.55rem; color:var(--neon-green); border-color:var(--neon-green);">
+                        + NEW ENGAGEMENT</button>
+                </div>
+            </div>
+
+            <div class="panel rounded p-4">
+                <h3 class="font-pixel" style="font-size:0.62rem;">CUSTOMERS</h3>
+                <div id="eng-list" class="mt-3 space-y-1"></div>
+            </div>
+
+            <div id="eng-detail" class="hidden space-y-5"></div>
+        </div><!-- /view-engagements -->
+
+
         <!-- ===== TEST LAB: the deterministic WSTG lane, finally clickable ===== -->
         <!-- Until now all six /api/v2/* endpoints had ZERO callers in this file:
              the 22 committed test cases could not be listed, run or reviewed
@@ -1849,12 +1894,13 @@
 
         // ===== View Switching =====
         function switchView(view) {
-            const views = ['scanner', 'reports', 'benchmark', 'monitor', 'testlab', 'skills', 'arsenal'];
+            const views = ['scanner', 'reports', 'benchmark', 'monitor', 'engagements', 'testlab', 'skills', 'arsenal'];
             const panels = {
                 scanner: document.getElementById('view-scanner'),
                 reports: document.getElementById('view-reports'),
                 benchmark: document.getElementById('view-benchmark'),
                 monitor: document.getElementById('view-monitor'),
+                engagements: document.getElementById('view-engagements'),
                 testlab: document.getElementById('view-testlab'),
                 skills: document.getElementById('view-skills'),
                 arsenal: document.getElementById('view-arsenal'),
@@ -1864,6 +1910,7 @@
                 reports: document.getElementById('nav-reports'),
                 benchmark: document.getElementById('nav-benchmark'),
                 monitor: document.getElementById('nav-monitor'),
+                engagements: document.getElementById('nav-engagements'),
                 testlab: document.getElementById('nav-testlab'),
                 skills: document.getElementById('nav-skills'),
                 arsenal: document.getElementById('nav-arsenal'),
@@ -1884,9 +1931,241 @@
 
             if (view === 'reports') loadReportsList();
             if (view === 'benchmark') loadBenchmarkHistory();
+            if (view === 'engagements') engLoad();
             if (view === 'testlab') tlInit();
             if (view === 'skills') loadSkills();
             if (view === 'arsenal') { loadArsenal(); loadAuthoring(); }
+        }
+
+
+        // ===== ENGAGEMENTS =====
+        // Everything for one customer, and the boundary their work may not
+        // cross. The scope panel is the important half: it shows WHY a target
+        // is allowed or refused, and it never silently authorises a host that
+        // enumeration merely found.
+        let engCurrent = null;
+
+        async function engLoad() {
+            const d = await (await fetch('/api/engagements')).json();
+            const list = d.engagements || [];
+            document.getElementById('eng-meta').textContent =
+                `${list.length} engagement(s)`;
+            document.getElementById('eng-list').innerHTML = list.length ? list.map(e => `
+                <div class="flex items-center gap-3 flex-wrap font-mono py-1"
+                    style="font-size:0.62rem; border-bottom:1px solid #1e242c; cursor:pointer;"
+                    onclick="engOpen('${tlEsc(e.id)}')">
+                    <span style="color:var(--neon-cyan); min-width:170px;">${tlEsc(e.client_name)}</span>
+                    <span style="opacity:.75; min-width:150px;">${tlEsc(e.root_domain || '—')}</span>
+                    <span style="opacity:.55;">${e.n_targets} target(s) · ${e.n_sessions} session(s)</span>
+                    ${e.n_pending ? `<span style="color:var(--neon-yellow);">${e.n_pending} awaiting approval</span>` : ''}
+                    <span style="opacity:.4;">${tlEsc((e.authorised_by || 'no authorisation recorded'))}</span>
+                </div>`).join('')
+                : '<div class="font-mono" style="font-size:0.6rem; opacity:.6;">No engagements yet. Create one above — a run without a customer has no recorded authorisation.</div>';
+        }
+
+        async function engCreate() {
+            const client_name = document.getElementById('eng-name').value.trim();
+            if (!client_name) { alert('Client name is required'); return; }
+            const body = {
+                client_name,
+                root_domain: document.getElementById('eng-domain').value.trim(),
+                authorised_by: document.getElementById('eng-auth').value.trim()
+            };
+            const r = await fetch('/api/engagements', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(body)
+            });
+            if (!r.ok) { alert('Create failed: ' + (await r.text()).slice(0, 160)); return; }
+            const d = await r.json();
+            document.getElementById('eng-name').value = '';
+            document.getElementById('eng-domain').value = '';
+            await engLoad();
+            engRender(d);
+        }
+
+        async function engOpen(id) {
+            const r = await fetch(`/api/engagements/${encodeURIComponent(id)}`);
+            if (!r.ok) return;
+            engRender(await r.json());
+        }
+
+        function engRender(d) {
+            engCurrent = d.engagement.id;
+            const e = d.engagement;
+            const sev = d.findings_by_severity || {};
+            const sevOrder = ['critical', 'high', 'medium', 'low', 'info'];
+            const sevBar = sevOrder.filter(k => sev[k]).map(k =>
+                `<span class="font-mono" style="font-size:0.6rem;">${tlSev(k)} ${sev[k]}</span>`).join(' · ')
+                || '<span class="font-mono" style="font-size:0.6rem; opacity:.5;">no findings recorded</span>';
+
+            const scopeRow = (r) => {
+                const pending = (r.source || 'declared') !== 'declared' && !r.approved_at;
+                const colour = !Number(r.in_scope) ? 'var(--neon-red)'
+                             : pending ? 'var(--neon-yellow)' : 'var(--neon-green)';
+                const label = !Number(r.in_scope) ? 'EXCLUDED'
+                            : pending ? 'AWAITING APPROVAL' : 'in scope';
+                return `<div class="flex items-center gap-3 flex-wrap font-mono py-0.5" style="font-size:0.6rem;">
+                    <span style="color:${colour}; min-width:135px;">${tlEsc(label)}</span>
+                    <span style="min-width:190px;">${tlEsc(r.pattern)}</span>
+                    <span style="opacity:.5; min-width:70px;">${tlEsc(r.kind)}</span>
+                    <span style="opacity:.5;">${tlEsc(r.source)}</span>
+                    ${pending ? `<button onclick="engApprove('${tlEsc(r.pattern)}')"
+                        class="font-pixel px-2 py-0.5 rounded border" style="font-size:0.45rem;">APPROVE</button>` : ''}
+                </div>`;
+            };
+
+            document.getElementById('eng-detail').innerHTML = `
+                <div class="panel rounded p-4">
+                    <div class="flex items-baseline justify-between flex-wrap gap-2">
+                        <h3 class="font-pixel" style="font-size:0.66rem; color:var(--neon-cyan);">${tlEsc(e.client_name)}</h3>
+                        <span class="font-mono" style="font-size:0.58rem; opacity:.6;">${tlEsc(e.id)}</span>
+                    </div>
+                    <div class="font-mono mt-1" style="font-size:0.6rem; opacity:.75;">
+                        ${tlEsc(e.root_domain || 'no root domain')} ·
+                        authorised by ${tlEsc(e.authorised_by || '— NOT RECORDED —')}
+                        ${e.authorised_from || e.authorised_until
+                            ? ` · window ${tlEsc(e.authorised_from || '?')} → ${tlEsc(e.authorised_until || '?')}`
+                            : ' · <span style="color:var(--neon-yellow);">no authorisation window recorded</span>'}
+                    </div>
+                    <div class="mt-2 flex gap-3 flex-wrap">${sevBar}</div>
+                    <div class="font-mono mt-1" style="font-size:0.58rem; opacity:.6;">
+                        ${d.counts.targets} target(s) · ${d.counts.sessions} agent session(s) ·
+                        ${d.counts.v2_runs} deterministic run(s)
+                    </div>
+                </div>
+
+                <div class="panel rounded p-4">
+                    <h3 class="font-pixel" style="font-size:0.62rem;">SCOPE &mdash; THE BOUNDARY</h3>
+                    <div class="mt-2">${(d.scope || []).map(scopeRow).join('') ||
+                        '<div class="font-mono" style="font-size:0.6rem; color:var(--neon-yellow);">No scope rules — this engagement authorises nothing.</div>'}</div>
+                    <div class="flex gap-2 mt-3 flex-wrap items-center">
+                        <input id="eng-scope-pattern" class="input-field font-mono px-2 py-1 rounded"
+                            style="font-size:0.6rem; width:200px;" placeholder="acme.com or 10.0.0.0/24">
+                        <select id="eng-scope-kind" class="input-field font-mono px-2 py-1 rounded" style="font-size:0.6rem;">
+                            <option value="domain">domain (+subdomains)</option>
+                            <option value="host">host (exact)</option>
+                            <option value="cidr">cidr</option>
+                            <option value="ip">ip</option>
+                            <option value="url">url prefix</option>
+                        </select>
+                        <label class="font-mono flex items-center gap-1" style="font-size:0.6rem;">
+                            <input type="checkbox" id="eng-scope-exclude" style="width:13px;height:13px;"> exclude
+                        </label>
+                        <button onclick="engAddScope()" class="font-pixel px-3 py-1 rounded border"
+                            style="font-size:0.55rem;">ADD RULE</button>
+                    </div>
+                    <div class="flex gap-2 mt-3 flex-wrap items-center"
+                        style="border-top:1px solid #1e242c; padding-top:10px;">
+                        <input id="eng-check" class="input-field font-mono px-2 py-1 rounded"
+                            style="font-size:0.6rem; width:250px;" placeholder="test a target against this scope"
+                            onkeydown="if(event.key==='Enter')engCheck()">
+                        <button onclick="engCheck()" class="font-pixel px-3 py-1 rounded border"
+                            style="font-size:0.55rem;">CHECK</button>
+                        <span id="eng-check-out" class="font-mono" style="font-size:0.6rem;"></span>
+                    </div>
+                </div>
+
+                <div class="panel rounded p-4">
+                    <h3 class="font-pixel" style="font-size:0.62rem;">TARGETS</h3>
+                    <div class="mt-2">${(d.targets || []).map(t => `
+                        <div class="flex items-center gap-3 flex-wrap font-mono py-0.5" style="font-size:0.6rem;">
+                            <span style="color:var(--neon-cyan); min-width:230px;">${tlEsc(t.base_url)}</span>
+                            <span style="opacity:.6;">${tlEsc(t.title || '')}</span>
+                            <span style="opacity:.5;">auth: ${tlEsc(t.auth_state || 'none')}</span>
+                            <button onclick="engToTestLab('${tlEsc(t.base_url)}')"
+                                class="font-pixel px-2 py-0.5 rounded border" style="font-size:0.45rem;">TEST LAB &rarr;</button>
+                        </div>`).join('') ||
+                        '<div class="font-mono" style="font-size:0.6rem; opacity:.6;">No targets yet.</div>'}</div>
+                    <div class="flex gap-2 mt-3 flex-wrap items-center">
+                        <input id="eng-target-url" class="input-field font-mono px-2 py-1 rounded"
+                            style="font-size:0.6rem; width:250px;" placeholder="https://app.acme.com">
+                        <input id="eng-target-title" class="input-field font-mono px-2 py-1 rounded"
+                            style="font-size:0.6rem; width:170px;" placeholder="name (optional)">
+                        <button onclick="engAddTarget()" class="font-pixel px-3 py-1 rounded border"
+                            style="font-size:0.55rem;">ADD TARGET</button>
+                    </div>
+                    <div class="font-mono mt-2" style="font-size:0.55rem; opacity:.55;">
+                        A target outside this engagement's scope is refused here, not merely flagged.
+                    </div>
+                </div>
+
+                <div class="panel rounded p-4">
+                    <h3 class="font-pixel" style="font-size:0.62rem;">WORK RECORDED FOR THIS CUSTOMER</h3>
+                    <div class="mt-2 font-mono" style="font-size:0.6rem;">
+                        ${(d.sessions || []).slice(0, 12).map(x => `
+                            <div class="py-0.5" style="opacity:.8;">
+                                <span style="color:var(--neon-cyan);">${tlEsc(x.id.slice(0, 8))}</span>
+                                <span style="opacity:.7;"> agent · ${tlEsc(x.target_url)} · ${tlEsc(x.status)}</span>
+                            </div>`).join('')}
+                        ${(d.v2_runs || []).slice(0, 12).map(x => `
+                            <div class="py-0.5" style="opacity:.8;">
+                                <span style="color:var(--neon-green);">${tlEsc(x.id.slice(0, 8))}</span>
+                                <span style="opacity:.7;"> deterministic · ${tlEsc(x.test_case_id)}</span>
+                            </div>`).join('')}
+                        ${!(d.sessions || []).length && !(d.v2_runs || []).length
+                            ? '<span style="opacity:.6;">Nothing run yet under this engagement.</span>' : ''}
+                    </div>
+                </div>`;
+            document.getElementById('eng-detail').classList.remove('hidden');
+        }
+
+        async function engAddScope() {
+            const pattern = document.getElementById('eng-scope-pattern').value.trim();
+            if (!pattern) return;
+            const body = {
+                pattern,
+                kind: document.getElementById('eng-scope-kind').value,
+                in_scope: !document.getElementById('eng-scope-exclude').checked
+            };
+            const r = await fetch(`/api/engagements/${engCurrent}/scope`, {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(body)
+            });
+            if (r.ok) { engRender(await r.json()); engLoad(); }
+        }
+
+        async function engApprove(pattern) {
+            const r = await fetch(`/api/engagements/${engCurrent}/scope/approve`, {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({pattern})
+            });
+            if (r.ok) { engRender(await r.json()); engLoad(); }
+        }
+
+        async function engCheck() {
+            const target = document.getElementById('eng-check').value.trim();
+            const out = document.getElementById('eng-check-out');
+            if (!target) return;
+            const d = await (await fetch(`/api/engagements/${engCurrent}/scope/check`, {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({target})
+            })).json();
+            out.textContent = (d.allowed ? 'ALLOWED — ' : 'REFUSED — ') + d.reason;
+            out.style.color = d.allowed ? 'var(--neon-green)' : 'var(--neon-red)';
+        }
+
+        async function engAddTarget() {
+            const base_url = document.getElementById('eng-target-url').value.trim();
+            if (!base_url) return;
+            const r = await fetch(`/api/engagements/${engCurrent}/targets`, {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({base_url, title: document.getElementById('eng-target-title').value.trim()})
+            });
+            if (!r.ok) {
+                const msg = (await r.json().catch(() => ({}))).detail || 'failed';
+                alert('Target refused: ' + msg);
+                return;
+            }
+            engRender(await r.json());
+            engLoad();   // else the customer list keeps showing a stale count
+        }
+
+        function engToTestLab(url) {
+            switchView('testlab');
+            tlInit().then(() => {
+                document.getElementById('tl-target').value = url;
+                tlPlan();
+            });
         }
 
 
