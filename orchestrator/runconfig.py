@@ -11,6 +11,7 @@ or full custom control over the automation *flow*:
   - nettacker_scenario  which Nettacker run mode               (ERLIK_NETTACKER_SCENARIO)
   - nettacker_findings  persist Nettacker findings             (ERLIK_NETTACKER_FINDINGS)
   - playbooks           exploit playbooks: ""|auto|<profile>  (ERLIK_PLAYBOOKS)
+  - max_playbooks       how many the router may inject       (ERLIK_MAX_PLAYBOOKS)
 
 A session may carry a `run_config` JSON object. Each boolean flag is TRI-STATE:
 True/False forces it; null/absent falls back to the process env default. This
@@ -136,7 +137,7 @@ def resolve(run_config=None) -> dict:
 
     # Explicit per-key values in the session config override the preset.
     for k in ("cve_enrich", "skills", "nettacker", "nettacker_findings",
-              "nettacker_scenario", "playbooks", "poc_verify", "primitives",
+              "nettacker_scenario", "playbooks", "max_playbooks", "poc_verify", "primitives",
               "target_memory", "techniques", "ai_review", "review_model",
               "skills_exclude", "skills_pin", "skills_max_chars",
               "safe_mode", "safe_mode_ack", "skills_max_files"):
@@ -148,7 +149,7 @@ def resolve(run_config=None) -> dict:
     # recognise as intended-but-wrong rather than dropping them without a word.
     warnings: list[str] = []
     _known = {"cve_enrich", "skills", "nettacker", "nettacker_findings",
-              "nettacker_scenario", "playbooks", "poc_verify", "primitives",
+              "nettacker_scenario", "playbooks", "max_playbooks", "poc_verify", "primitives",
               "target_memory", "techniques", "ai_review", "review_model",
               "skills_exclude", "skills_pin", "skills_max_chars",
               "safe_mode", "safe_mode_ack", "skills_max_files", "preset"}
@@ -174,6 +175,13 @@ def resolve(run_config=None) -> dict:
     playbooks = base.get("playbooks")
     if playbooks is None:
         playbooks = os.environ.get("ERLIK_PLAYBOOKS", "") or None
+    # How many playbooks the router may inject. Was env-only and read once at
+    # import, so two runs labelled the same arm could differ in treatment with
+    # nothing in the record showing it.
+    max_playbooks = base.get("max_playbooks")
+    if max_playbooks is None:
+        max_playbooks = os.environ.get("ERLIK_MAX_PLAYBOOKS") or None
+    max_playbooks = int(max_playbooks) if max_playbooks not in (None, "") else None
 
     # Budget: clamped, not trusted. 0 does NOT mean "off" — the selector takes
     # the first file unconditionally — so a 0 here would be a knob whose label
@@ -263,6 +271,7 @@ def resolve(run_config=None) -> dict:
         "review_model": review_model,
         "nettacker_scenario": scenario,
         "playbooks": playbooks,
+        "max_playbooks": max_playbooks,
     }
 
 

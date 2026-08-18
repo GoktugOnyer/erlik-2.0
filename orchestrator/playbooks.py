@@ -28,6 +28,7 @@ Juice Shop's exact endpoints live there now, selected explicitly with
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 
 CATALOG = Path(__file__).resolve().parent.parent / "playbook_catalog"
@@ -92,18 +93,39 @@ Confirms when: the payload appears unescaped in HTML context on retrieval. A
 reflection in a JSON response is not stored XSS.""",
 }
 
-# Mission phrases -> playbook key. Deliberately narrow: a playbook is only worth
-# its prompt cost when the mission actually names the class.
+# Mission phrases -> playbook key, each with a SPECIFICITY weight:
+#   2  names the class unambiguously — the operator asked for this
+#   1  suggestive but generic — "redirect" also occurs in `redirect_uri`
+#
+# Ranking used to be `max(len(phrase))`, and length is a proxy for nothing. On a
+# mission reading "cross-site scripting, SSRF, open redirect" it scored
+# 'cross-site scripting' 20, 'open redirect' 13, 'ssrf' 4 — so with a cap of 2
+# the SSRF playbook was DROPPED even though the mission named it outright, and
+# nothing said so. A precise four-character acronym is more specific evidence
+# than a long generic phrase, not less.
 _ROUTE = {
-    "ssrf": ("ssrf", "server-side request forgery", "request forgery"),
-    "open_redirect": ("open redirect", "redirect"),
-    "file_upload": ("file upload", "upload", "unrestricted file"),
-    "xxe": ("xxe", "xml external", "external entity"),
-    "prototype_pollution": ("prototype pollution", "prototype", "__proto__"),
-    "stored_xss": ("stored xss", "xss", "cross-site scripting"),
+    "ssrf": (("ssrf", 2), ("server-side request forgery", 2), ("request forgery", 1)),
+    "open_redirect": (("open redirect", 2), ("open-redirect", 2), ("redirect", 1)),
+    "file_upload": (("unrestricted file upload", 2), ("file upload", 2), ("upload", 1)),
+    "xxe": (("xxe", 2), ("xml external entity", 2), ("external entity", 1)),
+    "prototype_pollution": (("prototype pollution", 2), ("__proto__", 2),
+                            ("prototype", 1)),
+    "stored_xss": (("stored xss", 2), ("cross-site scripting", 2), ("xss", 1)),
 }
 
-MAX_PLAYBOOKS = int(os.environ.get("ERLIK_MAX_PLAYBOOKS", "2"))
+# 3, not 2. A mission naming three classes is ordinary, and a cap of 2 silently
+# discarded one of them. Three playbooks is ~1.9 KB — still a fifth of the 9 KB
+# block this replaced. Settable per run (run_config max_playbooks) so it can be
+# pinned in an experiment; the env var remains as a fallback default.
+MAX_PLAYBOOKS = int(os.environ.get("ERLIK_MAX_PLAYBOOKS", "3"))
+
+
+def _match_weight(phrase: str, mission: str) -> int:
+    """Whole-word match only. Substring matching let 'redirect' fire on
+    `redirect_uri` and 'upload' on `uploaded_at`, which is how a generic word
+    came to outrank an explicit class name."""
+    return (2 if re.search(r"(?<![a-z0-9_])" + re.escape(phrase) + r"(?![a-z0-9_])",
+                           mission) else 0)
 
 
 def available_profiles() -> list[str]:
@@ -125,18 +147,34 @@ def load_profile(name: str) -> dict:
         return {}
 
 
-def select_playbooks(mission: str, max_n: int = MAX_PLAYBOOKS) -> list[str]:
-    """Which classes the mission actually names, most specific first."""
+def route_playbooks(mission: str, max_n: int | None = None) -> tuple[list[str], list[str]]:
+    """(selected, dropped) — classes the mission names, most specific first.
+
+    Returns what the cap discarded as well as what it kept. The caller logs it:
+    a cap that silently drops a class the operator explicitly asked for is the
+    kind of thing that only surfaces under audit, which is exactly how the SSRF
+    drop went unnoticed through a whole experiment.
+    """
+    if max_n is None:
+        max_n = MAX_PLAYBOOKS
     m = (mission or "").lower()
     hits = []
-    for key, phrases in _ROUTE.items():
-        if any(ph in m for ph in phrases):
-            hits.append((max(len(ph) for ph in phrases if ph in m), key))
-    return [k for _, k in sorted(hits, reverse=True)][:max_n]
+    for order, (key, phrases) in enumerate(_ROUTE.items()):
+        best = max((w for ph, w in phrases if _match_weight(ph, m)), default=0)
+        if best:
+            # -order keeps ties in declaration order under a reverse sort, so
+            # selection is deterministic rather than dict-hash dependent.
+            hits.append((best, -order, key))
+    ranked = [k for _, _, k in sorted(hits, reverse=True)]
+    return ranked[:max_n], ranked[max_n:]
+
+
+def select_playbooks(mission: str, max_n: int | None = None) -> list[str]:
+    return route_playbooks(mission, max_n)[0]
 
 
 def get_playbook_context(target_url: str, mode: str | None = None,
-                         mission: str = "") -> str:
+                         mission: str = "", max_n: int | None = None) -> str:
     """The playbook block to inject.
 
     mode:
@@ -153,7 +191,10 @@ def get_playbook_context(target_url: str, mode: str | None = None,
         return ""
 
     profile = {} if effective == "auto" else load_profile(effective)
-    keys = select_playbooks(mission)
+    keys, dropped = route_playbooks(mission, max_n)
+    if dropped:
+        print(f"[playbooks] cap dropped {dropped} (max_playbooks="
+              f"{MAX_PLAYBOOKS if max_n is None else max_n})", flush=True)
     if not keys:
         # The mission names no class this module covers. Injecting the first two
         # in dict order — which is what this did — dresses up alphabetical
@@ -162,7 +203,7 @@ def get_playbook_context(target_url: str, mode: str | None = None,
         # operator chose it for this target, so honour it.
         if not profile:
             return ""
-        keys = list(profile)[:MAX_PLAYBOOKS]
+        keys = list(profile)[:(MAX_PLAYBOOKS if max_n is None else max_n)]
     parts = []
     for k in keys:
         body = profile.get(k) or GENERIC.get(k)

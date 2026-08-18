@@ -201,3 +201,69 @@ class TestNoFabricatedRelevance:
         """An operator who typed `juiceshop` chose it for this target."""
         out = P.get_playbook_context("http://t", mode="juiceshop", mission="general assessment")
         assert out, "an explicitly chosen profile injected nothing"
+
+
+class TestRoutingSpecificity:
+    """Ranking was `max(len(phrase))`, and length is a proxy for nothing.
+
+    MEASURED CONSEQUENCE: in the none-vs-auto experiment the mission read
+    "...injection, cross-site scripting, SSRF, open redirect...". Lengths were
+    'cross-site scripting' 20, 'open redirect' 13, 'ssrf' 4, and the cap was 2 —
+    so the SSRF playbook was dropped although the mission named it outright, and
+    nothing in the log or the run record said so. All four `auto` runs were
+    scored as testing guidance that was never injected.
+    """
+
+    MISSION = ("Assess the OWASP Juice Shop instance for injection, cross-site "
+               "scripting, SSRF, open redirect, broken access control and "
+               "authentication flaws.")
+
+    def test_an_explicitly_named_class_is_not_dropped_for_a_longer_phrase(self):
+        sel, dropped = P.route_playbooks(self.MISSION)
+        assert "ssrf" in sel, f"SSRF named in the mission but dropped: {dropped}"
+
+    def test_short_precise_acronym_outranks_a_long_generic_phrase(self):
+        sel = P.select_playbooks("test for ssrf", max_n=1)
+        assert sel == ["ssrf"]
+
+    def test_generic_word_inside_an_identifier_does_not_route(self):
+        """'redirect' as a substring matched `redirect_uri`, and 'upload'
+        matched `uploaded_at` — a generic word then outranked a named class."""
+        assert P.route_playbooks("inspect the redirect_uri parameter")[0] == []
+        assert P.route_playbooks("check the uploaded_at column")[0] == []
+
+    def test_a_deliberate_mention_still_routes(self):
+        """Guard on the guard: the boundary fix must not silence real requests."""
+        assert P.route_playbooks("test for open redirect")[0] == ["open_redirect"]
+
+    def test_selection_is_deterministic_across_calls(self):
+        """Ties broke on dict iteration before; the same mission must not route
+        differently between two runs of the same arm."""
+        runs = {tuple(P.select_playbooks(self.MISSION)) for _ in range(50)}
+        assert len(runs) == 1, runs
+
+    def test_the_cap_reports_what_it_discarded(self):
+        """A silent cap is how the SSRF drop survived a whole experiment."""
+        sel, dropped = P.route_playbooks(self.MISSION, max_n=1)
+        assert len(sel) == 1
+        assert dropped, "cap discarded classes but reported none"
+        assert set(sel) & set(dropped) == set()
+
+    def test_default_cap_covers_a_three_class_mission(self):
+        sel, dropped = P.route_playbooks(self.MISSION)
+        assert dropped == [], f"ordinary 3-class mission still truncated: {dropped}"
+
+
+class TestCapIsPinnable:
+    """ERLIK_MAX_PLAYBOOKS was read once at module import and was not a
+    run_config key, so two runs of the same arm in two server processes could
+    receive different treatments with nothing in the record showing it."""
+
+    def test_max_playbooks_is_a_run_config_key(self):
+        assert runconfig.resolve({"preset": "custom", "max_playbooks": 1})["max_playbooks"] == 1
+
+    def test_the_cap_actually_changes_what_is_injected(self):
+        m = "test for ssrf, cross-site scripting and open redirect"
+        one = P.get_playbook_context("http://t", mode="auto", mission=m, max_n=1)
+        three = P.get_playbook_context("http://t", mode="auto", mission=m, max_n=3)
+        assert 0 < len(one) < len(three)

@@ -3643,11 +3643,15 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
         # dose-dependently, so both halves of that were wrong.
         _pb_mission = " ".join(x for x in (system_prompt or "", vuln_category or "") if x)
         _pb_ctx = get_playbook_context(target_url, mode=runcfg["playbooks"],
-                                       mission=_pb_mission)
+                                       mission=_pb_mission,
+                                       max_n=runcfg.get("max_playbooks"))
         if _pb_ctx:
             combined_system += f"\n\n{_pb_ctx}"
+            from orchestrator.playbooks import route_playbooks as _route
+            _sel, _drop = _route(_pb_mission, runcfg.get("max_playbooks"))
             print(f"[playbooks {session_id[:8]}] injected {len(_pb_ctx)} chars "
-                  f"mode={runcfg['playbooks']} (target={target_url})", flush=True)
+                  f"mode={runcfg['playbooks']} classes={_sel} dropped={_drop} "
+                  f"(target={target_url})", flush=True)
             await manager.broadcast(session_id, {
                 "type": "log", "phase": "recon",
                 "message": f"PLAYBOOKS: Injected {len(_pb_ctx)} chars of exploit playbooks",
