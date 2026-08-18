@@ -808,3 +808,72 @@ class TestProfileIsNotADump:
         out = ('HTTP/1.1 200 OK\r\n\r\n[{"email":"a@b.c","role":"x"},'
                '{"email":"d@e.f","role":"y"}]')
         assert self._fire(out, "https://t/api/users")
+
+
+class TestToolHedgesAreAuthoritative:
+    """Four rules ignored the tool's OWN statement that it had not found
+    anything. Each is the same shape as the commix "does not seem to be
+    injectable" bug: erlik heard yes where the tool said no."""
+
+    def test_sqlmap_false_positive_warning_is_honoured(self):
+        out = ("sqlmap identified the following injection point:\nParameter: q\n"
+               "[!] the back-end DBMS is not confirmed, this might be a false positive")
+        assert detect("sqlmap", out, "sqlmap -u http://t/?q=1") == []
+
+    def test_sqlmap_confirmed_injection_still_fires(self):
+        out = ("sqlmap identified the following injection point:\nParameter: q (GET)\n"
+               "    Type: boolean-based blind\nback-end DBMS: SQLite\n")
+        assert detect("sqlmap", out, "sqlmap -u http://t/?q=1")
+
+    def test_dalfox_encoded_reflection_is_not_xss(self):
+        """The defence WORKING, reported as XSS: the line says the payload is
+        inert, but it contains both 'reflected' and 'xss'."""
+        out = ("[I] Reflected parameter q is HTML-entity encoded in the response, "
+               "so the injected payload is inert and no XSS is possible here")
+        assert detect("dalfox", out, "dalfox url http://t/") == []
+
+    def test_marker_inside_the_target_url_is_not_a_result(self):
+        """`/orders/confirmed` supplied the word 'confirmed' from _XSS_MARKERS."""
+        out = ("[~] Testing parameter ref of https://shop.test/orders/confirmed?ref=A1\n"
+               "[!] Reflections found: 0\n[-] No vectors found.")
+        assert detect("xsstrike", out,
+                      "xsstrike -u https://shop.test/orders/confirmed?ref=A1") == []
+
+    def test_advisory_page_prose_is_not_xss(self):
+        """A trust page saying 'not vulnerable to CVE-...' is not a finding."""
+        out = ("[D] response snippet: <p>Our checkout service is not vulnerable to "
+               "CVE-2024-1086; see the advisory below.</p>")
+        assert detect("dalfox", out, "dalfox url http://t/") == []
+
+    def test_real_xss_poc_still_fires(self):
+        assert detect("dalfox", "[POC][R] http://t/?q=<script>alert(1)</script> triggered",
+                      "dalfox url http://t/")
+
+    def test_jwt_rejected_variants_are_not_a_bypass(self):
+        """Two UNCORRELATED substring checks over the whole output: 'alg:none'
+        supplied the 'none' and an unrelated line supplied the 'success', so a
+        correct RS256 verifier was reported as CRITICAL broken authentication."""
+        out = ("[*] Running 'alg:none' variant checks...\n"
+               "[-] alg:none    - server returned 401, token rejected\n"
+               "[*] Scan complete - success")
+        assert detect("jwt_tool", out, "jwt_tool -t http://t/") == []
+
+    def test_jwt_accepted_none_still_fires(self):
+        out = "[+] alg:none  - server ACCEPTED the unsigned token (200 OK)"
+        assert detect("jwt_tool", out, "jwt_tool -t http://t/")
+
+    def test_zap_low_confidence_alert_is_skipped(self):
+        """ZAP publishes its own confidence and erlik ignored it, promoting a
+        heuristic ZAP itself distrusts to a HIGH finding."""
+        import json as _j
+        out = _j.dumps({"alerts": [{"risk": "High", "confidence": "Low",
+                                    "name": "SQL Injection", "url": "http://t/",
+                                    "alert": "SQL Injection"}]})
+        assert detect("zap-cli", out, "zap-cli alerts http://t/") == []
+
+    def test_zap_high_confidence_alert_still_fires(self):
+        import json as _j
+        out = _j.dumps({"alerts": [{"risk": "High", "confidence": "High",
+                                    "name": "SQL Injection", "url": "http://t/",
+                                    "alert": "SQL Injection"}]})
+        assert detect("zap-cli", out, "zap-cli alerts http://t/")

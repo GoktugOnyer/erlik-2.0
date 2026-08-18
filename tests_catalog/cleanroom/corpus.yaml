@@ -1272,10 +1272,7 @@ fixtures:
     \ not seem to be injectable\n[10:14:23] [CRITICAL] all tested parameters do not appear to be injectable.\
     \ Try to increase values for '--level'/'--risk' options if you wish to perform more tests.\n\n[*]\
     \ ending @ 10:14:23 /2026-08-15/"
-  expected:
-  - vuln_type: SQL Injection
-    severity: high
-    detector: sqlmap:_detect_sqlmap
+  expected: []
   rationale: 'The catalog page renders a ''no results / did you mean'' block whose wording varies with
     the query, so page content is not stable (a normal, correct rendering choice). sqlmap''s own sequence
     matcher briefly flags ''q'' and then RETRACTS it in writing: it prints the literal words ''false positive
@@ -1296,10 +1293,7 @@ fixtures:
     \ range=30d' AND (SELECT 5678 FROM (SELECT(SLEEP(5)))abc)-- wXyZ\n---\n[10:44:57] [INFO] the back-end\
     \ DBMS is MySQL\nback-end DBMS: MySQL >= 5.0.12\n[10:44:57] [WARNING] HTTP error codes detected during\
     \ run: 500 (Internal Server Error) - 4 times"
-  expected:
-  - vuln_type: SQL Injection
-    severity: high
-    detector: sqlmap:_detect_sqlmap
+  expected: []
   rationale: 'The /api/report endpoint aggregates over a date range and its latency is genuinely variable
     (2-9s on cache misses, plus occasional 500s under load). A time-based-blind oracle IS a latency comparison,
     so a slow analytics endpoint reproduces the ''the sleep worked'' signal with no injection present.
@@ -1408,10 +1402,7 @@ fixtures:
     and no XSS is possible here
 
     [*] Finish Scan] Total 0 issues found'
-  expected:
-  - vuln_type: Cross-Site Scripting (XSS)
-    severity: medium
-    detector: dalfox:_detect_xss_tools
+  expected: []
   rationale: The app reflects the search term but escapes it with the template engine's default HTML-entity
     encoding -- i.e. the defence is working, and dalfox says so and reports 0 issues. The secondary trigger
     is `reflected AND xss` on one line, and any sentence explaining WHY there is no XSS necessarily contains
@@ -1423,10 +1414,7 @@ fixtures:
   command: xsstrike -u "https://shop.cleanroom.test/orders/confirmed?ref=A19422" --skip-dom
   response: "\tXSStrike v3.1.5\n\n[~] Checking for DOM vulnerabilities\n[~] Testing parameter ref of https://shop.cleanroom.test/orders/confirmed?ref=A19422\n\
     [+] WAF Status: Offline\n[!] Reflections found: 0\n[-] No vectors found."
-  expected:
-  - vuln_type: Cross-Site Scripting (XSS)
-    severity: medium
-    detector: xsstrike:_detect_xss_tools
+  expected: []
   rationale: An order-confirmation route -- every e-commerce app has one. _XSS_MARKERS is a plain substring
     list, so the literal word 'confirmed' in the app's own URL path is indistinguishable from a verdict.
     XSStrike reports zero reflections and no vectors. Note the finding's evidence is the '[~] Testing
@@ -1446,10 +1434,7 @@ fixtures:
     the advisory below.</p>
 
     [*] Finish Scan] Total 0 issues found'
-  expected:
-  - vuln_type: Cross-Site Scripting (XSS)
-    severity: medium
-    detector: dalfox:_detect_xss_tools
+  expected: []
   rationale: A public trust/advisory page whose body legitimately contains the word 'vulnerable' as prose
     -- a page type that exists on essentially every mature product. dalfox echoes the response snippet
     in debug mode; the substring marker cannot tell page copy from a verdict, and the sentence it matched
@@ -1502,10 +1487,7 @@ fixtures:
     [-] x5u spoof   - server returned 401, token rejected
 
     [*] Scan complete: 0 of 6 exploit attempts were successful.'
-  expected:
-  - vuln_type: Broken Authentication
-    severity: critical
-    detector: jwt_tool:_detect_jwt_tool
+  expected: []
   rationale: 'A correctly implemented RS256 verifier that rejects every algorithm-confusion and unsigned-token
     variant -- the ideal outcome. The detector ANDs two bare substrings across the WHOLE output rather
     than one line: ''none'' is supplied by the attack''s own name (present in any report that merely tests
@@ -1774,9 +1756,6 @@ fixtures:
   - vuln_type: Absence of Anti-CSRF Tokens
     severity: medium
     detector: zap-cli:_detect_zap_cli
-  - vuln_type: Application Error Disclosure
-    severity: medium
-    detector: zap-cli:_detect_zap_cli
   - vuln_type: Content Security Policy (CSP) Header Not Set
     severity: medium
     detector: zap-cli:_detect_zap_cli
@@ -1796,10 +1775,7 @@ fixtures:
     ,\n     \"param\": \"range\", \"inputVector\": \"urlparam\", \"attack\": \"range=30d' AND 1=1 -- \"\
     ,\n     \"evidence\": \"range=30d' AND 1=1 -- \",\n     \"description\": \"SQL injection may be possible.\
     \ The page results were different when the original parameter value was modified.\"}\n  ]\n}"
-  expected:
-  - vuln_type: SQL Injection - SQLite
-    severity: high
-    detector: zap-cli:_detect_zap_cli
+  expected: []
   rationale: The same jittery analytics endpoint as the sqlmap time-based fixture, seen by a second tool.
     ZAP itself marks the alert confidence 'Low' -- its own 'I could not reproduce this' flag -- and hedges
     in the description ('may be possible'). _detect_zap_cli reads only 'risk' and never looks at 'confidence',

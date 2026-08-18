@@ -62,7 +62,19 @@ def _url_from_dash_u(command: str) -> str:
 
 
 # ── sqlmap ────────────────────────────────────────────────────────────────
+# sqlmap hedges its own results in plain text. Ignoring those lines meant
+# erlik reported HIGH SQL injection on a run where sqlmap itself said the
+# finding was probably a false positive.
+_SQLMAP_HEDGES = (
+    "false positive", "false-positive", "unable to exploit",
+    "might be a false positive", "does not seem to be injectable",
+    "all tested parameters do not appear to be injectable",
+)
+
+
 def _detect_sqlmap(ctx: DetectContext) -> list[Finding]:
+    if any(h in ctx.output_lower for h in _SQLMAP_HEDGES):
+        return []
     sqli_confirmed = False
     dbms = ""
     payload_lines: list[str] = []
@@ -124,9 +136,25 @@ def _detect_nuclei(ctx: DetectContext) -> list[Finding]:
 _XSS_MARKERS = ("[poc]", "[vuln]", "triggered", "poc:", "vulnerable", "confirmed")
 
 
+# _XSS_MARKERS is a plain substring list, so it matched the word "confirmed"
+# inside the URL `/orders/confirmed`, the word "vulnerable" inside a security
+# advisory page's own prose, and the pair reflected+xss inside a dalfox line
+# stating that the reflection is encoded and NO XSS is possible.
+_XSS_NEGATIONS = (
+    "no xss", "not vulnerable", "no vectors", "reflections found: 0",
+    "is inert", "no injection", "not exploitable", "html-entity encoded",
+    "is encoded", "0 vulnerable",
+)
+
+
 def _detect_xss_tools(ctx: DetectContext) -> list[Finding]:
     for line in ctx.output.split("\n"):
         line_lower = line.lower()
+        if any(neg in line_lower for neg in _XSS_NEGATIONS):
+            continue
+        # A marker inside the TARGET URL is the app's own routing, not a result.
+        for tok in re.findall(r"https?://\S+", line):
+            line_lower = line_lower.replace(tok.lower(), " ")
         if (any(tok in line_lower for tok in _XSS_MARKERS) or
                 ("reflected" in line_lower and "xss" in line_lower)):
             url_match = (re.search(r'-u\s+"?([^"\s]+)', ctx.command)
@@ -592,12 +620,25 @@ def _detect_jwt_tool(ctx: DetectContext) -> list[Finding]:
             "url": "", "parameter": "",
             "evidence": f"JWT weak secret cracked: {secret_match.group(1) if secret_match else 'key found'}",
         })
-    if "none" in ol and ("accepted" in ol or "bypass" in ol or "success" in ol):
-        findings.append({
-            "vuln_type": "Broken Authentication", "severity": "critical",
-            "url": "", "parameter": "",
-            "evidence": "JWT none algorithm attack successful — server accepts unsigned tokens",
-        })
+    # These were two UNCORRELATED substring checks over the whole output, so a
+    # run where every variant was REJECTED still matched: "alg:none" supplied
+    # the "none", and an unrelated summary line supplied the "success". A
+    # correctly-implemented RS256 verifier was reported as CRITICAL broken
+    # authentication. Require both on the SAME line, and honour the rejections.
+    for line in ctx.output.split("\n"):
+        low = line.lower()
+        if "none" not in low:
+            continue
+        if any(neg in low for neg in ("rejected", "401", "403", "failed",
+                                      "not accepted", "[-]", "invalid")):
+            continue
+        if "accepted" in low or "bypass" in low or "success" in low:
+            findings.append({
+                "vuln_type": "Broken Authentication", "severity": "critical",
+                "url": "", "parameter": "",
+                "evidence": f"JWT none algorithm attack successful: {line.strip()[:200]}",
+            })
+            break
     return findings
 
 
@@ -678,6 +719,13 @@ def _detect_zap_cli(ctx: DetectContext) -> list[Finding]:
 
             # Only auto-report medium+ findings
             if severity not in ("high", "medium", "critical"):
+                continue
+
+            # ZAP publishes its OWN confidence and erlik ignored it, so an
+            # alert ZAP itself marked "Low" — its hedge for a heuristic it does
+            # not trust — was promoted to a HIGH erlik finding.
+            confidence = (alert.get("confidence") or "").strip().lower()
+            if confidence in ("low", "false positive"):
                 continue
 
             dedup_key = (name, url)

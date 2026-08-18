@@ -232,7 +232,13 @@ class TestCommittedCorpus:
             "curl:_curl_null_byte",         # only fires when the file is served
             "curl:_curl_missing_headers",   # clean app sends what its type needs
             "curl:_curl_server_header",     # clean app suppresses the version
+            # These four now honour the TOOL'S OWN verdict, and on a clean
+            # target every tool correctly reports nothing.
+            "sqlmap:_detect_sqlmap",        # sqlmap flags its own false positives
+            "jwt_tool:_detect_jwt_tool",    # every variant rejected
+            "dalfox:_detect_xss_tools",     # reflection encoded, dalfox says inert
+            "xsstrike:_detect_xss_tools",   # "No vectors found"
         }
         assert set(rep.unreachable) <= QUIET_ON_CLEAN, (
             "a rule went quiet that we did not expect to:\n" + C.format_report(rep))
-        assert len(rep.exercised) >= 22, C.format_report(rep)
+        assert len(rep.exercised) >= 16, C.format_report(rep)
