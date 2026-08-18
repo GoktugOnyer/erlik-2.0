@@ -184,6 +184,54 @@ Disclosure repeats.
 never scored 0; `none` did) and lower variance — but all of that sits inside
 the interval.
 
+## Class-restricted scoring — the sharper question
+
+Aggregate recall averages over 35 items, most of them classes no playbook
+targets. Restricting the denominator to the routed classes asks what the
+guidance was actually about. Rescore only, no new runs:
+`scripts/score_by_class.py`.
+
+Denominator: **6 items** — XSS ×4 (`/rest/products/search`, `/#/search`,
+`/#/track-result`, `/api/Users`), SSRF ×1 (`/profile/image/url`), Open
+Redirect ×1 (`/redirect`). One finding = 0.1667.
+
+| arm | n | restricted recall | runs that hit anything |
+|---|---|---|---|
+| `none` | 12 | 0.0000 | **0 / 12** |
+| `auto` | 12 | 0.0139 | 1 / 12 |
+| `playbook_only` | 4 | 0.0417 | 1 / 4 |
+
+`auto` vs `none`: p = 1.0000. Pooling any guidance vs none — 2/16 vs 0/12 —
+gives p = 0.4921. At these sample sizes guidance would need **≥5/12** hits
+against 0/12 to reach p<0.05.
+
+Across all 28 runs there were exactly **two** routed-class hits, both XSS at
+`/rest/products/search`. **SSRF and Open Redirect were never found by any arm**,
+including the eight `auto` runs that carried correctly-routed SSRF guidance and
+the four `playbook_only` runs that named `/profile/image/url` outright.
+
+### The denominator is reachable — this is a positive control, not a dead metric
+
+Across the whole database, **19 of 102** sessions with findings did hit one of
+these six items: XSS `/rest/products/search` ×14, `/#/track-result` ×2,
+`/api/Users` ×2, `/#/search` ×1, and SSRF `/profile/image/url` ×1. So erlik can
+reach them; this experimental configuration mostly does not (2/28 = 7% against
+a 22% hit-rate for the 7B overall).
+
+Every one of the 19 was `qwen2.5-coder:7b`. The 27B hit **0 of 15** — consistent
+with the earlier finding that it is 7× slower and no better.
+
+### What this actually says
+
+The bottleneck is not knowing what to do at the endpoint. It is **reaching the
+endpoint at all**. Generic playbooks describe technique; they do not help the
+agent navigate to `/profile/image/url` in the first place, and neither, in
+practice, did naming it — `playbook_only` states that exact path and still
+never produced an SSRF finding in four runs.
+
+That reframes the product question. Guidance content is not the lever worth
+tuning next; endpoint discovery is.
+
 ## Next
 
 1. Re-run `auto` with the routing fix, so the arm tests what the mission asks.
