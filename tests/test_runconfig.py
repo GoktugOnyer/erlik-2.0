@@ -51,7 +51,10 @@ def test_guided_injects_skills_and_playbook():
     assert r["skills"] is True
     assert r["cve_enrich"] is True
     assert r["primitives"] is True
-    assert r["playbooks"] == "juiceshop"   # real endpoints for the target
+    # "auto" = generic playbooks routed to the mission's vuln classes. It used
+    # to be "juiceshop" here — the default preset shipped one app's endpoints to
+    # every target. Juice Shop's endpoints are still selectable by name.
+    assert r["playbooks"] == "auto"
     assert r["nettacker"] is False         # no external scanner in guided
 
 
@@ -59,7 +62,7 @@ def test_explicit_toggle_overrides_preset():
     # Ticking a toggle (custom) overrides the preset's value.
     r = rc.resolve({"preset": "guided_ai", "skills": False})
     assert r["skills"] is False
-    assert r["playbooks"] == "juiceshop"   # untouched keys keep preset value
+    assert r["playbooks"] == "auto"        # untouched keys keep preset value
 
 
 def test_custom_preset_uses_env_fallback(monkeypatch):

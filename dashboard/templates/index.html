@@ -1576,7 +1576,8 @@
                     Reusable pentest knowledge — payloads, detection probes, exploitation steps. When the
                     <b style="color:#a05cff;">SKILLS</b> toggle is on, a router injects the 1&ndash;3 most relevant
                     sheets for your target's tech&nbsp;+&nbsp;<b>VULN CATEGORY</b> into the agent's prompt (this is
-                    generic technique knowledge, not target-specific endpoints &mdash; that's what the playbook adds).
+                    generic technique knowledge; exploit playbooks add class-specific attack &amp; confirmation
+                    steps, also target-agnostic unless you select a target profile).
                     Files live in <code style="color:#9ad;">skills_catalog/skills/</code>.
                 </p>
                 <div class="flex items-center gap-2 mt-3 flex-wrap">
@@ -1714,7 +1715,11 @@
                 <div class="mt-3" style="border-left:2px solid #ffb545; padding-left:8px;">
                     <div class="font-mono" style="font-size:0.57rem; color:#ffb545;">What was actually measured</div>
                     <div class="font-mono mt-1" style="font-size:0.55rem; opacity:.78; max-width:78ch;">
-                        Experiments varied <b>skills on/off</b> and <b>playbook on/off</b> only.
+                        Experiments varied <b>skills on/off</b> and <b>playbook on/off</b> only, and the
+                        playbook arm was the old Juice-Shop-specific block (all six, ~9&nbsp;KB,
+                        every run). Playbooks are now generic and routed to the mission's classes
+                        (~1.4&nbsp;KB), which is <b>unmeasured</b> &mdash; the numbers below describe
+                        what was replaced, not what now ships.
                         Injecting this material costs recall on both models tested:
                         <b>7B</b> 0.114&nbsp;&rarr;&nbsp;0.014, <b>27B</b> 0.086&nbsp;&rarr;&nbsp;0.014
                         (n&nbsp;=&nbsp;2 per cell). Precision falls with it (0.90&nbsp;&rarr;&nbsp;0.07 on the 7B),

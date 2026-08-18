@@ -3636,10 +3636,18 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
             from orchestrator.playbooks import get_playbook_context
         except ImportError:
             from playbooks import get_playbook_context
-        _pb_ctx = get_playbook_context(target_url, mode=runcfg["playbooks"])
+        # Route on what the run is actually FOR. The playbooks used to be
+        # injected wholesale — all six, ~9 KB, naming Juice Shop's exact
+        # endpoints — on every run of five of the six presets. On a client
+        # target those paths do not exist, and injected volume costs recall
+        # dose-dependently, so both halves of that were wrong.
+        _pb_mission = " ".join(x for x in (system_prompt or "", vuln_category or "") if x)
+        _pb_ctx = get_playbook_context(target_url, mode=runcfg["playbooks"],
+                                       mission=_pb_mission)
         if _pb_ctx:
             combined_system += f"\n\n{_pb_ctx}"
-            print(f"[playbooks {session_id[:8]}] injected {len(_pb_ctx)} chars (target={target_url})", flush=True)
+            print(f"[playbooks {session_id[:8]}] injected {len(_pb_ctx)} chars "
+                  f"mode={runcfg['playbooks']} (target={target_url})", flush=True)
             await manager.broadcast(session_id, {
                 "type": "log", "phase": "recon",
                 "message": f"PLAYBOOKS: Injected {len(_pb_ctx)} chars of exploit playbooks",
