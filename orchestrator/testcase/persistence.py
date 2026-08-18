@@ -48,6 +48,21 @@ async def save_run(result: RunResult, *, provider: str | None, model: str | None
                  f.url, f.parameter, f.evidence,
                  "v2_testcase", f"v2:{f.test_case_id}:{f.step}"),
             )
+        # Hand the results to the AI lane. Until now a deterministic run's
+        # findings went only to v2_findings, which main.py never reads — so
+        # every agent run started from a bare URL and rediscovered what a scan
+        # had already established.
+        try:
+            from orchestrator.handoff import bridge_run
+            _t = result.target if isinstance(result.target, dict) else {}
+            _url = _t.get("url") or _t.get("host") or ""
+            n = await bridge_run(db, run_id, _url, result.findings)
+            if n:
+                print(f"[handoff {run_id[:8]}] {n} deterministic result(s) "
+                      f"available to the agent", flush=True)
+        except Exception as e:  # noqa: BLE001 — a broken handoff must not fail a run
+            print(f"[handoff {run_id[:8]}] skipped: {e}", flush=True)
+
         await db.commit()
     finally:
         await db.close()

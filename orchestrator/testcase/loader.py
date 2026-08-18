@@ -11,7 +11,17 @@ CATALOG_ROOT = Path(__file__).resolve().parents[2] / "tests_catalog"
 def _yaml_files() -> list[Path]:
     if not CATALOG_ROOT.exists():
         return []
-    return sorted(CATALOG_ROOT.rglob("*.yaml")) + sorted(CATALOG_ROOT.rglob("*.yml"))
+    # Only directories that actually hold test cases. rglob over the whole
+    # catalogue root swept in tests_catalog/cleanroom/corpus.yaml — the
+    # false-positive fixture corpus, which is not a TestCase — and printed four
+    # pydantic validation errors on every `list` and every run. A loader that
+    # cries wolf on a file that was never meant for it trains the operator to
+    # ignore its errors, which is where a genuinely malformed case hides.
+    roots = [d for d in (CATALOG_ROOT / "wstg",) if d.exists()] or [CATALOG_ROOT]
+    files: list[Path] = []
+    for root in roots:
+        files += sorted(root.rglob("*.yaml")) + sorted(root.rglob("*.yml"))
+    return files
 
 
 def load_test_case(path: Path | str) -> TestCase:
