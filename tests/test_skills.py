@@ -275,3 +275,98 @@ def test_one_sheet_is_the_RIGHT_sheet_not_a_starved_one():
         assert S.select_skill_files(hint)[0].stem == expect
         starved = S.select_skill_files(hint, max_files=3, max_chars=2000)[0].stem
         assert starved != expect, "budget starvation no longer degrades choice"
+
+
+# --- dead sheets: a file in the corpus that no mission can reach -----------
+#
+# hunt-lfi.md (16 KB — filter-chain RCE, log poisoning, wrappers, RFI) sat in the
+# catalogue unreachable. The `path` class's tokens were
+# ("file-inclusion", "path-traversal", "file-upload"): the first two named NO
+# sheet in the corpus, so the only token that ever matched was the third —
+# borrowed from the `upload` class — and every LFI mission was answered with
+# hunt-file-upload.md:
+#
+#     select_skill_files("LFI")                  -> ['hunt-file-upload']
+#     select_skill_files("path traversal")       -> ['hunt-file-upload']
+#     select_skill_files("local file inclusion") -> ['hunt-file-upload']
+#     select_skill_files("directory traversal")  -> ['hunt-file-upload']
+#
+# Selective mis-routing, not a broken router: "SQL injection" and "SSRF" both
+# resolved correctly throughout. The two tests below pin the fix; the two after
+# them are the general guards, because the interesting failure is not this sheet
+# — it is that a sheet can be dead in the catalogue and nothing says so.
+
+@pytest.mark.parametrize("mission", [
+    "LFI",
+    "path traversal",
+    "local file inclusion",
+    "directory traversal",
+    "Read /etc/passwd via directory traversal on the download endpoint",
+])
+def test_lfi_missions_route_to_the_lfi_sheet(mission):
+    """At the DEFAULT file cap — the configuration that actually ships. A sheet
+    reachable only when an operator raises max_files is still dead in practice."""
+    picked = _rel(S.select_skill_files(mission))
+    assert picked, mission
+    assert picked[0].endswith("hunt-lfi.md"), (mission, picked)
+
+
+@pytest.mark.parametrize("mission", ["file upload", "unrestricted upload"])
+def test_the_upload_class_keeps_its_own_sheet(mission):
+    """Negative control for the fix: `path` no longer borrows `upload`'s token,
+    and `upload` must still answer with hunt-file-upload, not hunt-lfi."""
+    picked = _rel(S.select_skill_files(mission))
+    assert picked and picked[0].endswith("hunt-file-upload.md"), (mission, picked)
+
+
+def test_every_class_token_names_a_real_sheet():
+    """A class token that matches no filename is a dead pointer.
+
+    This is the defect in its checkable form. `_class_candidates` ranks on
+    (boost, path) and NOT on token order, so a token cannot sit in the tuple as
+    an aspiration: while "file-inclusion" and "path-traversal" named nothing,
+    the class silently resolved to whatever its one live token matched, and
+    looked like it worked. Vendoring a sheet under a name no token carries — or
+    renaming one — must fail here rather than quietly re-point a whole class.
+    """
+    catalog = S._catalog()
+
+    def matches(stem: str, tok: str) -> bool:      # mirrors _class_candidates
+        return stem == tok or stem.startswith(tok + "-") or ("-" + tok) in stem
+
+    dead = [(cls, tok) for cls, _rx, toks in S._CLASS_PATTERNS for tok in toks
+            if not any(matches(p.stem.lower(), tok) for p, _ in catalog)]
+    assert not dead, f"class tokens matching no sheet in the corpus: {dead}"
+
+
+def test_no_sheet_in_the_catalogue_is_unreachable(tmp_path, monkeypatch):
+    """Every vendored sheet must be selectable by the REAL selector.
+
+    Probe: ask each sheet's own subject — the same "<directory> <filename>" text
+    the router derives that sheet's tokens from — and require the sheet to come
+    back. Run at max_files=3 with the budget lifted, deliberately: the shipped
+    default is ONE sheet per run, so a file losing the single slot to a better
+    file on the same topic (ssti-quickstart to hunt-ssti) is ranking working,
+    not a dead sheet. What this catches is a file that no mission reaches at any
+    setting — which is how bughunter/offensive-osint.md, the 34 KB arsenal
+    itself, ranked 17 of 100 for its own subject behind all 16 of its
+    sub-modules, because ties fell to the alphabet and "-" sorts before ".".
+
+    The authored root is relocated to an empty tmp dir so this asserts a fact
+    about the VENDORED corpus and cannot be perturbed by operator-local sheets.
+    """
+    import orchestrator.skills_authoring as A
+    monkeypatch.setattr(A, "ROOT", tmp_path)
+
+    unreachable = []
+    for path, _toks in S._catalog():
+        # "<topic>-index.md" is navigation the router excludes by design.
+        if path.stem.lower().endswith("-index"):
+            continue
+        rel = S.rel_of(path)
+        subject = f"{rel.parent.name or 'local'} {path.stem}".replace("-", " ").replace("_", " ")
+        if path not in S.select_skill_files(subject, max_files=3, max_chars=10 ** 9):
+            unreachable.append(str(rel))
+    assert not unreachable, (
+        "sheets no mission can select — fix the filename or the routing: "
+        f"{unreachable}")
