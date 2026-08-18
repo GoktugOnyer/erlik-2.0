@@ -62,6 +62,9 @@ BASE = {
     # recorded, and it now defaults ON — so leaving it implicit would vary a
     # lever between arms and across generations of the corpus without saying so.
     "safe_mode": True,
+    # Pinned. It was env-only and read once at import, so two runs of one arm
+    # could differ in treatment with nothing in the record showing it.
+    "max_playbooks": 3,
 }
 
 ARMS = {

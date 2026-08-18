@@ -123,6 +123,67 @@ produced nothing across four runs.
 sheet, the metric is dominated by a class no playbook targets, and the design
 had 0.14 power.
 
+## Follow-up: rerun at n=8 with the routing fixed (commit `7270326`)
+
+The SSRF drop and the cap were fixed, `max_playbooks` pinned to 3, the server
+restarted, and both arms re-run at n=8 into a **fresh file** (reusing the old
+rows under the same `arm` label was the audit's top-severity trap). `auto` now
+injects 1834 bytes and the server log confirms the CONTENT, not just the size:
+`classes=['ssrf', 'open_redirect', 'stored_xss'] dropped=[]`.
+
+| arm | n | recall | sd | median | min–max | precision | findings | sec |
+|---|---|---|---|---|---|---|---|---|
+| `none` | 8 | 0.0464 | 0.0372 | 0.0286 | 0.0000–0.1143 | 0.812 | 1.75 | 325 |
+| `auto` | 8 | **0.0643** | 0.0253 | 0.0571 | 0.0286–0.1143 | 0.854 | 3.00 | 308 |
+
+Exact permutation over all C(16,8)=12870 splits: |Δ| = 0.0178, **p = 0.3854**.
+Bootstrap 95% CI on `none − auto`: **[−0.0464, +0.0107]** — spans zero, width
+2.0 findings.
+
+**The direction reversed.** At n=4 with SSRF dropped, `auto` was *worse*
+(0.0286 vs 0.0571). At n=8 with SSRF routed, `auto` is *better* (0.0643 vs
+0.0464). Neither is significant. Two things I reported from the first run —
+that `auto` cost precision (0.500 vs 0.857) and ran 44% slower — both reversed
+here (0.854 vs 0.812; 308s vs 325s). They were noise, and I should have said so
+with less confidence the first time.
+
+### The noise floor, measured directly
+
+`none` is the *same treatment* in both experiments — 0 bytes, same mission,
+same model, and the intervening commits touched only playbook routing, which
+`none` never reaches. So the gap between its two means is pure noise:
+
+| | |
+|---|---|
+| same-condition drift (`none` exp1 vs exp2) | **0.0107** |
+| the effect being chased (exp2 `none` vs `auto`) | **0.0178** |
+
+The effect is 1.7× the drift of a comparison known to be null. That is the
+honest size of what this instrument can see.
+
+### Targeted classes — the sharper test
+
+`auto` injected SSRF, open-redirect and stored-XSS guidance on all 8 runs.
+
+| GT class | `none` | `auto` |
+|---|---|---|
+| XSS | 0 | **1** |
+| open redirect | 0 | 0 |
+| SSRF | 0 | 0 |
+| Broken Authentication | 2 | 0 |
+| Information Disclosure | 10 | 15 |
+
+One XSS in 8 runs against none in 8 (Fisher exact p = 1.0) is not evidence.
+SSRF and open redirect produced nothing even with the guidance correctly
+routed. Distinct GT items reached: `none` 5, `auto` 4 — `auto` scored more
+total matches but reached *fewer distinct* items, because Information
+Disclosure repeats.
+
+**Verdict: no detectable effect in either direction, across two experiments and
+28 runs.** `auto` has a higher median (0.0571 vs 0.0286), a higher floor (it
+never scored 0; `none` did) and lower variance — but all of that sits inside
+the interval.
+
 ## Next
 
 1. Re-run `auto` with the routing fix, so the arm tests what the mission asks.
@@ -130,9 +191,9 @@ had 0.14 power.
 3. Consider scoring on the routed classes only. Aggregate recall over 35 items
    dominated by Information Disclosure cannot detect a playbook effect at all.
 
-Until (1) and (2) land, the presets shipping `playbooks: "auto"` are shipping
-something unmeasured — the honest options are to default it off or to finish
-the measurement.
+The presets shipping `playbooks: "auto"` remain unproven — but after 28 runs the
+honest reading is that the effect is smaller than this instrument resolves, not
+that it is absent. Resolving it needs a better metric, not more reps.
 
 ## Reproduce
 
