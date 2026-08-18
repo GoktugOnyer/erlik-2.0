@@ -596,6 +596,12 @@ LLM_CALL_TIMEOUT_S = float(os.environ.get("ERLIK_LLM_CALL_TIMEOUT", "300"))
 
 # Legacy fallback, sized for a 4096-token window. Kept only for a model whose
 # window cannot be discovered — see context_budget_tokens().
+# When the stagnation guard may fire, and how many no-progress turns trigger it.
+# Raised from 0.40/0.35: at max_turns=30 those gave a stop at turn 12 after 10
+# dry turns, and 32 of 33 recorded sessions never reached the cap.
+STAGNATION_START_FRAC = float(os.environ.get("ERLIK_STAGNATION_START", "0.6"))
+STAGNATION_DRY_FRAC = float(os.environ.get("ERLIK_STAGNATION_DRY", "0.5"))
+
 MAX_ESTIMATED_TOKENS = 3600
 
 # Fraction of a model's real window erlik will fill with conversation, leaving
@@ -3978,7 +3984,22 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
         recent_commands: list[str] = []  # track commands for semantic dedup
         tools_executed: set[str] = set()  # track distinct tools run (for phase enforcement)
         consecutive_container_failures = 0  # circuit breaker for container-down
-        turns_since_last_finding = 0  # stagnation detection
+        turns_since_last_finding = 0  # kept for the UI/telemetry line
+        # Stagnation is REPEATING WORK, not "no findings yet".
+        #
+        # The old counter reset only on a new FINDING, so an agent doing exactly
+        # what it should — enumerating endpoints, fingerprinting, working
+        # through a phase — looked identical to one stuck in a loop. Measured on
+        # 33 recorded sessions: 32 stopped before the 30-turn cap, and 5 of the
+        # 6 in the server log ended on a `run_tool` action, i.e. the agent was
+        # mid-work and asking for the next command when the loop killed it.
+        #
+        # Progress now means any of: a new finding, a tool not used before, or a
+        # newly discovered endpoint. Running another variation of a command that
+        # taught you nothing is not progress — which is the behaviour the guard
+        # exists to stop.
+        turns_since_progress = 0
+        last_progress = (0, 0, 0)
         last_findings_count = 0  # to track new findings per turn
         sticky_discoveries: list[str] = []  # key discoveries that survive context trimming
 
@@ -4001,13 +4022,16 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
             # Kicks in after the first 40% of turns, triggers after ~35% dry turns.
             # Disabled when the session row sets disable_stagnation=1 (benchmark runs).
             if not disable_stagnation:
-                stagnation_start = max(5, int(max_turns * 0.4))
-                stagnation_threshold = max(5, int(max_turns * 0.35))
-                if turn >= stagnation_start and turns_since_last_finding >= stagnation_threshold:
+                stagnation_start = max(5, int(max_turns * STAGNATION_START_FRAC))
+                stagnation_threshold = max(5, int(max_turns * STAGNATION_DRY_FRAC))
+                if turn >= stagnation_start and turns_since_progress >= stagnation_threshold:
                     await manager.broadcast(session_id, {
                         "type": "log", "phase": "system",
-                        "message": f"⚠ No new findings in {turns_since_last_finding} turns. Auto-stopping to save resources.",
+                        "message": (f"⚠ No progress in {turns_since_progress} turns "
+                                    f"(no new finding, tool or endpoint). Auto-stopping."),
                     })
+                    print(f"[agent {session_id[:8]}] STOP: stagnation at turn {turn+1}/{max_turns} "
+                          f"after {turns_since_progress} turns without progress", flush=True)
                     break
 
             # Trim messages to fit context window (prevents Ollama silent truncation)
@@ -4073,12 +4097,21 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
                 "elapsed_ms": int((time.time() - session_start_time) * 1000),
             })
 
-            # Track stagnation (no new findings)
+            # Track stagnation. A turn counts as progress if it produced a new
+            # finding, reached a tool not used before, or surfaced a new
+            # endpoint — not findings alone.
             if findings_count > last_findings_count:
                 turns_since_last_finding = 0
                 last_findings_count = findings_count
             else:
                 turns_since_last_finding += 1
+
+            progress = (findings_count, len(tools_executed), len(sticky_discoveries))
+            if progress != last_progress:
+                turns_since_progress = 0
+                last_progress = progress
+            else:
+                turns_since_progress += 1
 
             # Parse action from LLM response
             print(f"[agent {session_id[:8]}] parsing LLM response ({len(response)} chars): {response[:100]}...", flush=True)
