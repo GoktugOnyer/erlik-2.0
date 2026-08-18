@@ -5115,24 +5115,33 @@ async def list_providers():
     }
 
 
+def _v2_case_summary(tc) -> dict:
+    """One description of a test case, used by the listing AND the sweep planner.
+
+    A second copy of this shape is how the planner comes to disagree with the
+    catalogue about what a case requires — and a planner working from a stale
+    target_schema would skip cases that are runnable, or run cases that are not.
+    """
+    return {
+        "id": tc.id,
+        "name": tc.name,
+        "category": tc.category,
+        "severity": tc.severity,
+        "target_schema": tc.target_schema.model_dump(),
+        "steps": [s.name for s in tc.steps],
+    }
+
+
 @app.get("/api/v2/testcases")
 async def list_test_cases():
     """List every YAML test case in tests_catalog/."""
     catalog = load_catalog()
+    cases = sorted((_v2_case_summary(tc) for tc in catalog.values()),
+                   key=lambda c: c["id"])
     return {
         "catalog_root": str(TESTCASE_CATALOG_ROOT),
         "count": len(catalog),
-        "test_cases": [
-            {
-                "id": tc.id,
-                "name": tc.name,
-                "category": tc.category,
-                "severity": tc.severity,
-                "target_schema": tc.target_schema.model_dump(),
-                "steps": [s.name for s in tc.steps],
-            }
-            for tc in catalog.values()
-        ],
+        "test_cases": cases,
     }
 
 
@@ -5171,6 +5180,38 @@ async def run_v2_test_case(test_case_id: str, body: dict):
     out = result.model_dump()
     out["run_id"] = run_id
     return out
+
+
+@app.post("/api/v2/sweep/plan")
+async def v2_sweep_plan(body: dict):
+    """What a whole-catalogue sweep WOULD do against a target. Runs nothing.
+
+    Deliberately a separate step from execution. A case pointed at the wrong
+    endpoint produces a confident wrong answer rather than a miss — the SSRF
+    case aimed at a search parameter recorded "SSRF (suspected)" and nothing in
+    the output flagged the target as implausible. The operator sees the plan,
+    including every skip and its reason, before anything touches the network.
+
+    Body: {"target": "http://host:port", "profile": "juiceshop"|"",
+           "only": ["WSTG-INPV-05", ...]?, "extra": {...}?}
+    """
+    from orchestrator.testcase.sweep import plan_sweep
+    target = (body.get("target") or "").strip()
+    if not target:
+        raise HTTPException(status_code=400, detail="target required")
+    cases = [_v2_case_summary(tc) for tc in load_catalog().values()]
+    cases.sort(key=lambda c: c["id"])
+    return plan_sweep(cases, target, body.get("profile") or "",
+                      body.get("only"), body.get("extra"))
+
+
+@app.get("/api/v2/sweep/profiles")
+async def v2_sweep_profiles():
+    """Named target profiles the sweep can apply."""
+    from orchestrator.testcase.sweep import PROFILES, UNSUPPLIABLE
+    return {"profiles": sorted(PROFILES),
+            "unsuppliable": UNSUPPLIABLE,
+            "cases_by_profile": {k: sorted(v) for k, v in PROFILES.items()}}
 
 
 @app.get("/api/v2/runs")

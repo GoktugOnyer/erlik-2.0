@@ -33,59 +33,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 API = "http://127.0.0.1:8002"
 
-# Per-target endpoint knowledge. Same idea as playbook_catalog: target-specific
-# facts live in a named profile, never guessed from the URL.
-PROFILES: dict[str, dict[str, dict]] = {
-    "juiceshop": {
-        "WSTG-CLNT-04":   {"url": "{base}/redirect", "parameter": "to"},
-        "WSTG-INPV-19":   {"url": "{base}/profile/image/url", "parameter": "imageUrl"},
-        "WSTG-INPV-01":   {"url": "{base}/rest/products/search", "parameter": "q"},
-        "WSTG-INPV-05":   {"url": "{base}/rest/products/search", "parameter": "q"},
-        "WSTG-INPV-05.6": {"url": "{base}/rest/user/login", "parameter": "email"},
-        "WSTG-INPV-06":   {"url": "{base}/rest/user/login", "parameter": "email"},
-        "WSTG-ERRH-01":   {"url": "{base}/rest/products/search", "parameter": "q"},
-        "WSTG-ATHN-01":   {"login_url": "{base}/rest/user/login"},
-        "WSTG-CONF-04":   {"url": "{base}"},
-        "WSTG-CONF-02":   {"url": "{base}"},
-    },
-}
-
-# Requirements this sweep cannot synthesise. Named with the reason, because a
-# silently missing case reads as "the lane found nothing here".
-UNSUPPLIABLE = {
-    "low_priv_token": "needs two authenticated accounts",
-    "high_priv_token": "needs two authenticated accounts",
-    "request_template": "needs a hand-written request template",
-    "success_marker": "needs a hand-written success marker",
-    "jwt": "needs a captured JWT",
-}
-
-
-def build_target(case: dict, base: str, profile: dict) -> tuple[dict | None, str]:
-    req = (case.get("target_schema") or {}).get("required") or []
-    for r in req:
-        if r in UNSUPPLIABLE:
-            return None, UNSUPPLIABLE[r]
-    over = {k: v.replace("{base}", base) if isinstance(v, str) else v
-            for k, v in (profile.get(case["id"]) or {}).items()}
-    host = urlparse(base).hostname or ""
-    port = urlparse(base).port or 80
-    defaults = {"url": base, "host": host, "port": port,
-                "login_url": f"{base}/login", "parameter": "q",
-                "url_template": base}
-    tgt = {}
-    for r in req:
-        tgt[r] = over.get(r, defaults.get(r))
-        if tgt[r] is None:
-            return None, f"no value for required field {r!r}"
-    for o in (case.get("target_schema") or {}).get("optional") or []:
-        if o in over:
-            tgt[o] = over[o]
-        elif o == "parameter" and "parameter" in over:
-            tgt[o] = over["parameter"]
-    tgt.setdefault("host", host)
-    tgt["scope"] = {"allow_hosts": [host], "allow_ports": [port]}
-    return tgt, ""
+# Targeting lives in orchestrator/testcase/sweep.py so this CLI and the
+# dashboard's /api/v2/sweep/plan endpoint cannot drift apart. A second copy of
+# the endpoint map is exactly how one of them ends up aiming a case at a
+# parameter that cannot exercise it.
+from orchestrator.testcase.sweep import PROFILES, UNSUPPLIABLE, build_target  # noqa: E402
 
 
 async def main() -> int:

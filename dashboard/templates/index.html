@@ -652,6 +652,11 @@
                 style="font-size: 0.55rem;">
                 &#9670; SKILLS
             </button>
+            <button id="nav-testlab" onclick="switchView('testlab')"
+                class="nav-tab font-pixel px-4 py-2 rounded"
+                style="font-size: 0.55rem;">
+                &#9635; TEST LAB
+            </button>
             <button id="nav-arsenal" onclick="switchView('arsenal')"
                 class="nav-tab font-pixel px-4 py-2 rounded"
                 style="font-size: 0.55rem;">
@@ -1601,6 +1606,86 @@
         </div><!-- /view-skills -->
 
 
+        <!-- ===== TEST LAB: the deterministic WSTG lane, finally clickable ===== -->
+        <!-- Until now all six /api/v2/* endpoints had ZERO callers in this file:
+             the 22 committed test cases could not be listed, run or reviewed
+             from the dashboard at all. This is the half of erlik that produces
+             evidence rather than model assertions, and it was API-only. -->
+        <div id="view-testlab" class="hidden space-y-5">
+
+            <div class="panel rounded p-4">
+                <div class="flex items-baseline justify-between flex-wrap gap-2">
+                    <h2 class="font-pixel" style="font-size:0.7rem;">&#9635; TEST LAB</h2>
+                    <div id="tl-meta" class="font-mono" style="font-size:0.6rem; opacity:.75;">loading&hellip;</div>
+                </div>
+                <p class="font-mono mt-2" style="font-size:0.6rem; opacity:.7; max-width:82ch;">
+                    Committed WSTG test cases. Each one runs fixed steps and asserts on the
+                    response &mdash; no model decides what to try, and every result names the case
+                    that produced it. A case whose required inputs cannot be supplied is listed as
+                    <b>skipped with its reason</b>, never dropped: a missing case reads exactly like
+                    a clean result.
+                </p>
+
+                <div class="flex gap-2 mt-3 flex-wrap items-center">
+                    <input id="tl-target" class="input-field font-mono px-2 py-1 rounded"
+                        style="font-size:0.65rem; min-width:290px;"
+                        placeholder="http://target:port" value="http://juice-shop:3000">
+                    <select id="tl-profile" class="input-field font-mono px-2 py-1 rounded"
+                        style="font-size:0.65rem;"></select>
+                    <button onclick="tlPlan()" class="font-pixel px-3 py-1 rounded border"
+                        style="font-size:0.55rem;">PLAN</button>
+                    <button id="tl-sweep-btn" onclick="tlSweep()" class="font-pixel px-3 py-1 rounded border"
+                        style="font-size:0.55rem; color:var(--neon-green); border-color:var(--neon-green);">
+                        &#9654; RUN SWEEP</button>
+                    <button id="tl-stop-btn" onclick="tlStop()" class="font-pixel px-3 py-1 rounded border hidden"
+                        style="font-size:0.55rem; color:var(--neon-red); border-color:var(--neon-red);">STOP</button>
+                    <span id="tl-progress" class="font-mono" style="font-size:0.6rem; opacity:.8;"></span>
+                </div>
+                <div class="font-mono mt-2" style="font-size:0.55rem; opacity:.55;">
+                    A profile supplies this application's real endpoints. Without one, cases needing
+                    a specific parameter get the base URL &mdash; which is how the SSRF case came to
+                    be aimed at a search box and report a finding there.
+                </div>
+            </div>
+
+            <div id="tl-skipped-panel" class="panel rounded p-4 hidden">
+                <h3 class="font-pixel" style="font-size:0.62rem;">SKIPPED &mdash; AND WHY</h3>
+                <div id="tl-skipped" class="mt-2 space-y-1"></div>
+            </div>
+
+            <div class="panel rounded p-4">
+                <div class="flex items-baseline justify-between flex-wrap gap-2">
+                    <h3 class="font-pixel" style="font-size:0.62rem;">TEST CASES</h3>
+                    <div id="tl-summary" class="font-mono" style="font-size:0.58rem; opacity:.75;"></div>
+                </div>
+                <div class="overflow-x-auto mt-3">
+                    <table class="w-full font-mono" style="font-size:0.6rem; border-collapse:collapse;">
+                        <thead>
+                            <tr style="border-bottom:1px solid #2a3038; opacity:.7;">
+                                <th class="text-left py-1 pr-3">CASE</th>
+                                <th class="text-left py-1 pr-3">CLASS</th>
+                                <th class="text-left py-1 pr-3">SEV</th>
+                                <th class="text-left py-1 pr-3">TARGET</th>
+                                <th class="text-left py-1 pr-3">STATUS</th>
+                                <th class="text-left py-1">FINDINGS</th>
+                            </tr>
+                        </thead>
+                        <tbody id="tl-rows"></tbody>
+                    </table>
+                </div>
+            </div>
+
+            <div id="tl-detail" class="panel rounded p-4 hidden">
+                <div class="flex items-baseline justify-between flex-wrap gap-2">
+                    <h3 class="font-pixel" style="font-size:0.62rem;">RUN DETAIL</h3>
+                    <button onclick="document.getElementById('tl-detail').classList.add('hidden')"
+                        class="font-pixel px-2 py-1 rounded border" style="font-size:0.5rem;">CLOSE</button>
+                </div>
+                <div id="tl-detail-body" class="mt-3"></div>
+            </div>
+        </div><!-- /view-testlab -->
+
+
         <!-- ===== ARSENAL: every attack erlik can run ===== -->
         <div id="view-arsenal" class="hidden space-y-5">
             <div class="panel rounded p-4">
@@ -1757,12 +1842,13 @@
 
         // ===== View Switching =====
         function switchView(view) {
-            const views = ['scanner', 'reports', 'benchmark', 'monitor', 'skills', 'arsenal'];
+            const views = ['scanner', 'reports', 'benchmark', 'monitor', 'testlab', 'skills', 'arsenal'];
             const panels = {
                 scanner: document.getElementById('view-scanner'),
                 reports: document.getElementById('view-reports'),
                 benchmark: document.getElementById('view-benchmark'),
                 monitor: document.getElementById('view-monitor'),
+                testlab: document.getElementById('view-testlab'),
                 skills: document.getElementById('view-skills'),
                 arsenal: document.getElementById('view-arsenal'),
             };
@@ -1771,6 +1857,7 @@
                 reports: document.getElementById('nav-reports'),
                 benchmark: document.getElementById('nav-benchmark'),
                 monitor: document.getElementById('nav-monitor'),
+                testlab: document.getElementById('nav-testlab'),
                 skills: document.getElementById('nav-skills'),
                 arsenal: document.getElementById('nav-arsenal'),
             };
@@ -1790,8 +1877,229 @@
 
             if (view === 'reports') loadReportsList();
             if (view === 'benchmark') loadBenchmarkHistory();
+            if (view === 'testlab') tlInit();
             if (view === 'skills') loadSkills();
             if (view === 'arsenal') { loadArsenal(); loadAuthoring(); }
+        }
+
+
+        // ===== TEST LAB: drive the deterministic WSTG lane =====
+        // Sweep is deliberately PLAN-then-execute rather than one server call.
+        // The plan is a pure function, so an operator can inspect targeting
+        // before anything touches the network — and bad targeting is not a miss
+        // here, it is a confident wrong answer (the SSRF case aimed at a search
+        // parameter duly reported "SSRF suspected" there). Executing case by
+        // case also gives live progress and a working STOP.
+        let tlPlanData = null;
+        let tlAbort = false;
+
+        function tlEsc(x) {
+            return String(x == null ? '' : x).replace(/[&<>"]/g,
+                c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+        }
+
+        async function tlInit() {
+            if (tlPlanData) return;
+            try {
+                const p = await (await fetch('/api/v2/sweep/profiles')).json();
+                const sel = document.getElementById('tl-profile');
+                sel.innerHTML = '<option value="">no profile (generic)</option>' +
+                    (p.profiles || []).map(x => `<option value="${tlEsc(x)}">profile: ${tlEsc(x)}</option>`).join('');
+                if ((p.profiles || []).includes('juiceshop')) sel.value = 'juiceshop';
+                const c = await (await fetch('/api/v2/testcases')).json();
+                document.getElementById('tl-meta').textContent =
+                    `${c.count} committed cases · ${tlEsc(c.catalog_root || '')}`;
+            } catch (e) {
+                document.getElementById('tl-meta').textContent = 'catalogue unavailable: ' + e;
+            }
+            tlPlan();
+        }
+
+        async function tlPlan() {
+            const target = document.getElementById('tl-target').value.trim();
+            const profile = document.getElementById('tl-profile').value;
+            if (!target) { alert('Enter a target URL'); return; }
+            const r = await fetch('/api/v2/sweep/plan', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({target, profile})
+            });
+            if (!r.ok) {
+                document.getElementById('tl-summary').textContent =
+                    'plan failed: ' + (await r.text()).slice(0, 120);
+                return;
+            }
+            tlPlanData = await r.json();
+            tlRender();
+        }
+
+        function tlRender() {
+            const d = tlPlanData;
+            document.getElementById('tl-summary').textContent =
+                `${d.counts.runnable} runnable · ${d.counts.skipped} skipped · ${d.counts.total} total`;
+
+            const skipPanel = document.getElementById('tl-skipped-panel');
+            if (d.skipped.length) {
+                skipPanel.classList.remove('hidden');
+                document.getElementById('tl-skipped').innerHTML = d.skipped.map(sc => `
+                    <div class="font-mono flex gap-3" style="font-size:0.6rem;">
+                        <span style="color:var(--neon-yellow); min-width:130px;">${tlEsc(sc.id)}</span>
+                        <span style="opacity:.75;">${tlEsc(sc.reason)}</span>
+                    </div>`).join('');
+            } else {
+                skipPanel.classList.add('hidden');
+            }
+
+            document.getElementById('tl-rows').innerHTML = d.runnable.map(c => `
+                <tr id="tlrow-${tlEsc(c.id)}" style="border-bottom:1px solid #1e242c;">
+                    <td class="py-1 pr-3" style="color:var(--neon-cyan); white-space:nowrap;">${tlEsc(c.id)}</td>
+                    <td class="py-1 pr-3" style="opacity:.8;">${tlEsc(c.category || '')}</td>
+                    <td class="py-1 pr-3">${tlSev(c.severity)}</td>
+                    <td class="py-1 pr-3" style="opacity:.7; max-width:290px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;"
+                        title="${tlEsc(c.where)}">${tlEsc(c.where)}</td>
+                    <td class="py-1 pr-3" id="tlst-${tlEsc(c.id)}" style="opacity:.55;">ready</td>
+                    <td class="py-1" id="tlfd-${tlEsc(c.id)}">
+                        <button onclick="tlRunOne('${tlEsc(c.id)}')" class="font-pixel px-2 py-0.5 rounded border"
+                            style="font-size:0.45rem;">RUN</button>
+                    </td>
+                </tr>`).join('');
+        }
+
+        function tlSev(s) {
+            const col = {critical:'#ff2e63', high:'#ff6b35', medium:'var(--neon-yellow)',
+                         low:'#7ad', info:'#6a6a8a'}[s] || '#6a6a8a';
+            return `<span style="color:${col};">${tlEsc((s || '').toUpperCase())}</span>`;
+        }
+
+        function tlCase(id) { return (tlPlanData.runnable || []).find(c => c.id === id); }
+
+        // A case that DECLINED to assess is not a clean result, and must never
+        // be shown as one. WSTG-CLNT-09 against a host that 302s to a login
+        // emits ERLIK_FRAMING_NOT_ASSESSED_REDIRECT — it did not check framing,
+        // because a redirect is not the page an attacker would frame. Rendering
+        // that as "clean" would put "no clickjacking issue" in front of an
+        // operator when the truth is "not tested".
+        const TL_NOT_ASSESSED = /ERLIK_\w*(?:NOT_ASSESSED|NO_RESPONSE|INCONCLUSIVE)\w*/;
+        const tlLast = {};
+
+        function tlVerdict(d) {
+            const n = (d.findings || []).length;
+            if (n) return {kind: 'finding', label: 'FINDING', color: 'var(--neon-red)'};
+            const steps = d.steps || [];
+            const failed = steps.find(s => !s.success);
+            if (failed) return {kind: 'error', label: 'step failed',
+                                color: 'var(--neon-orange)',
+                                why: failed.error || failed.step};
+            for (const s of steps) {
+                const m = TL_NOT_ASSESSED.exec(s.output || '');
+                if (m) return {kind: 'unassessed', label: 'not assessed',
+                               color: 'var(--neon-yellow)', why: m[0]};
+            }
+            if (!steps.length) return {kind: 'error', label: 'no steps ran',
+                                       color: 'var(--neon-orange)'};
+            // "no finding" rather than "clean": the assertions did not fire,
+            // which is weaker than a claim that the target is safe.
+            return {kind: 'nofinding', label: 'no finding', color: 'var(--neon-green)'};
+        }
+
+        async function tlRunOne(id) {
+            const c = tlCase(id);
+            if (!c) return;
+            const st = document.getElementById('tlst-' + id);
+            const fd = document.getElementById('tlfd-' + id);
+            st.textContent = 'running…';
+            st.style.opacity = '1';
+            st.style.color = 'var(--neon-cyan)';
+            const t0 = Date.now();
+            try {
+                const r = await fetch(`/api/v2/testcases/${encodeURIComponent(id)}/run`, {
+                    method: 'POST', headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({target: c.target})
+                });
+                if (!r.ok) throw new Error((await r.text()).slice(0, 140));
+                const d = await r.json();
+                const n = (d.findings || []).length;
+                const secs = Math.round((Date.now() - t0) / 1000);
+                const v = tlVerdict(d);
+                tlLast[id] = v.kind;
+                st.textContent = v.label + ` · ${secs}s`;
+                st.style.color = v.color;
+                st.title = v.why || '';
+                fd.innerHTML = n
+                    ? (d.findings.map(f =>
+                        `<div style="color:var(--neon-red);">${tlEsc(f.vuln_type)} <span style="opacity:.6;">[${tlEsc(f.severity)}]</span></div>`
+                      ).join('') +
+                      `<button onclick='tlDetail(${JSON.stringify(d).replace(/'/g, "&#39;")})'
+                          class="font-pixel px-2 py-0.5 rounded border mt-1" style="font-size:0.45rem;">EVIDENCE</button>`)
+                    : `<button onclick='tlDetail(${JSON.stringify(d).replace(/'/g, "&#39;")})'
+                          class="font-pixel px-2 py-0.5 rounded border" style="font-size:0.45rem; opacity:.6;">STEPS</button>`;
+                return n;
+            } catch (e) {
+                st.textContent = 'error';
+                st.style.color = 'var(--neon-orange)';
+                fd.innerHTML = `<span style="opacity:.7; font-size:0.55rem;">${tlEsc(e.message || e)}</span>`;
+                return 0;
+            }
+        }
+
+        async function tlSweep() {
+            if (!tlPlanData) { await tlPlan(); if (!tlPlanData) return; }
+            tlAbort = false;
+            document.getElementById('tl-sweep-btn').classList.add('hidden');
+            document.getElementById('tl-stop-btn').classList.remove('hidden');
+            const cases = tlPlanData.runnable;
+            let done = 0, hits = 0;
+            for (const c of cases) {
+                if (tlAbort) break;
+                document.getElementById('tl-progress').textContent =
+                    `${done}/${cases.length} · ${hits} finding(s)`;
+                hits += (await tlRunOne(c.id)) || 0;
+                done++;
+            }
+            // Counted separately on purpose. A sweep reporting "19 clean" when
+            // four of them never actually assessed anything is the single most
+            // dangerous thing this panel could print.
+            const tally = k => Object.values(tlLast).filter(v => v === k).length;
+            const un = tally('unassessed'), err = tally('error');
+            document.getElementById('tl-progress').textContent =
+                `${done}/${cases.length} run · ${hits} finding(s)` +
+                (un ? ` · ${un} not assessed` : '') +
+                (err ? ` · ${err} failed` : '') +
+                (tlPlanData.skipped.length ? ` · ${tlPlanData.skipped.length} skipped` : '') +
+                (tlAbort ? ' · STOPPED' : '');
+            document.getElementById('tl-sweep-btn').classList.remove('hidden');
+            document.getElementById('tl-stop-btn').classList.add('hidden');
+        }
+
+        function tlStop() { tlAbort = true; }
+
+        function tlDetail(d) {
+            const el = document.getElementById('tl-detail');
+            const steps = (d.steps || []).map(s => `
+                <div class="mt-2" style="border-left:2px solid ${s.success ? 'var(--neon-green)' : '#4a4a5a'}; padding-left:8px;">
+                    <div class="font-mono" style="font-size:0.58rem; color:var(--neon-cyan);">
+                        ${tlEsc(s.step)} <span style="opacity:.5;">· ${s.duration_ms}ms${s.success ? '' : ' · failed'}</span>
+                    </div>
+                    <pre class="font-mono mt-1" style="font-size:0.55rem; opacity:.75; white-space:pre-wrap; word-break:break-all; max-height:110px; overflow:auto;">${tlEsc(s.command)}</pre>
+                    <pre class="font-mono" style="font-size:0.55rem; opacity:.6; white-space:pre-wrap; word-break:break-all; max-height:170px; overflow:auto;">${tlEsc((s.output || '').slice(0, 1400))}</pre>
+                </div>`).join('');
+            const finds = (d.findings || []).map(f => `
+                <div class="font-mono mt-1" style="font-size:0.6rem;">
+                    <span style="color:var(--neon-red);">${tlEsc(f.vuln_type)}</span>
+                    <span style="opacity:.6;">[${tlEsc(f.severity)}] ${tlEsc(f.url || '')} ${tlEsc(f.parameter || '')}</span>
+                    <div style="opacity:.7; font-size:0.55rem;">from step <b>${tlEsc(f.step)}</b> of ${tlEsc(f.test_case_id)}</div>
+                </div>`).join('') || '<div class="font-mono" style="font-size:0.6rem; opacity:.6;">no findings — the assertions did not fire</div>';
+            document.getElementById('tl-detail-body').innerHTML = `
+                <div class="font-mono" style="font-size:0.6rem;">
+                    <b style="color:var(--neon-cyan);">${tlEsc(d.test_case_id)}</b>
+                    <span style="opacity:.6;"> · ${d.duration_ms}ms · run ${tlEsc((d.run_id || '').slice(0, 8))}</span>
+                    ${d.stopped_early ? '<span style="color:var(--neon-yellow);"> · stopped early</span>' : ''}
+                </div>
+                <div class="mt-2 font-pixel" style="font-size:0.5rem; opacity:.7;">FINDINGS</div>
+                ${finds}
+                <div class="mt-3 font-pixel" style="font-size:0.5rem; opacity:.7;">STEPS &mdash; EXACT COMMAND AND RESPONSE</div>
+                ${steps}`;
+            el.classList.remove('hidden');
+            el.scrollIntoView({behavior: 'smooth', block: 'nearest'});
         }
 
 
