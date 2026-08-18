@@ -261,3 +261,47 @@ class TestEvidenceIsNotAnHtmlPage:
         body = H.format_for_agent(rows)
         entry = [l for l in body.splitlines() if l.startswith("  [")]
         assert len(entry) == 1, body
+
+
+class TestTheControlColumnMeasuresTheRightLever:
+    """A control that measures the wrong lever is worse than none — it looks
+    like evidence.
+
+    The first handoff runs recorded playbook_chars = 0 for BOTH arms. That is
+    correct (the experiment varies the handoff, not playbooks) and therefore
+    useless: the record could not distinguish the arms at all, and the only
+    proof the treatment was live came from grepping the server log by hand.
+    """
+
+    def test_harness_records_a_handoff_column(self):
+        import pathlib
+        src = (pathlib.Path(__file__).resolve().parents[1]
+               / "scripts" / "context_test.py").read_text()
+        assert "handoff_chars" in src
+        assert '"handoff_chars":' in src, "computed but never written to the row"
+        assert '"handoff_on":' in src, "cannot tell which arm CLAIMED the treatment"
+
+    def test_one_parser_serves_every_lever(self):
+        """Two copies is how one of them silently stops matching the log
+        format it is supposed to read."""
+        import pathlib
+        src = (pathlib.Path(__file__).resolve().parents[1]
+               / "scripts" / "context_test.py").read_text()
+        assert "def tagged_chars(" in src
+        assert src.count("_INJECTED_RX = re.compile") == 1, "log format defined twice"
+        assert "re.search(r\"injected" not in src, "an inline copy of the pattern survives"
+
+    def test_harness_warns_at_run_time_when_a_treatment_is_dead(self):
+        """Analysis-time discovery means the GPU hours are already spent."""
+        import pathlib
+        src = (pathlib.Path(__file__).resolve().parents[1]
+               / "scripts" / "context_test.py").read_text()
+        assert "TREATMENT DEAD" in src
+
+    def test_the_off_state_is_logged_so_a_control_arm_is_verifiably_silent(self):
+        """Absence of a log line cannot prove absence of treatment — it is
+        equally consistent with a logging bug."""
+        import pathlib
+        src = (pathlib.Path(__file__).resolve().parents[1]
+               / "orchestrator" / "main.py").read_text()
+        assert "skipped (handoff off)" in src

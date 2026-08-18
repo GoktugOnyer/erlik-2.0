@@ -104,6 +104,13 @@ ARMS = {
 }
 
 
+# One definition of the log format. Two copies is how one of them silently
+# stops matching the line it is supposed to read, and a control that stops
+# matching reports 0 or -1 — which reads as "treatment absent", not "parser
+# broken".
+_INJECTED_RX = re.compile(r"injected (\d+) chars")
+
+
 def injected_chars(server_log: Path, sid: str) -> int:
     """Bytes of guidance actually injected, read from the server's own log."""
     if not server_log.exists():
@@ -113,37 +120,51 @@ def injected_chars(server_log: Path, sid: str) -> int:
     for line in server_log.read_text(errors="replace").splitlines():
         if short not in line:
             continue
-        m = re.search(r"injected (\d+) chars", line)
+        m = _INJECTED_RX.search(line)
         if m:
             total += int(m.group(1))
     return total
 
 
-def playbook_chars(server_log: Path, sid: str) -> int:
-    """Playbook bytes specifically — the arm's independent variable.
+def tagged_chars(server_log: Path, sid: str, tag: str) -> int:
+    """Bytes injected by ONE named path, read from the server's own log.
 
-    THIS IS THE CONTROL THAT WAS MISSING. Every previously recorded run has
-    injected_chars = -1, because --server-log was never passed. Nothing in the
-    corpus therefore proves the arms ever differed in what reached the model:
-    had the injection path been broken, both arms would have been identical and
-    the experiment would have reported a confident "no effect" from two runs of
-    the same condition.
+    THIS IS THE CONTROL THAT KEEPS GOING MISSING. Every run in
+    context_test_v2/v3.jsonl records injected_chars = -1 because --server-log
+    was never passed, so nothing in that corpus proves the arms ever differed in
+    what reached the model — a broken injection path would have produced two
+    runs of the SAME condition and a confident "no effect".
 
-    Returns -1 when the log is unavailable (unknown), 0 when the server
-    explicitly logged a skip (verified silent).
+    It then went missing a second time, differently: the first handoff runs
+    recorded playbook_chars = 0 for both arms, which is CORRECT (that experiment
+    varies the handoff, not playbooks) and therefore useless as a control. The
+    column measured the wrong lever, so the record could not distinguish the
+    arms at all. Hence one function, parameterised by tag, and every lever
+    recorded on every row.
+
+    Returns the byte count, 0 when the server logged an explicit skip (verified
+    silent), or -1 when unknown.
     """
     if not server_log.exists():
         return -1
     short = sid[:8]
     for line in server_log.read_text(errors="replace").splitlines():
-        if f"[playbooks {short}]" not in line:
+        if f"[{tag} {short}]" not in line:
             continue
-        m = re.search(r"injected (\d+) chars", line)
+        m = _INJECTED_RX.search(line)
         if m:
             return int(m.group(1))
         if "skipped" in line:
             return 0
     return -1
+
+
+def playbook_chars(server_log: Path, sid: str) -> int:
+    return tagged_chars(server_log, sid, "playbooks")
+
+
+def handoff_chars(server_log: Path, sid: str) -> int:
+    return tagged_chars(server_log, sid, "handoff-ctx")
 
 
 def _code_version() -> str:
@@ -291,7 +312,9 @@ async def main() -> int:
                            "commit": CODE_VERSION,
                            "injected_chars": injected_chars(log, sid) if log else -1,
                            "playbook_chars": playbook_chars(log, sid) if log else -1,
+                           "handoff_chars": handoff_chars(log, sid) if log else -1,
                            "playbooks_mode": cfg.get("playbooks", ""),
+                           "handoff_on": bool(cfg.get("handoff")),
                            "mission_sha": hashlib.sha1(
                                MISSION.encode()).hexdigest()[:8]}
                     row.update(await score(sid))
@@ -300,7 +323,19 @@ async def main() -> int:
                     row = {"arm": arm, "rep": rep, "status": "error", "error": str(e)[:200]}
                 with out.open("a") as fh:
                     fh.write(json.dumps(row) + "\n")
+                # A dead control is only useful if it is noticed while the
+                # experiment is still running. Analysis-time discovery means the
+                # GPU hours are already spent.
+                if row.get("handoff_on") and row.get("handoff_chars", -1) <= 0:
+                    print(f"      !! arm claims handoff but injected "
+                          f"{row.get('handoff_chars')} chars — TREATMENT DEAD",
+                          flush=True)
+                if cfg.get("playbooks") and row.get("playbook_chars", -1) <= 0:
+                    print(f"      !! arm claims playbooks={cfg.get('playbooks')!r} but "
+                          f"injected {row.get('playbook_chars')} chars — TREATMENT DEAD",
+                          flush=True)
                 print(f"      {row.get('status')} pb={row.get('playbook_chars')} "
+                      f"ho={row.get('handoff_chars')} "
                       f"turns={row.get('turns')} findings={row.get('total_findings')} "
                       f"recall={row.get('recall')} precision={row.get('precision')} "
                       f"{row.get('duration_s')}s", flush=True)

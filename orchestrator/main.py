@@ -3922,6 +3922,12 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
             else:
                 print(f"[handoff-ctx {session_id[:8]}] skipped (no deterministic "
                       f"results for this target)", flush=True)
+        else:
+            # Logged even when OFF so a control arm reads as VERIFIABLY SILENT
+            # rather than unknown. Silence in a log is indistinguishable from a
+            # logging bug, and an experiment cannot prove its control arm was
+            # untreated by the absence of evidence.
+            print(f"[handoff-ctx {session_id[:8]}] skipped (handoff off)", flush=True)
 
         if runcfg.get("target_memory"):
             _tm = await _get_target_memory_context(session_id, target_url)
