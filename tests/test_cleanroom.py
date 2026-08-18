@@ -190,7 +190,7 @@ class TestCommittedCorpus:
     # /v2/regions is a real `curl -s -i` where CSP and X-Frame-Options genuinely
     # are absent. Whether they matter on a JSON API is a triage question, and
     # C4's submission policy already demotes it to informational.
-    ZONE_B_BASELINE = 1
+    ZONE_B_BASELINE = 0
 
     def test_zone_b_findings_do_not_grow(self):
         corpus = C.load_corpus()
@@ -230,7 +230,9 @@ class TestCommittedCorpus:
             "curl:_curl_sqli_login",        # only fires on a successful bypass
             "commix:_detect_commix",        # only fires on a real injection
             "curl:_curl_null_byte",         # only fires when the file is served
+            "curl:_curl_missing_headers",   # clean app sends what its type needs
+            "curl:_curl_server_header",     # clean app suppresses the version
         }
         assert set(rep.unreachable) <= QUIET_ON_CLEAN, (
             "a rule went quiet that we did not expect to:\n" + C.format_report(rep))
-        assert len(rep.exercised) >= 24, C.format_report(rep)
+        assert len(rep.exercised) >= 22, C.format_report(rep)

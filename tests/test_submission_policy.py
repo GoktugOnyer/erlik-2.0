@@ -45,7 +45,7 @@ LIVE_FIXTURES = {
         "curl", "HTTP/1.1 200 OK\r\nServer: nginx\r\nContent-Type: text/html\r\n\r\n",
         "curl -s -i http://juice-shop:3000/"),
     "server_version_banner": (
-        "curl", "HTTP/1.1 200 OK\r\nX-Powered-By: Express\r\n"
+        "curl", "HTTP/1.1 200 OK\r\nX-Powered-By: Express 4.17.1\r\n"
                 "Content-Security-Policy: default-src 'self'\r\n"
                 "X-Frame-Options: DENY\r\nStrict-Transport-Security: max-age=1\r\n"
                 "X-Content-Type-Options: nosniff\r\n\r\n",

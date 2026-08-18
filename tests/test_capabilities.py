@@ -143,8 +143,8 @@ class TestReadApi:
         # positives were fixed — they only fire on a real vulnerability, which
         # a cleanroom by definition does not contain. Capability is proven by
         # positive controls in test_auto_detect.py instead.
-        assert len(d["unreachable"]) <= 4, d["unreachable"]
-        assert sum(1 for x in d["detectors"] if x["exercised"]) >= 24
+        assert len(d["unreachable"]) <= 6, d["unreachable"]
+        assert sum(1 for x in d["detectors"] if x["exercised"]) >= 22
 
     def test_testcases_surface_load_errors(self, client):
         d = client.get("/api/library/testcases").json()

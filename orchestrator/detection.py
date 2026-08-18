@@ -172,9 +172,19 @@ def _succeeded(ctx: "DetectContext") -> bool:
 # ── curl sub-rules ──────────────────────────────────────────────────────────
 def _curl_exposed_user_data(ctx: DetectContext) -> list[Finding]:
     ol = ctx.output_lower
+    # A self-service endpoint returns the CALLER'S OWN record. That is the
+    # feature, not a leak — it fired on /api/users/me, on a legitimate login
+    # response, and on a deliberately public team directory.
+    if re.search(r"/(me|self|current|profile|login|signin|session)\b", ctx.url, re.I):
+        return []
     if (('"email"' in ol and '"password"' in ol) or
             ('"email"' in ol and ('"role"' in ol or '"isadmin"' in ol))):
         emails = re.findall(r'"email"\s*:\s*"([^"]+)"', ctx.output)
+        # Without a credential field, one record is a profile and several are a
+        # directory. Require a dump before calling it exposure.
+        has_credential = '"password"' in ol or '"hash"' in ol or '"token"' in ol
+        if not has_credential and len(emails) < 2:
+            return []
         if not emails:
             # No record could be extracted, so nothing is evidenced. This used
             # to report `0 user records found` AS the finding — a claim of data
@@ -342,13 +352,38 @@ def _curl_missing_headers(ctx: DetectContext) -> list[Finding]:
             _HEADER_FLAG_RX.search(ctx.command)):
         return []
     headers_lower = ctx.output_lower
+
+    # A header is only "missing" if it would have DONE something here.
+    #
+    # The rule judged every response against all four regardless of what the
+    # response was, so it reported CSP and X-Frame-Options absent from JSON
+    # APIs that never return a document to frame or script, HSTS absent from
+    # plain-HTTP intranet services where the header is inert, and all four
+    # absent from an empty 301 that exists only to upgrade the scheme. Four of
+    # the corpus's medium false positives were exactly these.
+    status = _http_status(ctx.output)
+    is_redirect = status is not None and 300 <= status < 400
+    if is_redirect:
+        return []                       # nothing to protect in an empty hop
+
+    ct = ""
+    ctm = re.search(r"^content-type:\s*([^\r\n;]+)", ctx.output, re.I | re.M)
+    if ctm:
+        ct = ctm.group(1).strip().lower()
+    is_document = (not ct) or ct.startswith("text/html") or "xhtml" in ct
+    over_https = ctx.url.lower().startswith("https://")
+
     missing = []
-    if "content-security-policy" not in headers_lower:
+    # CSP and X-Frame-Options defend a rendered document. They do nothing for
+    # an application/json body.
+    if is_document and "content-security-policy" not in headers_lower:
         missing.append("Content-Security-Policy")
-    if "x-frame-options" not in headers_lower:
+    if is_document and "x-frame-options" not in headers_lower:
         missing.append("X-Frame-Options")
-    if "strict-transport-security" not in headers_lower:
+    # HSTS is only meaningful on an HTTPS origin.
+    if over_https and "strict-transport-security" not in headers_lower:
         missing.append("Strict-Transport-Security")
+    # nosniff applies to every content type.
     if "x-content-type-options" not in headers_lower:
         missing.append("X-Content-Type-Options")
     if missing and len(missing) >= 2:
@@ -360,10 +395,22 @@ def _curl_missing_headers(ctx: DetectContext) -> list[Finding]:
     return []
 
 
+# A product name alone ("nginx", "Apache") tells an attacker nothing they could
+# not guess; a VERSION ("nginx/1.18.0") is what maps to a CVE list. The rule
+# reported bare `Server: nginx` — the hardened configuration, with the version
+# deliberately suppressed — as Information Disclosure.
+_VERSIONED_BANNER_RX = re.compile(r"\d+\.\d+")
+
+
 def _curl_server_header(ctx: DetectContext) -> list[Finding]:
-    if "x-powered-by:" in ctx.output_lower or ("server:" in ctx.output_lower and "express" in ctx.output_lower):
+    # The outer gate used to be `"server:" in output AND "express" in output`,
+    # so a versioned `Server: nginx/1.18.0` on any non-Express target was never
+    # reported — the same target-specific hardcode as the old `"juice" not in
+    # location` guard in _curl_open_redirect. Any banner carrying a version
+    # qualifies now; a bare product name still does not.
+    if "x-powered-by:" in ctx.output_lower or "server:" in ctx.output_lower:
         server_match = re.search(r'(?:x-powered-by|server):\s*(.+)', ctx.output, re.IGNORECASE)
-        if server_match:
+        if server_match and _VERSIONED_BANNER_RX.search(server_match.group(1)):
             return [{
                 "vuln_type": "Information Disclosure", "severity": "medium",
                 "url": ctx.url, "parameter": "",

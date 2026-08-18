@@ -34,10 +34,7 @@ fixtures:
     {"status":"ok","version":"2.4.1","checks":{"database":"ok","cache":"ok","queue":"ok"}}
 
     '
-  expected:
-  - vuln_type: Security Misconfiguration
-    severity: medium
-    detector: curl:_curl_missing_headers
+  expected: []
   rationale: 'A JSON-only API correctly omits CSP and X-Frame-Options: it never returns a document a browser
     renders or frames, so both headers are inert there. The two that do apply (HSTS, nosniff) are set.
     Two ''missing'' headers is exactly the rule''s >=2 threshold, so correct hardening scores identically
@@ -63,10 +60,7 @@ fixtures:
     {"service":"reports","state":"healthy","queue_depth":0,"workers":4}
 
     '
-  expected:
-  - vuln_type: Security Misconfiguration
-    severity: medium
-    detector: curl:_curl_missing_headers
+  expected: []
   rationale: Intranet-only service on plain HTTP. Strict-Transport-Security over http:// is ignored by
     browsers per RFC 6797, so omitting it is correct, and CSP is inert on a JSON endpoint. Both omissions
     are deliberate and right; together they cross the threshold. The rule never inspects the scheme, so
@@ -102,10 +96,7 @@ fixtures:
     <p>Last incident: none in 94 days.</p>
 
     '
-  expected:
-  - vuln_type: Information Disclosure
-    severity: medium
-    detector: curl:_curl_server_header
+  expected: []
   rationale: 'A deliberately public, unauthenticated status page. The operator leaves the framework banner
     on because the page holds nothing to protect; no version is disclosed, so there is nothing to pivot
     on. Note the emitted evidence is ''Server header exposes: nginx'' -- the condition tripped on X-Powered-By
@@ -178,10 +169,7 @@ fixtures:
     Connection: keep-alive
 
     '
-  expected:
-  - vuln_type: Security Misconfiguration
-    severity: medium
-    detector: curl:_curl_missing_headers
+  expected: []
   rationale: 'The canonical, recommended edge behaviour: an empty 301 that upgrades the scheme. It has
     no body, so CSP/XFO/nosniff have nothing to govern, and HSTS must not be sent over plain HTTP. All
     four headers are absent precisely because sending any of them would be wrong -- and this is the maximal-severity
@@ -212,10 +200,7 @@ fixtures:
     (next day)","price":1200}]}
 
     '
-  expected:
-  - vuln_type: Information Disclosure
-    severity: medium
-    detector: curl:_curl_server_header
+  expected: []
   rationale: 'A hardened response: bare ''Server: nginx'' with the version suppressed (nothing actually
     disclosed) plus a full security-header set. The only occurrence of ''express'' anywhere is the shipping
     tier in the JSON body. The rule''s second clause ANDs two whole-output substring tests without distinguishing
@@ -580,10 +565,7 @@ fixtures:
     \ nosniff\r\nx-frame-options: DENY\r\ncontent-security-policy: default-src 'none'; frame-ancestors\
     \ 'none'\r\n\r\n{\"id\":8841,\"email\":\"alice.moreau@acme-robotics.example\",\"displayName\":\"Alice\
     \ Moreau\",\"role\":\"owner\",\"createdAt\":\"2024-03-02T10:00:00Z\"}"
-  expected:
-  - vuln_type: Sensitive Data Exposure
-    severity: medium
-    detector: curl:_curl_exposed_user_data
+  expected: []
   rationale: 'The self-service profile endpoint. The caller presents their own bearer token and receives
     exactly one record: their own. _curl_api_users_bac matches ''/api/users'' as a substring, so /api/users/me,
     /api/users/8841/preferences and /api/users/me/avatar all qualify. The emitted evidence asserts ''GET
@@ -659,9 +641,6 @@ fixtures:
   - vuln_type: Broken Access Control
     severity: high
     detector: curl:_curl_idor_order
-  - vuln_type: Information Disclosure
-    severity: medium
-    detector: curl:_curl_server_header
   rationale: 'User 8841 opens their own order confirmation. HIGH IDOR from _curl_idor_order for the same
     reason as the basket: a URL shape plus the word totalPrice, with no identity check. The second finding
     is an unplanned but honest catch and belongs to another family: _curl_server_header greps the WHOLE
@@ -702,9 +681,6 @@ fixtures:
   - vuln_type: SQL Injection
     severity: critical
     detector: curl:_curl_sqli_login
-  - vuln_type: Sensitive Data Exposure
-    severity: medium
-    detector: curl:_curl_exposed_user_data
   rationale: 'A correct B2B login with the correct password, returning a legitimate JWT. It is reported
     as CRITICAL SQL Injection because one of the five payload patterns is the three-character literal
     ''"or'' (Python source "\"or\""), and the tenant field \"organization\" contains it. Measured: ''\"organization\"''
@@ -1218,10 +1194,7 @@ fixtures:
     \ preload\nx-content-type-options: nosniff\ncache-control: public, max-age=600\n\n{\"regions\":[{\"\
     code\":\"eu-west-1\",\"name\":\"Ireland\"},{\"code\":\"us-east-1\",\"name\":\"N. Virginia\"},{\"code\"\
     :\"ap-south-1\",\"name\":\"Mumbai\"}]}"
-  expected:
-  - vuln_type: Security Misconfiguration
-    severity: medium
-    detector: curl:_curl_missing_headers
+  expected: []
   rationale: A plain public JSON list -- the most ordinary traffic in the corpus, and the only Zone B
     fixture that emits. It sends HSTS and nosniff, the two headers that actually matter for a JSON response,
     and omits CSP and X-Frame-Options, which govern HTML script sources and framing and have no effect

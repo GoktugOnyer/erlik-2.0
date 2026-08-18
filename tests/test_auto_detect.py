@@ -320,7 +320,9 @@ class TestCurlAccessControl:
 
 class TestCurlExposure:
     def test_server_header_disclosure(self):
-        out = "HTTP/1.1 200 OK\nX-Powered-By: Express\n"
+        # Versioned on purpose: a BARE product name is the hardened config
+        # and no longer reported. See TestBannerNeedsAVersion.
+        out = "HTTP/1.1 200 OK\nX-Powered-By: Express 4.17.1\n"
         findings = detect("curl", out, "curl http://juice-shop:3000/")
         assert "Information Disclosure" in types(findings)
 
@@ -720,3 +722,89 @@ class TestRefusedAttacksAreNotFindings:
         out = '{"products":[{"id":1}]}'
         assert [f for f in detect("curl", out, "curl -s http://t/rest/basket/12")
                 if f["vuln_type"] == "Broken Access Control"]
+
+
+class TestBannerNeedsAVersion:
+    """A product name alone tells an attacker nothing they could not guess; a
+    VERSION is what maps to a CVE list. The rule reported bare `Server: nginx`
+    — the hardened configuration, with the version deliberately suppressed — as
+    Information Disclosure."""
+
+    def _fire(self, hdr):
+        out = f"HTTP/1.1 200 OK\r\n{hdr}\r\n\r\n{{}}"
+        return [f for f in detect("curl", out, "curl -s -i https://t/")
+                if f["detector"] == "curl:_curl_server_header"]
+
+    @pytest.mark.parametrize("hdr", ["Server: nginx", "X-Powered-By: Express"])
+    def test_bare_product_name_is_silent(self, hdr):
+        assert self._fire(hdr) == []
+
+    @pytest.mark.parametrize("hdr", ["Server: nginx/1.18.0",
+                                     "X-Powered-By: Express 4.17.1",
+                                     "X-Powered-By: PHP/8.1.2"])
+    def test_versioned_banner_fires(self, hdr):
+        assert self._fire(hdr)
+
+
+class TestHeadersJudgedAgainstTheResponse:
+    """A header is only "missing" if it would have done something here. The rule
+    judged every response against all four regardless of what it was."""
+
+    def _missing(self, out, url="https://t/"):
+        return [f for f in detect("curl", out, f"curl -s -i {url}")
+                if f["detector"] == "curl:_curl_missing_headers"]
+
+    def test_json_api_is_not_missing_csp_or_xfo(self):
+        """CSP and X-Frame-Options defend a rendered document. They do nothing
+        for an application/json body."""
+        out = ("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+               "X-Content-Type-Options: nosniff\r\n"
+               "Strict-Transport-Security: max-age=1\r\n\r\n{}")
+        assert self._missing(out) == []
+
+    def test_json_api_still_needs_nosniff(self):
+        out = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{}"
+        assert self._missing(out)
+
+    def test_html_document_still_needs_csp(self):
+        out = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<html></html>"
+        assert self._missing(out)
+
+    def test_hsts_is_not_expected_over_plain_http(self):
+        """HSTS on an http:// origin is inert — browsers ignore it."""
+        out = ("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+               "X-Content-Type-Options: nosniff\r\n\r\n{}")
+        assert self._missing(out, "http://intranet/") == []
+
+    def test_empty_redirect_is_not_judged(self):
+        """The canonical scheme upgrade has no body to protect."""
+        out = "HTTP/1.1 301 Moved Permanently\r\nLocation: https://t/\r\n\r\n"
+        assert self._missing(out, "http://t/") == []
+
+
+class TestProfileIsNotADump:
+    """A self-service endpoint returns the CALLER'S OWN record — the feature,
+    not a leak. It fired on /api/users/me and on a legitimate login response."""
+
+    def _fire(self, out, url):
+        return [f for f in detect("curl", out, f"curl -s -i {url}")
+                if f["detector"] == "curl:_curl_exposed_user_data"]
+
+    @pytest.mark.parametrize("path", ["/api/users/me", "/api/profile",
+                                      "/rest/user/login", "/api/session"])
+    def test_self_service_paths_are_silent(self, path):
+        out = 'HTTP/1.1 200 OK\r\n\r\n{"email":"a@b.c","role":"eng"}'
+        assert self._fire(out, f"https://t{path}") == []
+
+    def test_single_record_without_a_credential_is_not_exposure(self):
+        out = 'HTTP/1.1 200 OK\r\n\r\n{"email":"a@b.c","role":"eng"}'
+        assert self._fire(out, "https://t/api/users/1") == []
+
+    def test_single_record_WITH_a_password_still_fires(self):
+        out = 'HTTP/1.1 200 OK\r\n\r\n{"email":"a@b.c","password":"x"}'
+        assert self._fire(out, "https://t/api/users/1")
+
+    def test_multi_record_dump_still_fires(self):
+        out = ('HTTP/1.1 200 OK\r\n\r\n[{"email":"a@b.c","role":"x"},'
+               '{"email":"d@e.f","role":"y"}]')
+        assert self._fire(out, "https://t/api/users")
