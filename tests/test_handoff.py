@@ -144,7 +144,9 @@ class TestFailureIsNonFatal:
         import inspect
         from orchestrator.testcase import persistence
         src = inspect.getsource(persistence)
-        i = src.index("bridge_run")
-        window = src[i:i + 500]
-        assert "except Exception" in window
+        # Anchor on the CALL, not the import — src.index finds the import line
+        # first and the guard sits ~600 chars past it.
+        i = src.index("await bridge_run(")
+        window = src[i:i + 600]
+        assert "except Exception" in window, "the bridge is unguarded"
         assert "skipped:" in window, "a failed bridge must say so, not vanish"
