@@ -150,3 +150,114 @@ class TestFailureIsNonFatal:
         window = src[i:i + 600]
         assert "except Exception" in window, "the bridge is unguarded"
         assert "skipped:" in window, "a failed bridge must say so, not vanish"
+
+
+class TestHandoffContextIsDeterministicOnly:
+    """The gate must inject the WSTG lane's results and NOTHING else.
+
+    `_get_target_memory_context` — the obvious thing to reuse — also replays
+    every prior finding from every earlier session against the target: 436 rows
+    across 102 sessions on the Juice Shop corpus. Gating an experiment arm on
+    that would measure "hand the agent every answer anyone ever recorded", and
+    shipping it would let one false positive re-enter every future run on that
+    client as an established fact.
+    """
+
+    def test_only_wstg_sourced_rows_are_injected(self, tmp_path, monkeypatch):
+        import aiosqlite
+        import orchestrator.main as M
+
+        db_file = tmp_path / "t.db"
+
+        async def _seed():
+            async with aiosqlite.connect(db_file) as db:
+                await db.execute(
+                    "CREATE TABLE recon_context (session_id TEXT, context_type TEXT, "
+                    "key TEXT, value TEXT, source_tool TEXT, target_key TEXT)")
+                await db.executemany(
+                    "INSERT INTO recon_context VALUES (?,?,?,?,?,?)",
+                    [("other", "finding", "WSTG-INPV-05:SQL Injection", "/search",
+                      "wstg:WSTG-INPV-05", "juice-shop:3000"),
+                     ("other", "directory", "/admin", "found", "ffuf", "juice-shop:3000"),
+                     ("other", "endpoint", "/api", "found", "nuclei", "juice-shop:3000")])
+                await db.commit()
+        asyncio.run(_seed())
+
+        async def fake_get_db():
+            conn = await aiosqlite.connect(db_file)
+            conn.row_factory = aiosqlite.Row
+            return conn
+
+        monkeypatch.setattr(M, "get_db", fake_get_db)
+        out = asyncio.run(M._get_handoff_context("me", "http://juice-shop:3000"))
+        assert "SQL Injection" in out, "the deterministic row was not injected"
+        assert "ffuf" not in out and "/admin" not in out, out
+        assert "nuclei" not in out, out
+
+    def test_empty_when_the_lane_has_run_nothing(self, tmp_path, monkeypatch):
+        """Must return "" rather than a header with no facts under it — an
+        empty brief still costs prompt budget and implies a scan happened."""
+        import aiosqlite
+        import orchestrator.main as M
+        db_file = tmp_path / "t.db"
+
+        async def _seed():
+            async with aiosqlite.connect(db_file) as db:
+                await db.execute(
+                    "CREATE TABLE recon_context (session_id TEXT, context_type TEXT, "
+                    "key TEXT, value TEXT, source_tool TEXT, target_key TEXT)")
+                await db.commit()
+        asyncio.run(_seed())
+
+        async def fake_get_db():
+            conn = await aiosqlite.connect(db_file)
+            conn.row_factory = aiosqlite.Row
+            return conn
+        monkeypatch.setattr(M, "get_db", fake_get_db)
+        assert asyncio.run(M._get_handoff_context("me", "http://juice-shop:3000")) == ""
+
+    def test_gate_is_off_by_default(self):
+        from orchestrator import runconfig
+        assert runconfig.resolve({"preset": "custom"})["handoff"] is False
+
+    def test_gate_is_separate_from_target_memory(self):
+        """Two levers, because they carry different kinds of claim."""
+        from orchestrator import runconfig
+        r = runconfig.resolve({"preset": "custom", "handoff": True})
+        assert r["handoff"] is True and r["target_memory"] is False
+
+    def test_agent_loop_reads_the_isolated_gate(self):
+        """Wiring guard: the loop must branch on `handoff`, not target_memory."""
+        import pathlib
+        src = (pathlib.Path(__file__).resolve().parents[1]
+               / "orchestrator" / "main.py").read_text()
+        assert 'runcfg.get("handoff")' in src
+        assert "_get_handoff_context(session_id, target_url)" in src
+
+
+class TestEvidenceIsNotAnHtmlPage:
+    """Error-based test cases capture whole HTML error pages. Injected verbatim
+    that put multi-line markup into the prompt, and injected volume is the one
+    variable measured to cost recall dose-dependently."""
+
+    def test_tags_and_newlines_are_stripped(self):
+        raw = "<html>\n  <head>\n    <title>Error: SQLITE_ERROR: near \"x\"</title>"
+        out = H._evidence(raw)
+        assert "<" not in out and "\n" not in out
+        assert "SQLITE_ERROR" in out, "stripped the part that carries the signal"
+
+    def test_entities_are_decoded(self):
+        assert '"' in H._evidence("a &quot;b&quot; c")
+
+    def test_bounded(self):
+        assert len(H._evidence("x" * 5000)) <= 110
+
+    def test_handles_none(self):
+        assert H._evidence(None) == ""
+
+    def test_rendered_block_has_one_line_per_row(self):
+        rows = [{"context_type": "finding", "key": "WSTG-INPV-05:SQLi",
+                 "value": "<html>\n<head>\n<title>Error: SQLITE_ERROR</title>"}]
+        body = H.format_for_agent(rows)
+        entry = [l for l in body.splitlines() if l.startswith("  [")]
+        assert len(entry) == 1, body

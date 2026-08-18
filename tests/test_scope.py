@@ -184,15 +184,34 @@ class TestSegmentToolset:
         db = Path(__file__).resolve().parents[1] / "data" / "pentest.db"
         if not db.exists():
             pytest.skip("no recorded corpus in this checkout")
-        rows = [r[0] for r in sqlite3.connect(f"file:{db}?mode=ro", uri=True).execute(
-            "SELECT tool_input FROM steps WHERE tool_input IS NOT NULL AND tool_input != ''")]
+        # Replay each command against ITS OWN session's toolset, not a
+        # hand-written one. The fixed TOOLSET above lists ten tools; production
+        # grants ~30 (see the sessions.enabled_tools default in database.py,
+        # which includes john and hashcat). Judging history against the narrow
+        # list asked "would this be refused under a toolset erlik never used?",
+        # and it went unnoticed until a run recorded
+        # `john --incremental --stdout | hashcat ...` — a command that executed
+        # fine (denied=0) but names two tools the fixture omits.
+        rows = sqlite3.connect(f"file:{db}?mode=ro", uri=True).execute(
+            "SELECT s.tool_input, COALESCE(ss.enabled_tools, '') "
+            "FROM steps s LEFT JOIN sessions ss ON ss.id = s.session_id "
+            "WHERE s.tool_input IS NOT NULL AND s.tool_input != '' "
+            "AND (s.denied IS NULL OR s.denied = 0)").fetchall()
         if not rows:
             pytest.skip("corpus present but empty")
         refused = []
-        for cmd in rows:
+        for cmd, tools in rows:
             primary = te._extract_tool_name(cmd)
             if not primary:
                 continue
-            if te._segment_violation(cmd, TOOLSET + [primary], None, ALIASES):
+            granted = [t.strip() for t in (tools or "").split(",") if t.strip()] or TOOLSET
+            if te._segment_violation(cmd, granted + [primary], None, ALIASES):
                 refused.append(cmd[:120])
         assert refused == [], f"{len(refused)} historical command(s) newly refused"
+
+    def test_the_replay_is_not_vacuous(self):
+        """Guard on the guard: a toolset that grants everything would make the
+        test above pass no matter what the gate does."""
+        assert te._segment_violation(
+            "curl http://x | nmap -sV localhost", ["curl"], None, ALIASES), \
+            "segment gate no longer refuses an ungranted tool in a pipeline"

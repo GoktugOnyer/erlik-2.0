@@ -2996,6 +2996,47 @@ async def _get_target_memory_context(session_id: str, target_url: str, max_chars
     return out[:max_chars] + ("\n" if len(out) <= max_chars else " …\n")
 
 
+async def _get_handoff_context(session_id: str, target_url: str,
+                               max_chars: int = 1600) -> str:
+    """DETERMINISTIC results only — the WSTG lane's output, nothing else.
+
+    Deliberately NOT `_get_target_memory_context`. That function also injects
+    every prior finding from every earlier session against the same target
+    (436 rows across 102 sessions on the Juice Shop corpus). Two reasons that is
+    the wrong thing to hand an agent:
+
+      * MEASUREMENT — an arm gated on it would not be measuring the handoff, it
+        would be measuring "tell the agent every answer anyone ever recorded".
+      * PRODUCTION — those prior findings are unverified agent claims, some of
+        them false positives. Feeding them back in is how one false positive
+        becomes self-reinforcing across every future run on that client.
+
+    Deterministic rows are different in kind: a test case either reproduced the
+    behaviour or it did not, and the row records which case said so.
+    """
+    tk = _target_key(target_url)
+    if not tk:
+        return ""
+    try:
+        db = await get_db()
+        try:
+            cur = await db.execute(
+                "SELECT context_type, key, value, source_tool FROM recon_context "
+                "WHERE target_key = ? AND source_tool LIKE 'wstg:%' AND session_id != ? "
+                "ORDER BY context_type, key LIMIT 40", (tk, session_id))
+            rows = [dict(r) for r in await cur.fetchall()]
+        finally:
+            await db.close()
+    except Exception as e:  # noqa: BLE001 — context is an optimisation, never fatal
+        print(f"[handoff-ctx {session_id[:8]}] {e}", flush=True)
+        return ""
+    if not rows:
+        return ""
+    from orchestrator.handoff import format_for_agent
+    out = format_for_agent(rows)
+    return out[:max_chars] + ("\n" if len(out) <= max_chars else " …\n")
+
+
 async def _get_warm_start_context(parent_session_id: str) -> str:
     """Build a warm-start context string from a parent session's recon data."""
     db = await get_db()
@@ -3869,6 +3910,19 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
         # Inject durable per-TARGET memory (from all prior runs against this target).
         # Unlike warm-start (explicit parent lineage), this applies to any session,
         # incl. cold. Gated by the run config; default off. See _get_target_memory_context.
+        # Deterministic hand-off: the WSTG lane's confirmed results, and only
+        # those. Separate from target_memory on purpose — see
+        # _get_handoff_context for why prior agent findings must not ride along.
+        if runcfg.get("handoff"):
+            _hc = await _get_handoff_context(session_id, target_url)
+            if _hc:
+                combined_system += f"\n\n{_hc}"
+                print(f"[handoff-ctx {session_id[:8]}] injected {len(_hc)} chars "
+                      f"(target={target_url})", flush=True)
+            else:
+                print(f"[handoff-ctx {session_id[:8]}] skipped (no deterministic "
+                      f"results for this target)", flush=True)
+
         if runcfg.get("target_memory"):
             _tm = await _get_target_memory_context(session_id, target_url)
             if _tm:

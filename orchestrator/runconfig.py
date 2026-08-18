@@ -40,6 +40,9 @@ _BOOL_KEYS = {
     "target_memory": "ERLIK_TARGET_MEMORY",
     "techniques": "ERLIK_TECHNIQUES",
     "ai_review": "ERLIK_AI_REVIEW",
+    # Deterministic WSTG results as the agent's starting context. Distinct
+    # from target_memory, which also replays prior AGENT findings.
+    "handoff": "ERLIK_HANDOFF",
 }
 
 # Sensible pre-selectable setups. Keys map to the flag bundle a preset turns on;
@@ -138,6 +141,7 @@ def resolve(run_config=None) -> dict:
     # Explicit per-key values in the session config override the preset.
     for k in ("cve_enrich", "skills", "nettacker", "nettacker_findings",
               "nettacker_scenario", "playbooks", "max_playbooks", "poc_verify", "primitives",
+              "handoff",
               "target_memory", "techniques", "ai_review", "review_model",
               "skills_exclude", "skills_pin", "skills_max_chars",
               "safe_mode", "safe_mode_ack", "skills_max_files"):
@@ -150,6 +154,7 @@ def resolve(run_config=None) -> dict:
     warnings: list[str] = []
     _known = {"cve_enrich", "skills", "nettacker", "nettacker_findings",
               "nettacker_scenario", "playbooks", "max_playbooks", "poc_verify", "primitives",
+              "handoff",
               "target_memory", "techniques", "ai_review", "review_model",
               "skills_exclude", "skills_pin", "skills_max_chars",
               "safe_mode", "safe_mode_ack", "skills_max_files", "preset"}
@@ -272,6 +277,7 @@ def resolve(run_config=None) -> dict:
         "nettacker_scenario": scenario,
         "playbooks": playbooks,
         "max_playbooks": max_playbooks,
+        "handoff": tri("handoff"),
     }
 
 

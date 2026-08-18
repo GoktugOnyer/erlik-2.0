@@ -73,6 +73,12 @@ ARMS = {
     # ships by default now. `playbook_only` is the block it REPLACED, kept as
     # the reference arm so "smaller" can be told apart from "better".
     "auto":          {"skills": False, "playbooks": "auto"},
+
+    # HANDOFF — the deterministic WSTG lane's results as starting context.
+    # Gated on `handoff`, NOT `target_memory`: the latter also replays every
+    # prior agent finding for the target (436 rows / 102 sessions here), which
+    # would make this arm measure "hand the agent every answer ever recorded".
+    "handoff":       {"skills": False, "playbooks": "", "handoff": True},
     "playbook_only": {"skills": False, "playbooks": "juiceshop"},
     "skills_only":   {"skills": True,  "playbooks": ""},
     "both":          {"skills": True,  "playbooks": "juiceshop"},
