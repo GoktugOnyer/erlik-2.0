@@ -174,3 +174,30 @@ class TestSafeMode:
                           blob)
         denied = [c for c in cmds if T._safe_mode_violation(c)]
         assert denied == [], denied
+
+
+class TestNoFabricatedRelevance:
+    """The fallback used to inject `list(GENERIC)[:2]` — SSRF and open redirect,
+    chosen by dict order — for ANY mission naming no class. Alphabetical
+    accident presented as routing, and unjustified injected volume is precisely
+    what the dose ladder measured as costly."""
+
+    def test_unrelated_mission_injects_nothing_in_auto(self):
+        out = P.get_playbook_context(
+            "http://client.test", mode="auto",
+            mission="Assess for injection, authentication and access-control flaws")
+        assert out == "", f"fabricated {len(out)} chars of unrouted guidance"
+
+    def test_the_specific_dict_order_leak(self):
+        out = P.get_playbook_context("http://t", mode="auto", mission="check TLS")
+        assert "SSRF" not in out and "Open Redirect" not in out
+
+    def test_named_mission_still_injects(self):
+        """Guard on the guard: the fix must not silence routing entirely."""
+        out = P.get_playbook_context("http://t", mode="auto", mission="test for SSRF")
+        assert "SSRF" in out
+
+    def test_explicit_profile_is_honoured_without_a_named_class(self):
+        """An operator who typed `juiceshop` chose it for this target."""
+        out = P.get_playbook_context("http://t", mode="juiceshop", mission="general assessment")
+        assert out, "an explicitly chosen profile injected nothing"

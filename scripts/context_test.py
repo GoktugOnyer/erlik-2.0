@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import re
 import sys
@@ -42,8 +43,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 API = "http://127.0.0.1:8002"
 TARGET = "http://juice-shop:3000"
-MISSION = ("Assess the OWASP Juice Shop instance for injection, authentication and "
-           "access-control flaws. Report only what you can evidence from tool output.")
+MISSION = ("Assess the OWASP Juice Shop instance for injection, cross-site scripting, "
+           "SSRF, open redirect, broken access control and authentication flaws. "
+           "Report only what you can evidence from tool output.")
+# The mission is part of the independent variable now: `auto` routes playbooks
+# from the classes the mission NAMES, so the older MISSION (which named none of
+# the six playbook classes) would have made the arm vacuous. Recorded per row —
+# recall from a different mission is not comparable.
 
 # Everything except skills/playbooks is pinned, so the only thing that varies
 # between arms is how many bytes of guidance get injected.
@@ -60,6 +66,10 @@ BASE = {
 
 ARMS = {
     "none":          {"skills": False, "playbooks": ""},
+    # NEW. Generic playbooks routed to the classes the mission names — what
+    # ships by default now. `playbook_only` is the block it REPLACED, kept as
+    # the reference arm so "smaller" can be told apart from "better".
+    "auto":          {"skills": False, "playbooks": "auto"},
     "playbook_only": {"skills": False, "playbooks": "juiceshop"},
     "skills_only":   {"skills": True,  "playbooks": ""},
     "both":          {"skills": True,  "playbooks": "juiceshop"},
@@ -98,6 +108,33 @@ def injected_chars(server_log: Path, sid: str) -> int:
         if m:
             total += int(m.group(1))
     return total
+
+
+def playbook_chars(server_log: Path, sid: str) -> int:
+    """Playbook bytes specifically — the arm's independent variable.
+
+    THIS IS THE CONTROL THAT WAS MISSING. Every previously recorded run has
+    injected_chars = -1, because --server-log was never passed. Nothing in the
+    corpus therefore proves the arms ever differed in what reached the model:
+    had the injection path been broken, both arms would have been identical and
+    the experiment would have reported a confident "no effect" from two runs of
+    the same condition.
+
+    Returns -1 when the log is unavailable (unknown), 0 when the server
+    explicitly logged a skip (verified silent).
+    """
+    if not server_log.exists():
+        return -1
+    short = sid[:8]
+    for line in server_log.read_text(errors="replace").splitlines():
+        if f"[playbooks {short}]" not in line:
+            continue
+        m = re.search(r"injected (\d+) chars", line)
+        if m:
+            return int(m.group(1))
+        if "skipped" in line:
+            return 0
+    return -1
 
 
 def _code_version() -> str:
@@ -216,8 +253,13 @@ async def main() -> int:
     total = len(arms) * ns.reps
     n = 0
     async with httpx.AsyncClient(timeout=60.0) as client:
-        for arm, flags in arms.items():
-            for rep in range(1, ns.reps + 1):
+        # INTERLEAVED, not arm-by-arm. Juice Shop is a stateful application:
+        # runs create users, upload files and store XSS payloads that persist
+        # for every later run. Executing all of arm A then all of arm B makes
+        # "later" a property of the arm, so target drift would be read as an
+        # arm effect. Interleaving spreads drift across arms instead.
+        for rep in range(1, ns.reps + 1):
+            for arm, flags in arms.items():
                 n += 1
                 if (ns.model, arm, rep) in done:
                     print(f"[{n}/{total}] {arm} rep{rep} — skipping", flush=True)
@@ -238,14 +280,18 @@ async def main() -> int:
                            "turns": sess.get("total_steps"),
                            "duration_s": round(time.time() - t0),
                            "commit": CODE_VERSION,
-                           "injected_chars": injected_chars(log, sid) if log else -1}
+                           "injected_chars": injected_chars(log, sid) if log else -1,
+                           "playbook_chars": playbook_chars(log, sid) if log else -1,
+                           "playbooks_mode": cfg.get("playbooks", ""),
+                           "mission_sha": hashlib.sha1(
+                               MISSION.encode()).hexdigest()[:8]}
                     row.update(await score(sid))
                     row.update(await run_facts(sid))
                 except Exception as e:  # noqa: BLE001
                     row = {"arm": arm, "rep": rep, "status": "error", "error": str(e)[:200]}
                 with out.open("a") as fh:
                     fh.write(json.dumps(row) + "\n")
-                print(f"      {row.get('status')} injected={row.get('injected_chars')} "
+                print(f"      {row.get('status')} pb={row.get('playbook_chars')} "
                       f"turns={row.get('turns')} findings={row.get('total_findings')} "
                       f"recall={row.get('recall')} precision={row.get('precision')} "
                       f"{row.get('duration_s')}s", flush=True)

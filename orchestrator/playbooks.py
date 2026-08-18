@@ -152,10 +152,17 @@ def get_playbook_context(target_url: str, mode: str | None = None,
     if not effective or effective in ("0", "off", "false", "none"):
         return ""
 
-    keys = select_playbooks(mission) or (
-        list(GENERIC)[:MAX_PLAYBOOKS] if effective == "auto" else list(GENERIC)[:MAX_PLAYBOOKS])
-
     profile = {} if effective == "auto" else load_profile(effective)
+    keys = select_playbooks(mission)
+    if not keys:
+        # The mission names no class this module covers. Injecting the first two
+        # in dict order — which is what this did — dresses up alphabetical
+        # accident as relevance, and unjustified volume is measurably the thing
+        # that costs recall. An explicitly named PROFILE is different: the
+        # operator chose it for this target, so honour it.
+        if not profile:
+            return ""
+        keys = list(profile)[:MAX_PLAYBOOKS]
     parts = []
     for k in keys:
         body = profile.get(k) or GENERIC.get(k)
