@@ -161,3 +161,40 @@ ERLIK_LLM_CALL_TIMEOUT=900 python scripts/context_test.py --model qwen3.8:27b \
 ```
 
 Each row records the commit, so runs from different code are never pooled.
+
+## 27B dose ladder — unresolved, not replicated (17 Aug, `data/dose_test_27b.jsonl`)
+
+Same question on `qwen3.8:27b`, keyed on `skills_max_files` so sheet QUALITY is
+held fixed (the 7B ladder varied `max_chars`, which reached its volumes by
+starving the per-class share and therefore also degraded which sheet was
+chosen).
+
+| arm | injected | sheets | n | recall | precision |
+|---|---|---|---|---|---|
+| `none` | 0 | 0 | 2 | 0.0714 | 1.000 |
+| `dose_1` | 6,452 | 1 | 2 | 0.1000 | 1.000 |
+| `dose_3` | 18,166 | 3 | 2 | 0.0857 | 0.750 |
+
+```
+none      [0.0286, 0.1143]    <- spread 0.086, LARGER than any effect measured
+dose_1    [0.0857, 0.1143]
+dose_3    [0.0857, 0.0857]
+```
+
+Both guided arms scored ABOVE `none`, the opposite of the 7B. **This is not
+evidence of a reversal.** The `none` arm swung 0.086 between two identical runs;
+every delta in the table is smaller than that. Its mean is dragged down by a
+single 0.0286 outlier — drop it and `none` becomes 0.1143, above both guided
+arms, and the direction flips back.
+
+**Conclusion: at n=2 the 27B cannot resolve a ~0.03 effect.** Establishing it
+either way needs roughly n=8 per arm, ~11 hours of compute on this hardware.
+The 7B ladder stands on its own — four levels, monotonic — and the product
+decision does not depend on the 27B, since one sheet is the best-performing
+guided arm on both models.
+
+| arm | 7B | 27B |
+|---|---|---|
+| `none` | 0.1429 | 0.0714 |
+| `dose_1` | 0.0857 | 0.1000 |
+| `dose_3` | 0.0428 | 0.0857 |
