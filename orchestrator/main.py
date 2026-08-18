@@ -4000,6 +4000,13 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
         # exists to stop.
         turns_since_progress = 0
         last_progress = (0, 0, 0)
+
+        # WHY a run ended. Every exit sets this, and it is persisted, because
+        # until now none of them recorded a reason: diagnosing why 32 of 33
+        # sessions stopped short of their cap required INFERRING from the last
+        # action line, and that inference was wrong — the stagnation guard was
+        # not firing at all. A stop reason has to be a read, not a deduction.
+        stop_reason = "max_turns"
         last_findings_count = 0  # to track new findings per turn
         sticky_discoveries: list[str] = []  # key discoveries that survive context trimming
 
@@ -4016,6 +4023,8 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
                     "type": "log", "phase": "error",
                     "message": "⚠ kali-tools container is down (3 consecutive failures). Stopping session.",
                 })
+                stop_reason = "container_down"
+                print(f"[agent {session_id[:8]}] STOP: container_down at turn {turn+1}/{max_turns}", flush=True)
                 break
 
             # === Stagnation detection: stop if no new findings in last N turns ===
@@ -4030,6 +4039,7 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
                         "message": (f"⚠ No progress in {turns_since_progress} turns "
                                     f"(no new finding, tool or endpoint). Auto-stopping."),
                     })
+                    stop_reason = "stagnation"
                     print(f"[agent {session_id[:8]}] STOP: stagnation at turn {turn+1}/{max_turns} "
                           f"after {turns_since_progress} turns without progress", flush=True)
                     break
@@ -4689,6 +4699,8 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
                     "type": "log", "phase": "report",
                     "message": done_msg,
                 })
+                stop_reason = "agent_done"
+                print(f"[agent {session_id[:8]}] STOP: agent_done at turn {turn+1}/{max_turns}", flush=True)
                 break
 
             else:
@@ -4699,6 +4711,23 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
                 })
 
         # ===== Phase 5: REPORT =====
+        if stop_reason == "max_turns":
+            print(f"[agent {session_id[:8]}] STOP: max_turns ({max_turns} turns used)", flush=True)
+        await manager.broadcast(session_id, {
+            "type": "log", "phase": "system",
+            "message": f"Session ended: {stop_reason} after {step_number} steps",
+        })
+        try:
+            _db_sr = await get_db()
+            try:
+                await _db_sr.execute("UPDATE sessions SET stop_reason = ? WHERE id = ?",
+                                     (stop_reason, session_id))
+                await _db_sr.commit()
+            finally:
+                await _db_sr.close()
+        except Exception as _sre:  # noqa: BLE001 — telemetry must not fail a run
+            print(f"[agent {session_id[:8]}] stop_reason not recorded: {_sre}", flush=True)
+
         total_duration_ms = int((time.time() - session_start_time) * 1000)
 
         await manager.broadcast(session_id, {"type": "phase", "active": "report"})
@@ -4895,7 +4924,23 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
 
     except Exception as e:
         import traceback; traceback.print_exc()
+        print(f"[agent {session_id[:8]}] STOP: error — {e}", flush=True)
         print(f"[AGENT CRASH] {session_id}: {e}", flush=True)
+        # The post-loop persist is skipped when an exception escapes, so the
+        # crash path records its own reason. Without this an errored session
+        # keeps whatever stop_reason it had, or none — and "why did this run
+        # end" becomes a deduction again.
+        try:
+            _db_er = await get_db()
+            try:
+                await _db_er.execute(
+                    "UPDATE sessions SET stop_reason = ? WHERE id = ?",
+                    (f"error: {str(e)[:120]}", session_id))
+                await _db_er.commit()
+            finally:
+                await _db_er.close()
+        except Exception:  # noqa: BLE001
+            pass
         await manager.broadcast(session_id, {
             "type": "log", "phase": "error",
             "message": f"Unexpected error: {e}",

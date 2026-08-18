@@ -231,6 +231,11 @@ async def init_db():
             # asking the selector again months later answers a different
             # question than "what did this session receive".
             ("skills_trace", "TEXT DEFAULT NULL"),
+            # WHY the agent loop ended: agent_done | stagnation | container_down
+            # | max_turns | error. Additive, nullable — rows written before this
+            # genuinely have no recorded reason and must read as unknown rather
+            # than be attributed to whichever value happens to be the default.
+            ("stop_reason", "TEXT DEFAULT NULL"),
         ]
         for col_name, col_def in migrations:
             try:
