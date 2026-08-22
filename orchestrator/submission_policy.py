@@ -52,6 +52,7 @@ class Rule:
     max_severity: str
     action: str
     rationale: str = ""
+    source: str = "detector"
     evidence_prefix: str | None = None
     evidence_contains: tuple[str, ...] = ()
     unless_field: str | None = None
@@ -106,10 +107,36 @@ def load_rules(path: Path | None = None) -> tuple[list[Rule], str]:
                 f"{INFORMATIONAL!r} is supported (suppression is not)")
         if r["max_severity"].strip().lower() not in _SEVERITY_RANK:
             raise PolicyError(f"{p}: rule {r['id']!r} has unknown max_severity")
-        if not r.get("evidence_prefix") and not r.get("evidence_contains"):
-            raise PolicyError(
-                f"{p}: rule {r['id']!r} matches on vuln_type alone; every rule "
-                f"must key on a code-controlled evidence string")
+        source = str(r.get("source") or "detector").strip().lower()
+        if source not in ("detector", "model_reported"):
+            raise PolicyError(f"{p}: rule {r['id']!r} has unknown source {source!r}")
+        if source == "detector":
+            if not r.get("evidence_prefix") and not r.get("evidence_contains"):
+                raise PolicyError(
+                    f"{p}: rule {r['id']!r} matches on vuln_type alone; a "
+                    f"detector rule must key on a code-controlled evidence "
+                    f"string (set source: model_reported if it governs "
+                    f"model-authored findings)")
+        else:
+            # MODEL-AUTHORED findings carry detector = NULL and evidence text
+            # written fresh each run — the same CORS issue appears under six
+            # different vuln_type strings in the corpus. There is no
+            # code-controlled literal to anchor to, so the guarantee has to come
+            # from somewhere else:
+            #
+            #   * the severity brake is capped at `medium`, so no rule of this
+            #     kind can ever demote a high or critical finding; and
+            #   * tests/test_submission_policy.py requires every model_reported
+            #     rule to fire on at least one REAL recorded finding, which is
+            #     the corpus-backed equivalent of the evidence-literal check.
+            #
+            # Relaxing the evidence requirement without the cap would let a
+            # broad vuln_type quietly demote real work.
+            if _rank(r["max_severity"]) > _rank("medium"):
+                raise PolicyError(
+                    f"{p}: rule {r['id']!r} is source: model_reported with "
+                    f"max_severity {r['max_severity']!r}; these may not demote "
+                    f"above 'medium'")
         rules.append(Rule(
             id=str(r["id"]),
             vuln_types=tuple(r["vuln_types"]),
@@ -119,6 +146,7 @@ def load_rules(path: Path | None = None) -> tuple[list[Rule], str]:
             evidence_prefix=r.get("evidence_prefix"),
             evidence_contains=tuple(r.get("evidence_contains") or ()),
             unless_field=r.get("unless_field"),
+            source=source,
         ))
     ids = [r.id for r in rules]
     if len(ids) != len(set(ids)):

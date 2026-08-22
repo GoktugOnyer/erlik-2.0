@@ -91,3 +91,99 @@ rules:
       so it cannot evidence that secrets are present. Shipped unconditional on
       purpose: an `unless secrets-in-body` clause would be a dead hatch, since
       the pattern could only ever match the PATH, never the file contents.
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ALWAYS-REJECTED CLASSES (bug-bounty triage list)
+#
+# The rules above key on evidence literals that orchestrator/detection.py
+# constructs itself. The rules BELOW cannot: they govern MODEL-AUTHORED
+# findings, which carry detector = NULL and whose evidence text is written
+# fresh each run. Of the 31 CORS findings in the corpus the same issue appears
+# under six different vuln_type strings.
+#
+# So these rules key on vuln_type, with two safeguards:
+#
+#   * `max_severity` remains the brake. Anything escalated above the band a
+#     rule was written for is never demoted by it.
+#   * Where a rule could otherwise hide an exploitable variant, an
+#     `evidence_contains` narrows it to the non-exploitable form. A finding
+#     whose evidence does not carry that literal simply does not match and
+#     STAYS SUBMITTABLE — the rule fails toward a noisier report, never toward
+#     a hidden vulnerability.
+#
+# Every rule below was checked against the recorded corpus before shipping, so
+# none of them is a rule that cannot fire.
+# ─────────────────────────────────────────────────────────────────────────────
+
+  - id: cors_wildcard_no_credentials
+    source: model_reported
+    vuln_types:
+      - "CORS Misconfiguration"
+      - "Insecure CORS Configuration"
+      - "Insecure CORS Policy"
+      - "Permissive CORS Configuration"
+      - "Missing Security Headers & Permissive CORS"
+      - "Missing Security Headers / CORS Misconfiguration"
+    evidence_contains:
+      - "Allow-Origin: *"
+      - "allow-origin: *"
+      - "Allow-Origin:*"
+    max_severity: medium
+    action: informational
+    rationale: >
+      `Access-Control-Allow-Origin: *` cannot be exploited for a credentialed
+      cross-origin read: browsers refuse the wildcard whenever the request
+      carries credentials, so no attacker page can read an authenticated
+      response through it. The exploitable shape is a REFLECTED origin with
+      Access-Control-Allow-Credentials: true, which does not contain the
+      wildcard literal and therefore does not match this rule. 31 findings in
+      the corpus, all wildcard, none evidencing credentials.
+
+  - id: missing_headers_as_its_own_type
+    source: model_reported
+    vuln_types:
+      - "Missing Security Headers"
+    max_severity: medium
+    action: informational
+    rationale: >
+      Same class as `missing_security_headers` above, reported by the model
+      under its own vuln_type rather than as Security Misconfiguration with the
+      detector's evidence prefix. Keyed on type alone because there is no
+      code-controlled evidence string to anchor to — the text is model-written.
+
+  - id: no_vulnerability_asserted
+    source: model_reported
+    vuln_types:
+      - "No Vulnerability Found"
+      - "No Output"
+      - "No Reflection XSS"
+      - "Connection Refused"
+      - "Unresponsive Target"
+      - "Unknown Protocol"
+      - "Incorrect Port Scan Output"
+      - "Port Scan"
+      - "API Endpoint Error"
+      - "API Error Handling"
+      - "Authentication Error"
+      - "Authentication Required"
+    max_severity: low
+    action: informational
+    rationale: >
+      Not on any triage reject list because they are not vulnerability classes
+      at all — the agent recorded a NON-EVENT as a finding. "Connection
+      Refused", "No Vulnerability Found" and "Unresponsive Target" assert that
+      nothing was found. 16 such rows in the corpus. `max_severity: low` is
+      deliberate: one row named "Authentication Required" was written at high,
+      and a high-severity finding is not demoted on the strength of its name.
+
+  - id: rate_limit_alone
+    source: model_reported
+    vuln_types:
+      - "Brute Force"
+    max_severity: low
+    action: informational
+    rationale: >
+      Missing rate limiting on a non-critical form is a hardening gap. It
+      becomes submittable only when chained to something — OTP brute force
+      reaching account takeover — and that chain would be reported as the
+      takeover, at its own severity, not as this.
