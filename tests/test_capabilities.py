@@ -224,3 +224,103 @@ class TestProducedOutputIsActuallyRead:
         assert "NOT_ASSESSED" in src
         assert "not assessed" in src
         assert "tlVerdict" in src
+
+
+class TestHostedProviderRateLimit:
+    """A hosted provider has a request QUOTA; local Ollama has a GPU.
+
+    Hetzner's Inference API allows 10 requests per 60s per key, and one agent
+    run makes up to 30 LLM calls. `_openai_chat` previously surfaced every 4xx
+    immediately — the comment said "surface 4xx (incl. 401/429)" — so on a
+    rate-limited provider a run would die partway through rather than wait out
+    a window that reopens in seconds.
+    """
+
+    import inspect as _i
+    import orchestrator.llm_client as _L
+
+    def test_429_is_retried_not_surfaced(self):
+        import inspect
+        import orchestrator.llm_client as L
+        src = inspect.getsource(L._openai_chat)
+        assert "code == 429" in src, "429 is not distinguished from other 4xx"
+        assert "surface 4xx (incl. 401/429) immediately" not in src
+
+    def test_the_server_backoff_header_is_honoured(self):
+        """Guessing a delay when the server told us one is how a client keeps
+        spending its budget on rejected requests."""
+        import inspect
+        import orchestrator.llm_client as L
+        assert "_retry_after" in inspect.getsource(L._openai_chat)
+
+    def test_401_is_still_surfaced_immediately(self):
+        """The retry must not swallow a bad key into a slow loop."""
+        import inspect
+        import orchestrator.llm_client as L
+        src = inspect.getsource(L._openai_chat)
+        assert "code >= 500" in src, "5xx handling was lost"
+
+    def test_pacing_is_client_side_and_process_wide(self):
+        """Reacting to 429 alone converges on spending the whole allowance on
+        rejected requests, because the retry lands in the same window. And a
+        per-session limiter would multiply the rate by the session count, since
+        every session shares one key."""
+        import orchestrator.llm_client as L
+        assert hasattr(L, "_pace") and hasattr(L, "_rate_lock")
+        assert isinstance(L.LLM_RPM, int)
+
+    def test_pacing_is_off_by_default(self):
+        """Local Ollama must not be throttled: its constraint is the GPU, not a
+        quota. Off unless ERLIK_LLM_RPM says otherwise."""
+        import importlib
+        import os
+        import orchestrator.llm_client as L
+        old = os.environ.pop("ERLIK_LLM_RPM", None)
+        try:
+            importlib.reload(L)
+            assert L.LLM_RPM == 0
+        finally:
+            if old is not None:
+                os.environ["ERLIK_LLM_RPM"] = old
+            importlib.reload(L)
+
+    def test_ollama_path_is_not_paced(self):
+        import inspect
+        import orchestrator.llm_client as L
+        assert "await _pace()" not in inspect.getsource(L._ollama_chat)
+
+    def test_pace_actually_waits(self):
+        """Behavioural, not source-inspection: two paced calls must be spaced."""
+        import asyncio
+        import importlib
+        import os
+        import time
+        import orchestrator.llm_client as L
+        os.environ["ERLIK_LLM_RPM"] = "60"      # 1s spacing, keeps the test quick
+        try:
+            importlib.reload(L)
+
+            async def two():
+                await L._pace()
+                t0 = time.monotonic()
+                await L._pace()
+                return time.monotonic() - t0
+
+            assert asyncio.run(two()) >= 0.9
+        finally:
+            os.environ.pop("ERLIK_LLM_RPM", None)
+            importlib.reload(L)
+
+    def test_env_file_is_loaded_by_the_launcher(self):
+        """Credentials live in a gitignored .env. Without the launcher sourcing
+        it the server starts on whatever the shell happens to hold, which
+        silently runs the wrong provider."""
+        import pathlib
+        run = (pathlib.Path(__file__).resolve().parents[1] / "run.sh").read_text()
+        assert ". ./.env" in run and "set -a" in run
+
+    def test_env_is_gitignored(self):
+        """The one thing that must never become a tracked file."""
+        import pathlib
+        ig = (pathlib.Path(__file__).resolve().parents[1] / ".gitignore").read_text()
+        assert ".env" in ig.split()
