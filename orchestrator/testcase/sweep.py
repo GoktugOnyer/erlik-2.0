@@ -91,6 +91,15 @@ def build_target(case: dict[str, Any], base: str,
         if o in over:
             tgt[o] = over[o]
     tgt.setdefault("host", host)
+    # Every rendered value is checked, not just the host. The scope object below
+    # constrains WHICH HOST may be contacted; it says nothing about the other
+    # fields, and those are substituted into `bash -c '...'` command templates.
+    from orchestrator.engagement import looks_injectable
+    for k, v in tgt.items():
+        if isinstance(v, str):
+            bad = looks_injectable(v)
+            if bad:
+                return None, f"target field {k!r} {bad}"
     # Scope travels WITH the target. The runner enforces it, so a plan that
     # omitted it would hand the executor a case with no boundary.
     tgt["scope"] = {"allow_hosts": [host], "allow_ports": [port]}

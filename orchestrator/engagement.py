@@ -33,6 +33,36 @@ from typing import Any
 from urllib.parse import urlparse
 
 
+# Characters that can BREAK OUT of the quoting the test-case templates actually
+# use. Verified against every template in tests_catalog/wstg/: each value is
+# interpolated inside DOUBLE quotes, inside an outer `bash -c '...'`. So:
+#
+#   "   closes the inner double quote
+#   '   closes the OUTER single quote of bash -c
+#   $   parameter and command expansion, still live inside double quotes
+#   `   command substitution, still live inside double quotes
+#   \   escape
+#   newline / CR / NUL
+#
+# Deliberately NOT rejected: & ; | < > — these are literal inside double quotes
+# and appear in ordinary URLs ("?a=1&b=2"). Rejecting them would refuse
+# legitimate customer targets, which is a correctness failure dressed as
+# security. The set is narrow because it is derived from the actual quoting,
+# not from a generic list of scary characters.
+_SHELL_META = set("\"'`$\\\n\r\x00")
+
+
+def looks_injectable(value: str) -> str:
+    """'' if the value is safe to render into a command, else the reason."""
+    v = str(value or "")
+    bad = sorted(_SHELL_META & set(v))
+    if bad:
+        return f"contains shell metacharacter(s): {' '.join(repr(c) for c in bad)}"
+    if "\x00" in v:
+        return "contains a null byte"
+    return ""
+
+
 def _host_of(value: str) -> str:
     """Bare hostname from a URL, host:port, or hostname."""
     v = (value or "").strip()
@@ -75,7 +105,13 @@ def _matches(pattern: str, kind: str, host: str, url: str = "") -> bool:
         except ValueError:
             return False
     if kind == "url":
-        return (url or "").lower().startswith(pattern)
+        # Host equality FIRST, then the path prefix. A bare string prefix let
+        # pattern "https://acme.com" authorise "https://acme.com.evil.net",
+        # which is the same label-boundary mistake as a suffix match on a
+        # domain, pointing the other way.
+        if _host_of(pattern) != host:
+            return False
+        return (url or "").lower().rstrip("/").startswith(pattern.rstrip("/"))
     return False
 
 

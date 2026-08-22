@@ -5214,6 +5214,9 @@ async def add_engagement_target(engagement_id: str, body: dict):
     base = (body.get("base_url") or "").strip()
     if not base:
         raise HTTPException(status_code=400, detail="base_url required")
+    bad = E.looks_injectable(base)
+    if bad:
+        raise HTTPException(status_code=400, detail=f"refusing to store this URL — {bad}")
     db = await get_db()
     try:
         allowed, reason = await E.check(db, engagement_id, base)

@@ -270,3 +270,79 @@ class TestApiRefusesOutOfScope:
 
     def test_unknown_engagement_is_404(self, client):
         assert client.get("/api/engagements/nope").status_code == 404
+
+
+class TestShellMetacharacterGate:
+    """Values from a target dict are substituted into `bash -c '...'` command
+    templates with no quoting of their own (runner._render is a raw string
+    substitution). The gate must reject what can BREAK OUT of that quoting —
+    and must not reject anything else.
+
+    Every template in tests_catalog/wstg/ interpolates inside DOUBLE quotes
+    within an outer single-quoted `bash -c`. So `&` and `;` are literal there
+    and appear in ordinary URLs; refusing them would reject legitimate customer
+    targets, which is a correctness failure wearing a security costume.
+    """
+
+    @pytest.mark.parametrize("url", [
+        "https://app.acme.com",
+        "https://app.acme.com/search?q=test&page=2&sort=desc",   # & is normal
+        "https://app.acme.com/a;b/c",                            # ; is normal
+        "https://acme.com:8443/path/to/thing",
+        "https://acme.com/?filter=a|b",                          # | is literal
+        "https://acme.com/?a=<b>",                               # < > literal
+    ])
+    def test_ordinary_urls_are_accepted(self, url):
+        assert E.looks_injectable(url) == "", f"refused a legitimate URL: {url}"
+
+    @pytest.mark.parametrize("bad,why", [
+        ('https://acme.com/"; id; echo "', 'double quote closes the inner quote'),
+        ("https://acme.com/'; id; echo '", "apostrophe closes the outer bash -c"),
+        ("https://acme.com/$(id)", "command substitution"),
+        ("https://acme.com/${HOME}", "parameter expansion"),
+        ("https://acme.com/`id`", "backtick substitution"),
+        ("https://acme.com/\\x", "backslash escape"),
+        ("https://acme.com/\nid", "newline"),
+    ])
+    def test_breakout_characters_are_refused(self, bad, why):
+        assert E.looks_injectable(bad), f"accepted a breakout payload ({why}): {bad!r}"
+
+    def test_the_reason_names_the_character(self):
+        r = E.looks_injectable("https://acme.com/$(id)")
+        assert "$" in r
+
+    def test_sweep_planner_refuses_rather_than_renders(self):
+        """The planner must turn an injectable value into a NAMED SKIP, not a
+        runnable case — the whole point of planning before executing."""
+        from orchestrator.testcase import sweep as S
+        case = {"id": "X", "name": "x", "category": "c", "severity": "low",
+                "target_schema": {"required": ["url"], "optional": []}}
+        tgt, why = S.build_target(case, 'https://acme.com/$(id)')
+        assert tgt is None
+        assert "url" in why and "$" in why
+
+    def test_sweep_planner_still_builds_a_normal_target(self):
+        """Guard on the guard: the gate must not refuse everything."""
+        from orchestrator.testcase import sweep as S
+        case = {"id": "X", "name": "x", "category": "c", "severity": "low",
+                "target_schema": {"required": ["url"], "optional": []}}
+        tgt, why = S.build_target(case, "https://acme.com/search?q=a&b=2")
+        assert tgt is not None and why == ""
+
+
+class TestUrlScopeKindChecksTheHost:
+    """`kind='url'` matched by raw string prefix, so pattern
+    "https://acme.com" authorised "https://acme.com.evil.net" — the same
+    label-boundary mistake as a domain suffix match, pointing the other way."""
+
+    ROWS = [{"pattern": "https://acme.com/app", "kind": "url", "in_scope": 1,
+             **DECLARED}]
+
+    def test_prefix_alone_no_longer_authorises_a_different_host(self):
+        assert ok("https://acme.com.evil.net/app", self.ROWS) is False
+
+    def test_the_intended_url_still_matches(self):
+        assert ok("https://acme.com/app/page", self.ROWS) is True
+
+    def test_a_different_path_on_the_same_host_is_refused(self):
+        assert ok("https://acme.com/other", self.ROWS) is False

@@ -1953,7 +1953,7 @@
             document.getElementById('eng-list').innerHTML = list.length ? list.map(e => `
                 <div class="flex items-center gap-3 flex-wrap font-mono py-1"
                     style="font-size:0.62rem; border-bottom:1px solid #1e242c; cursor:pointer;"
-                    onclick="engOpen('${tlEsc(e.id)}')">
+                    data-engopen="${tlEsc(e.id)}">
                     <span style="color:var(--neon-cyan); min-width:170px;">${tlEsc(e.client_name)}</span>
                     <span style="opacity:.75; min-width:150px;">${tlEsc(e.root_domain || '—')}</span>
                     <span style="opacity:.55;">${e.n_targets} target(s) · ${e.n_sessions} session(s)</span>
@@ -1961,6 +1961,8 @@
                     <span style="opacity:.4;">${tlEsc((e.authorised_by || 'no authorisation recorded'))}</span>
                 </div>`).join('')
                 : '<div class="font-mono" style="font-size:0.6rem; opacity:.6;">No engagements yet. Create one above — a run without a customer has no recorded authorisation.</div>';
+            document.querySelectorAll('[data-engopen]').forEach(el =>
+                el.addEventListener('click', () => engOpen(el.dataset.engopen)));
         }
 
         async function engCreate() {
@@ -2009,7 +2011,7 @@
                     <span style="min-width:190px;">${tlEsc(r.pattern)}</span>
                     <span style="opacity:.5; min-width:70px;">${tlEsc(r.kind)}</span>
                     <span style="opacity:.5;">${tlEsc(r.source)}</span>
-                    ${pending ? `<button onclick="engApprove('${tlEsc(r.pattern)}')"
+                    ${pending ? `<button data-engapprove="${tlEsc(r.pattern)}"
                         class="font-pixel px-2 py-0.5 rounded border" style="font-size:0.45rem;">APPROVE</button>` : ''}
                 </div>`;
             };
@@ -2072,7 +2074,7 @@
                             <span style="color:var(--neon-cyan); min-width:230px;">${tlEsc(t.base_url)}</span>
                             <span style="opacity:.6;">${tlEsc(t.title || '')}</span>
                             <span style="opacity:.5;">auth: ${tlEsc(t.auth_state || 'none')}</span>
-                            <button onclick="engToTestLab('${tlEsc(t.base_url)}')"
+                            <button data-engtestlab="${tlEsc(t.base_url)}"
                                 class="font-pixel px-2 py-0.5 rounded border" style="font-size:0.45rem;">TEST LAB &rarr;</button>
                         </div>`).join('') ||
                         '<div class="font-mono" style="font-size:0.6rem; opacity:.6;">No targets yet.</div>'}</div>
@@ -2106,7 +2108,12 @@
                             ? '<span style="opacity:.6;">Nothing run yet under this engagement.</span>' : ''}
                     </div>
                 </div>`;
-            document.getElementById('eng-detail').classList.remove('hidden');
+            const det = document.getElementById('eng-detail');
+            det.querySelectorAll('[data-engapprove]').forEach(b =>
+                b.addEventListener('click', () => engApprove(b.dataset.engapprove)));
+            det.querySelectorAll('[data-engtestlab]').forEach(b =>
+                b.addEventListener('click', () => engToTestLab(b.dataset.engtestlab)));
+            det.classList.remove('hidden');
         }
 
         async function engAddScope() {
@@ -2179,10 +2186,16 @@
         let tlPlanData = null;
         let tlAbort = false;
 
+        // Escapes the apostrophe too: several call sites interpolate into
+        // single-quoted attribute values, where a bare ' closes the attribute.
         function tlEsc(x) {
-            return String(x == null ? '' : x).replace(/[&<>"]/g,
-                c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+            return String(x == null ? '' : x).replace(/[&<>"']/g,
+                c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;', "'":'&#39;'}[c]));
         }
+
+        // Run results, keyed by case id. Holding the parsed object means nothing
+        // target-controlled is ever serialised back through the HTML parser.
+        const tlRuns = {};
 
         async function tlInit() {
             if (tlPlanData) return;
@@ -2310,14 +2323,25 @@
                 st.textContent = v.label + ` · ${secs}s`;
                 st.style.color = v.color;
                 st.title = v.why || '';
+                // The run object is kept in JS and referenced by CASE ID only.
+                // It used to be JSON.stringify'd into an onclick attribute with
+                // .replace(/'/g,"&#39;") as the sole guard -- which is a
+                // round-trip, not an escape. Every byte of this object is chosen
+                // by the probed host (steps[].output is raw curl stdout), so a
+                // target emitting the literal characters `&quot;` produced a
+                // real `"` after HTML decoding, closed the JSON string literal
+                // and executed arbitrary JS in the operator's dashboard.
+                tlRuns[id] = d;
                 fd.innerHTML = n
                     ? (d.findings.map(f =>
                         `<div style="color:var(--neon-red);">${tlEsc(f.vuln_type)} <span style="opacity:.6;">[${tlEsc(f.severity)}]</span></div>`
                       ).join('') +
-                      `<button onclick='tlDetail(${JSON.stringify(d).replace(/'/g, "&#39;")})'
+                      `<button data-tlrun="${tlEsc(id)}"
                           class="font-pixel px-2 py-0.5 rounded border mt-1" style="font-size:0.45rem;">EVIDENCE</button>`)
-                    : `<button onclick='tlDetail(${JSON.stringify(d).replace(/'/g, "&#39;")})'
+                    : `<button data-tlrun="${tlEsc(id)}"
                           class="font-pixel px-2 py-0.5 rounded border" style="font-size:0.45rem; opacity:.6;">STEPS</button>`;
+                fd.querySelectorAll('[data-tlrun]').forEach(b =>
+                    b.addEventListener('click', () => tlDetail(tlRuns[b.dataset.tlrun])));
                 return n;
             } catch (e) {
                 st.textContent = 'error';
