@@ -65,6 +65,12 @@ BASE = {
     # Pinned. It was env-only and read once at import, so two runs of one arm
     # could differ in treatment with nothing in the record showing it.
     "max_playbooks": 3,
+    # PINNED TO LOCAL OLLAMA, deliberately. Every row already recorded ran on
+    # qwen2.5-coder:7b through Ollama. The process default is now a hosted
+    # provider, and a hosted model is a DIFFERENT model — an arm compared
+    # against archived rows has to take the same inference path or the
+    # comparison is between two things at once.
+    "provider": "ollama",
 }
 
 ARMS = {
@@ -315,6 +321,7 @@ async def main() -> int:
                            "handoff_chars": handoff_chars(log, sid) if log else -1,
                            "playbooks_mode": cfg.get("playbooks", ""),
                            "handoff_on": bool(cfg.get("handoff")),
+                           "provider": cfg.get("provider") or "default",
                            "mission_sha": hashlib.sha1(
                                MISSION.encode()).hexdigest()[:8]}
                     row.update(await score(sid))

@@ -74,3 +74,65 @@ def test_custom_preset_uses_env_fallback(monkeypatch):
 def test_all_presets_expose_label_and_config():
     for p in rc.presets_for_api():
         assert p["name"] and p["label"] and isinstance(p["config"], dict)
+
+
+class TestProviderIsPinnablePerRun:
+    """Every recorded experiment ran on local Ollama with qwen2.5-coder:7b.
+
+    The process default is now a hosted provider, and a hosted model is a
+    DIFFERENT model. An arm compared against archived rows has to take the same
+    inference path, or the comparison is between two things at once — the
+    treatment AND the model. Hence a per-run pin rather than a process-wide
+    setting.
+    """
+
+    def test_unpinned_falls_back_to_the_process_default(self):
+        assert rc.resolve({"preset": "custom"})["provider"] is None
+
+    def test_a_run_can_pin_ollama(self):
+        assert rc.resolve({"preset": "custom", "provider": "ollama"})["provider"] == "ollama"
+
+    def test_an_unknown_provider_warns_and_falls_back(self):
+        """Silently honouring a typo would route a run to a backend nobody
+        chose, and the row would still claim the arm ran."""
+        r = rc.resolve({"preset": "custom", "provider": "gpt5-turbo-ultra"})
+        assert r["provider"] is None
+        assert any("provider" in w for w in r["run_config_warnings"])
+
+    def test_the_experiment_harness_pins_ollama(self):
+        """The reason this feature exists. If the harness ever stops pinning,
+        the next experiment silently changes model AND provider."""
+        import importlib.util
+        import pathlib
+        path = pathlib.Path(__file__).resolve().parents[1] / "scripts" / "context_test.py"
+        spec = importlib.util.spec_from_file_location("ct", path)
+        m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(m)
+        assert m.BASE.get("provider") == "ollama"
+
+    def test_the_agent_loop_actually_uses_the_pin(self):
+        """Wiring guard: a run_config key nothing reads is this codebase's
+        signature defect — the tunables shipped that way for months."""
+        import pathlib
+        src = (pathlib.Path(__file__).resolve().parents[1]
+               / "orchestrator" / "main.py").read_text()
+        assert 'runcfg.get("provider")' in src
+        assert "provider=_provider" in src
+        assert src.count("provider=_provider") >= 2, (
+            "the pin must reach BOTH the model-availability check and the "
+            "generation call")
+
+    def test_chat_json_forwards_the_provider(self):
+        """It accepted `provider` and dropped it — the deterministic lane's
+        LLM-judged cases would have ignored the pin entirely."""
+        import inspect
+        import orchestrator.llm_client as L
+        assert "provider=provider" in inspect.getsource(L.chat_json)
+
+    def test_default_model_follows_the_resolved_provider(self):
+        """Pinning ollama while the process default is hosted must not hand
+        Ollama a hosted model id — that fails at request time as an opaque 404
+        rather than an obvious configuration error."""
+        import orchestrator.llm_client as L
+        assert L.default_model_for("ollama") == L.OLLAMA_DEFAULT_MODEL
+        assert ":" in L.default_model_for("ollama"), "not an Ollama-style tag"

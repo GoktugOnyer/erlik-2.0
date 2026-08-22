@@ -3498,6 +3498,30 @@ async def _chain_auto_progress(session_id: str):
 
 # --- Agent Loop ---
 
+async def _load_run_config(session_id: str) -> dict:
+    """Resolve this session's run config. Depends only on session_id.
+
+    Extracted so it can run BEFORE the model-availability check, which now
+    needs to know the provider: an Ollama-only check must not reject a run
+    pinned to a hosted provider whose model is not installed locally, and a run
+    pinned to Ollama must still get the check even when the process default is
+    a hosted provider.
+    """
+    raw = None
+    try:
+        db = await get_db()
+        try:
+            cur = await db.execute(
+                "SELECT run_config FROM sessions WHERE id = ?", (session_id,))
+            row = await cur.fetchone()
+            raw = row[0] if row else None
+        finally:
+            await db.close()
+    except Exception:
+        raw = None
+    return runconfig.resolve(raw)
+
+
 async def agent_loop(session_id: str, target_url: str, scope_mode: str,
                      system_prompt: str, enabled_tools: list[str], model: str,
                      session_type: str = "cold", parent_session_id: str = None,
@@ -3508,8 +3532,10 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
     # configured default used to be a tag Ollama does not have, so a session
     # would set up, inject context, then die on an opaque 404 at the first
     # generation. Never substitutes a near neighbour — see ensure_model_available.
+    runcfg = await _load_run_config(session_id)
+    _provider = runcfg.get("provider")
     try:
-        await llm_client.ensure_model_available(model)
+        await llm_client.ensure_model_available(model, provider=_provider)
     except llm_client.ModelUnavailable as _mu:
         print(f"[session {session_id[:8]}] {_mu}", flush=True)
         await manager.broadcast(session_id, {
@@ -3666,20 +3692,10 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
 
         # Resolve the per-session run configuration (preset + overrides + env
         # fallback). Decides which deterministic / knowledge stages run below.
-        _rc_raw = None
-        try:
-            _rc_db = await get_db()
-            try:
-                _rc_cur = await _rc_db.execute(
-                    "SELECT run_config FROM sessions WHERE id = ?", (session_id,))
-                _rc_row = await _rc_cur.fetchone()
-                _rc_raw = _rc_row[0] if _rc_row else None
-            finally:
-                await _rc_db.close()
-        except Exception:
-            _rc_raw = None
-        runcfg = runconfig.resolve(_rc_raw)
-        print(f"[runconfig {session_id[:8]}] preset={runcfg['preset']} "
+        # runcfg was resolved at the top of this function, before the
+        # model-availability check that now depends on it.
+        print(f"[runconfig {session_id[:8]}] provider={runcfg.get('provider') or 'default'} "
+              f"preset={runcfg['preset']} "
               f"skills={runcfg['skills']} nettacker={runcfg['nettacker']}"
               f"({runcfg['nettacker_scenario']}) cve={runcfg['cve_enrich']}", flush=True)
 
@@ -4143,7 +4159,8 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
             print(f"[agent {session_id[:8]}] turn {turn+1}/{max_turns} → LLM call (msgs={len(messages)})", flush=True)
             try:
                 response = await asyncio.wait_for(
-                    llm_client.chat(messages, model=model, num_ctx=_ctx_alloc),
+                    llm_client.chat(messages, model=model, num_ctx=_ctx_alloc,
+                                    provider=_provider),
                     timeout=LLM_CALL_TIMEOUT_S,
                 )
                 duration = int((time.time() - start_time) * 1000)

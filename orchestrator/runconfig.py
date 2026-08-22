@@ -140,7 +140,7 @@ def resolve(run_config=None) -> dict:
 
     # Explicit per-key values in the session config override the preset.
     for k in ("cve_enrich", "skills", "nettacker", "nettacker_findings",
-              "nettacker_scenario", "playbooks", "max_playbooks", "poc_verify", "primitives",
+              "nettacker_scenario", "playbooks", "max_playbooks", "provider", "poc_verify", "primitives",
               "handoff",
               "target_memory", "techniques", "ai_review", "review_model",
               "skills_exclude", "skills_pin", "skills_max_chars",
@@ -153,7 +153,7 @@ def resolve(run_config=None) -> dict:
     # recognise as intended-but-wrong rather than dropping them without a word.
     warnings: list[str] = []
     _known = {"cve_enrich", "skills", "nettacker", "nettacker_findings",
-              "nettacker_scenario", "playbooks", "max_playbooks", "poc_verify", "primitives",
+              "nettacker_scenario", "playbooks", "max_playbooks", "provider", "poc_verify", "primitives",
               "handoff",
               "target_memory", "techniques", "ai_review", "review_model",
               "skills_exclude", "skills_pin", "skills_max_chars",
@@ -176,6 +176,18 @@ def resolve(run_config=None) -> dict:
     # is not part of the measurement — so it is a free-form string, not tri-state.
     review_model = (base.get("review_model")
                     or os.environ.get("ERLIK_REVIEW_MODEL", "").strip() or None)
+
+    # Which inference backend this run uses. Pinnable PER RUN because every
+    # recorded experiment ran on local Ollama: an arm compared against those
+    # rows must take the same inference path, while new work is free to use a
+    # hosted provider. None falls back to the process-wide ERLIK_LLM_PROVIDER.
+    provider = (base.get("provider")
+                or os.environ.get("ERLIK_RUN_PROVIDER", "").strip() or None)
+    if provider:
+        provider = str(provider).strip().lower()
+        if provider not in ("ollama", "openai"):
+            warnings.append(f"unknown provider {provider!r}; falling back to the default")
+            provider = None
 
     playbooks = base.get("playbooks")
     if playbooks is None:
@@ -275,6 +287,7 @@ def resolve(run_config=None) -> dict:
         "ai_review": tri("ai_review"),
         "review_model": review_model,
         "nettacker_scenario": scenario,
+        "provider": provider,
         "playbooks": playbooks,
         "max_playbooks": max_playbooks,
         "handoff": tri("handoff"),

@@ -282,8 +282,30 @@ async def _openai_health() -> dict:
 
 # ---------- Public API (unchanged signatures) ----------
 
-async def list_models() -> list[str]:
-    if PROVIDER == "openai":
+# Provider is resolvable PER RUN, not only per process. Every recorded
+# experiment ran on local Ollama; comparing a new arm against those rows
+# requires the same inference path, while new work should be free to use a
+# hosted provider. A process-wide setting forces one or the other.
+def resolve_provider(provider: str | None = None) -> str:
+    return (provider or PROVIDER or "ollama").strip().lower()
+
+
+def default_model_for(provider: str | None = None) -> str:
+    """The default model of the RESOLVED provider.
+
+    Without this, pinning a run to ollama while ERLIK_LLM_PROVIDER=openai would
+    hand Ollama a hosted model id and fail at request time with a confusing
+    404 rather than an obvious configuration error.
+    """
+    p = resolve_provider(provider)
+    override = os.environ.get("ERLIK_LLM_MODEL")
+    if override:
+        return override
+    return OPENAI_DEFAULT_MODEL if p == "openai" else OLLAMA_DEFAULT_MODEL
+
+
+async def list_models(provider: str | None = None) -> list[str]:
+    if resolve_provider(provider) == "openai":
         return await _openai_list_models()
     return await _ollama_list_models()
 
@@ -292,7 +314,8 @@ class ModelUnavailable(RuntimeError):
     """The requested model is not installed, raised BEFORE a run starts."""
 
 
-async def ensure_model_available(model: str | None = None) -> str:
+async def ensure_model_available(model: str | None = None,
+                                 provider: str | None = None) -> str:
     """Check the model can be served, and return the tag that will be used.
 
     Deliberately raises instead of substituting a near neighbour. The model is an
@@ -304,8 +327,8 @@ async def ensure_model_available(model: str | None = None) -> str:
 
     Only meaningful for Ollama; a remote provider validates at request time.
     """
-    use_model = model or _default_model()
-    if PROVIDER != "ollama":
+    use_model = model or default_model_for(provider)
+    if resolve_provider(provider) != "ollama":
         return use_model
 
     installed = await _ollama_list_models()
@@ -325,20 +348,21 @@ async def ensure_model_available(model: str | None = None) -> str:
 
 
 async def chat(messages: list[dict], model: str | None = None, max_retries: int = 3,
-               num_ctx: int | None = None) -> str:
+               num_ctx: int | None = None, provider: str | None = None) -> str:
     """Send a conversation to the configured provider.
 
     `num_ctx` sizes the LOCAL model's context allocation. It is ignored by
     hosted providers, which size their own.
     """
-    use_model = model or _default_model()
-    if PROVIDER == "openai":
+    use_model = model or default_model_for(provider)
+    if resolve_provider(provider) == "openai":
         return await _openai_chat(messages, use_model, max_retries)
     return await _ollama_chat(messages, use_model, max_retries, num_ctx=num_ctx)
 
 
-async def chat_json(messages: list[dict], model: str | None = None) -> dict | None:
-    content = await chat(messages, model=model)
+async def chat_json(messages: list[dict], model: str | None = None,
+                    provider: str | None = None) -> dict | None:
+    content = await chat(messages, model=model, provider=provider)
     try:
         return json.loads(content)
     except json.JSONDecodeError:
