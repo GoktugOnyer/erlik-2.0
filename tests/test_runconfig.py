@@ -136,3 +136,62 @@ class TestProviderIsPinnablePerRun:
         import orchestrator.llm_client as L
         assert L.default_model_for("ollama") == L.OLLAMA_DEFAULT_MODEL
         assert ":" in L.default_model_for("ollama"), "not an Ollama-style tag"
+
+
+class TestHealthGateIsProviderAware:
+    """The gate that killed the first pinned run.
+
+    agent_loop gated on `health.get("ollama") != "connected"` — Ollama's key.
+    Once a run could pin its own provider, a run pinned to Ollama on a process
+    defaulting to a hosted provider read a payload with no "ollama" key at all,
+    failed the gate, and reported "Ollama is not running" while Ollama was
+    running perfectly. A provider-blind gate does not merely fail; it fails
+    while naming the wrong cause, which is worse than failing loudly.
+    """
+
+    def test_hosted_health_payload_passes_the_gate(self):
+        import orchestrator.llm_client as L
+        ok, why = L.provider_is_healthy(
+            {"provider": "openai", "status": "configured"})
+        assert ok is True and why == ""
+
+    def test_ollama_health_payload_passes_the_gate(self):
+        import orchestrator.llm_client as L
+        ok, _ = L.provider_is_healthy({"provider": "ollama", "ollama": "connected"})
+        assert ok is True
+
+    def test_a_hosted_payload_is_not_judged_by_ollamas_key(self):
+        """The exact defect: the hosted payload has no 'ollama' key, and the
+        old gate read that absence as 'Ollama is down'."""
+        import orchestrator.llm_client as L
+        payload = {"provider": "openai", "status": "configured"}
+        assert "ollama" not in payload
+        assert L.provider_is_healthy(payload)[0] is True
+
+    def test_a_genuinely_down_provider_still_fails(self):
+        """Guard on the guard — the fix must not make the gate always pass."""
+        import orchestrator.llm_client as L
+        assert L.provider_is_healthy({"provider": "ollama", "ollama": "down"})[0] is False
+        assert L.provider_is_healthy({"provider": "openai", "status": "missing_key"})[0] is False
+
+    def test_the_failure_message_names_the_right_provider(self):
+        import orchestrator.llm_client as L
+        _, why = L.provider_is_healthy({"provider": "openai", "status": "missing_key"})
+        assert "ollama serve" not in why.lower(), "still blames Ollama for a hosted failure"
+        assert "OPENAI_API_KEY" in why
+
+    def test_the_agent_loop_passes_the_pin_to_the_health_check(self):
+        import pathlib
+        src = (pathlib.Path(__file__).resolve().parents[1]
+               / "orchestrator" / "main.py").read_text()
+        assert "health_check(provider=_provider)" in src
+        assert 'health.get("ollama") != "connected"' not in src, (
+            "the provider-blind gate is still there")
+
+    def test_model_presence_is_only_checked_for_ollama(self):
+        """A hosted provider validates at request time; its /models list is not
+        a local inventory, so checking membership there rejects valid runs."""
+        import pathlib
+        src = (pathlib.Path(__file__).resolve().parents[1]
+               / "orchestrator" / "main.py").read_text()
+        assert 'resolve_provider(_provider) == "ollama" and available_models' in src

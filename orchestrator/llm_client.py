@@ -376,7 +376,28 @@ async def chat_json(messages: list[dict], model: str | None = None,
     return None
 
 
-async def health_check() -> dict:
-    if PROVIDER == "openai":
+async def health_check(provider: str | None = None) -> dict:
+    if resolve_provider(provider) == "openai":
         return await _openai_health()
     return await _ollama_health()
+
+
+def provider_is_healthy(health: dict) -> tuple[bool, str]:
+    """(ok, why) for ANY provider's health payload.
+
+    The agent loop used to gate on `health.get("ollama") != "connected"`, which
+    is Ollama's key. Once a run could pin its own provider, a run pinned to
+    Ollama on a process defaulting to a hosted provider read a payload with no
+    "ollama" key at all and failed the gate — reporting "Ollama is not running"
+    while Ollama was running perfectly. A provider-blind gate does not merely
+    fail; it fails while naming the wrong cause.
+    """
+    prov = (health or {}).get("provider", "ollama")
+    if prov == "openai":
+        if health.get("status") == "configured":
+            return True, ""
+        return False, (f"Hosted provider is not usable: {health.get('status')}. "
+                       f"Check OPENAI_API_KEY and OPENAI_BASE_URL in .env.")
+    if health.get("ollama") == "connected":
+        return True, ""
+    return False, "Ollama is not running. Start it with: ollama serve"

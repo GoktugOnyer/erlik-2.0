@@ -3629,24 +3629,30 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
             "message": f"Connecting to LLM model: {model}",
         })
 
-        health = await llm_client.health_check()
-        if health.get("ollama") != "connected":
+        health = await llm_client.health_check(provider=_provider)
+        _ok, _why = llm_client.provider_is_healthy(health)
+        if not _ok:
+            print(f"[session {session_id[:8]}] provider unhealthy: {_why}", flush=True)
             await manager.broadcast(session_id, {
-                "type": "log", "phase": "error",
-                "message": "Ollama is not running. Start it with: ollama serve",
+                "type": "log", "phase": "error", "message": _why,
             })
             await _finish_session(session_id, "error")
             return
 
+        # Model presence is an OLLAMA question — a hosted provider validates at
+        # request time and its /models list is not a local inventory.
+        # ensure_model_available() already made this check at the top of the
+        # run, for the resolved provider; repeating it here against the wrong
+        # provider's payload is what turned a pinned run into a failed one.
         available_models = health.get("models", [])
-        model_found = any(model in m or model.split(":")[0] in m for m in available_models)
-        if not model_found:
-            await manager.broadcast(session_id, {
-                "type": "log", "phase": "error",
-                "message": f"Model '{model}' not found. Available: {', '.join(available_models)}",
-            })
-            await _finish_session(session_id, "error")
-            return
+        if llm_client.resolve_provider(_provider) == "ollama" and available_models:
+            if not any(model in m or model.split(":")[0] in m for m in available_models):
+                await manager.broadcast(session_id, {
+                    "type": "log", "phase": "error",
+                    "message": f"Model '{model}' not found. Available: {', '.join(available_models)}",
+                })
+                await _finish_session(session_id, "error")
+                return
 
         await manager.broadcast(session_id, {
             "type": "log", "phase": "recon",
