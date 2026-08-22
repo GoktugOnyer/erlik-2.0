@@ -466,6 +466,18 @@ async def _record_finding(session_id: str, f: dict, *, source: str,
                for c in collected):
             return False
 
+    # vuln_type is exempt from export masking because it is supposed to be a
+    # controlled vocabulary. It is frequently written by a model, so the
+    # exemption's premise has to be enforced HERE — the field is also
+    # broadcast to the dashboard and printed into client reports, so a secret
+    # that reaches this row has already escaped by the time an export runs.
+    from orchestrator.redaction import safe_label
+    _vt = safe_label(f.get("vuln_type", ""))
+    if _vt != (f.get("vuln_type") or "").strip():
+        print(f"[redact {session_id[:8]}] vuln_type replaced — the label carried "
+              f"a secret or was not a class name", flush=True)
+    f = {**f, "vuln_type": _vt}
+
     owns_db = db is None
     if owns_db:
         db = await get_db()
@@ -6206,6 +6218,21 @@ def _mask_export_rows(rows: list[dict], counts: dict) -> list[dict]:
         clean = {}
         for col, val in row.items():
             if col in _EXPORT_STRUCTURAL or not isinstance(val, str) or not val:
+                # Structural columns are exempt because they hold a controlled
+                # vocabulary. That premise is now ENFORCED at the write path
+                # (see safe_label in _record_finding), but rows recorded before
+                # that fix still exist, and the exemption is default-ALLOW —
+                # the one place in this function where a mistake escapes. So
+                # the allowlist gets a tripwire rather than blind trust: if a
+                # structural value actually carries a secret, it is masked
+                # anyway and counted.
+                if isinstance(val, str) and val:
+                    found = census(val)
+                    if found:
+                        for kind, n in found.items():
+                            counts[kind] = counts.get(kind, 0) + n
+                        clean[col] = mask(val)
+                        continue
                 clean[col] = val
                 continue
             for kind, n in census(val).items():

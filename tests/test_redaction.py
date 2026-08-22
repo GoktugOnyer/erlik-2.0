@@ -19,6 +19,7 @@ from pathlib import Path
 
 import pytest
 
+from orchestrator import redaction as R
 from orchestrator.redaction import mask, census, mask_url, PLACEHOLDER_RX
 from orchestrator.primitives import _AUTH_FLAGS
 
@@ -247,3 +248,89 @@ class TestAgainstTheRealCorpus:
         for src, v in self._rows():
             once = mask(v)
             assert mask(once) == once, f"unstable on {src}: {v[:80]}"
+
+
+class TestControlledVocabularyCannotCarryASecret:
+    """`vuln_type` sits in _EXPORT_STRUCTURAL, which exempts it from export
+    masking on the grounds that it holds a controlled vocabulary.
+
+    That exemption is correct in principle and was false in practice: the value
+    is frequently written by a model. Three rows in the recorded corpus have
+
+        vuln_type = 'password="password",username="admin"'
+
+    at severity `critical` — a credential pair in the ONE finding field that is
+    deliberately never masked, and which is also broadcast live to the
+    dashboard and printed into client reports.
+
+    Two independent guarantees, because the field escapes by three routes:
+      * the write path replaces such a label before the INSERT and before the
+        WebSocket broadcast (rows recorded from now on are clean); and
+      * the export allowlist gains a tripwire, so a row recorded BEFORE the fix
+        still cannot leave.
+    """
+
+    LEGIT = [
+        "SQL Injection", "Cross-Site Scripting (XSS)", "CORS Misconfiguration",
+        "Server-Side Request Forgery (SSRF)", "Information Disclosure - Stack Trace",
+        "Default Login Credentials", "Broken Authentication", "Arbitrary File Upload",
+    ]
+
+    @pytest.mark.parametrize("label", LEGIT)
+    def test_real_class_names_pass_through_untouched(self, label):
+        """The matcher keys on vuln_type. Mangling legitimate labels would
+        silently change every recorded recall number."""
+        assert R.safe_label(label) == label
+
+    @pytest.mark.parametrize("bad", [
+        'password="password",username="admin"',
+        "api_key=sk-live-abc123XYZ456",
+        'token="eyJhbGciOiJIUzI1NiJ9"',
+        "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG",
+    ])
+    def test_a_label_carrying_a_secret_is_replaced(self, bad):
+        out = R.safe_label(bad)
+        assert out == R.LABEL_REDACTED
+        assert "password" not in out and "sk-live" not in out
+
+    def test_the_replacement_says_why(self):
+        """An operator seeing this in a report needs to know the label was
+        suppressed, not that the finding is unclassified."""
+        assert "secret" in R.LABEL_REDACTED.lower()
+
+    def test_empty_stays_empty(self):
+        assert R.safe_label("") == "" and R.safe_label(None) == ""
+
+    def test_the_write_path_applies_it(self):
+        """Wiring guard: defining safe_label is not calling it."""
+        import pathlib
+        src = (pathlib.Path(__file__).resolve().parents[1]
+               / "orchestrator" / "main.py").read_text()
+        assert "safe_label" in src
+        assert 'f = {**f, "vuln_type": _vt}' in src, (
+            "the sanitised label is computed but not substituted before the "
+            "INSERT and the broadcast")
+
+    def test_export_tripwire_masks_a_structural_column_holding_a_secret(self):
+        """The allowlist is default-ALLOW — the one place in _mask_export_rows
+        where a mistake escapes. A row recorded before the write-path fix must
+        still not leave."""
+        import orchestrator.main as M
+        counts: dict = {}
+        out = M._mask_export_rows(
+            [{"id": 1, "vuln_type": 'password="password",username="admin"',
+              "severity": "critical"}], counts)
+        assert "password" not in out[0]["vuln_type"]
+        assert counts.get("secret"), "the leak was masked but not counted"
+
+    def test_export_tripwire_leaves_ordinary_structural_values_readable(self):
+        """Blanket-masking the allowlist would turn every class name into a
+        hash and make exports unusable."""
+        import orchestrator.main as M
+        counts: dict = {}
+        out = M._mask_export_rows(
+            [{"id": 1, "vuln_type": "SQL Injection", "severity": "high",
+              "status": "completed"}], counts)
+        assert out[0]["vuln_type"] == "SQL Injection"
+        assert out[0]["severity"] == "high"
+        assert not counts
