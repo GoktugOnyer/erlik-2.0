@@ -19,12 +19,13 @@ references:
 
 target_schema:
   required: [url, parameter]
+  optional: [cookie, auth_header]
 
 steps:
   - name: jinja_twig_braces
     tool: curl
     command: >-
-      curl -s -G "{{url}}" --data-urlencode "{{parameter}}={{31337*7}}"
+      curl -s -b "{{cookie}}" -H "{{auth_header}}" -G "{{url}}" --data-urlencode "{{parameter}}={{31337*7}}"
     evaluators:
       - type: regex
         pattern: '219359'
@@ -37,7 +38,7 @@ steps:
     tool: curl
     when: no_finding_yet
     command: >-
-      curl -s -G "{{url}}" --data-urlencode "{{parameter}}=${31337*7}"
+      curl -s -b "{{cookie}}" -H "{{auth_header}}" -G "{{url}}" --data-urlencode "{{parameter}}=${31337*7}"
     evaluators:
       - type: regex
         pattern: '219359'
@@ -50,7 +51,7 @@ steps:
     tool: curl
     when: no_finding_yet
     command: >-
-      curl -s -G "{{url}}" --data-urlencode "{{parameter}}=<%= 31337*7 %>"
+      curl -s -b "{{cookie}}" -H "{{auth_header}}" -G "{{url}}" --data-urlencode "{{parameter}}=<%= 31337*7 %>"
     evaluators:
       - type: regex
         pattern: '219359'
@@ -63,7 +64,7 @@ steps:
     tool: curl
     when: no_finding_yet
     command: >-
-      curl -s -G "{{url}}" --data-urlencode "{{parameter}}=#{31337*7}"
+      curl -s -b "{{cookie}}" -H "{{auth_header}}" -G "{{url}}" --data-urlencode "{{parameter}}=#{31337*7}"
     evaluators:
       - type: regex
         pattern: '219359'
@@ -79,7 +80,7 @@ steps:
     tool: curl
     when: no_finding_yet
     command: >-
-      curl -s -G "{{url}}" --data-urlencode "{{parameter}}={{7*'7'}}"
+      curl -s -b "{{cookie}}" -H "{{auth_header}}" -G "{{url}}" --data-urlencode "{{parameter}}={{7*'7'}}"
     evaluators:
       - type: regex
         pattern: '7777777'
@@ -95,7 +96,7 @@ steps:
     tool: curl
     when: no_finding_yet
     command: >-
-      curl -s -G "{{url}}" --data-urlencode "{{parameter}}={{31337*'7'}}"
+      curl -s -b "{{cookie}}" -H "{{auth_header}}" -G "{{url}}" --data-urlencode "{{parameter}}={{31337*'7'}}"
     evaluators:
       - type: regex
         pattern: 'jinja2\.exceptions|TemplateSyntaxError|freemarker\.core|org\.apache\.velocity|Twig\\\\Error|smarty_error|Liquid::SyntaxError'

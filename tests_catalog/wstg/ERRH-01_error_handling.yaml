@@ -16,7 +16,7 @@ steps:
     # A few malformed requests likely to trip an unhandled exception and leak a
     # stack trace / framework internals.
     command: >-
-      bash -c "curl -s \"{{url}}/%ff%fe\"; echo; curl -s \"{{url}}/'\\\"\"; echo; curl -s \"{{url}}?id[]=1\""
+      bash -c "curl -s -b \"{{cookie}}\" -H \"{{auth_header}}\" \"{{url}}/%ff%fe\"; echo; curl -s -b \"{{cookie}}\" -H \"{{auth_header}}\" \"{{url}}/'\\\"\"; echo; curl -s -b \"{{cookie}}\" -H \"{{auth_header}}\" \"{{url}}?id[]=1\""
     evaluators:
       - type: regex
         pattern: >-

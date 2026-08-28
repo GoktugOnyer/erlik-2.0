@@ -24,7 +24,7 @@ steps:
   - name: actuator_index
     tool: curl
     command: >-
-      curl -s -L --max-redirs 3 -A "Mozilla/5.0" --connect-timeout 3 --max-time 6
+      curl -s -b "{{cookie}}" -H "{{auth_header}}" -L --max-redirs 3 -A "Mozilla/5.0" --connect-timeout 3 --max-time 6
       -w "\n[erlik] %{http_code} %{url_effective}\n"
       "{{url}}/actuator" "{{url}}/actuator/health"
     evaluators:
@@ -47,7 +47,7 @@ steps:
   - name: actuator_env_dump
     tool: curl
     command: >-
-      curl -s -L --max-redirs 3 -A "Mozilla/5.0" --connect-timeout 3 --max-time 6
+      curl -s -b "{{cookie}}" -H "{{auth_header}}" -L --max-redirs 3 -A "Mozilla/5.0" --connect-timeout 3 --max-time 6
       -w "\n[erlik] %{http_code} %{url_effective}\n"
       "{{url}}/actuator/env" "{{url}}/env" "{{url}}/actuator/configprops"
     evaluators:
@@ -69,7 +69,7 @@ steps:
   - name: webserver_status_handlers
     tool: curl
     command: >-
-      curl -s -L --max-redirs 3 -A "Mozilla/5.0" --connect-timeout 3 --max-time 5
+      curl -s -b "{{cookie}}" -H "{{auth_header}}" -L --max-redirs 3 -A "Mozilla/5.0" --connect-timeout 3 --max-time 5
       -w "\n[erlik] %{http_code} %{url_effective}\n"
       "{{url}}/server-status" "{{url}}/server-info" "{{url}}/balancer-manager"
       "{{url}}/nginx_status"
@@ -104,7 +104,7 @@ steps:
   - name: php_info_pages
     tool: curl
     command: >-
-      curl -s -L --max-redirs 3 -A "Mozilla/5.0" --connect-timeout 3 --max-time 5
+      curl -s -b "{{cookie}}" -H "{{auth_header}}" -L --max-redirs 3 -A "Mozilla/5.0" --connect-timeout 3 --max-time 5
       -w "\n[erlik] %{http_code} %{url_effective}\n"
       "{{url}}/phpinfo.php" "{{url}}/info.php" "{{url}}/php_info.php"
       "{{url}}/phpinfo"
@@ -120,7 +120,7 @@ steps:
   - name: dev_debug_consoles
     tool: curl
     command: >-
-      curl -s -L --max-redirs 3 -A "Mozilla/5.0" --connect-timeout 3 --max-time 5
+      curl -s -b "{{cookie}}" -H "{{auth_header}}" -L --max-redirs 3 -A "Mozilla/5.0" --connect-timeout 3 --max-time 5
       -w "\n[erlik] %{http_code} %{url_effective}\n"
       "{{url}}/_profiler" "{{url}}/telescope" "{{url}}/_ignition/health-check"
       "{{url}}/console"

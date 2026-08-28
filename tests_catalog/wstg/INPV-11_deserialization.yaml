@@ -31,7 +31,7 @@ steps:
   - name: php_object_probe
     tool: curl
     command: >-
-      curl -s -X POST -d 'data=O:8:"stdClass":0:{}' "{{url}}"
+      curl -s -b "{{cookie}}" -H "{{auth_header}}" -X POST -d 'data=O:8:"stdClass":0:{}' "{{url}}"
     evaluators:
       - type: regex
         pattern: '__PHP_Incomplete_Class|unserialize\(\)|Notice:\s*unserialize|Error at offset'
@@ -45,7 +45,7 @@ steps:
     tool: curl
     when: no_finding_yet
     command: >-
-      curl -s -X POST -H "Content-Type: application/octet-stream"
+      curl -s -b "{{cookie}}" -H "{{auth_header}}" -X POST -H "Content-Type: application/octet-stream"
       -d 'rO0ABXNyABFlcmxpay5Ob3RBUmVhbENscw==' "{{url}}"
     evaluators:
       - type: regex
@@ -60,7 +60,7 @@ steps:
     tool: curl
     when: no_finding_yet
     command: >-
-      curl -s -X POST -d 'data=gASVAAAAAAAAAAAu' "{{url}}"
+      curl -s -b "{{cookie}}" -H "{{auth_header}}" -X POST -d 'data=gASVAAAAAAAAAAAu' "{{url}}"
     evaluators:
       - type: regex
         pattern: '_pickle\.UnpicklingError|pickle\.UnpicklingError|cPickle|unsupported pickle protocol'
@@ -73,7 +73,7 @@ steps:
     tool: curl
     when: no_finding_yet
     command: >-
-      curl -s -X POST -d 'data=AAEAAAD/////AQAAAAAAAAAM' "{{url}}"
+      curl -s -b "{{cookie}}" -H "{{auth_header}}" -X POST -d 'data=AAEAAAD/////AQAAAAAAAAAM' "{{url}}"
     evaluators:
       - type: regex
         pattern: 'System\.Runtime\.Serialization|BinaryFormatter|SerializationException|Psych::|Marshal\.load|undefined class/module'

@@ -14,7 +14,7 @@ steps:
   - name: baseline
     tool: curl
     command: >-
-      curl -s -o /dev/null -w "%{http_code}" "{{url}}?{{parameter}}=1"
+      curl -s -b "{{cookie}}" -H "{{auth_header}}" -o /dev/null -w "%{http_code}" "{{url}}?{{parameter}}=1"
     evaluators:
       - type: regex
         pattern: '^[23]\d\d$'
@@ -60,7 +60,7 @@ steps:
     tool: curl
     when: no_finding_yet
     command: >-
-      curl -s -o /dev/null -w "noop" "{{url}}"
+      curl -s -b "{{cookie}}" -H "{{auth_header}}" -o /dev/null -w "noop" "{{url}}"
     evaluators:
       - type: llm
         instruction: >-

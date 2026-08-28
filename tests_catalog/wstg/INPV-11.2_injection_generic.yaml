@@ -29,6 +29,7 @@ references:
 
 target_schema:
   required: [url, parameter]
+  optional: [cookie, auth_header]
 
 steps:
   # A lone quote is the classic probe: harmless to send, and it terminates a
@@ -36,7 +37,7 @@ steps:
   - name: single_quote
     tool: curl
     command: >-
-      curl -s -G "{{url}}" --data-urlencode "{{parameter}}=erlik'probe"
+      curl -s -b "{{cookie}}" -H "{{auth_header}}" -G "{{url}}" --data-urlencode "{{parameter}}=erlik'probe"
     evaluators:
       - type: regex
         pattern: 'XPathException|javax\.xml\.xpath|SpelEvaluationException|ognl\.OgnlException|jakarta\.el|javax\.el\.ELException|Traceback \(most recent call last\)|PHP (Parse|Fatal) error|System\.Data\.\w+Exception|NoMethodError|Elixir\.\w+Error'
@@ -49,7 +50,7 @@ steps:
     tool: curl
     when: no_finding_yet
     command: >-
-      curl -s -G "{{url}}" --data-urlencode "{{parameter}}=erlik\"|]}$(){}"
+      curl -s -b "{{cookie}}" -H "{{auth_header}}" -G "{{url}}" --data-urlencode "{{parameter}}=erlik\"|]}$(){}"
     evaluators:
       - type: regex
         pattern: 'XPathException|javax\.xml\.xpath|SpelEvaluationException|ognl\.OgnlException|jakarta\.el|javax\.el\.ELException|Traceback \(most recent call last\)|PHP (Parse|Fatal) error|System\.Data\.\w+Exception|NoMethodError'
@@ -64,7 +65,7 @@ steps:
     tool: curl
     when: no_finding_yet
     command: >-
-      curl -s -G "{{url}}" --data-urlencode "{{parameter}}=' or '1'='1"
+      curl -s -b "{{cookie}}" -H "{{auth_header}}" -G "{{url}}" --data-urlencode "{{parameter}}=' or '1'='1"
     evaluators:
       - type: regex
         pattern: 'XPathException|XPathEvaluationException|Invalid XPath expression|xmlXPathEval|MSXML.*XPath'
@@ -78,7 +79,7 @@ steps:
     tool: curl
     when: no_finding_yet
     command: >-
-      curl -s -G "{{url}}" --data-urlencode "{{parameter}}=erlik%0d%0aX-Erlik-Probe: 1"
+      curl -s -b "{{cookie}}" -H "{{auth_header}}" -G "{{url}}" --data-urlencode "{{parameter}}=erlik%0d%0aX-Erlik-Probe: 1"
     evaluators:
       - type: regex
         pattern: 'imaplib|smtplib|SMTPRecipientsRefused|javax\.mail|Net::SMTP|Swift_TransportException'

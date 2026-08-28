@@ -21,7 +21,7 @@ steps:
   - name: null_origin_get
     tool: curl
     command: >-
-      curl -s -D - -o /dev/null -H "Origin: null" "{{url}}"
+      curl -s -b "{{cookie}}" -H "{{auth_header}}" -D - -o /dev/null -H "Origin: null" "{{url}}"
     evaluators:
       # Trusted null origin + credentials: a cross-origin page can read authed
       # responses. Order-independent match, both headers must be present.
@@ -54,7 +54,7 @@ steps:
     tool: curl
     when: no_finding_yet
     command: >-
-      curl -s -D - -o /dev/null -X OPTIONS -H "Origin: null" -H "Access-Control-Request-Method: PUT" -H "Access-Control-Request-Headers: authorization" "{{url}}"
+      curl -s -b "{{cookie}}" -H "{{auth_header}}" -D - -o /dev/null -X OPTIONS -H "Origin: null" -H "Access-Control-Request-Method: PUT" -H "Access-Control-Request-Headers: authorization" "{{url}}"
     evaluators:
       - type: regex
         pattern: '(?s)(?=[\s\S]*^Access-Control-Allow-Origin:[ \t]*null\b)(?=[\s\S]*^Access-Control-Allow-Credentials:[ \t]*true\b)'

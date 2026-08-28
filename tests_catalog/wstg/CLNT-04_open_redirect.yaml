@@ -19,7 +19,7 @@ steps:
   - name: declared_parameter_probe
     tool: curl
     command: >-
-      curl -s -D - -o /dev/null "{{url}}?{{parameter}}=//erlik-redir.oast.test/"
+      curl -s -b "{{cookie}}" -H "{{auth_header}}" -D - -o /dev/null "{{url}}?{{parameter}}=//erlik-redir.oast.test/"
     evaluators:
       - type: regex
         # Only a Location that STARTS with the marker host is off-site; the
@@ -35,7 +35,7 @@ steps:
     tool: curl
     when: no_finding_yet
     command: >-
-      curl -s -D - -o /dev/null "{{url}}?redirect=//erlik-redir.oast.test/&next=//erlik-redir.oast.test/&url=//erlik-redir.oast.test/&returnUrl=//erlik-redir.oast.test/&dest=//erlik-redir.oast.test/&continue=//erlik-redir.oast.test/"
+      curl -s -b "{{cookie}}" -H "{{auth_header}}" -D - -o /dev/null "{{url}}?redirect=//erlik-redir.oast.test/&next=//erlik-redir.oast.test/&url=//erlik-redir.oast.test/&returnUrl=//erlik-redir.oast.test/&dest=//erlik-redir.oast.test/&continue=//erlik-redir.oast.test/"
     evaluators:
       - type: regex
         pattern: '^Location:[ \t]*(?:https?:)?//erlik-redir\.oast\.test'
@@ -53,7 +53,7 @@ steps:
     tool: curl
     when: no_finding_yet
     command: >-
-      curl -s -D - -o /dev/null "{{url}}?{{parameter}}=%2f%2ferlik-redir.oast.test/"
+      curl -s -b "{{cookie}}" -H "{{auth_header}}" -D - -o /dev/null "{{url}}?{{parameter}}=%2f%2ferlik-redir.oast.test/"
     evaluators:
       - type: regex
         pattern: '^Location:[ \t]*(?:https?:)?//erlik-redir\.oast\.test'
@@ -67,7 +67,7 @@ steps:
     tool: curl
     when: no_finding_yet
     command: >-
-      curl -s "{{url}}?{{parameter}}=//erlik-redir.oast.test/"
+      curl -s -b "{{cookie}}" -H "{{auth_header}}" "{{url}}?{{parameter}}=//erlik-redir.oast.test/"
     evaluators:
       - type: llm
         instruction: >-

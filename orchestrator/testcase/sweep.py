@@ -42,6 +42,33 @@ PROFILES: dict[str, dict[str, dict[str, str]]] = {
         "WSTG-CONF-04":   {"url": "{base}"},
         "WSTG-CONF-02":   {"url": "{base}"},
     },
+    # DVWA. Added after a full sweep against it returned four findings at
+    # security=low and the SAME four at security=impossible — every one of them
+    # infrastructure (phpinfo, server banner, robots.txt), none affected by the
+    # security level. The lane was testing http://dvwa, and DVWA's
+    # vulnerabilities all live under /vulnerabilities/<module>/. It was not
+    # finding nothing; it was never reaching anything.
+    #
+    # This is the endpoint-reaching bottleneck measured in the agent lane,
+    # arrived at from the deterministic side: the cases were correct and the
+    # targeting was not.
+    "dvwa": {
+        "WSTG-INPV-05":   {"url": "{base}/vulnerabilities/sqli/", "parameter": "id"},
+        "WSTG-INPV-01":   {"url": "{base}/vulnerabilities/xss_r/", "parameter": "name"},
+        "WSTG-INPV-11.2": {"url": "{base}/vulnerabilities/exec/", "parameter": "ip"},
+        "WSTG-INPV-15":   {"url": "{base}/vulnerabilities/fi/", "parameter": "page"},
+        "WSTG-CLNT-04":   {"url": "{base}/vulnerabilities/open_redirect/",
+                           "parameter": "redirect"},
+        "WSTG-ERRH-01":   {"url": "{base}/vulnerabilities/sqli/", "parameter": "id"},
+        "WSTG-ATHN-01":   {"login_url": "{base}/login.php"},
+        # `uploaded` and the `Upload` button are not decoration: DVWA gates the
+        # whole handler on isset($_POST['Upload']), and a POST with the wrong
+        # field name renders the page normally — which reads as CLEAN.
+        "WSTG-BUSL-09":   {"url": "{base}/vulnerabilities/upload/",
+                           "parameter": "uploaded", "submit": "Upload=Upload"},
+        "WSTG-CONF-02":   {"url": "{base}"},
+        "WSTG-CONF-04":   {"url": "{base}"},
+    },
 }
 
 # Required inputs this sweep cannot synthesise, each with the reason shown to

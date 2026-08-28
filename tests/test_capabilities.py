@@ -663,3 +663,76 @@ class TestOneFilenamePredicate:
         with pytest.raises(ScopeViolation):
             check_command("curl http://evil.example/x",
                           Scope(allow_hosts=["localhost"], allow_ports=[3000]))
+
+
+class TestDeclaredAuthIsActuallySent:
+    """14 cases declared `cookie`/`auth_header` and only 2 used them.
+
+    The other 12 accepted a session and then sent UNAUTHENTICATED requests —
+    so on any target behind a login they tested the login page and reported it
+    clean. The whole credential milestone (store, verified session, handle,
+    resolution) reached those cases and was dropped on the floor, and nothing
+    failed: a clean result from an unauthenticated request looks exactly like a
+    clean result.
+
+    Declaring an input a case cannot apply is a promise the engine keeps on its
+    behalf and the case then breaks.
+    """
+
+    AUTH_FIELDS = ("cookie", "auth_header", "jwt", "low_priv_token", "high_priv_token")
+
+    @staticmethod
+    def _cases():
+        import yaml
+        from pathlib import Path
+        for f in sorted(Path("tests_catalog/wstg").glob("*.yaml")):
+            yield f.name, yaml.safe_load(f.read_text())
+
+    def test_every_case_that_declares_auth_uses_it(self):
+        offenders = []
+        for name, doc in self._cases():
+            ts = doc.get("target_schema") or {}
+            declared = {f for f in self.AUTH_FIELDS
+                        if f in set(ts.get("optional") or []) | set(ts.get("required") or [])}
+            if not declared:
+                continue
+            cmds = " ".join(s.get("command", "") for s in (doc.get("steps") or []))
+            used = {f for f in declared if "{{" + f + "}}" in cmds}
+            if not used:
+                offenders.append(f"{doc['id']} declares {sorted(declared)} and uses none")
+        assert not offenders, (
+            "cases that accept a session and send it nowhere:\n  " + "\n  ".join(offenders))
+
+    def test_auth_renders_away_cleanly_when_absent(self):
+        """`curl -b "" -H ""` is harmless — verified against a live server —
+        so the arguments can be unconditional. If they rendered to `-b` with no
+        value, curl would consume the next argument as the cookie."""
+        from orchestrator.testcase.loader import load_catalog
+        from orchestrator.testcase.runner import _render
+        cat = load_catalog()
+        bare = {"url": "http://t/x", "parameter": "q", "url_template": "http://t/x",
+                "host": "t", "port": 80, "client_id": "c"}
+        for tc in cat.values():
+            for st in tc.steps:
+                cmd = _render(st.command, bare)
+                assert " -b -" not in cmd and " -H -" not in cmd, f"{tc.id}::{st.name}: {cmd}"
+                assert not cmd.rstrip().endswith(("-b", "-H")), f"{tc.id}::{st.name}"
+
+    def test_auth_reaches_the_command_when_supplied(self):
+        from orchestrator.testcase.loader import load_catalog
+        from orchestrator.testcase.runner import _render
+        cat = load_catalog()
+        ctx = {"url": "http://t/x", "parameter": "q", "cookie": "SID=abc",
+               "auth_header": "Authorization: Bearer XYZ"}
+        cmd = _render(cat["WSTG-INPV-05"].steps[0].command, ctx)
+        assert "SID=abc" in cmd and "Bearer XYZ" in cmd
+
+    def test_a_case_that_cannot_apply_auth_does_not_declare_it(self):
+        """WSTG-BUSL-04 fires the operator's own request_template verbatim, so
+        a session belongs inside that template. Declaring `auth_header` there
+        promised something the case has no way to apply."""
+        import yaml
+        from pathlib import Path
+        doc = yaml.safe_load(Path("tests_catalog/wstg/BUSL-04_race_condition.yaml").read_text())
+        opt = set((doc.get("target_schema") or {}).get("optional") or [])
+        assert not (opt & set(self.AUTH_FIELDS)), opt

@@ -17,7 +17,7 @@ steps:
     # server reflects our arbitrary origin (or returns '*') together with
     # credentials, cross-origin reads are possible.
     command: >-
-      curl -s -i -H "Origin: https://evil.oast.test" "{{url}}"
+      curl -s -b "{{cookie}}" -H "{{auth_header}}" -i -H "Origin: https://evil.oast.test" "{{url}}"
     evaluators:
       - type: regex
         pattern: 'Access-Control-Allow-Origin:\s*(https://evil\.oast\.test|\*)'
@@ -29,7 +29,7 @@ steps:
     tool: curl
     when: has_finding
     command: >-
-      curl -s -i -H "Origin: https://evil.oast.test" "{{url}}"
+      curl -s -b "{{cookie}}" -H "{{auth_header}}" -i -H "Origin: https://evil.oast.test" "{{url}}"
     evaluators:
       - type: regex
         # Reflected origin + credentials true = exploitable (reads authed data).

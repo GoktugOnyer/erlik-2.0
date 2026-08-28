@@ -14,7 +14,7 @@ steps:
   - name: fetch_headers
     tool: curl
     command: >-
-      curl -s -i "{{url}}"
+      curl -s -b "{{cookie}}" -H "{{auth_header}}" -i "{{url}}"
     evaluators:
       - type: llm
         instruction: >-

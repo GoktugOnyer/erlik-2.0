@@ -25,7 +25,7 @@ steps:
   - name: vcs_working_copy
     tool: curl
     command: >-
-      curl -s -L --max-redirs 3 -A "Mozilla/5.0" --connect-timeout 3 --max-time 5
+      curl -s -b "{{cookie}}" -H "{{auth_header}}" -L --max-redirs 3 -A "Mozilla/5.0" --connect-timeout 3 --max-time 5
       -w "\n[erlik] %{http_code} %{url_effective}\n"
       "{{url}}/.git/HEAD" "{{url}}/.git/logs/HEAD" "{{url}}/.svn/entries"
       "{{url}}/.hg/requires" | LC_ALL=C tr -c '[:print:][:space:]' '.'
@@ -56,7 +56,7 @@ steps:
   - name: backup_archive_probe
     tool: curl
     command: >-
-      curl -s -I -L --max-redirs 3 -A "Mozilla/5.0" --connect-timeout 3 --max-time 4
+      curl -s -b "{{cookie}}" -H "{{auth_header}}" -I -L --max-redirs 3 -A "Mozilla/5.0" --connect-timeout 3 --max-time 4
       -w "\n[erlik] %{http_code} %{content_type} %{url_effective}\n"
       "{{url}}/backup.zip" "{{url}}/backup.tar.gz" "{{url}}/backup.sql"
       "{{url}}/database.sql" "{{url}}/dump.sql" "{{url}}/www.zip"
@@ -81,7 +81,7 @@ steps:
   - name: editor_ide_artifacts
     tool: curl
     command: >-
-      curl -s -L --max-redirs 3 -A "Mozilla/5.0" --connect-timeout 3 --max-time 5
+      curl -s -b "{{cookie}}" -H "{{auth_header}}" -L --max-redirs 3 -A "Mozilla/5.0" --connect-timeout 3 --max-time 5
       -w "\n[erlik] %{http_code} %{url_effective}\n"
       "{{url}}/.DS_Store" "{{url}}/.idea/workspace.xml"
       "{{url}}/.vscode/sftp.json" "{{url}}/.index.php.swp"
@@ -123,7 +123,7 @@ steps:
   - name: build_manifests
     tool: curl
     command: >-
-      curl -s -L --max-redirs 3 -A "Mozilla/5.0" --connect-timeout 3 --max-time 4
+      curl -s -b "{{cookie}}" -H "{{auth_header}}" -L --max-redirs 3 -A "Mozilla/5.0" --connect-timeout 3 --max-time 4
       -w "\n[erlik] %{http_code} %{url_effective}\n"
       "{{url}}/package.json" "{{url}}/composer.lock" "{{url}}/.npmrc"
       "{{url}}/appsettings.json" "{{url}}/WEB-INF/web.xml"

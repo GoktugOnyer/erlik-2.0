@@ -17,7 +17,7 @@ references:
 
 target_schema:
   required: [url]
-  optional: [client_id, collaborator_host]
+  optional: [client_id, collaborator_host, cookie, auth_header]
 
 steps:
   # The core OAuth failure: an authorisation server that redirects to a
@@ -25,7 +25,7 @@ steps:
   - name: redirect_uri_not_validated
     tool: curl
     command: >-
-      curl -s -i -o /dev/null -w "%{http_code} %{redirect_url}" -G "{{url}}"
+      curl -s -b "{{cookie}}" -H "{{auth_header}}" -i -o /dev/null -w "%{http_code} %{redirect_url}" -G "{{url}}"
       --data-urlencode "response_type=code"
       --data-urlencode "client_id={{client_id}}"
       --data-urlencode "redirect_uri=https://erlik-not-registered.example/cb"
@@ -44,7 +44,7 @@ steps:
     tool: curl
     when: no_finding_yet
     command: >-
-      curl -s -i -o /dev/null -w "%{http_code} %{redirect_url}" -G "{{url}}"
+      curl -s -b "{{cookie}}" -H "{{auth_header}}" -i -o /dev/null -w "%{http_code} %{redirect_url}" -G "{{url}}"
       --data-urlencode "response_type=code"
       --data-urlencode "client_id={{client_id}}"
       --data-urlencode "redirect_uri={{url}}.erlik-not-registered.example"
@@ -63,7 +63,7 @@ steps:
     tool: curl
     when: no_finding_yet
     command: >-
-      curl -s -i -G "{{url}}"
+      curl -s -b "{{cookie}}" -H "{{auth_header}}" -i -G "{{url}}"
       --data-urlencode "response_type=token"
       --data-urlencode "client_id={{client_id}}"
       --data-urlencode "state=erlikstate"
@@ -81,7 +81,7 @@ steps:
     tool: curl
     when: no_finding_yet
     command: >-
-      curl -s -i -o /dev/null -w "%{http_code} %{redirect_url}" -G "{{url}}"
+      curl -s -b "{{cookie}}" -H "{{auth_header}}" -i -o /dev/null -w "%{http_code} %{redirect_url}" -G "{{url}}"
       --data-urlencode "response_type=code"
       --data-urlencode "client_id={{client_id}}"
     evaluators:
