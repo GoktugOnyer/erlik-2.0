@@ -217,12 +217,34 @@ class TestApiRefusesOutOfScope:
     flagged in the UI."""
 
     @pytest.fixture(scope="class")
-    def client(self):
+    def client(self, tmp_path_factory):
+        """Against a TEMP database, not the live one.
+
+        These tests drive the real API, and the API writes. Pointed at the
+        production DB they created a real engagement per run — 32 rows of
+        "Scope Test Co" and "Disc Co" had accumulated in the operator's
+        customer list, which is both noise and, on a tool that holds client
+        data, the wrong default entirely.
+
+        get_db() reads DB_PATH at CALL time, so redirecting the module
+        attribute is enough; the rest of this file already does it that way.
+        """
         import warnings
         warnings.filterwarnings("ignore", category=DeprecationWarning)
         from fastapi.testclient import TestClient
+        import orchestrator.database as db_mod
         import orchestrator.main as M
-        return TestClient(M.app)
+
+        original = db_mod.DB_PATH
+        db_mod.DB_PATH = str(tmp_path_factory.mktemp("api") / "t.db")
+        asyncio.run(db_mod.init_db())
+        try:
+            yield TestClient(M.app)
+        finally:
+            # RESTORED, or the redirect leaks into every module that runs after
+            # this one — which it did: the export tests passed alone and failed
+            # in the full suite, reading an empty temp database.
+            db_mod.DB_PATH = original
 
     def test_full_flow_and_refusal(self, client):
         r = client.post("/api/engagements",
@@ -346,3 +368,35 @@ class TestUrlScopeKindChecksTheHost:
 
     def test_a_different_path_on_the_same_host_is_refused(self):
         assert ok("https://acme.com/other", self.ROWS) is False
+
+
+
+class TestTheSuiteDoesNotWriteToTheLiveDatabase:
+    """Guard on the guard. An API test that writes to the operator's real
+    database is a test that changes what it is measuring — and here it also put
+    fictional customers in a list of real ones."""
+
+    def test_api_tests_use_a_temp_database(self):
+        import pathlib
+        src = pathlib.Path(__file__).read_text()
+        block = src[src.index("class TestApiRefusesOutOfScope"):]
+        block = block[:block.index("\n\nclass ")] if "\n\nclass " in block else block
+        assert "db_mod.DB_PATH = str(tmp_path_factory" in block, (
+            "the API test client points at the live database")
+
+    def test_no_fixture_client_names_leak_into_the_live_db(self):
+        """Fails loudly if the live DB still holds test rows, so the cleanup is
+        not silently forgotten."""
+        import pathlib
+        import sqlite3
+        db = pathlib.Path(__file__).resolve().parents[1] / "data" / "pentest.db"
+        if not db.exists():
+            pytest.skip("no live database in this checkout")
+        c = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+        try:
+            n = c.execute(
+                "SELECT COUNT(*) FROM engagements WHERE client_name IN "
+                "('Scope Test Co', 'Disc Co')").fetchone()[0]
+        except sqlite3.OperationalError:
+            pytest.skip("engagements table not present")
+        assert n == 0, f"{n} test-created engagement(s) still in the live database"

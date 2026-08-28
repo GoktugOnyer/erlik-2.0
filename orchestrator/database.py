@@ -495,6 +495,54 @@ async def init_db():
             except Exception:
                 pass
 
+        # ===== Assets: what the findings are ABOUT =====
+        #
+        # Findings were keyed only by URL, so 167 Information Disclosure rows
+        # could describe a handful of facts about a handful of hosts with
+        # nothing tying them together. An asset is the thing a finding is
+        # attached to, and it is a TREE, because that is how a target actually
+        # decomposes:
+        #
+        #     host  ->  port  ->  service / technology  ->  endpoint
+        #
+        # Idea taken from Rekono (GPL-3.0), which attaches every finding to the
+        # host, port or technology where it was found. The implementation here
+        # is original -- erlik is MIT and cannot take GPL code.
+        #
+        # This is ADDITIVE. `findings` rows are untouched and still counted the
+        # same way, so every recorded metric holds; assets are a layer for
+        # grouping, reporting and re-scan comparison.
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS engagement_assets (
+                id TEXT PRIMARY KEY,
+                engagement_id TEXT NOT NULL,
+                parent_id TEXT,
+                kind TEXT NOT NULL,
+                value TEXT NOT NULL,
+                source TEXT DEFAULT 'observed',
+                notes TEXT,
+                first_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(engagement_id, parent_id, kind, value)
+            )
+        """)
+        for idx, cols in (("idx_assets_engagement", "engagement_id"),
+                          ("idx_assets_parent", "parent_id")):
+            try:
+                await db.execute(
+                    f"CREATE INDEX IF NOT EXISTS {idx} ON engagement_assets({cols})")
+            except Exception:
+                pass
+        # Nullable on purpose: the 453 findings recorded before engagements
+        # existed have no asset, and inventing one would attribute a finding to
+        # a host nobody confirmed it came from.
+        for table in ("findings", "v2_findings"):
+            try:
+                await db.execute(
+                    f"ALTER TABLE {table} ADD COLUMN asset_id TEXT DEFAULT NULL")
+            except Exception:
+                pass
+
         # Additive, nullable link from existing work to its owner. Nullable on
         # purpose: the 108 sessions recorded before engagements existed genuinely
         # have no customer, and must read as unassigned rather than be silently

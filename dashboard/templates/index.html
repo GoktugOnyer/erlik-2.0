@@ -2068,6 +2068,21 @@
                 </div>
 
                 <div class="panel rounded p-4">
+                    <div class="flex items-baseline justify-between flex-wrap gap-2">
+                        <h3 class="font-pixel" style="font-size:0.62rem;">ASSET INVENTORY</h3>
+                        <span class="font-mono" style="font-size:0.58rem; opacity:.6;">
+                            ${engAssetSummary(d)}</span>
+                    </div>
+                    <p class="font-mono mt-1" style="font-size:0.55rem; opacity:.55; max-width:78ch;">
+                        What the findings are ABOUT, as host &rarr; port &rarr; endpoint. Findings are
+                        grouped here for reading; the underlying rows are untouched, so a count of
+                        &ldquo;SQL Injection &times;3&rdquo; and a metric counting three findings are
+                        both correct.
+                    </p>
+                    <div class="mt-2">${engAssetTree(d.assets || [], 0)}</div>
+                </div>
+
+                <div class="panel rounded p-4">
                     <h3 class="font-pixel" style="font-size:0.62rem;">TARGETS</h3>
                     <div class="mt-2">${(d.targets || []).map(t => `
                         <div class="flex items-center gap-3 flex-wrap font-mono py-0.5" style="font-size:0.6rem;">
@@ -2114,6 +2129,49 @@
             det.querySelectorAll('[data-engtestlab]').forEach(b =>
                 b.addEventListener('click', () => engToTestLab(b.dataset.engtestlab)));
             det.classList.remove('hidden');
+        }
+
+        // ===== Asset inventory =====
+        // host -> port -> endpoint, with findings rolled up per node. Grouping
+        // is presentational: the findings table still holds every row.
+        function engAssetSummary(d) {
+            const c = d.asset_counts || {};
+            const parts = ['host', 'port', 'service', 'technology', 'endpoint']
+                .filter(k => c[k]).map(k => `${c[k]} ${k}${c[k] > 1 ? 's' : ''}`);
+            return parts.length ? parts.join(' · ') : 'nothing inventoried yet';
+        }
+
+        function engAssetTree(nodes, depth) {
+            if (!nodes.length) {
+                return depth === 0
+                    ? '<div class="font-mono" style="font-size:0.6rem; opacity:.6;">No assets yet — they are created as findings arrive, and only for hosts this engagement authorises.</div>'
+                    : '';
+            }
+            const icon = {host: '▣', port: '·', service: '◇', technology: '◆', endpoint: '→'};
+            return nodes.map(n => {
+                const sev = {};
+                (n.findings || []).forEach(f => { sev[f.severity] = (sev[f.severity] || 0) + f.count; });
+                const chips = ['critical', 'high', 'medium', 'low', 'info']
+                    .filter(k => sev[k])
+                    .map(k => `<span class="font-mono" style="font-size:0.55rem;">${tlSev(k)}&nbsp;${sev[k]}</span>`)
+                    .join(' ');
+                const finds = (n.findings || []).map(f =>
+                    `<div class="font-mono" style="font-size:0.57rem; opacity:.8; padding-left:${(depth + 1) * 14}px;">
+                        ${tlSev(f.severity)} ${tlEsc(f.vuln_type)}${f.count > 1 ? ` <span style="opacity:.6;">&times;${f.count}</span>` : ''}
+                     </div>`).join('');
+                return `
+                    <div style="padding-left:${depth * 14}px;">
+                        <div class="font-mono flex items-center gap-2 flex-wrap" style="font-size:0.62rem; padding:1px 0;">
+                            <span style="opacity:.45;">${icon[n.kind] || '·'}</span>
+                            <span style="color:${n.kind === 'host' ? 'var(--neon-cyan)' : 'inherit'};">${tlEsc(n.value)}</span>
+                            <span style="opacity:.4; font-size:0.52rem;">${tlEsc(n.kind)}</span>
+                            ${n.source && n.source !== 'observed' ? `<span style="opacity:.4; font-size:0.52rem;">${tlEsc(n.source)}</span>` : ''}
+                            ${chips}
+                        </div>
+                        ${finds}
+                        ${engAssetTree(n.children || [], depth + 1)}
+                    </div>`;
+            }).join('');
         }
 
         async function engAddScope() {

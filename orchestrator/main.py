@@ -482,12 +482,35 @@ async def _record_finding(session_id: str, f: dict, *, source: str,
     if owns_db:
         db = await get_db()
     try:
+        # Attach the finding to the ASSET it is about, when the session belongs
+        # to an engagement. Best-effort and additive: a finding with no asset is
+        # still a finding, and inventing an asset for a session with no customer
+        # would attribute it to a host nobody confirmed it came from.
+        _asset_id = None
+        try:
+            _cur = await db.execute(
+                "SELECT engagement_id FROM sessions WHERE id = ?", (session_id,))
+            _row = await _cur.fetchone()
+            _eid = _row[0] if _row else None
+            if _eid and f.get("url"):
+                from orchestrator import assets as _A
+                _asset_id, _why = await _A.path_for_url(db, _eid, f["url"],
+                                                        source="finding")
+                if _asset_id is None:
+                    # Out of scope. The finding is still recorded — refusing it
+                    # would hide something erlik observed — but it does not get
+                    # an entry in the customer's asset inventory.
+                    print(f"[asset {session_id[:8]}] not inventoried: {_why}",
+                          flush=True)
+        except Exception as _ae:  # noqa: BLE001 — inventory must never block a write
+            print(f"[asset {session_id[:8]}] skipped: {_ae}", flush=True)
+
         await db.execute(
             "INSERT INTO findings (session_id, vuln_type, severity, url, parameter, "
-            "evidence, source, detector) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "evidence, source, detector, asset_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (session_id, f.get("vuln_type", ""), f.get("severity", "info"),
              f.get("url", "") or "", f.get("parameter", "") or "",
-             (f.get("evidence") or "")[:2000], source, f.get("detector")),
+             (f.get("evidence") or "")[:2000], source, f.get("detector"), _asset_id),
         )
         if owns_db:
             await db.commit()

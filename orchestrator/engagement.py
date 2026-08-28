@@ -230,7 +230,12 @@ async def summary(db, engagement_id: str) -> dict[str, Any]:
         "SELECT f.severity, COUNT(*) c FROM findings f JOIN sessions s ON s.id = f.session_id "
         "WHERE s.engagement_id = ? GROUP BY f.severity", (engagement_id,))).fetchall()
     out["findings_by_severity"] = {r[0] or "unknown": r[1] for r in sev}
-    out["counts"] = {"targets": len(out["targets"]), "sessions": len(out["sessions"]),
+    from orchestrator import assets as _A
+    out["assets"] = await _A.tree(db, engagement_id)
+    out["asset_counts"] = await _A.counts(db, engagement_id)
+    out["asset_severity"] = _A.rollup(out["assets"])
+    out["counts"] = {"assets": sum(out["asset_counts"].values()),
+                     "targets": len(out["targets"]), "sessions": len(out["sessions"]),
                      "v2_runs": len(out["v2_runs"]),
                      "findings": sum(out["findings_by_severity"].values()),
                      "pending_scope": len(out["pending_scope"])}
