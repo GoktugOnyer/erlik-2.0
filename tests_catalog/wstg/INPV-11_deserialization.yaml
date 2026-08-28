@@ -1,0 +1,97 @@
+id: WSTG-INPV-11
+name: Insecure Deserialization
+category: Input Validation
+attack_class: deserialize
+severity: critical
+references:
+  - https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/07-Input_Validation_Testing/11-Testing_for_Code_Injection
+
+# WSTG 4.2 has no dedicated deserialization test; it is examined under Code
+# Injection (INPV-11), which is the id used here.
+#
+# EVERY PAYLOAD IS INERT. A real deserialization test uses a gadget chain that
+# executes code on the target — this case does not, and will not. It sends
+# WELL-FORMED but EMPTY serialized objects and reads the error the target
+# returns. That is enough to answer the question that matters, "does user input
+# reach a deserializer", without running anything on a client's server to prove
+# it. A confirmed gadget chain is an operator's decision, made deliberately,
+# not a side effect of a sweep.
+#
+# The evidence is the runtime's own exception text. `__PHP_Incomplete_Class`
+# and `java.io.StreamCorruptedException` do not appear in ordinary output; they
+# appear when a deserializer was handed something and objected.
+
+target_schema:
+  required: [url]
+  optional: [parameter, cookie]
+
+steps:
+  # PHP: O:8:"stdClass":0:{} is an empty object — valid, harmless, and enough
+  # to make unserialize() speak.
+  - name: php_object_probe
+    tool: curl
+    command: >-
+      curl -s -X POST -d 'data=O:8:"stdClass":0:{}' "{{url}}"
+    evaluators:
+      - type: regex
+        pattern: '__PHP_Incomplete_Class|unserialize\(\)|Notice:\s*unserialize|Error at offset'
+        emit_finding:
+          vuln_type: PHP unserialize() reached by user input
+          severity: critical
+        stop_after: true
+
+  # Java: rO0AB is the base64 prefix of every Java serialization stream.
+  - name: java_stream_probe
+    tool: curl
+    when: no_finding_yet
+    command: >-
+      curl -s -X POST -H "Content-Type: application/octet-stream"
+      -d 'rO0ABXNyABFlcmxpay5Ob3RBUmVhbENscw==' "{{url}}"
+    evaluators:
+      - type: regex
+        pattern: 'java\.io\.(StreamCorruptedException|InvalidClassException|OptionalDataException)|ObjectInputStream|ClassNotFoundException'
+        emit_finding:
+          vuln_type: Java ObjectInputStream reached by user input
+          severity: critical
+        stop_after: true
+
+  # Python pickle: protocol-2 empty tuple. Deserializing it is harmless.
+  - name: python_pickle_probe
+    tool: curl
+    when: no_finding_yet
+    command: >-
+      curl -s -X POST -d 'data=gASVAAAAAAAAAAAu' "{{url}}"
+    evaluators:
+      - type: regex
+        pattern: '_pickle\.UnpicklingError|pickle\.UnpicklingError|cPickle|unsupported pickle protocol'
+        emit_finding:
+          vuln_type: Python pickle reached by user input
+          severity: critical
+        stop_after: true
+
+  - name: dotnet_ruby_probe
+    tool: curl
+    when: no_finding_yet
+    command: >-
+      curl -s -X POST -d 'data=AAEAAAD/////AQAAAAAAAAAM' "{{url}}"
+    evaluators:
+      - type: regex
+        pattern: 'System\.Runtime\.Serialization|BinaryFormatter|SerializationException|Psych::|Marshal\.load|undefined class/module'
+        emit_finding:
+          vuln_type: .NET/Ruby deserializer reached by user input
+          severity: critical
+        stop_after: true
+
+  # Session cookies are the commonest deserialization surface and are missed
+  # entirely by body-only probes.
+  - name: serialized_cookie_probe
+    tool: curl
+    when: no_finding_yet
+    command: >-
+      curl -s -b 'session=O:8:"stdClass":0:{}' "{{url}}"
+    evaluators:
+      - type: regex
+        pattern: '__PHP_Incomplete_Class|unserialize\(\)|java\.io\.StreamCorruptedException|_pickle\.UnpicklingError'
+        emit_finding:
+          vuln_type: Session cookie is deserialized without validation
+          severity: critical

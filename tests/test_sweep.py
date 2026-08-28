@@ -243,23 +243,44 @@ class TestAGuessIsNotKnowledge:
         assert tgt and tgt["url"] == BASE and why == ""
 
     def test_the_profile_path_is_unchanged(self, client):
-        """The juiceshop profile supplies real endpoints, so every recorded
-        sweep against it must plan exactly as before: 19 runnable, 3 skipped."""
-        plan = S.plan_sweep(_cases(client), BASE, "juiceshop")
-        assert plan["counts"]["runnable"] == 19
-        assert plan["counts"]["skipped"] == 3
-        assert plan["counts"]["cases"] == 22, "a case vanished from the plan"
+        """The juiceshop profile supplies real endpoints, so the cases it
+        describes must all still plan.
+
+        The counts are no longer frozen literals. They were 19/3/22, and every
+        one of them moved when six cases were added to the catalogue — which
+        told us nothing about the profile path and only obscured what the test
+        is for. What must hold is that the profile still resolves every case
+        it describes, and that no case vanishes from the plan."""
+        cases = _cases(client)
+        plan = S.plan_sweep(cases, BASE, "juiceshop")
+        assert plan["counts"]["cases"] == len(cases), "a case vanished from the plan"
+        assert plan["counts"]["runnable"] + plan["counts"]["skipped"] >= len(cases)
+
+        profiled = set(S.PROFILES["juiceshop"])
+        planned = {r["id"] for r in plan["runnable"]}
+        missing = sorted(c for c in profiled if c in {x["id"] for x in cases}
+                         and c not in planned)
+        assert not missing, f"the profile describes these but they did not plan: {missing}"
+
+        # And the profile must still BEAT the no-profile path, which is the
+        # whole reason it exists.
+        bare = S.plan_sweep(cases, BASE, "")
+        assert plan["counts"]["runnable"] > bare["counts"]["runnable"]
 
     def test_an_unknown_target_skips_more_and_says_why(self, client):
         """The honest number for a target nobody has described."""
-        plan = S.plan_sweep(_cases(client), BASE, "")
-        assert plan["counts"]["runnable"] == 13
-        assert plan["counts"]["skipped"] == 9
+        cases = _cases(client)
+        plan = S.plan_sweep(cases, BASE, "")
+        # Not a frozen literal: the property is that an undescribed target
+        # skips MORE than a described one and says why for every skip, not
+        # that the catalogue never grows.
+        profiled = S.plan_sweep(cases, BASE, "juiceshop")
+        assert plan["counts"]["skipped"] > profiled["counts"]["skipped"]
         for sk in plan["skipped"]:
             assert sk["reason"], sk
         guessed = [sk for sk in plan["skipped"]
                    if "parameter" in sk["reason"] or "login URL" in sk["reason"]]
-        assert len(guessed) == 6, "the guess-driven skips are missing"
+        assert guessed, "the guess-driven skips are missing"
 
     def test_guessed_and_derived_are_separate_sets_in_the_source(self):
         """The two must not drift back into one dict — that merge IS the bug.

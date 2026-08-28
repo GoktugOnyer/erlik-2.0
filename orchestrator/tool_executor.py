@@ -454,6 +454,32 @@ def _safe_hostname(url: str) -> str:
         return ""
 
 
+# Extensions that are NOT delegated TLDs. Deliberately not "common file
+# extensions": .zip, .mov, .md, .sh, .io, .app and .dev are all real TLDs, and
+# skipping one would let `evil.zip` through a scope guard as a filename.
+_NON_TLD_FILE_EXT = (
+    ".txt", ".json", ".yaml", ".yml", ".html", ".php", ".js", ".csv",
+    ".jpg", ".jpeg", ".png", ".gif", ".svg", ".webp", ".ico",
+    ".pdf", ".doc", ".docx", ".xls", ".xlsx",
+    ".gz", ".bz2", ".xz", ".tar", ".rar", ".7z",
+    ".xml", ".log", ".conf", ".ini", ".bak", ".old", ".sql", ".db",
+    ".jar", ".war", ".exe", ".dll", ".bin", ".pem", ".key", ".crt",
+)
+
+
+def looks_like_filename(token: str) -> bool:
+    """A path or a filename, not a host erlik could contact.
+
+    ONE definition, used by both scope guards. They had separate lists —
+    tool_executor knew eight extensions, testcase/scope.py knew two — so a
+    command was refused by one and allowed by the other depending on which
+    lane ran it. The file-upload case was blocked by the narrower copy before
+    it ever sent a request.
+    """
+    t = (token or "").lower()
+    return "/" in t or t.endswith(_NON_TLD_FILE_EXT)
+
+
 def extract_hosts(text: str) -> list[str]:
     """Every hostname referenced by `text`, in order, deduplicated.
 
@@ -475,9 +501,7 @@ def extract_hosts(text: str) -> list[str]:
     masked = _SCOPE_URL_RX.sub(" ", text or "")
     for m in _SCOPE_BARE_HOST_RX.finditer(masked):
         tok = m.group(0)
-        # skip filesystem paths / wordlist filenames that look host-ish
-        if "/" in tok or tok.endswith((".txt", ".json", ".yaml", ".yml", ".html",
-                                       ".php", ".js", ".csv")):
+        if looks_like_filename(tok):
             continue
         add(tok.split(":")[0])
     return out

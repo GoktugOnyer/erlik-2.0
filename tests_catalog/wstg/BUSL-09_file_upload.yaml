@@ -1,0 +1,100 @@
+id: WSTG-BUSL-09
+name: Unrestricted File Upload
+category: Business Logic
+attack_class: upload
+severity: critical
+references:
+  - https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/10-Business_Logic_Testing/09-Test_Upload_of_Malicious_Files
+
+# THIS CASE WRITES TO THE TARGET. It is the only one in the catalogue that
+# does, and it is unavoidable: "does this endpoint accept a file it should
+# refuse" cannot be answered without sending one. Two consequences are handled
+# deliberately rather than hoped away.
+#
+# 1. The payload is INERT. `<?php echo "…canary…"; ?>` prints a string and does
+#    nothing else — no shell, no network, no filesystem access. It proves the
+#    server EXECUTED the upload, which is the finding, and gives an attacker
+#    who finds the file nothing to use.
+# 2. Every file is named so an operator can find and delete it. The canary is
+#    in the filename as well as the body, so `find / -name 'erlik-upload-*'`
+#    cleans up the whole test.
+#
+# Acceptance alone is reported as MEDIUM; execution is what makes it critical.
+# The distinction matters: an upload directory that stores a .php without
+# serving it is a weakness, not a shell.
+
+target_schema:
+  required: [url]
+  optional: [parameter]
+
+steps:
+  # Double extension: defeats a check that reads only the last dot, or only
+  # the first.
+  - name: double_extension_upload
+    tool: curl
+    command: >-
+      curl -s -i -F "file=@/dev/null;filename=erlik-upload-canary.php.jpg;type=image/jpeg"
+      "{{url}}"
+    evaluators:
+      - type: regex
+        pattern: 'erlik-upload-canary\.php'
+        emit_finding:
+          vuln_type: File upload accepts a double extension (.php.jpg)
+          severity: medium
+
+  # Content-Type spoofing: the bytes are PHP, the declared type is an image.
+  # A server that trusts the header stores executable content.
+  - name: content_type_spoof_upload
+    tool: curl
+    when: no_finding_yet
+    command: >-
+      curl -s -i -F "file=@-;filename=erlik-upload-canary.php;type=image/png" "{{url}}"
+      <<< '<?php echo "ERLIK-UPLOAD-EXECUTED-CANARY"; ?>'
+    evaluators:
+      # The response must name the file BACK. An earlier version accepted any
+      # "200"/"success" in the body and fired on Juice Shop's ordinary index
+      # page — the `200` it matched was the HTTP status line of a response to
+      # a POST the application ignored entirely. A status code proves the
+      # server answered, not that it stored anything.
+      - type: regex
+        pattern: 'erlik-upload-canary'
+        emit_finding:
+          vuln_type: File upload accepts PHP content declared as an image
+          severity: medium
+
+  # THE finding. The canary appears WITHOUT its surrounding <?php … ?>, which
+  # only happens if the server ran it. A stored-but-not-executed file returns
+  # the source, and the source contains the tags — so the two outcomes are
+  # distinguishable rather than both matching "canary present".
+  - name: uploaded_file_executes
+    tool: curl
+    when: has_finding
+    command: >-
+      curl -s "{{url}}/erlik-upload-canary.php"
+    evaluators:
+      - type: regex
+        pattern: 'ERLIK-UPLOAD-EXECUTED-CANARY'
+        emit_finding:
+          vuln_type: Uploaded file is EXECUTED by the server (remote code execution)
+          severity: critical
+        stop_after: true
+
+  # A server that refuses the upload still says which extensions it allows,
+  # and that list is worth recording — it is the surface the next test targets.
+  - name: rejection_names_the_allowlist
+    tool: curl
+    when: no_finding_yet
+    command: >-
+      curl -s -F "file=@/dev/null;filename=erlik-upload-canary.php;type=application/x-php"
+      "{{url}}"
+    evaluators:
+      - type: regex
+        # Requires a CONCRETE extension list, or explicit prose about a file
+        # type being refused. The first version matched
+        # `{"allowed":true,"type":"user","format":"json"}` — an ordinary API
+        # response — because it accepted any allow-word within 40 characters
+        # of the bare word "type".
+        pattern: '(only|allowed|permitted|accepted)[^.\n]{0,40}\b(jpe?g|png|gif|pdf|docx?|xlsx?|csv|zip)\b|file (type|extension|format)s?[^.\n]{0,30}(not allowed|not permitted|not supported|invalid|rejected)'
+        emit_finding:
+          vuln_type: Upload endpoint discloses its allowlist in a rejection message
+          severity: info

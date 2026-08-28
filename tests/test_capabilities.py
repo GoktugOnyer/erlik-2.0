@@ -392,13 +392,17 @@ class TestCasesAreFiledUnderTheRightAttackClass:
             if c["key"] == "ssrf":
                 c["wstg"] = []
             elif c["key"] == "ssti":
-                c["wstg"] = ["WSTG-INPV-19"]
+                # ssti KEEPS its own case and additionally takes ssrf's. A
+                # mutation that dropped WSTG-INPV-18 would make it genuinely
+                # unclaimed, which the OLD audit does catch — and the point
+                # here is a bug the old audit cannot see.
+                c["wstg"] = ["WSTG-INPV-18", "WSTG-INPV-19"]
             broken.append(c)
         C.CLASSES = broken
         try:
             a = C.audit()
-            assert a["wstg_misattributed"] == [
-                {"case": "WSTG-INPV-19", "case_declares": "ssrf", "claimed_by": "ssti"}]
+            assert {"case": "WSTG-INPV-19", "case_declares": "ssrf",
+                    "claimed_by": "ssti"} in a["wstg_misattributed"]
             # ...and the checks that existed before stay silent, which is the
             # whole reason the bug survived.
             assert a["wstg_declared_missing"] == []
@@ -407,16 +411,255 @@ class TestCasesAreFiledUnderTheRightAttackClass:
             C.CLASSES = real
 
     def test_a_class_with_no_case_says_so_rather_than_borrowing_one(self):
-        """`ssti` and `cmdi` now report no engine coverage. That is the honest
-        answer; the alternative was credit for a case testing something else."""
+        """`cmdi` reports no engine coverage. That is the honest answer; the
+        alternative was credit for WSTG-INPV-06, which tests LDAP.
+
+        `ssti` was in this list until WSTG-INPV-18 was written for it — the
+        gap the corrected attribution made visible."""
         from orchestrator import capabilities as C
-        for key in ("ssti", "cmdi"):
-            c = next(x for x in C.CLASSES if x["key"] == key)
-            assert c["wstg"] == [], f"{key} claims {c['wstg']}"
-            assert C.verdicts(c)["wstg_engine"] == "not covered"
+        c = next(x for x in C.CLASSES if x["key"] == "cmdi")
+        assert c["wstg"] == [], f"cmdi claims {c['wstg']}"
+        assert C.verdicts(c)["wstg_engine"] == "not covered"
+        # ...and it is still reachable on the other lane, via commix.
+        assert C.verdicts(c)["agent_session"] == "confirmable"
 
     def test_the_classes_that_gained_correct_coverage(self):
         from orchestrator import capabilities as C
         for key in ("ssrf", "ldap", "nosql"):
             c = next(x for x in C.CLASSES if x["key"] == key)
             assert C.verdicts(c)["wstg_engine"] == "deterministic", key
+
+
+class TestTheSixNewCases:
+    """Six classes had no deterministic case: SSTI, XXE, OAuth, file upload,
+    insecure deserialization, and unclassified injection.
+
+    A case that never fires and a case that always fires both report zero
+    useful information, and the second is worse because it looks like work. So
+    every evaluator is checked in BOTH directions.
+    """
+
+    NEW = ["WSTG-INPV-18", "WSTG-INPV-07", "WSTG-AUTHZ-05",
+           "WSTG-BUSL-09", "WSTG-INPV-11", "WSTG-INPV-11.2"]
+
+    # What a genuinely vulnerable application returns, per step.
+    VULNERABLE = {
+        "WSTG-INPV-18": {
+            "jinja_twig_braces": "search results for 219359",
+            "dollar_braces": "Hello 219359",
+            "erb_aspnet": "<td>219359</td>",
+            "hash_braces": "value: 219359",
+            "string_repetition": "<p>7777777</p>",
+            "engine_error_signature": "jinja2.exceptions.TemplateSyntaxError: x",
+        },
+        "WSTG-INPV-07": {
+            "classic_file_read": "root:x:0:0:root:/root:/bin/bash",
+            "php_wrapper_read": "PD9waHAKZWNobyAiaGkiOwo/Pg==",
+            "windows_file_read": "[fonts]\n[extensions]",
+            "entity_parser_signature": "Warning: failed to load external entity",
+        },
+        "WSTG-AUTHZ-05": {
+            "redirect_uri_not_validated": "302 https://erlik-not-registered.example/cb?code=a",
+            "redirect_uri_suffix_bypass": "302 https://app.acme.com.erlik-not-registered.example/cb",
+            "implicit_flow_supported":
+                "HTTP/1.1 302 Found\r\nLocation: https://a/cb#access_token=eyJ&x=1\r\n",
+            "state_parameter_not_required": "302 https://app.acme.com/cb?code=abc123",
+        },
+        "WSTG-BUSL-09": {
+            "double_extension_upload": '{"stored":"/uploads/erlik-upload-canary.php.jpg"}',
+            "content_type_spoof_upload": '{"file":"erlik-upload-canary.php"}',
+            "uploaded_file_executes": "ERLIK-UPLOAD-EXECUTED-CANARY",
+            "rejection_names_the_allowlist": "Only jpg, png, gif files are permitted",
+        },
+        "WSTG-INPV-11": {
+            "php_object_probe": "Notice: unserialize(): Error at offset 0",
+            "java_stream_probe": "java.io.StreamCorruptedException: bad header",
+            "python_pickle_probe": "_pickle.UnpicklingError: invalid load key",
+            "dotnet_ruby_probe": "System.Runtime.Serialization.SerializationException",
+            "serialized_cookie_probe": "__PHP_Incomplete_Class Object",
+        },
+        "WSTG-INPV-11.2": {
+            "single_quote": "javax.xml.xpath.XPathExpressionException: nope",
+            "expression_metachars": 'Traceback (most recent call last):\n  File "a.py"',
+            "xpath_probe": "Invalid XPath expression: token",
+            "crlf_header_probe": "smtplib.SMTPRecipientsRefused",
+        },
+    }
+
+    # Ordinary output from an application with none of these defects. The
+    # `200` entry is not hypothetical: an earlier upload evaluator matched any
+    # "200"/"success" in the body and fired on Juice Shop's index page, where
+    # the 200 it matched was the HTTP status line of a POST the application
+    # ignored.
+    BENIGN = [
+        "HTTP/1.1 200 OK\nContent-Type: text/html\n\n<html><body>Welcome</body></html>",
+        '{"status":"ok","results":[],"count":49,"page":201}',
+        "<h1>Search</h1><p>No results for your query.</p>",
+        "Error: invalid request. Please try again.",
+        "HTTP/1.1 404 Not Found\n\nCannot POST /upload",
+        "success: true, uploaded 0 files",
+        '{"allowed":true,"type":"user","format":"json"}',
+    ]
+
+    @staticmethod
+    def _cat():
+        from orchestrator.testcase.loader import load_catalog
+        return load_catalog()
+
+    def test_all_six_load(self):
+        cat = self._cat()
+        for cid in self.NEW:
+            assert cid in cat, f"{cid} did not load"
+
+    def test_each_declares_its_attack_class_and_is_claimed_by_it(self):
+        from orchestrator import capabilities as C
+        cat = self._cat()
+        claimed = {w: c["key"] for c in C.CLASSES for w in (c.get("wstg") or [])}
+        for cid in self.NEW:
+            says = cat[cid].attack_class
+            assert says, f"{cid} declares no attack_class"
+            assert claimed.get(cid) == says, (
+                f"{cid} declares {says!r} but is claimed by {claimed.get(cid)!r}")
+
+    def test_every_evaluator_fires_on_vulnerable_output(self):
+        """Otherwise the case is decoration: it would report zero findings on
+        a target that IS vulnerable, and look identical to a clean result."""
+        import re
+        cat = self._cat()
+        dead = []
+        for cid in self.NEW:
+            for st in cat[cid].steps:
+                sample = self.VULNERABLE[cid].get(st.name)
+                if sample is None:
+                    continue
+                rx = [e for e in st.evaluators if e.type == "regex"]
+                if not any(re.search(e.pattern, sample,
+                                     re.I if e.case_insensitive else 0) for e in rx):
+                    dead.append(f"{cid}::{st.name}")
+        assert not dead, f"evaluators that never fire: {dead}"
+
+    def test_no_evaluator_fires_on_ordinary_output(self):
+        """THE precision test. A generic detector is exactly where recall eats
+        precision, and a false positive in a client deliverable costs more
+        than a miss."""
+        import re
+        cat = self._cat()
+        bad = []
+        for cid in self.NEW:
+            for st in cat[cid].steps:
+                for e in st.evaluators:
+                    if e.type != "regex":
+                        continue
+                    for sample in self.BENIGN:
+                        if re.search(e.pattern, sample,
+                                     re.I if e.case_insensitive else 0):
+                            bad.append(f"{cid}::{st.name} matched {sample[:40]!r}")
+        assert not bad, "false positives on ordinary output:\n  " + "\n  ".join(bad)
+
+    def test_the_payloads_survive_template_rendering(self):
+        """The SSTI payloads use {{...}}, the same syntax as the engine's own
+        placeholders. If _render consumed them the case would test nothing and
+        still report clean."""
+        from orchestrator.testcase.runner import _render
+        cat = self._cat()
+        ctx = {"url": "http://t.example/s", "parameter": "q", "client_id": "cid"}
+        rendered = [_render(s.command, ctx) for s in cat["WSTG-INPV-18"].steps]
+        assert any("31337*7" in r for r in rendered), "the arithmetic payload was eaten"
+        assert any("7*'7'" in r for r in rendered)
+
+    def test_no_case_uses_a_tool_the_runner_will_not_allow(self):
+        from orchestrator.testcase.runner import _TOOLS_ALL
+        cat = self._cat()
+        for cid in self.NEW:
+            for st in cat[cid].steps:
+                assert st.tool in _TOOLS_ALL, f"{cid}::{st.name} uses {st.tool!r}"
+
+    def test_no_case_trips_safe_mode(self):
+        """A case blocked by safe mode reports nothing and looks like a clean
+        result. DELETE/PUT/PATCH are refused; POST is not."""
+        from orchestrator.testcase.runner import _render
+        from orchestrator.tool_executor import _safe_mode_violation
+        cat = self._cat()
+        ctx = {"url": "http://t.example/s", "parameter": "q", "client_id": "cid"}
+        for cid in self.NEW:
+            for st in cat[cid].steps:
+                cmd = _render(st.command, ctx)
+                why = _safe_mode_violation(cmd, enabled=True)
+                assert why is None, f"{cid}::{st.name} blocked by safe mode: {why}"
+
+    def test_the_upload_case_is_the_only_one_that_writes(self):
+        """It is unavoidable there — "does this endpoint accept a file it
+        should refuse" cannot be answered without sending one — and it must
+        stay the only one."""
+        cat = self._cat()
+        writers = []
+        for cid in self.NEW:
+            for st in cat[cid].steps:
+                if "-F " in st.command or "--form" in st.command:
+                    writers.append(cid)
+        assert set(writers) == {"WSTG-BUSL-09"}, writers
+
+    def test_the_upload_payload_is_inert_and_traceable(self):
+        """It proves execution and gives whoever finds the file nothing to
+        use, and the canary is in the filename so cleanup is one find."""
+        from pathlib import Path
+        y = Path("tests_catalog/wstg/BUSL-09_file_upload.yaml").read_text()
+        assert "erlik-upload-canary" in y
+        assert "ERLIK-UPLOAD-EXECUTED-CANARY" in y
+        for shell in ("system(", "exec(", "shell_exec", "passthru", "popen",
+                      "eval(", "base64_decode"):
+            assert shell not in y, f"upload payload contains {shell!r}"
+
+
+class TestOneFilenamePredicate:
+    """Both scope guards had their own idea of what a filename is —
+    tool_executor knew eight extensions, testcase/scope.py knew two — so the
+    file-upload case was refused by the runner's copy before it ever sent a
+    request, while the agent lane's copy would have allowed it.
+    """
+
+    def test_filenames_are_not_treated_as_hosts(self):
+        from orchestrator.tool_executor import looks_like_filename
+        for name in ("erlik-upload-canary.php.jpg", "report.tar.gz",
+                     "wordlist.txt", "dump.sql", "cert.pem", "app.log",
+                     "/usr/share/wordlists/common.txt"):
+            assert looks_like_filename(name), name
+
+    def test_real_TLDs_are_still_treated_as_hosts(self):
+        """.zip, .mov, .md, .sh, .io, .app and .dev are delegated TLDs.
+        Skipping any of them as a "file extension" would let `evil.zip` past
+        the guard as a filename — the whole reason the list is not simply
+        "common file extensions"."""
+        from orchestrator.tool_executor import looks_like_filename, extract_hosts
+        for host in ("evil.zip", "payload.mov", "notes.md", "run.sh",
+                     "thing.io", "site.app", "x.dev"):
+            assert not looks_like_filename(host), host
+            assert extract_hosts(f"nmap {host}") == [host], host
+
+    def test_the_upload_command_resolves_to_one_host(self):
+        from orchestrator.tool_executor import extract_hosts
+        cmd = ('curl -s -i -F "file=@/dev/null;'
+               'filename=erlik-upload-canary.php.jpg;type=image/jpeg" '
+               'http://localhost:3000/')
+        assert extract_hosts(cmd) == ["localhost"]
+
+    def test_both_guards_use_the_same_predicate(self):
+        import inspect
+        from orchestrator.testcase import scope as S
+        assert "looks_like_filename" in inspect.getsource(S.check_command), \
+            "the runner's guard has its own filename list again"
+
+    def test_the_runner_guard_allows_the_upload_command(self):
+        """The behavioural check. The source assertion above passes if the
+        import is present but unused."""
+        from orchestrator.testcase.scope import check_command, Scope
+        cmd = ('curl -s -F "file=@-;filename=erlik-upload-canary.php;'
+               'type=image/png" http://localhost:3000/')
+        check_command(cmd, Scope(allow_hosts=["localhost"], allow_ports=[3000]))
+
+    def test_the_runner_guard_still_refuses_a_real_off_scope_host(self):
+        import pytest
+        from orchestrator.testcase.scope import check_command, Scope, ScopeViolation
+        with pytest.raises(ScopeViolation):
+            check_command("curl http://evil.example/x",
+                          Scope(allow_hosts=["localhost"], allow_ports=[3000]))
