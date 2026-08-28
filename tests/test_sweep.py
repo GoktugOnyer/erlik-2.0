@@ -78,14 +78,22 @@ class TestSkipsAreNamedNeverSilent:
 
 class TestTargeting:
     def test_profile_endpoints_beat_the_default(self, client):
-        """The actual SSRF defect: without a profile the case gets the base URL
-        and a default parameter, which cannot exercise it."""
+        """A profile supplies the real endpoint and parameter.
+
+        This test used to assert the OPPOSITE and call it correct: it checked
+        that without a profile the case still produced a target, built from the
+        base URL and a parameter named "q". That is the defect, not the
+        contract — see test_a_guess_can_never_satisfy_a_required_field.
+        """
         case = next(c for c in _cases(client) if c["id"] == "WSTG-INPV-19")
-        with_p, _ = S.build_target(case, BASE, S.PROFILES["juiceshop"])
-        without, _ = S.build_target(case, BASE, {})
+        with_p, why = S.build_target(case, BASE, S.PROFILES["juiceshop"])
         assert with_p["url"].endswith("/profile/image/url")
         assert with_p["parameter"] == "imageUrl"
-        assert without["url"] != with_p["url"]
+        assert why == ""
+
+        without, why = S.build_target(case, BASE, {})
+        assert without is None, "ran a parameter case against an invented parameter"
+        assert "parameter" in why
 
     def test_base_is_substituted_not_hardcoded(self, client):
         case = next(c for c in _cases(client) if c["id"] == "WSTG-INPV-19")
@@ -172,3 +180,97 @@ class TestCliAndApiShareOneImplementation:
                / "scripts" / "deterministic_sweep.py").read_text()
         assert "from orchestrator.testcase.sweep import" in src
         assert "PROFILES: dict" not in src, "script re-declares the endpoint map"
+
+
+
+class TestAGuessIsNotKnowledge:
+    """`defaults` conflated two different things, and the difference is the
+    whole point of this module.
+
+    DERIVED values are facts about the target the operator gave us — the base
+    URL is the base URL. GUESSED values were inventions: a parameter named "q",
+    a login form at /login. Both sat in one dict, so a guess SATISFIED a
+    required field and the "no value for required field" branch never fired for
+    it.
+
+    The consequence on any target without a profile: the SSRF, XSS, SQLi and
+    open-redirect cases all ran against the bare base URL with ?q= and reported
+    "no finding" — 22 confident negative verdicts, most of which assessed
+    nothing. sweep.py's own docstring says the module exists to prevent exactly
+    that, and precision is what a client deliverable is made of.
+
+    A guess may still FILL a field nobody named; it can never SATISFY a
+    REQUIRED one. Required means "this case cannot run without knowing this",
+    and inventing the answer does not make it known.
+    """
+
+    @pytest.mark.parametrize("case_id,needle", [
+        ("WSTG-INPV-19", "parameter"),   # SSRF
+        ("WSTG-INPV-01", "parameter"),   # reflected XSS
+        ("WSTG-INPV-05", "parameter"),   # SQLi
+        ("WSTG-ATHN-01", "login url"),   # the reason is prose, not the field name
+    ])
+    def test_a_guess_can_never_satisfy_a_required_field(self, client, case_id, needle):
+        case = next(c for c in _cases(client) if c["id"] == case_id)
+        tgt, why = S.build_target(case, BASE, {})
+        assert tgt is None, f"{case_id} ran on an invented value"
+        assert needle in why.lower(), why
+
+    def test_the_reason_says_how_to_fix_it(self, client):
+        """A skip an operator cannot act on is only marginally better than a
+        wrong answer."""
+        case = next(c for c in _cases(client) if c["id"] == "WSTG-INPV-19")
+        _, why = S.build_target(case, BASE, {})
+        assert "profile" in why or "supply" in why
+
+    def test_a_profile_still_satisfies_it(self, client):
+        case = next(c for c in _cases(client) if c["id"] == "WSTG-INPV-19")
+        tgt, why = S.build_target(case, BASE, S.PROFILES["juiceshop"])
+        assert tgt and tgt["parameter"] == "imageUrl" and why == ""
+
+    def test_an_explicit_value_still_satisfies_it(self, client):
+        """Discovery feeding a real parameter in is the whole point of the
+        next change; it must work today."""
+        case = next(c for c in _cases(client) if c["id"] == "WSTG-INPV-19")
+        tgt, why = S.build_target(case, BASE, {}, extra={"parameter": "imageUrl"})
+        assert tgt and tgt["parameter"] == "imageUrl" and why == ""
+
+    def test_derived_values_still_satisfy_required_fields(self, client):
+        """Guard on the guard: the fix must not make everything skip. The base
+        URL is a fact, not a guess."""
+        case = next(c for c in _cases(client) if c["id"] == "WSTG-INFO-02")
+        tgt, why = S.build_target(case, BASE, {})
+        assert tgt and tgt["url"] == BASE and why == ""
+
+    def test_the_profile_path_is_unchanged(self, client):
+        """The juiceshop profile supplies real endpoints, so every recorded
+        sweep against it must plan exactly as before: 19 runnable, 3 skipped."""
+        plan = S.plan_sweep(_cases(client), BASE, "juiceshop")
+        assert plan["counts"] == {"runnable": 19, "skipped": 3, "total": 22}
+
+    def test_an_unknown_target_skips_more_and_says_why(self, client):
+        """The honest number for a target nobody has described."""
+        plan = S.plan_sweep(_cases(client), BASE, "")
+        assert plan["counts"]["runnable"] == 13
+        assert plan["counts"]["skipped"] == 9
+        for sk in plan["skipped"]:
+            assert sk["reason"], sk
+        guessed = [sk for sk in plan["skipped"]
+                   if "parameter" in sk["reason"] or "login URL" in sk["reason"]]
+        assert len(guessed) == 6, "the guess-driven skips are missing"
+
+    def test_guessed_and_derived_are_separate_sets_in_the_source(self):
+        """The two must not drift back into one dict — that merge IS the bug.
+
+        Scoped to build_target's own source. A whole-file check fails on
+        PROFILES, where `"parameter": "q"` is Juice Shop's REAL search
+        parameter — a profile value is knowledge about a specific application,
+        which is exactly what a guess is not.
+        """
+        import inspect
+        src = inspect.getsource(S.build_target)
+        assert "derived = {" in src and "guessed = {" in src
+        derived_block = src.split("derived = {")[1].split("}")[0]
+        for invented in ("parameter", "login_url"):
+            assert invented not in derived_block, (
+                f"{invented!r} is back among the derived values")

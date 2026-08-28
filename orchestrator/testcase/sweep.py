@@ -78,13 +78,44 @@ def build_target(case: dict[str, Any], base: str,
     p = urlparse(base)
     host = p.hostname or ""
     port = p.port or (443 if p.scheme == "https" else 80)
-    defaults = {"url": base, "host": host, "port": port,
-                "login_url": f"{base}/login", "parameter": "q",
-                "url_template": base}
+
+    # DERIVED from the target the operator gave us. These are facts, not
+    # guesses: the base URL is the base URL.
+    derived = {"url": base, "host": host, "port": port, "url_template": base}
+
+    # GUESSES. A parameter named "q" and a login form at /login are inventions
+    # that happen to be true on some applications and false on most.
+    #
+    # They used to sit in the same dict as the derived values, which quietly
+    # defeated the skip logic this module exists for: because the default
+    # SUPPLIED a value, a case requiring `parameter` never hit the
+    # "no value for required field" branch. On any target without a profile the
+    # SSRF, XSS, SQLi and open-redirect cases all ran against the bare base URL
+    # with ?q= and reported "no finding" — 22 confident negative verdicts, most
+    # of which assessed nothing. That is a precision failure, and precision is
+    # what a client deliverable is made of.
+    #
+    # A guess may still FILL a field the operator or a profile did not name, but
+    # it can never SATISFY a required one. Required means "this case cannot be
+    # run without knowing this", and inventing the answer does not make it known.
+    guessed = {"parameter": "q", "login_url": f"{base}/login"}
+    GUESS_REASON = {
+        "parameter": "needs a parameter name; none known for this target "
+                     "(supply one, add a target profile, or run discovery first)",
+        "login_url": "needs the login URL; none known for this target "
+                     "(supply one or add a target profile)",
+    }
 
     tgt: dict[str, Any] = {}
     for r in req:
-        tgt[r] = over.get(r, defaults.get(r))
+        if r in over:
+            tgt[r] = over[r]
+        elif r in derived:
+            tgt[r] = derived[r]
+        elif r in guessed:
+            return None, GUESS_REASON.get(r, f"no known value for {r!r}; refusing to guess")
+        else:
+            return None, f"no value for required field {r!r}"
         if tgt[r] in (None, ""):
             return None, f"no value for required field {r!r}"
     for o in schema.get("optional") or []:
