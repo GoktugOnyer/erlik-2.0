@@ -502,6 +502,14 @@ async def _record_finding(session_id: str, f: dict, *, source: str,
                     # an entry in the customer's asset inventory.
                     print(f"[asset {session_id[:8]}] not inventoried: {_why}",
                           flush=True)
+                # A technology observation belongs on the asset tree, not only
+                # in the finding text. Recorded when the detector named one, so
+                # the inventory answers "what is this host RUNNING" as well as
+                # "what is wrong with it".
+                if _asset_id and f.get("technology"):
+                    await _A.record_observation(db, _eid, f["url"], "technology",
+                                                str(f["technology"])[:120],
+                                                source="finding")
         except Exception as _ae:  # noqa: BLE001 — inventory must never block a write
             print(f"[asset {session_id[:8]}] skipped: {_ae}", flush=True)
 
@@ -5825,6 +5833,27 @@ async def create_session(data: SessionCreate):
     effective_tools = preset_tools if preset_tools is not None else data.enabled_tools
     enabled_tools_str = ",".join(effective_tools)
 
+    # An engagement's scope is the LEGAL BOUNDARY of the test. If this run names
+    # a customer, the target must be inside what that customer authorised —
+    # checked HERE, before a session exists, because a session that should never
+    # have been created is not something a later gate can undo. Runs with no
+    # engagement keep the previous behaviour.
+    if data.engagement_id:
+        from orchestrator import engagement as _E
+        _sdb = await get_db()
+        try:
+            _row = await (await _sdb.execute(
+                "SELECT id FROM engagements WHERE id = ?", (data.engagement_id,))).fetchone()
+            if not _row:
+                raise HTTPException(status_code=404, detail="engagement not found")
+            _ok, _why = await _E.check(_sdb, data.engagement_id, data.target_url)
+        finally:
+            await _sdb.close()
+        if not _ok:
+            raise HTTPException(
+                status_code=403,
+                detail=f"{data.target_url} is not in scope for this engagement — {_why}")
+
     db = await get_db()
     try:
         # Resolve max_turns: 0 = unlimited (use ABSOLUTE_MAX_TURNS safety cap)
@@ -5836,13 +5865,14 @@ async def create_session(data: SessionCreate):
             "INSERT INTO sessions (id, target_url, scope_mode, system_prompt, model, enabled_tools, "
             "session_type, parent_session_id, vuln_category, no_timeout, max_turns, "
             "toolset_preset, disable_stagnation, tool_timeout, run_config, scope_extra, "
-            "authorization_ref) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "authorization_ref, engagement_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (session_id, data.target_url, data.scope_mode.value, data.system_prompt, data.model,
              enabled_tools_str, data.session_type, data.parent_session_id, data.vuln_category,
              1 if data.no_timeout else 0, effective_max_turns, data.toolset_preset,
              1 if data.disable_stagnation else 0, data.tool_timeout, _run_config_json,
-             json.dumps(current_scope_extra()), data.authorization_ref),
+             json.dumps(current_scope_extra()), data.authorization_ref,
+             data.engagement_id),
         )
         await db.commit()
         row = await db.execute("SELECT * FROM sessions WHERE id = ?", (session_id,))

@@ -9,6 +9,19 @@ from orchestrator.testcase.runner import RunResult
 from orchestrator.testcase.chain import ChainRun
 
 
+async def _asset_for(db, engagement_id: str | None, url: str | None) -> str | None:
+    """Inventory a deterministic finding's URL, or None when there is no
+    engagement or the URL is outside its scope."""
+    if not engagement_id or not url:
+        return None
+    try:
+        from orchestrator.assets import path_for_url
+        aid, _ = await path_for_url(db, engagement_id, url, source="testcase")
+        return aid
+    except Exception:  # noqa: BLE001 — inventory must never fail a run
+        return None
+
+
 async def save_run(result: RunResult, *, provider: str | None, model: str | None,
                    chain_root_run_id: str | None = None) -> str:
     """Persist a single RunResult. Returns the new run_id."""
@@ -33,6 +46,20 @@ async def save_run(result: RunResult, *, provider: str | None, model: str | None
                 json.dumps(result.chain_next),
             ),
         )
+        # Same inventory as the agent lane. Without this the deterministic
+        # half — the part erlik actually asks a client to trust — contributes
+        # nothing to the asset tree, and the column added for it stays empty.
+        _eid = None
+        try:
+            if chain_root_run_id is None:
+                pass
+            cur = await db.execute(
+                "SELECT engagement_id FROM v2_runs WHERE id = ?", (run_id,))
+            row = await cur.fetchone()
+            _eid = row[0] if row else None
+        except Exception:
+            _eid = None
+
         for f in result.findings:
             # Provenance mirrors the `findings` table (see _record_finding in
             # main.py). This is a different table with a different schema, so it
@@ -42,11 +69,12 @@ async def save_run(result: RunResult, *, provider: str | None, model: str | None
             await db.execute(
                 """INSERT INTO v2_findings
                    (run_id, test_case_id, step, vuln_type, severity, url, parameter,
-                    evidence, source, detector)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    evidence, source, detector, asset_id)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (run_id, f.test_case_id, f.step, f.vuln_type, f.severity,
                  f.url, f.parameter, f.evidence,
-                 "v2_testcase", f"v2:{f.test_case_id}:{f.step}"),
+                 "v2_testcase", f"v2:{f.test_case_id}:{f.step}",
+                 await _asset_for(db, _eid, f.url)),
             )
         # Hand the results to the AI lane. Until now a deterministic run's
         # findings went only to v2_findings, which main.py never reads — so

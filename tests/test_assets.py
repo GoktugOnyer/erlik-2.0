@@ -289,3 +289,105 @@ class TestWritePathIntegration:
         ok, n, aid = asyncio.run(go())
         assert ok is True and n == 1
         assert aid is None, "invented an asset for a session with no customer"
+
+
+class TestTheModelIsReachableFromARealRun:
+    """The audit that prompted these: the asset model shipped complete and
+    UNREACHABLE.
+
+    `sessions.engagement_id` had no writer at all, so `_record_finding` read it,
+    got NULL every time, and no real run could ever produce an asset. The demo
+    only worked because the session row was inserted by hand. Two more of the
+    same shape: `record_observation()` had zero callers, and `v2_findings.asset_id`
+    existed as a column the deterministic lane never wrote.
+
+    A capability nothing can reach is indistinguishable from one that does not
+    exist, which is this codebase's signature defect.
+    """
+
+    def test_session_creation_accepts_an_engagement(self):
+        from orchestrator.models import SessionCreate
+        assert "engagement_id" in SessionCreate.model_fields
+
+    def test_session_creation_persists_it(self):
+        import pathlib
+        src = (pathlib.Path(__file__).resolve().parents[1]
+               / "orchestrator" / "main.py").read_text()
+        assert "authorization_ref, engagement_id) " in src, (
+            "engagement_id is accepted but never written to the row")
+        assert "data.engagement_id)," in src
+
+    def test_record_observation_is_called(self):
+        """It was dead code — service/technology could never be populated."""
+        import pathlib
+        src = (pathlib.Path(__file__).resolve().parents[1]
+               / "orchestrator" / "main.py").read_text()
+        # The CALL SITE, not the substring: a rename to
+        # `_dead_record_observation(` still contains "record_observation(",
+        # which is exactly how this assertion passed against dead code when I
+        # tested it.
+        assert "await _A.record_observation(db," in src
+
+    def test_the_deterministic_lane_links_assets(self):
+        """The half erlik asks a client to trust contributed nothing to the
+        inventory, and the column added for it stayed empty."""
+        import pathlib
+        src = (pathlib.Path(__file__).resolve().parents[1] / "orchestrator"
+               / "testcase" / "persistence.py").read_text()
+        assert "await _asset_for(db, _eid, f.url)" in src
+        assert "evidence, source, detector, asset_id)" in src, (
+            "asset_id is computed but not in the INSERT column list")
+
+    def test_scope_is_enforced_when_a_run_names_a_customer(self, tmp_path,
+                                                           monkeypatch):
+        """The real payoff. An engagement's scope is the legal boundary, and it
+        is now enforced at session CREATION — a session that should never have
+        existed is not something a later gate can undo."""
+        import warnings
+        warnings.filterwarnings("ignore", category=DeprecationWarning)
+        from fastapi.testclient import TestClient
+        import orchestrator.database as db_mod
+        import orchestrator.main as M
+
+        original = db_mod.DB_PATH
+        db_mod.DB_PATH = str(tmp_path / "s.db")
+        try:
+            asyncio.run(db_mod.init_db())
+            c = TestClient(M.app)
+            eid = c.post("/api/engagements",
+                         json={"client_name": "Bound", "root_domain": "bound.example"}
+                         ).json()["engagement"]["id"]
+
+            out = c.post("/api/sessions", json={
+                "target_url": "http://notbound.example", "engagement_id": eid})
+            assert out.status_code == 403, out.text
+            assert "not in scope" in out.json()["detail"]
+
+            ok = c.post("/api/sessions", json={
+                "target_url": "http://app.bound.example", "engagement_id": eid})
+            assert ok.status_code == 200, ok.text
+
+            bad = c.post("/api/sessions", json={
+                "target_url": "http://x.example", "engagement_id": "nope"})
+            assert bad.status_code == 404
+        finally:
+            db_mod.DB_PATH = original
+
+    def test_a_run_without_an_engagement_is_unaffected(self, tmp_path, monkeypatch):
+        """110 sessions predate engagements. Requiring one would break every
+        existing workflow."""
+        import warnings
+        warnings.filterwarnings("ignore", category=DeprecationWarning)
+        from fastapi.testclient import TestClient
+        import orchestrator.database as db_mod
+        import orchestrator.main as M
+
+        original = db_mod.DB_PATH
+        db_mod.DB_PATH = str(tmp_path / "s2.db")
+        try:
+            asyncio.run(db_mod.init_db())
+            c = TestClient(M.app)
+            r = c.post("/api/sessions", json={"target_url": "http://anything.example"})
+            assert r.status_code == 200, r.text
+        finally:
+            db_mod.DB_PATH = original
