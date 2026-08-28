@@ -1,6 +1,7 @@
 id: WSTG-CLNT-07
 name: Cross Origin Resource Sharing
 category: Client-side
+attack_class: cors
 severity: medium
 references:
   - https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/11-Client-side_Testing/07-Testing_Cross_Origin_Resource_Sharing

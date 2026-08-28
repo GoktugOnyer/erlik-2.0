@@ -1,6 +1,7 @@
 id: WSTG-ERRH-01
 name: Improper Error Handling
 category: Error Handling
+attack_class: disclosure
 severity: low
 references:
   - https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/08-Testing_for_Error_Handling/01-Testing_For_Improper_Error_Handling

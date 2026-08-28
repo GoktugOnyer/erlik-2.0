@@ -1,6 +1,7 @@
 id: WSTG-INFO-02
 name: Fingerprint Web Server
 category: Information Gathering
+attack_class: disclosure
 severity: low
 references:
   - https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/01-Information_Gathering/02-Fingerprint_Web_Server

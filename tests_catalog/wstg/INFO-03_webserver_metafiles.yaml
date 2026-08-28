@@ -1,6 +1,7 @@
 id: WSTG-INFO-03
 name: Review Webserver Metafiles
 category: Information Gathering
+attack_class: disclosure
 severity: low
 references:
   - https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/01-Information_Gathering/03-Review_Webserver_Metafiles_for_Information_Leakage

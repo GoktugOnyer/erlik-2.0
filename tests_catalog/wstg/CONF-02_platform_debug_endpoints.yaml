@@ -1,6 +1,7 @@
 id: WSTG-CONF-02
 name: Platform Debug and Diagnostic Endpoint Exposure
 category: Configuration & Deployment Management
+attack_class: disclosure
 severity: high
 references:
   - https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/02-Configuration_and_Deployment_Management_Testing/02-Test_Application_Platform_Configuration

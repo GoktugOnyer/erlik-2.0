@@ -1,6 +1,7 @@
 id: WSTG-INPV-01
 name: Reflected Cross-Site Scripting
 category: Input Validation
+attack_class: xss
 severity: high
 references:
   - https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/07-Input_Validation_Testing/01-Testing_for_Reflected_Cross_Site_Scripting

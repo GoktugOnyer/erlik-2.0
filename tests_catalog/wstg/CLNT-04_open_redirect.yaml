@@ -1,6 +1,7 @@
 id: WSTG-CLNT-04
 name: Client-side URL Redirect (Open Redirect)
 category: Client-side
+attack_class: xss
 severity: medium
 references:
   - https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/11-Client-side_Testing/04-Testing_for_Client_Side_URL_Redirect

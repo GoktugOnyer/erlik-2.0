@@ -324,3 +324,99 @@ class TestHostedProviderRateLimit:
         import pathlib
         ig = (pathlib.Path(__file__).resolve().parents[1] / ".gitignore").read_text()
         assert ".env" in ig.split()
+
+
+class TestCasesAreFiledUnderTheRightAttackClass:
+    """The Arsenal was wrong in BOTH directions at once.
+
+    Three cases were filed under the wrong class:
+
+        WSTG-INPV-19  "Server-Side Request Forgery"  -> claimed by `ssti`
+        WSTG-INPV-06  "LDAP Injection"               -> claimed by `cmdi`
+        WSTG-INPV-05.6 "NoSQL Operator Injection"    -> claimed by `sqli`
+
+    So the operator was told SSRF, LDAP and NoSQL had no deterministic
+    coverage — while SSTI and command injection were credited with coverage
+    that tested something else entirely. Both halves of that are worse than a
+    gap: a gap is visible.
+
+    The existing integrity audit passed the whole time, because it asked only
+    whether every declared id EXISTS and whether every case is claimed by
+    SOMEONE. Both were true. Correct attribution needs the case itself to say
+    what it proves.
+    """
+
+    EXPECTED = {
+        "WSTG-INPV-05":   "sqli",
+        "WSTG-INPV-05.6": "nosql",
+        "WSTG-INPV-06":   "ldap",
+        "WSTG-INPV-19":   "ssrf",
+        "WSTG-INPV-01":   "xss",
+        "WSTG-AUTHZ-04":  "authz",
+        "WSTG-SESS-10":   "jwt",
+    }
+
+    def test_the_specific_cases_that_were_wrong(self):
+        from orchestrator import capabilities as C
+        claimed = {w: c["key"] for c in C.CLASSES for w in (c.get("wstg") or [])}
+        for case, key in self.EXPECTED.items():
+            assert claimed.get(case) == key, (
+                f"{case} is claimed by {claimed.get(case)!r}, expected {key!r}")
+
+    def test_every_case_declares_the_class_it_proves(self):
+        from orchestrator import capabilities as C
+        declared = C.case_declared_classes()
+        ids = C.wstg_ids()
+        missing = sorted(ids - set(declared))
+        assert not missing, f"cases with no attack_class: {missing}"
+
+    def test_declared_classes_are_real_class_keys(self):
+        from orchestrator import capabilities as C
+        keys = {c["key"] for c in C.CLASSES}
+        for case, key in C.case_declared_classes().items():
+            assert key in keys, f"{case} declares unknown class {key!r}"
+
+    def test_the_audit_reports_misattribution(self):
+        from orchestrator import capabilities as C
+        assert "wstg_misattributed" in C.audit()
+
+    def test_the_audit_would_have_caught_the_original_bug(self):
+        """The control: re-file the SSRF case under `ssti` and the audit must
+        object. Without this, the check is only asserted against a corpus that
+        is already correct — which is exactly how the old audit passed."""
+        from orchestrator import capabilities as C
+        real = C.CLASSES
+        broken = []
+        for c in real:
+            c = dict(c)
+            if c["key"] == "ssrf":
+                c["wstg"] = []
+            elif c["key"] == "ssti":
+                c["wstg"] = ["WSTG-INPV-19"]
+            broken.append(c)
+        C.CLASSES = broken
+        try:
+            a = C.audit()
+            assert a["wstg_misattributed"] == [
+                {"case": "WSTG-INPV-19", "case_declares": "ssrf", "claimed_by": "ssti"}]
+            # ...and the checks that existed before stay silent, which is the
+            # whole reason the bug survived.
+            assert a["wstg_declared_missing"] == []
+            assert a["wstg_unclaimed"] == []
+        finally:
+            C.CLASSES = real
+
+    def test_a_class_with_no_case_says_so_rather_than_borrowing_one(self):
+        """`ssti` and `cmdi` now report no engine coverage. That is the honest
+        answer; the alternative was credit for a case testing something else."""
+        from orchestrator import capabilities as C
+        for key in ("ssti", "cmdi"):
+            c = next(x for x in C.CLASSES if x["key"] == key)
+            assert c["wstg"] == [], f"{key} claims {c['wstg']}"
+            assert C.verdicts(c)["wstg_engine"] == "not covered"
+
+    def test_the_classes_that_gained_correct_coverage(self):
+        from orchestrator import capabilities as C
+        for key in ("ssrf", "ldap", "nosql"):
+            c = next(x for x in C.CLASSES if x["key"] == key)
+            assert C.verdicts(c)["wstg_engine"] == "deterministic", key

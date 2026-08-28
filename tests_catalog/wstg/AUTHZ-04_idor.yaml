@@ -1,6 +1,7 @@
 id: WSTG-AUTHZ-04
 name: Insecure Direct Object References
 category: Authorization
+attack_class: authz
 severity: high
 references:
   - https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/05-Authorization_Testing/04-Testing_for_Insecure_Direct_Object_References

@@ -82,6 +82,21 @@ class TestCase(BaseModel):
     severity: str = "medium"
     references: list[str] = Field(default_factory=list)
     target_schema: TargetSchema = Field(default_factory=TargetSchema)
+    # Which attack CLASS this case proves, as a capabilities.CLASSES key.
+    #
+    # The case declares it, not the join table, because the join table got it
+    # wrong in three places and nothing could tell: WSTG-INPV-19
+    # ("Server-Side Request Forgery") was filed under `ssti`, WSTG-INPV-06
+    # ("LDAP Injection") under `cmdi`, and WSTG-INPV-05.6 ("NoSQL Operator
+    # Injection") under `sqli`. The Arsenal therefore told the operator that
+    # SSRF, LDAP and NoSQL had no deterministic coverage while claiming SSTI
+    # and command injection did — wrong in both directions at once.
+    #
+    # The existing integrity audit could not see it: it checked that every
+    # declared id EXISTS and every case is claimed by SOMEONE, which was true
+    # the whole time. Correct attribution needs a second opinion, and the case
+    # itself is the one source that knows what it tests.
+    attack_class: Optional[str] = None
     steps: list[TestStep]
     chain: Optional[ChainRule] = None
 

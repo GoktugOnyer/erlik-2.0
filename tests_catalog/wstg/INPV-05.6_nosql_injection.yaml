@@ -1,6 +1,7 @@
 id: WSTG-INPV-05.6
 name: NoSQL Operator Injection
 category: Input Validation
+attack_class: nosql
 severity: high
 references:
   - https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/07-Input_Validation_Testing/05.6-Testing_for_NoSQL_Injection

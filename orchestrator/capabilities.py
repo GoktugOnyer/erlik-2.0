@@ -36,21 +36,21 @@ WSTG_DIR = ROOT / "tests_catalog" / "wstg"
 # detectors: `tool:rule` names from detection.py that can CONFIRM it
 CLASSES: list[dict] = [
     {"key": "sqli", "label": "SQL Injection", "owasp": "A03:2021 Injection",
-     "wstg": ["WSTG-INPV-05", "WSTG-INPV-05.6"],
+     "wstg": ["WSTG-INPV-05"],
      "detectors": ["sqlmap:_detect_sqlmap", "curl:_curl_sqli_login"]},
     {"key": "xss", "label": "Cross-Site Scripting", "owasp": "A03:2021 Injection",
      "wstg": ["WSTG-INPV-01", "WSTG-CLNT-04"],
      "detectors": ["xsstrike:_detect_xss_tools", "dalfox:_detect_xss_tools"]},
     {"key": "cmdi", "label": "Command Injection", "owasp": "A03:2021 Injection",
-     "wstg": ["WSTG-INPV-06"], "detectors": ["commix:_detect_commix"]},
+     "wstg": [], "detectors": ["commix:_detect_commix"]},
     {"key": "ssti", "label": "Server-Side Template Injection",
-     "owasp": "A03:2021 Injection", "wstg": ["WSTG-INPV-19"], "detectors": []},
+     "owasp": "A03:2021 Injection", "wstg": [], "detectors": []},
     {"key": "xxe", "label": "XML External Entity", "owasp": "A05:2021 Misconfiguration",
      "wstg": [], "detectors": []},
     {"key": "ldap", "label": "LDAP Injection", "owasp": "A03:2021 Injection",
-     "wstg": [], "detectors": []},
+     "wstg": ["WSTG-INPV-06"], "detectors": []},
     {"key": "nosql", "label": "NoSQL Injection", "owasp": "A03:2021 Injection",
-     "wstg": [], "detectors": []},
+     "wstg": ["WSTG-INPV-05.6"], "detectors": []},
     {"key": "authz", "label": "Broken Access Control / IDOR",
      "owasp": "A01:2021 Broken Access Control",
      "wstg": ["WSTG-AUTHZ-04"],
@@ -71,7 +71,7 @@ CLASSES: list[dict] = [
      "owasp": "A05:2021 Security Misconfiguration",
      "wstg": ["WSTG-CLNT-07", "WSTG-CLNT-07b"], "detectors": ["curl:_curl_cors"]},
     {"key": "ssrf", "label": "Server-Side Request Forgery", "owasp": "A10:2021 SSRF",
-     "wstg": [], "detectors": []},
+     "wstg": ["WSTG-INPV-19"], "detectors": []},
     {"key": "path", "label": "Path Traversal / File Inclusion",
      "owasp": "A01:2021 Broken Access Control",
      "wstg": ["WSTG-INPV-15"], "detectors": ["curl:_curl_null_byte"]},
@@ -157,6 +157,35 @@ def verdicts(cls: dict) -> dict:
     }
 
 
+def case_declared_classes() -> dict[str, str]:
+    """{case id: the class the CASE FILE says it proves}."""
+    import yaml
+    out: dict[str, str] = {}
+    for p in sorted(WSTG_DIR.glob("*.yaml")):
+        try:
+            doc = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+        except Exception:
+            continue
+        if doc.get("id") and doc.get("attack_class"):
+            out[str(doc["id"])] = str(doc["attack_class"])
+    return out
+
+
+def _misattributed() -> list[dict]:
+    """Cases whose declaring class disagrees with the class claiming them."""
+    declared = case_declared_classes()
+    claimed: dict[str, str] = {}
+    for c in CLASSES:
+        for w in (c.get("wstg") or []):
+            claimed[w] = c["key"]
+    out = []
+    for cid, says in sorted(declared.items()):
+        by = claimed.get(cid)
+        if by != says:
+            out.append({"case": cid, "case_declares": says, "claimed_by": by})
+    return out
+
+
 def audit() -> dict:
     """Every declared id must exist, and every catalogue entry must be claimed.
 
@@ -170,6 +199,15 @@ def audit() -> dict:
     return {
         "wstg_declared_missing": sorted(declared_w - ids),
         "wstg_unclaimed": sorted(ids - declared_w),
+        # Existence is not correctness. Every check above passed while three
+        # cases were filed under the wrong class — WSTG-INPV-19 ("Server-Side
+        # Request Forgery") under `ssti`, WSTG-INPV-06 ("LDAP Injection") under
+        # `cmdi`, WSTG-INPV-05.6 ("NoSQL Operator Injection") under `sqli` — so
+        # the Arsenal reported no deterministic coverage for SSRF, LDAP and
+        # NoSQL while claiming it for SSTI and command injection. Every id
+        # existed and every case was claimed by SOMEONE, which is all the old
+        # audit asked.
+        "wstg_misattributed": _misattributed(),
         "detectors_declared_missing": sorted(declared_d - dets),
         "detectors_unclaimed": sorted(dets - declared_d),
         "class_keys_unknown": sorted(declared_k - keys),

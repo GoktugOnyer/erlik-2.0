@@ -1,6 +1,7 @@
 id: WSTG-ATHN-01
 name: Credentials Transported over Encrypted Channel
 category: Authentication
+attack_class: authn
 severity: high
 references:
   - https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/04-Authentication_Testing/01-Testing_for_Credentials_Transported_over_an_Encrypted_Channel

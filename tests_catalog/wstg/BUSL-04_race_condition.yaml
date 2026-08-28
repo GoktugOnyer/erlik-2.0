@@ -1,6 +1,7 @@
 id: WSTG-BUSL-04
 name: Process Timing / Race Condition
 category: Business Logic
+attack_class: logic
 severity: high
 references:
   - https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/10-Business_Logic_Testing/04-Test_for_Process_Timing
