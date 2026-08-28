@@ -103,7 +103,40 @@ def _validate_target(tc: TestCase, target: dict[str, Any]) -> str | None:
 MAX_PRODUCED_PER_FIELD = 200
 
 
-def _harvest(ev: Evaluator, output: str, flags: int) -> dict[str, list[str]]:
+def _resolve_url(value: str, base: str) -> str | None:
+    """Absolutise a produced URL, or None if it must not be used.
+
+    robots.txt yields paths (`/admin`); sitemap.xml yields absolute URLs. Both
+    have to become something the 18 cases that require `url` can consume, so a
+    relative value is joined to the target's own URL.
+
+    THE HOST CHECK IS THE POINT. A sitemap can list URLs on any host, and a
+    target file is attacker-controlled: `<loc>https://evil.example/</loc>` in a
+    customer's sitemap would otherwise retarget a chained case at a third party
+    erlik was never authorised to touch. Same-host only, and no scheme other
+    than http/https — `javascript:` and `data:` are not targets.
+    """
+    from urllib.parse import urljoin, urlparse
+
+    if not base:
+        return None
+    try:
+        absolute = urljoin(base, value)
+        p, b = urlparse(absolute), urlparse(base)
+    except ValueError:
+        return None
+    if p.scheme not in ("http", "https"):
+        return None
+    if (p.hostname or "").lower() != (b.hostname or "").lower():
+        return None
+    if (p.port or (443 if p.scheme == "https" else 80)) != \
+       (b.port or (443 if b.scheme == "https" else 80)):
+        return None
+    return absolute
+
+
+def _harvest(ev: Evaluator, output: str, flags: int,
+             target: dict[str, Any] | None = None) -> dict[str, list[str]]:
     """Pull the values an evaluator declares it produces out of tool output.
 
     EVERY occurrence, not just the first: a robots.txt has many Disallow lines
@@ -113,11 +146,15 @@ def _harvest(ev: Evaluator, output: str, flags: int) -> dict[str, list[str]]:
     Values are DROPPED, never escaped, if they do not survive the same
     injection gate the sweep planner applies. This text came from the target,
     and it is about to become a command argument.
+
+    A produced `url` is additionally absolutised against the target and
+    restricted to the SAME HOST — see _resolve_url.
     """
     if not ev.produces:
         return {}
     from orchestrator.engagement import looks_injectable
 
+    base = (target or {}).get("url") or ""
     out: dict[str, list[str]] = {}
     for field, group in ev.produces.items():
         seen: list[str] = []
@@ -131,6 +168,11 @@ def _harvest(ev: Evaluator, output: str, flags: int) -> dict[str, list[str]]:
             value = value.strip()
             if not value or looks_injectable(value):
                 continue
+            if field == "url":
+                resolved = _resolve_url(value, base)
+                if not resolved:
+                    continue
+                value = resolved
             if value not in seen:
                 seen.append(value)
             if len(seen) >= MAX_PRODUCED_PER_FIELD:
@@ -161,7 +203,7 @@ async def _run_evaluator(
         # The Match used to be destroyed on the line that created it —
         # `bool(re.search(...))` — so every capture group a case wrote was
         # thrown away to keep a yes/no. Harvest first, then decide matched.
-        produced = _harvest(ev, step_result.output, flags)
+        produced = _harvest(ev, step_result.output, flags, target)
         matched = bool(produced) or bool(
             re.search(ev.pattern, step_result.output, flags))
 
