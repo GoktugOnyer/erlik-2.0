@@ -591,3 +591,264 @@ class TestTheWiringIsLive:
         src = inspect.getsource(M.run_v2_test_case)
         assert "db=await get_db()" in src, \
             "the runner cannot resolve a handle, so every authed step would fail"
+
+
+class TestLoginFormIsSubmittedLikeABrowser:
+    """A browser posts every successful control, not {username, password}.
+
+    DVWA gates its entire login branch on `isset($_POST['Login'])` — and
+    `Login` is the SUBMIT BUTTON, not a hidden input. erlik posted
+    username+password+CSRF, got HTTP 200 with no login attempted, and recorded
+    the session as `rejected` for a reason that had nothing to do with the
+    credentials. Harvesting hidden inputs alone was not enough.
+    """
+
+    DVWA = '''<html><body>
+      <form action="login.php" method="post">
+        <input type="text" name="username">
+        <input type="password" AUTOCOMPLETE="off" name="password">
+        <p class="submit"><input type="submit" value="Login" name="Login"></p>
+        <input type='hidden' name='user_token' value='3cd98fd081ec11180d1d38dd1fb14772' />
+      </form></body></html>'''
+
+    def _f(self, html, url="http://t.example/login.php"):
+        from orchestrator.login import login_form
+        return login_form(html, url)
+
+    def test_the_submit_button_is_submitted(self):
+        """THE DVWA bug. Without this the application never runs its login
+        branch at all and answers 200 as if nothing was tried."""
+        f = self._f(self.DVWA)
+        assert f["fields"].get("Login") == "Login"
+
+    def test_the_csrf_token_is_submitted(self):
+        assert self._f(self.DVWA)["fields"]["user_token"].startswith("3cd98fd0")
+
+    def test_the_action_is_resolved_against_the_page(self):
+        f = self._f(self.DVWA, "http://t.example/dvwa/login.php")
+        assert f["url"] == "http://t.example/dvwa/login.php"
+
+    def test_a_form_posting_off_host_is_refused_not_rewritten(self):
+        """The page is attacker-controlled on a pentest. Silently posting to
+        the page URL instead would hide a hostile form from the operator; the
+        one mistake here that cannot be walked back is sending the customer's
+        password to a third party."""
+        html = '<form action="https://evil.test/collect" method="post">' \
+               '<input type="password" name="password"></form>'
+        f = self._f(html)
+        assert f.get("error") and "another origin" in f["error"]
+        assert "url" not in f
+
+    def test_the_login_form_is_picked_not_the_search_box(self):
+        """A login page routinely also carries a search box and a newsletter
+        signup. Submitting those is indistinguishable from a wrong password."""
+        html = '''<form action="/search"><input type="text" name="q">
+                    <input type="submit" name="go" value="Search"></form>
+                  <form action="/session"><input type="text" name="username">
+                    <input type="password" name="password">
+                    <input type="submit" name="Login" value="Login"></form>'''
+        f = self._f(html)
+        assert f["url"].endswith("/session")
+        assert "q" not in f["fields"]
+
+    def test_unchecked_boxes_are_not_submitted_but_checked_ones_are(self):
+        html = '''<form><input type="password" name="password">
+                  <input type="checkbox" name="remember" value="1">
+                  <input type="checkbox" name="tos" value="yes" checked></form>'''
+        fields = self._f(html)["fields"]
+        assert "remember" not in fields
+        assert fields["tos"] == "yes"
+
+    def test_a_select_submits_its_selected_option(self):
+        html = '''<form><input type="password" name="password">
+                  <select name="realm"><option value="a">A</option>
+                  <option value="b" selected>B</option></select></form>'''
+        assert self._f(html)["fields"]["realm"] == "b"
+
+    def test_a_select_with_no_selection_submits_the_first_option(self):
+        html = '''<form><input type="password" name="password">
+                  <select name="realm"><option value="a">A</option>
+                  <option value="b">B</option></select></form>'''
+        assert self._f(html)["fields"]["realm"] == "a"
+
+    def test_only_one_submit_button_is_sent_and_it_is_the_login_one(self):
+        """A browser sends only the button that was clicked. Sending them all
+        could register an account or cancel the request."""
+        html = '''<form><input type="password" name="password">
+                  <input type="submit" name="cancel" value="Cancel">
+                  <input type="submit" name="Login" value="Log in"></form>'''
+        fields = self._f(html)["fields"]
+        assert fields.get("Login") == "Log in"
+        assert "cancel" not in fields
+
+    def test_malformed_markup_does_not_abort_a_login(self):
+        assert self._f("<form><input type=password name=password><b>") is not None
+
+    def test_a_page_with_no_form_yields_nothing(self):
+        assert self._f("<html><body>no forms here</body></html>") is None
+
+
+class TestCookiesOnASingleLabelHost:
+    """THE bug that made DVWA look like a wrong password.
+
+    http.cookiejar appends ".local" to a dotless request host, so a cookie set
+    by `localhost` with `domain=localhost` is stored and never returned. Every
+    request got a fresh session, the CSRF token belonged to a session that no
+    longer existed, and the login was recorded `rejected`. Nothing errored.
+
+    erlik's recon deliberately accepts single-label internal names — `intranet`,
+    `jira`, `vpn` — so this broke cookie auth on exactly the internal
+    engagements the feature exists for.
+    """
+
+    def test_a_dotless_host_cookie_is_returned(self):
+        """The regression test. With stdlib jar semantics this is False."""
+        from orchestrator.login import Jar
+
+        class R:
+            headers = _Headers([("set-cookie",
+                                 "PHPSESSID=abc123; path=/; domain=localhost; HttpOnly")])
+
+        jar = Jar()
+        jar.update(R())
+        assert jar.header() == "PHPSESSID=abc123"
+
+    def test_the_stdlib_jar_really_does_drop_it(self):
+        """Guard on the premise: if http.cookiejar ever started returning this,
+        the hand-rolled tracking above would be unnecessary complexity."""
+        from http.cookiejar import CookieJar
+        import urllib.request
+        jar = CookieJar()
+        req = urllib.request.Request("http://localhost:8081/login.php")
+        res = _FakeResponse(["PHPSESSID=abc123; path=/; domain=localhost"])
+        jar.extract_cookies(res, req)
+        out = urllib.request.Request("http://localhost:8081/login.php")
+        jar.add_cookie_header(out)
+        assert out.get_header("Cookie") is None, (
+            "stdlib now returns dotless-host cookies; simplify Jar")
+
+    def test_cookies_accumulate_across_requests(self):
+        """The session cookie is usually set by the first GET; using only the
+        last response's cookies loses it."""
+        from orchestrator.login import Jar
+        jar = Jar()
+        jar.update(_Resp(["PHPSESSID=one; path=/"]))
+        jar.update(_Resp(["security=impossible; path=/"]))
+        assert "PHPSESSID=one" in jar.header()
+        assert "security=impossible" in jar.header()
+
+    def test_a_later_value_replaces_an_earlier_one(self):
+        from orchestrator.login import Jar
+        jar = Jar()
+        jar.update(_Resp(["PHPSESSID=one"]))
+        jar.update(_Resp(["PHPSESSID=two"]))
+        assert jar.header() == "PHPSESSID=two"
+
+    def test_attributes_are_not_mistaken_for_cookies(self):
+        from orchestrator.login import Jar
+        jar = Jar()
+        jar.update(_Resp(["a=1; path=/; HttpOnly; SameSite=Strict; Max-Age=86400"]))
+        assert jar.header() == "a=1"
+
+
+class _Headers:
+    def __init__(self, pairs):
+        self._pairs = pairs
+
+    def get_list(self, name):
+        return [v for k, v in self._pairs if k.lower() == name.lower()]
+
+
+class _Resp:
+    def __init__(self, cookies):
+        self.headers = _Headers([("set-cookie", c) for c in cookies])
+
+
+class _FakeResponse:
+    def __init__(self, cookies):
+        self._cookies = cookies
+
+    def info(self):
+        import email.message
+        m = email.message.Message()
+        for c in self._cookies:
+            m["Set-Cookie"] = c
+        return m
+
+
+class TestRedirectsAreFollowedSafely:
+    class _Client:
+        """Replays a scripted redirect chain and records what was sent."""
+
+        def __init__(self, script):
+            self.script = script
+            self.sent = []
+
+        async def request(self, method, url, data=None, json=None, auth=None,
+                          headers=None):
+            self.sent.append({"method": method, "url": url, "data": data,
+                              "cookie": (headers or {}).get("Cookie")})
+            status, location = self.script.pop(0)
+            return _Resp2(status, location)
+
+    def _go(self, script, **kw):
+        import asyncio
+        from orchestrator.login import Jar, request
+        cli = self._Client(list(script))
+        jar = Jar()
+        r = asyncio.run(request(cli, "POST", "http://t.example/login", jar,
+                                data={"password": "hunter2"}, **kw))
+        return cli, jar, r
+
+    def test_a_same_origin_redirect_is_followed(self):
+        cli, _, _ = self._go([(302, "http://t.example/index"), (200, None)])
+        assert [s["url"] for s in cli.sent] == [
+            "http://t.example/login", "http://t.example/index"]
+
+    def test_a_302_drops_the_credential_body_and_becomes_a_get(self):
+        """Reposting the password to the redirect target sends it somewhere
+        the operator never named."""
+        cli, _, _ = self._go([(302, "/next"), (200, None)])
+        assert cli.sent[1]["method"] == "GET"
+        assert cli.sent[1]["data"] is None, "the password was reposted"
+
+    def test_a_cross_origin_redirect_is_not_followed(self):
+        """Following it would send the customer's session — and on a 307/308
+        their password — to a third party."""
+        cli, _, r = self._go([(302, "https://evil.test/collect"), (200, None)])
+        assert len(cli.sent) == 1, "followed a redirect off-origin"
+        assert r.status_code == 302
+
+    def test_cookies_are_carried_across_the_chain(self):
+        cli, _, _ = self._go([(302, "/next"), (200, None)])
+        assert cli.sent[0]["cookie"] is None
+        assert cli.sent[1]["cookie"] == "sid=1", \
+            "the session set by the first hop was not carried"
+
+    def test_a_redirect_loop_terminates(self):
+        """The bound is ABSOLUTE, not derived from MAX_REDIRECTS — a test that
+        reads the same constant it is checking passes at any value, including
+        500, and this one did until that was noticed."""
+        cli, _, _ = self._go([(302, "/loop")] * 200)
+        assert len(cli.sent) <= 21, f"followed {len(cli.sent)} redirects"
+
+    def test_the_redirect_bound_is_sane(self):
+        from orchestrator.login import MAX_REDIRECTS
+        assert 1 <= MAX_REDIRECTS <= 20
+
+
+class _Resp2:
+    """A redirect hop that also sets a session cookie, like a real login."""
+
+    def __init__(self, status, location):
+        self.status_code = status
+        pairs = [("set-cookie", "sid=1; path=/; domain=localhost")]
+        if location:
+            pairs.append(("location", location))
+        self.headers = _Headers2(pairs)
+
+
+class _Headers2(_Headers):
+    def get(self, name, default=None):
+        vals = self.get_list(name)
+        return vals[0] if vals else default
