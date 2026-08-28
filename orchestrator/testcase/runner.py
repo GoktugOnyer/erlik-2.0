@@ -8,6 +8,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from orchestrator import llm_client
+from orchestrator import credentials as _CRED
 from orchestrator.testcase.schema import TestCase, TestStep, Evaluator
 from orchestrator.testcase.scope import Scope, ScopeViolation, check_command, from_target
 from orchestrator.tool_executor import execute_tool
@@ -260,6 +261,7 @@ async def run_test_case(
     provider: str | None = None,
     model: str | None = None,
     dry_run: bool = False,
+    db: Any = None,
 ) -> RunResult:
     """Execute a TestCase. provider/model override env defaults for LLM evaluators.
 
@@ -318,9 +320,40 @@ async def run_test_case(
                 last_step = sr
                 continue
 
+            # AUTH RESOLUTION. `cmd` carries opaque handles; the secret exists
+            # only in `live_cmd`, only for the duration of this call, and is
+            # never stored. See credentials.HANDLE_RX.
+            live_cmd, secret_values = cmd, []
+            if _CRED.has_handle(cmd):
+                if db is None:
+                    sr = StepResult(
+                        step=step.name, command=cmd, success=False, output="",
+                        duration_ms=0,
+                        error="this step needs an authenticated session and the "
+                              "runner was given no credential store; refusing to "
+                              "send the request unauthenticated")
+                    result.steps.append(sr)
+                    result.stopped_early = True
+                    break
+                live_cmd, secret_values = await _CRED.resolve(db, cmd)
+                if _CRED.has_handle(live_cmd):
+                    # A session was revoked, unverified, or deleted between
+                    # planning and running. Sending the request anyway would
+                    # produce an UNAUTHENTICATED result labelled authenticated —
+                    # a false negative wearing a clean bill of health.
+                    sr = StepResult(
+                        step=step.name, command=cmd, success=False, output="",
+                        duration_ms=0,
+                        error="the session this step needs is no longer verified; "
+                              "re-authenticate and re-run (refusing to fall back "
+                              "to an unauthenticated request)")
+                    result.steps.append(sr)
+                    result.stopped_early = True
+                    break
+
             t0 = time.time()
             raw = await execute_tool(
-                cmd,
+                live_cmd,
                 enabled_tools=_TOOLS_ALL,
                 target_url=target.get("url"),
                 no_timeout=False,
@@ -328,11 +361,11 @@ async def run_test_case(
             )
             sr = StepResult(
                 step=step.name,
-                command=cmd,
+                command=cmd,                       # handles, never the secret
                 success=bool(raw.get("success")),
-                output=raw.get("output", "") or "",
+                output=_CRED.scrub(raw.get("output", "") or "", secret_values),
                 duration_ms=int((time.time() - t0) * 1000),
-                error=raw.get("error"),
+                error=_CRED.scrub(raw.get("error") or "", secret_values) or None,
             )
             result.steps.append(sr)
             last_step = sr

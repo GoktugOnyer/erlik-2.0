@@ -484,6 +484,62 @@ async def init_db():
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        # ===== Credentials =====
+        #
+        # A pentest tool has to log in, so it has to hold a client's secret.
+        # The secret is stored ENCRYPTED (Fernet, key outside the database —
+        # see orchestrator/secrets.py) and is never returned by an API, never
+        # logged, and never rendered into a report.
+        #
+        # `role` is what makes access-control testing possible at all:
+        # WSTG-AUTHZ-04 needs a LOW and a HIGH privilege session to compare,
+        # and it has been a named skip on every run for want of them. Broken
+        # Access Control is 6 of the 35 ground-truth items on the benchmark
+        # target and neither lane has ever matched one.
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS engagement_credentials (
+                id TEXT PRIMARY KEY,
+                engagement_id TEXT,
+                target_key TEXT NOT NULL,
+                label TEXT NOT NULL,
+                role TEXT DEFAULT 'user',
+                kind TEXT DEFAULT 'form',
+                username TEXT,
+                secret_enc TEXT,
+                login_url TEXT,
+                username_field TEXT DEFAULT 'username',
+                password_field TEXT DEFAULT 'password',
+                extra TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(target_key, label)
+            )
+        """)
+        # A captured session, kept apart from the credential that produced it:
+        # a token expires and is re-fetched, the credential does not change.
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS engagement_sessions (
+                id TEXT PRIMARY KEY,
+                credential_id TEXT NOT NULL,
+                target_key TEXT NOT NULL,
+                token_enc TEXT,
+                cookie_enc TEXT,
+                header_name TEXT DEFAULT 'Authorization',
+                acquired_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                verified_at TIMESTAMP,
+                status TEXT DEFAULT 'unverified'
+            )
+        """)
+        for idx, tbl, cols in (
+            ("idx_creds_target", "engagement_credentials", "target_key"),
+            ("idx_sessions_cred", "engagement_sessions", "credential_id"),
+            ("idx_sessions_target", "engagement_sessions", "target_key"),
+        ):
+            try:
+                await db.execute(
+                    f"CREATE INDEX IF NOT EXISTS {idx} ON {tbl}({cols})")
+            except Exception:
+                pass
+
         # target_endpoints keys on an engagement_targets id, and the
         # deterministic lane usually runs without an engagement — which is why
         # the table sat empty. It gains the same host:port key recon_context and

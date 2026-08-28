@@ -65,3 +65,7 @@ docs/THESIS_NARRATIVE_UPDATES.md
 docs/THESIS_RECOMPUTE_PATCH.md
 docs/THESIS_UPDATE_COMPLETE.md
 docs/THREE_TASK_PLAN.md
+
+# Credential encryption key — never commit. Losing it makes stored
+# credentials unreadable; committing it makes them plaintext.
+data/.secret_key

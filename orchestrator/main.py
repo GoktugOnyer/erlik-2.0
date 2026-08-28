@@ -5401,7 +5401,11 @@ async def run_v2_test_case(test_case_id: str, body: dict):
     model = body.get("model")
 
     try:
-        result = await run_test_case(tc, target, provider=provider, model=model)
+        # db is passed so a step carrying an auth HANDLE can resolve it at
+        # execution. Without it such a step fails loudly instead of
+        # silently running unauthenticated. See credentials.resolve.
+        result = await run_test_case(tc, target, provider=provider, model=model,
+                                     db=await get_db())
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     run_id = await save_v2_run(result, provider=provider, model=model)
@@ -5427,10 +5431,35 @@ async def v2_sweep_plan(body: dict):
     target = (body.get("target") or "").strip()
     if not target:
         raise HTTPException(status_code=400, detail="target required")
+    from orchestrator.testcase.endpoints import known, as_sweep_inputs
+    from orchestrator import credentials as creds
     cases = [_v2_case_summary(tc) for tc in load_catalog().values()]
     cases.sort(key=lambda c: c["id"])
-    return plan_sweep(cases, target, body.get("profile") or "",
-                      body.get("only"), body.get("extra"))
+    db = await get_db()
+
+    # What erlik has LEARNED about this target feeds the plan. Both of these
+    # were written earlier and had no caller, which is this project's recurring
+    # defect: a producer nothing consumes looks exactly like a working feature.
+    #
+    #   endpoints  — paths discovered by earlier runs, so a case fans out over
+    #                real URLs instead of running once against the site root.
+    #   auth       — HANDLES for verified sessions (never the secrets; see
+    #                credentials.HANDLE_RX). This is what finally clears the
+    #                WSTG-AUTHZ-04 skip that no recorded run has ever passed.
+    #
+    # Caller-supplied `extra` wins: an operator who types a value is overriding
+    # what erlik inferred, and should not be silently ignored.
+    discovered = as_sweep_inputs(await known(db, target), target)
+    extra = {**(await creds.auth_inputs(db, target)), **(body.get("extra") or {})}
+    plan = plan_sweep(cases, target, body.get("profile") or "",
+                      body.get("only"), extra, discovered=discovered)
+    plan["inputs"] = {
+        "discovered": {k: len(v) for k, v in discovered.items() if v},
+        "auth_fields": sorted(k for k in extra if k in
+                              ("low_priv_token", "high_priv_token", "auth_header",
+                               "jwt", "cookie")),
+    }
+    return plan
 
 
 @app.get("/api/v2/sweep/profiles")

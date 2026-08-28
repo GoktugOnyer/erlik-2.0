@@ -47,11 +47,18 @@ PROFILES: dict[str, dict[str, dict[str, str]]] = {
 # Required inputs this sweep cannot synthesise, each with the reason shown to
 # the operator. Two of these disappear once milestone D (authentication) lands.
 UNSUPPLIABLE: dict[str, str] = {
-    "low_priv_token": "needs two authenticated accounts",
-    "high_priv_token": "needs two authenticated accounts",
+    # These become suppliable once credentials are stored and a session has
+    # been VERIFIED — see orchestrator/credentials.auth_inputs, whose values
+    # arrive through `extra` and clear the skip. Unverified is not enough: a
+    # case that runs unauthenticated while claiming otherwise is a false
+    # negative with extra steps.
+    "low_priv_token": "needs two authenticated accounts "
+                      "(store low- and high-privilege credentials for this target)",
+    "high_priv_token": "needs two authenticated accounts "
+                       "(store low- and high-privilege credentials for this target)",
     "request_template": "needs a hand-written request template",
     "success_marker": "needs a hand-written success marker",
-    "jwt": "needs a captured JWT",
+    "jwt": "needs a captured JWT (log in with a stored credential first)",
 }
 
 
