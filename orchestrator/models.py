@@ -188,6 +188,11 @@ class ChainCreate(BaseModel):
     auto_progress: bool = True
     disable_stagnation: bool = False
     run_config: Optional[dict] = None  # per-session automation flow (applied to every chain sub-session)
+    # Same two fields as SessionCreate, and for the same reason: a chain is a
+    # run against a customer's asset. The engagement's scope is enforced before
+    # the chain exists, and every sub-session inherits the engagement.
+    engagement_id: Optional[str] = None
+    authorization_ref: Optional[str] = None
 
 
 class ChainResponse(BaseModel):

@@ -400,3 +400,205 @@ class TestTheSuiteDoesNotWriteToTheLiveDatabase:
         except sqlite3.OperationalError:
             pytest.skip("engagements table not present")
         assert n == 0, f"{n} test-created engagement(s) still in the live database"
+
+
+class TestAnEngagementReachesTheRunItOwns:
+    """The gate existed and could never fire.
+
+    `enforce_engagement_scope` and the `engagement_id` INSERT were both written
+    and correct, and the dashboard never sent the field — so the engagements
+    table had never held a row that mattered: 127 sessions, 0 with an
+    engagement; 95 deterministic runs, 0 with an engagement. A boundary nothing
+    can reach is not a boundary, and this is the shape of defect this project
+    ships most often.
+    """
+
+    @pytest.fixture(scope="class")
+    def client(self, tmp_path_factory):
+        import warnings
+        warnings.filterwarnings("ignore", category=DeprecationWarning)
+        from fastapi.testclient import TestClient
+        import orchestrator.database as db_mod
+        import orchestrator.main as M
+
+        original = db_mod.DB_PATH
+        db_mod.DB_PATH = str(tmp_path_factory.mktemp("engrun") / "t.db")
+        asyncio.run(db_mod.init_db())
+        try:
+            yield TestClient(M.app)
+        finally:
+            db_mod.DB_PATH = original
+
+    @pytest.fixture(scope="class")
+    def engagement(self, client):
+        r = client.post("/api/engagements",
+                        json={"client_name": "Acme Corp", "root_domain": "acme.example"})
+        assert r.status_code == 200, r.text
+        return r.json()["engagement"]["id"]
+
+    SESSION = {"scope_mode": "full", "model": "m", "enabled_tools": ["curl"], "max_turns": 1}
+    CHAIN = {"scope_mode": "full", "model": "m", "enabled_tools": ["curl"],
+             "max_turns_per_session": 1, "auto_progress": False}
+
+    # ---- the session path -------------------------------------------------
+
+    def test_an_in_scope_target_is_accepted_and_records_the_customer(
+            self, client, engagement):
+        r = client.post("/api/sessions", json={
+            **self.SESSION, "target_url": "http://app.acme.example",
+            "engagement_id": engagement, "authorization_ref": "SOW-2026-114"})
+        assert r.status_code == 200, r.text
+        import orchestrator.database as db_mod
+
+        async def row():
+            db = await db_mod.get_db()
+            out = await (await db.execute(
+                "SELECT engagement_id, authorization_ref FROM sessions WHERE id = ?",
+                (r.json()["id"],))).fetchone()
+            await db.close()
+            return out
+
+        got = asyncio.run(row())
+        assert got[0] == engagement, "the run did not record its customer"
+        assert got[1] == "SOW-2026-114"
+
+    def test_an_out_of_scope_target_is_REFUSED(self, client, engagement):
+        """THE point of the whole feature."""
+        r = client.post("/api/sessions", json={
+            **self.SESSION, "target_url": "http://not-acme.example",
+            "engagement_id": engagement})
+        assert r.status_code == 403, r.text
+        assert "not in scope" in r.json()["detail"]
+
+    def test_an_unknown_engagement_is_refused(self, client):
+        r = client.post("/api/sessions", json={
+            **self.SESSION, "target_url": "http://anywhere.example",
+            "engagement_id": "no-such-engagement"})
+        assert r.status_code == 404
+
+    def test_a_run_with_no_engagement_still_works(self, client):
+        """462 findings and 110 sessions predate engagements. Unassigned work
+        must stay legal, or the feature is a breaking change."""
+        r = client.post("/api/sessions", json={
+            **self.SESSION, "target_url": "http://anywhere.example"})
+        assert r.status_code == 200, r.text
+
+    # ---- the chain path, which had NO engagement support at all ------------
+
+    def test_a_chain_records_the_customer_and_its_children_inherit_it(
+            self, client, engagement):
+        """A chain is a run like any other. Before this, `engagement_id` was
+        absent from ChainCreate, from the chains table and from the
+        sub-session INSERT — so selecting a customer and choosing "chain" would
+        have dropped it in silence."""
+        r = client.post("/api/chains", json={
+            **self.CHAIN, "target_url": "http://app.acme.example",
+            "engagement_id": engagement, "authorization_ref": "SOW-2026-114"})
+        assert r.status_code == 200, r.text
+        chain_id = r.json()["id"]
+        import orchestrator.database as db_mod
+
+        async def rows():
+            db = await db_mod.get_db()
+            chain = await (await db.execute(
+                "SELECT engagement_id, authorization_ref FROM chains WHERE id = ?",
+                (chain_id,))).fetchone()
+            kids = await (await db.execute(
+                "SELECT engagement_id FROM sessions WHERE chain_id = ?",
+                (chain_id,))).fetchall()
+            await db.close()
+            return chain, kids
+
+        chain, kids = asyncio.run(rows())
+        assert chain[0] == engagement
+        assert chain[1] == "SOW-2026-114"
+        assert kids, "the chain created no sub-session to check"
+        for k in kids:
+            assert k[0] == engagement, "a chain phase lost the customer"
+
+    def test_a_chain_against_an_out_of_scope_target_is_REFUSED(
+            self, client, engagement):
+        r = client.post("/api/chains", json={
+            **self.CHAIN, "target_url": "http://not-acme.example",
+            "engagement_id": engagement})
+        assert r.status_code == 403, r.text
+
+    def test_both_paths_share_one_gate(self):
+        """Two copies of a legal boundary is one copy that eventually stops
+        matching the other."""
+        import inspect
+        import orchestrator.main as M
+        for fn in (M.create_session, M.create_chain):
+            assert "enforce_engagement_scope" in inspect.getsource(fn), fn.__name__
+
+    def test_the_report_says_who_authorised_the_test(self):
+        import orchestrator.main as M
+        assert "SOW-2026-114" in "\n".join(
+            M.render_authorization_block("SOW-2026-114"))
+        assert "NOT RECORDED" in "\n".join(M.render_authorization_block(None))
+
+
+class TestTheDashboardActuallySendsIt:
+    """A backend field the UI never populates is the exact defect being fixed,
+    so the UI wiring is asserted too."""
+
+    @staticmethod
+    def _html():
+        from pathlib import Path
+        return Path("dashboard/templates/index.html").read_text()
+
+    def test_the_scanner_has_a_customer_selector_and_an_authorisation_input(self):
+        html = self._html()
+        assert 'id="session-engagement"' in html
+        assert 'id="session-authref"' in html
+
+    def test_the_selector_is_populated_from_the_api(self):
+        html = self._html()
+        assert "loadEngagementOptions" in html
+        assert "'/api/engagements'" in html
+        # ...and actually invoked at start-up, not merely defined.
+        assert "\n        loadEngagementOptions();" in html, \
+            "the loader is never called, so the selector stays empty"
+
+    def test_both_start_paths_send_the_engagement(self):
+        """/api/sessions AND /api/chains — missing either one drops the
+        customer for that mode without any error."""
+        html = self._html()
+        assert html.count("engagement_id: engagementId") == 2, \
+            "one of the two start paths does not send the engagement"
+        assert html.count("authorization_ref: authorizationRef") == 2
+
+    def test_the_values_come_from_the_inputs(self):
+        html = self._html()
+        assert "getElementById('session-engagement').value" in html
+        assert "getElementById('session-authref').value" in html
+
+    def test_a_refused_run_is_not_swallowed(self):
+        """Both paths used to call resp.json() with no status check, so a 403
+        set sessionId = undefined and the flow carried on. The gate fired and
+        the operator saw nothing."""
+        html = self._html()
+        assert html.count("if (!resp.ok) throw new Error(await describeApiError(resp));") == 2
+        assert "async function describeApiError" in html
+
+    def test_the_test_lab_handoff_carries_the_customer(self):
+        html = self._html()
+        assert "function engToTestLab(url, engagementId)" in html
+        assert "engToTestLab(b.dataset.engtestlab, engCurrent)" in html
+
+    def test_the_scope_hint_follows_the_target(self):
+        """The hint named the target captured when the CUSTOMER was picked, so
+        it went stale the moment the operator edited the URL — telling them the
+        wrong host would be checked."""
+        html = self._html()
+        assert 'oninput="onEngagementPicked()"' in html, \
+            "editing the target no longer refreshes the scope hint"
+
+    def test_a_client_name_cannot_inject_markup_into_the_selector(self):
+        """Option text is set through new Option(), which assigns text, not
+        markup — the dashboard has had an XSS through innerHTML before."""
+        html = self._html()
+        i = html.index("async function loadEngagementOptions")
+        block = html[i:i + 1600]
+        assert "new Option(" in block
+        assert "innerHTML" not in block, "option list built with innerHTML"

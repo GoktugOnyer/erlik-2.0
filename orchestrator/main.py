@@ -3248,15 +3248,20 @@ async def _create_chain_session(chain_id: str, chain_row, phase: str, position: 
         await db.execute(
             "INSERT INTO sessions (id, target_url, scope_mode, system_prompt, model, enabled_tools, "
             "session_type, no_timeout, max_turns, chain_id, chain_position, chain_phase, "
-            "toolset_preset, disable_stagnation, run_config, scope_extra, authorization_ref) "
-            "VALUES (?, ?, ?, ?, ?, ?, 'chain', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "toolset_preset, disable_stagnation, run_config, scope_extra, authorization_ref, "
+            "engagement_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, 'chain', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (session_id, chain_row["target_url"], chain_row["scope_mode"],
              chain_row["system_prompt"], chain_row["model"], enabled_tools_str,
              1 if no_timeout else 0, max_turns,
              chain_id, position, phase,
              toolset_preset, 1 if disable_stagnation else 0, _chain_run_config,
              json.dumps(current_scope_extra()),
-             (chain_row["authorization_ref"] if "authorization_ref" in chain_row.keys() else None)),
+             (chain_row["authorization_ref"] if "authorization_ref" in chain_row.keys() else None),
+             # Every phase of a chain belongs to the customer the chain named.
+             # Without this the engagement would stop at the chain row and each
+             # sub-session would record as unassigned work.
+             (chain_row["engagement_id"] if "engagement_id" in chain_row.keys() else None)),
         )
         await db.commit()
     finally:
@@ -5887,6 +5892,38 @@ async def get_session_run_config(session_id: str):
     return {"raw": parsed, "resolved": runconfig.resolve(raw)}
 
 
+async def enforce_engagement_scope(engagement_id: str | None, target_url: str) -> None:
+    """Refuse a run against a target the customer did not authorise.
+
+    An engagement's scope is the LEGAL BOUNDARY of the test, so this is checked
+    BEFORE the run exists — a session or chain that should never have been
+    created is not something a later gate can undo. A run with no engagement
+    keeps the previous behaviour, because 462 findings and 110 sessions predate
+    engagements and must not be retro-attributed to a customer.
+
+    Shared by /api/sessions and /api/chains deliberately. Two copies of a legal
+    boundary is one copy that eventually stops matching the other, and the
+    chain path is exactly where an engagement would otherwise be dropped in
+    silence.
+    """
+    if not engagement_id:
+        return
+    from orchestrator import engagement as _E
+    db = await get_db()
+    try:
+        row = await (await db.execute(
+            "SELECT id FROM engagements WHERE id = ?", (engagement_id,))).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="engagement not found")
+        ok, why = await _E.check(db, engagement_id, target_url)
+    finally:
+        await db.close()
+    if not ok:
+        raise HTTPException(
+            status_code=403,
+            detail=f"{target_url} is not in scope for this engagement — {why}")
+
+
 @app.post("/api/sessions", response_model=SessionResponse)
 async def create_session(data: SessionCreate):
     session_id = uuid.uuid4().hex[:12]
@@ -5900,26 +5937,7 @@ async def create_session(data: SessionCreate):
     effective_tools = preset_tools if preset_tools is not None else data.enabled_tools
     enabled_tools_str = ",".join(effective_tools)
 
-    # An engagement's scope is the LEGAL BOUNDARY of the test. If this run names
-    # a customer, the target must be inside what that customer authorised —
-    # checked HERE, before a session exists, because a session that should never
-    # have been created is not something a later gate can undo. Runs with no
-    # engagement keep the previous behaviour.
-    if data.engagement_id:
-        from orchestrator import engagement as _E
-        _sdb = await get_db()
-        try:
-            _row = await (await _sdb.execute(
-                "SELECT id FROM engagements WHERE id = ?", (data.engagement_id,))).fetchone()
-            if not _row:
-                raise HTTPException(status_code=404, detail="engagement not found")
-            _ok, _why = await _E.check(_sdb, data.engagement_id, data.target_url)
-        finally:
-            await _sdb.close()
-        if not _ok:
-            raise HTTPException(
-                status_code=403,
-                detail=f"{data.target_url} is not in scope for this engagement — {_why}")
+    await enforce_engagement_scope(data.engagement_id, data.target_url)
 
     db = await get_db()
     try:
@@ -6447,6 +6465,9 @@ async def create_chain(data: ChainCreate):
     """Create a new chain and auto-start the first (recon) session."""
     chain_id = uuid.uuid4().hex[:12]
 
+    # Same legal boundary as a single session — see enforce_engagement_scope.
+    await enforce_engagement_scope(data.engagement_id, data.target_url)
+
     # RQ3-b: if client passed a named toolset_preset, its tool list wins.
     preset_tools = get_toolset_preset_tools(data.toolset_preset)
     effective_tools = preset_tools if preset_tools is not None else data.enabled_tools
@@ -6462,15 +6483,16 @@ async def create_chain(data: ChainCreate):
             "INSERT INTO chains (id, target_url, scope_mode, system_prompt, model, enabled_tools, "
             "current_phase, current_position, total_sessions, status, auto_progress, "
             "max_turns_per_session, no_timeout, toolset_preset, disable_stagnation, run_config, "
-            "scope_extra, authorization_ref) "
-            "VALUES (?, ?, ?, ?, ?, ?, 'recon', 0, 1, 'running', ?, ?, ?, ?, ?, ?, ?, ?)",
+            "scope_extra, authorization_ref, engagement_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, 'recon', 0, 1, 'running', ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (chain_id, data.target_url, data.scope_mode.value, data.system_prompt, data.model,
              enabled_tools_str, 1 if data.auto_progress else 0, effective_max_turns,
              1 if data.no_timeout else 0, data.toolset_preset,
              1 if data.disable_stagnation else 0,
              json.dumps(data.run_config) if data.run_config else None,
              json.dumps(current_scope_extra()),
-             getattr(data, "authorization_ref", None)),
+             getattr(data, "authorization_ref", None),
+             data.engagement_id),
         )
         await db.commit()
 

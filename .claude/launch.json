@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "erlik",
+      "runtimeExecutable": ".venv/bin/uvicorn",
+      "runtimeArgs": ["orchestrator.main:app", "--host", "127.0.0.1", "--port", "8011"],
+      "port": 8011
+    }
+  ]
+}

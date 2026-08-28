@@ -686,7 +686,7 @@
                 <div class="flex-1 min-w-[280px]">
                     <label class="block font-pixel mb-2" style="font-size:0.55rem; color:#6a6a8a;">TARGET URL</label>
                     <input id="target-url" type="text" value="http://localhost:3000"
-                        class="cyber-input w-full rounded">
+                        oninput="onEngagementPicked()" class="cyber-input w-full rounded">
                 </div>
                 <div>
                     <label class="block font-pixel mb-2" style="font-size:0.55rem; color:#6a6a8a;">SCOPE</label>
@@ -704,6 +704,18 @@
                         <option value="qwen2.5-coder:7b">Loading models...</option>
                     </select>
                 </div>
+                <div class="min-w-[190px]">
+                    <label class="block font-pixel mb-2" style="font-size:0.55rem; color:#6a6a8a;">CUSTOMER</label>
+                    <select id="session-engagement" class="cyber-input cyber-select rounded w-full"
+                            onchange="onEngagementPicked()">
+                        <option value="">&mdash; none (unassigned) &mdash;</option>
+                    </select>
+                </div>
+                <div class="min-w-[170px]">
+                    <label class="block font-pixel mb-2" style="font-size:0.55rem; color:#6a6a8a;">AUTHORIZATION REF</label>
+                    <input id="session-authref" type="text" placeholder="SOW / ticket / approval"
+                        class="cyber-input w-full rounded">
+                </div>
                 <div class="flex gap-2">
                     <button id="start-btn" onclick="startSession()" class="pixel-btn rounded">
                         &gt; START
@@ -712,6 +724,9 @@
                         &#9632; STOP
                     </button>
                 </div>
+            </div>
+            <div id="eng-scope-hint" style="font-size:0.66rem; color:#6a6a8a;">
+                No customer &mdash; this run is recorded as unassigned work.
             </div>
 
             <!-- Row 1.5: Session Type + Vuln Category (thesis controls) -->
@@ -2144,7 +2159,7 @@
             det.querySelectorAll('[data-engapprove]').forEach(b =>
                 b.addEventListener('click', () => engApprove(b.dataset.engapprove)));
             det.querySelectorAll('[data-engtestlab]').forEach(b =>
-                b.addEventListener('click', () => engToTestLab(b.dataset.engtestlab)));
+                b.addEventListener('click', () => engToTestLab(b.dataset.engtestlab, engCurrent)));
             det.classList.remove('hidden');
         }
 
@@ -2275,10 +2290,17 @@
             engLoad();   // else the customer list keeps showing a stale count
         }
 
-        function engToTestLab(url) {
+        function engToTestLab(url, engagementId) {
             switchView('testlab');
             tlInit().then(() => {
                 document.getElementById('tl-target').value = url;
+                // Carry the customer across the handoff. It used to forward the
+                // URL alone, so a run launched from an engagement arrived at the
+                // deterministic lane with no idea whose asset it was.
+                if (engagementId) {
+                    const sel = document.getElementById('session-engagement');
+                    if (sel) { sel.value = engagementId; onEngagementPicked(); }
+                }
                 tlPlan();
             });
         }
@@ -3816,6 +3838,23 @@ ${htmlBody}
         // Track current chain
         let currentChainId = null;
 
+        // A refused run must SAY SO. Both start paths used to call resp.json()
+        // without checking the status, so a 403 "not in scope for this
+        // engagement" set sessionId = undefined and the flow carried on: the
+        // scope gate fired and the operator saw nothing. A boundary that
+        // refuses silently is indistinguishable from one that never ran.
+        async function describeApiError(resp) {
+            let detail = '';
+            try {
+                const body = await resp.json();
+                detail = typeof body.detail === 'string'
+                    ? body.detail : JSON.stringify(body.detail || body);
+            } catch (e) {
+                try { detail = await resp.text(); } catch (e2) { detail = ''; }
+            }
+            return `HTTP ${resp.status} — ${detail || resp.statusText || 'request refused'}`;
+        }
+
         async function startSession() {
             const targetUrl = document.getElementById('target-url').value;
             const scopeMode = document.getElementById('scope-mode').value;
@@ -3825,6 +3864,8 @@ ${htmlBody}
             const sessionType = document.getElementById('session-type').value;
             const parentSessionId = document.getElementById('parent-session').value || null;
             const vulnCategory = document.getElementById('vuln-category').value || null;
+            const engagementId = document.getElementById('session-engagement').value || null;
+            const authorizationRef = document.getElementById('session-authref').value.trim() || null;
             const btn = document.getElementById('start-btn');
             btn.disabled = true;
             btn.textContent = '> STARTING...';
@@ -3861,8 +3902,11 @@ ${htmlBody}
                             no_timeout: document.getElementById('no-timeout-toggle').checked,
                             auto_progress: true,
                             run_config: buildRunConfig(),
+                            engagement_id: engagementId,
+                            authorization_ref: authorizationRef,
                         }),
                     });
+                    if (!resp.ok) throw new Error(await describeApiError(resp));
                     const chain = await resp.json();
                     currentChainId = chain.id;
                     sessionId = chain.first_session_id;
@@ -3903,8 +3947,11 @@ ${htmlBody}
                         tool_timeout: parseInt(document.getElementById('tool-timeout-input').value) || null,
                         max_turns: parseInt(document.getElementById('max-turns-slider').value) || 0,
                         run_config: buildRunConfig(),
+                        engagement_id: engagementId,
+                        authorization_ref: authorizationRef,
                     }),
                 });
+                if (!resp.ok) throw new Error(await describeApiError(resp));
                 const session = await resp.json();
                 sessionId = session.id;
 
@@ -5292,7 +5339,57 @@ ${htmlBody}
             renderTriageTable(sid);  // reflect new state (report.json/html/sarif honor it live)
         }
 
+        // ===== ENGAGEMENT ON A RUN =====
+        // The engagement is the CUSTOMER a run belongs to, and its scope is the
+        // legal boundary the server enforces on the target. Both fields existed
+        // end-to-end in the backend — model, scope gate, INSERT, report line —
+        // and the dashboard simply never sent them, so the engagements table had
+        // never held a row that mattered: 127 sessions, 0 with an engagement.
+        // A gate that cannot be reached is not a gate.
+        async function loadEngagementOptions() {
+            const sel = document.getElementById('session-engagement');
+            if (!sel) return;
+            let list = [];
+            try {
+                list = (await (await fetch('/api/engagements')).json()).engagements || [];
+            } catch (e) {
+                return;   // leave "none"; the run is still legal, just unassigned
+            }
+            const keep = sel.value;
+            sel.length = 1;   // keep the "none" option, drop the rest
+            for (const e of list) {
+                if ((e.status || 'active') !== 'active') continue;
+                // new Option() sets text as TEXT, so a client name is never
+                // parsed as markup.
+                sel.add(new Option(
+                    e.root_domain ? `${e.client_name} — ${e.root_domain}` : e.client_name,
+                    e.id));
+            }
+            sel.value = keep;
+            if (sel.value !== keep) sel.value = '';   // the engagement disappeared
+            onEngagementPicked();
+        }
+
+        function onEngagementPicked() {
+            // Surface the authorisation window the operator is working inside.
+            // It is displayed, not enforced here — the server decides.
+            const sel = document.getElementById('session-engagement');
+            const hint = document.getElementById('eng-scope-hint');
+            if (!sel || !hint) return;
+            if (!sel.value) {
+                hint.textContent = 'No customer — this run is recorded as unassigned work.';
+                hint.style.color = '#6a6a8a';
+                return;
+            }
+            const t = document.getElementById('target-url').value.trim() || '(no target)';
+            hint.textContent =
+                `Scope enforced — the server refuses this run if ${t} is outside `
+                + 'what this customer authorised.';
+            hint.style.color = '#00fff5';
+        }
+
         // ===== Init =====
+        loadEngagementOptions();
         checkHealth();
         setInterval(checkHealth, 15000);
         loadPresets();

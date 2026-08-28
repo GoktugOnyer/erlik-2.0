@@ -250,6 +250,11 @@ async def init_db():
             ("run_config", "TEXT DEFAULT NULL"),  # per-session automation flow (JSON)
             ("scope_extra", "TEXT DEFAULT NULL"),
             ("authorization_ref", "TEXT DEFAULT NULL"),
+            # A chain is a run like any other, so it belongs to a customer like
+            # any other. Without this the Scanner's engagement selector would be
+            # silently ignored the moment the operator picked "chain" — the
+            # failure this project keeps shipping.
+            ("engagement_id", "TEXT DEFAULT NULL"),
         ]
         for col_name, col_def in chain_migrations:
             try:
