@@ -128,7 +128,7 @@ class TestMalformedDeclarationsDoNotCrash:
         assert got == {"endpoint": ["/real"]}
 
     def test_a_greedy_whitespace_pattern_walks_onto_the_next_line(self):
-        """Pinned deliberately. \s crosses newlines even under MULTILINE, so a
+        r"""Pinned deliberately. \s crosses newlines even under MULTILINE, so a
         case author writing `\s*` on a line-oriented format gets values from
         the wrong line rather than an error."""
         got = R._harvest(ev(pattern=r"^Disallow:\s*(\S*)", produces={"endpoint": 1}),
@@ -183,3 +183,64 @@ class TestTheOldDefectIsGone:
         import inspect
         src = inspect.getsource(R.run_test_case)
         assert "result.produced" in src, "harvested values never reach the RunResult"
+
+
+class TestHarvestIsActuallyCalled:
+    """Most tests above call `_harvest` DIRECTLY, so they pass even if nothing
+    ever calls it — the producer-with-no-consumer shape this codebase keeps
+    producing, reproduced in my own test design.
+
+    Removing the call site from `_run_evaluator` failed exactly ONE test (a
+    source-inspection check). These exercise the path behaviourally, so the
+    disconnect fails loudly.
+    """
+
+    @staticmethod
+    def _evaluate(pattern, produces, output):
+        import asyncio
+        from orchestrator.testcase.schema import TestCase, TargetSchema
+        tc = TestCase(id="X", name="x", category="c", severity="info",
+                      target_schema=TargetSchema(required=[]), steps=[])
+        sr = R.StepResult(step="s", command="c", success=True, output=output,
+                          duration_ms=1)
+        e = Evaluator(type="regex", pattern=pattern, produces=produces)
+        return asyncio.run(R._run_evaluator(e, sr, tc, {}, None, None))
+
+    def test_run_evaluator_returns_what_it_harvested(self):
+        _, _, _, produced = self._evaluate(r"^Disallow:\s*(\S+)",
+                                           {"endpoint": 1}, ROBOTS)
+        assert produced == {"endpoint": ["/ftp", "/admin", "/api/internal", "/backup"]}
+
+    def test_run_evaluator_returns_nothing_without_produces(self):
+        _, _, _, produced = self._evaluate(r"^Disallow:", None, ROBOTS)
+        assert produced == {}
+
+    def test_a_producing_evaluator_still_reports_a_match(self):
+        finding, _, _, produced = self._evaluate(r"^Disallow:\s*(\S+)",
+                                                 {"endpoint": 1}, ROBOTS)
+        assert produced, "harvest did not run through the evaluator"
+
+    def test_run_test_case_accumulates_across_evaluators(self):
+        """The whole path: two evaluators on one step, both producing, merged
+        onto the RunResult without duplication."""
+        import asyncio
+        from unittest.mock import patch
+        from orchestrator.testcase.schema import TestCase, TestStep, TargetSchema
+
+        tc = TestCase(
+            id="X", name="x", category="c", severity="info",
+            target_schema=TargetSchema(required=[]),
+            steps=[TestStep(name="s", tool="curl", command="curl x", evaluators=[
+                Evaluator(type="regex", pattern=r"^Disallow:\s*(\S+)",
+                          produces={"endpoint": 1}),
+                Evaluator(type="regex", pattern=r"^Allow:\s*(\S+)",
+                          produces={"endpoint": 1}),
+            ])])
+
+        async def fake_exec(*a, **k):
+            return {"success": True, "output": ROBOTS, "error": None}
+
+        with patch("orchestrator.testcase.runner.execute_tool", fake_exec):
+            r = asyncio.run(R.run_test_case(tc, {"scope": {}}))
+        assert r.produced["endpoint"] == [
+            "/ftp", "/admin", "/api/internal", "/backup", "/public"]
