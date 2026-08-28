@@ -718,3 +718,147 @@ class TestTheEngagementRulesActuallyReachTheExecutor:
         src = inspect.getsource(M.engagement_rows_for_session)
         assert "return None" in src
         assert "[]" not in src.split('"""')[2], "an empty list would deny everything"
+
+
+class TestTheWorkspaceSidebar:
+    """The dashboard was eight top tabs and nothing else: the operator could
+    not see what a customer's engagement contained without opening a view and
+    waiting for a fetch. These counts ARE the state of the work — what has been
+    found, on whose assets, and what has actually been run.
+    """
+
+    @staticmethod
+    def _html():
+        from pathlib import Path
+        return Path("dashboard/templates/index.html").read_text()
+
+    def test_the_sidebar_exists_and_wraps_the_page(self):
+        html = self._html()
+        assert 'id="app-sidebar"' in html
+        assert 'class="app-shell"' in html
+        assert ".app-shell { display: flex" in html, "the shell has no layout"
+
+    def test_navigation_moved_into_the_sidebar_without_losing_a_view(self):
+        """switchView() is id-based, so every nav id must survive the move or
+        that view becomes unreachable."""
+        html = self._html()
+        for view in ("scanner", "reports", "benchmark", "monitor",
+                     "engagements", "testlab", "skills", "arsenal"):
+            assert f'id="nav-{view}"' in html, view
+        i = html.index('id="app-sidebar"')
+        j = html.index("</aside>")
+        sidebar = html[i:j]
+        for view in ("scanner", "engagements", "testlab", "arsenal"):
+            assert f'id="nav-{view}"' in sidebar, f"{view} nav is not in the sidebar"
+
+    def test_the_sidebar_shows_assets_findings_and_activity(self):
+        html = self._html()
+        for el in ("side-assets", "side-findings", "side-activity"):
+            assert f'id="{el}"' in html, el
+
+    def test_the_counts_come_from_the_engagement_summary(self):
+        html = self._html()
+        assert "asset_counts" in html and "findings_by_severity" in html
+        assert "/api/engagements/${encodeURIComponent(id)}" in html
+
+    def test_the_sidebar_is_populated_at_start_up(self):
+        assert "\n        sideLoadEngagements();" in self._html(), \
+            "the sidebar loader is never called, so it stays empty"
+
+    def test_customer_selection_is_two_way(self):
+        """One customer, one run: the counts on screen must describe the
+        engagement the next run will be recorded against."""
+        html = self._html()
+        assert "function sideEngagementPicked" in html
+        assert "getElementById('session-engagement')" in html[html.index("function sideEngagementPicked"):][:900]
+        i = html.index("function onEngagementPicked")
+        assert "side-engagement" in html[i:i + 900], \
+            "picking a customer in the Scanner does not update the sidebar"
+
+    def test_a_client_name_cannot_inject_markup_into_the_sidebar(self):
+        html = self._html()
+        i = html.index("async function sideLoadEngagements")
+        block = html[i:i + 1400]
+        assert "new Option(" in block
+        assert "innerHTML" not in block
+
+    def test_counts_are_escaped_where_they_are_rendered(self):
+        html = self._html()
+        i = html.index("function sideCount")
+        assert "tlEsc(label)" in html[i:i + 500]
+
+
+class TestTheEngagementPageAnswersWhatHappened:
+    """It listed run IDs and nothing else, so "what has actually happened for
+    this customer" took reading a list of hex strings."""
+
+    @staticmethod
+    def _html():
+        from pathlib import Path
+        return Path("dashboard/templates/index.html").read_text()
+
+    def test_there_are_count_cards(self):
+        html = self._html()
+        assert "function engStatCards" in html
+        assert "${engStatCards(d)}" in html, "the cards are built but never rendered"
+        assert ".stat-card {" in html
+
+    def test_there_is_an_execution_table_with_status_and_duration(self):
+        html = self._html()
+        assert "function engRunTable" in html
+        assert "${engRunTable(d)}" in html, "the table is built but never rendered"
+        i = html.index("function engRunTable")
+        block = html[i:i + 2600]
+        for col in ("Status", "Started", "Duration"):
+            assert col in block, col
+
+    def test_the_table_covers_BOTH_lanes(self):
+        """A customer page that showed only agent runs would misrepresent the
+        deterministic lane as idle."""
+        i = self._html().index("function engRunTable")
+        block = self._html()[i:i + 2600]
+        assert "d.sessions" in block and "d.v2_runs" in block
+
+    def test_duration_is_formatted_not_raw_milliseconds(self):
+        html = self._html()
+        assert "function fmtDuration" in html
+        i = html.index("function fmtDuration")
+        assert "m " in html[i:i + 400]
+
+    def test_the_summary_supplies_duration(self):
+        """The table cannot show a duration the API does not return."""
+        import inspect
+        from orchestrator import engagement as E
+        src = inspect.getsource(E.summary)
+        assert "total_duration_ms" in src
+        assert "duration_ms" in src
+
+    def test_the_summary_query_only_selects_columns_that_exist(self):
+        """`findings_count` was written into the v2_runs SELECT and does not
+        exist on that table — it would have raised on every engagement page."""
+        import asyncio
+        import inspect
+        import sqlite3
+        import tempfile
+        import os
+        from orchestrator import engagement as E
+        import orchestrator.database as db_mod
+
+        src = inspect.getsource(E.summary)
+        assert "findings_count" not in src
+
+        old = db_mod.DB_PATH
+        db_mod.DB_PATH = os.path.join(tempfile.mkdtemp(), "sum.db")
+        try:
+            async def go():
+                await db_mod.init_db()
+                db = await db_mod.get_db()
+                eid = await E.create(db, "Acme", "acme.example")
+                await db.commit()
+                out = await E.summary(db, eid)   # raises if a column is wrong
+                await db.close()
+                return out
+            out = asyncio.run(go())
+            assert "counts" in out and "asset_counts" in out
+        finally:
+            db_mod.DB_PATH = old

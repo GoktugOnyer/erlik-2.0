@@ -613,7 +613,91 @@
         .report-rendered .road-step {
             color: var(--neon-cyan);
         }
-    </style>
+    
+        /* ===== App shell: persistent left sidebar =====
+           The dashboard was eight top tabs and nothing else, so the operator
+           could not see what a customer's engagement contained without opening
+           a view and waiting for a fetch. The sidebar keeps the inventory —
+           assets, findings by severity, what has actually been run — visible
+           the whole time, because those counts are the state of the work. */
+        .app-shell { display: flex; align-items: flex-start; gap: 0; }
+        #app-sidebar {
+            width: 224px; flex: 0 0 224px; align-self: stretch;
+            padding: 14px 12px 40px; box-sizing: border-box;
+            border-right: 1px solid rgba(0,255,245,0.18);
+            background: rgba(8,8,20,0.55);
+            position: sticky; top: 0; max-height: 100vh; overflow-y: auto;
+        }
+        .side-group { margin-bottom: 18px; }
+        .side-head {
+            font-family: 'Press Start 2P', monospace; font-size: 0.45rem;
+            letter-spacing: 1px; color: #6a6a8a; margin-bottom: 8px;
+        }
+        .side-select {
+            width: 100%; background: rgba(0,0,0,0.45); color: #d8d8e8;
+            border: 1px solid rgba(0,255,245,0.25); border-radius: 3px;
+            padding: 5px 6px; font-family: ui-monospace, monospace; font-size: 0.66rem;
+        }
+        .side-link {
+            display: flex; align-items: center; gap: 8px; width: 100%;
+            padding: 6px 8px; margin-bottom: 2px; border-radius: 3px;
+            background: transparent; border: 1px solid transparent;
+            color: #8a8aa0; text-align: left; cursor: pointer;
+            font-family: ui-monospace, monospace; font-size: 0.72rem;
+        }
+        .side-link:hover { background: rgba(0,255,245,0.06); color: #d8d8e8; }
+        .side-link.nav-tab-active {
+            background: rgba(0,255,245,0.10); color: var(--neon-cyan);
+            border-color: rgba(0,255,245,0.35);
+        }
+        .side-ico { width: 14px; text-align: center; opacity: .85; }
+        .side-rows { display: flex; flex-direction: column; gap: 1px; }
+        .side-row {
+            display: flex; align-items: center; justify-content: space-between;
+            gap: 8px; padding: 3px 8px; border-radius: 3px;
+            font-family: ui-monospace, monospace; font-size: 0.68rem; color: #8a8aa0;
+        }
+        .side-row:hover { background: rgba(255,255,255,0.03); }
+        .side-row b { color: #d8d8e8; font-weight: 600; }
+        .side-row .zero { color: #4a4a5a; font-weight: 400; }
+        .side-empty {
+            font-family: ui-monospace, monospace; font-size: 0.64rem;
+            color: #5a5a6a; padding: 2px 8px;
+        }
+        /* Count cards — the at-a-glance row above a customer's work. */
+        .stat-cards { display: flex; flex-wrap: wrap; gap: 10px; }
+        .stat-card {
+            flex: 1 1 110px; min-width: 100px; padding: 10px 12px;
+            border-radius: 6px; background: rgba(10,10,26,0.65);
+            border: 1px solid rgba(255,255,255,0.07); border-top-width: 2px;
+        }
+        .stat-card .n {
+            font-family: ui-monospace, monospace; font-size: 1.35rem;
+            font-weight: 600; color: #e8e8f4; line-height: 1.1;
+        }
+        .stat-card .n.zero { color: #4a4a5a; }
+        .stat-card .l {
+            font-family: ui-monospace, monospace; font-size: 0.6rem;
+            color: #7a7a8a; margin-top: 2px;
+        }
+        .run-table { width: 100%; border-collapse: collapse; font-size: 0.7rem; }
+        .run-table th {
+            text-align: left; padding: 5px 8px; color: #6a6a8a;
+            font-family: ui-monospace, monospace; font-size: 0.6rem;
+            border-bottom: 1px solid rgba(255,255,255,0.08);
+        }
+        .run-table td {
+            padding: 5px 8px; color: #b8b8c8;
+            font-family: ui-monospace, monospace;
+            border-bottom: 1px solid rgba(255,255,255,0.04);
+        }
+        @media (max-width: 900px) {
+            .app-shell { flex-direction: column; }
+            #app-sidebar { width: 100%; flex: 1 1 auto; position: static;
+                           max-height: none; border-right: none;
+                           border-bottom: 1px solid rgba(0,255,245,0.18); }
+        }
+</style>
 </head>
 <body class="min-h-screen">
     <!-- ===== Header ===== -->
@@ -626,55 +710,71 @@
                 v0.1 // qwen2.5-coder-7b
             </span>
         </div>
-        <nav class="flex items-center gap-1">
-            <button id="nav-scanner" onclick="switchView('scanner')"
-                class="nav-tab nav-tab-active font-pixel px-4 py-2 rounded"
-                style="font-size: 0.55rem;">
-                &#9655; SCANNER
-            </button>
-            <button id="nav-reports" onclick="switchView('reports')"
-                class="nav-tab font-pixel px-4 py-2 rounded"
-                style="font-size: 0.55rem;">
-                &#9776; REPORTS
-            </button>
-            <button id="nav-benchmark" onclick="switchView('benchmark')"
-                class="nav-tab font-pixel px-4 py-2 rounded"
-                style="font-size: 0.55rem;">
-                &#9881; BENCHMARK
-            </button>
-            <button id="nav-monitor" onclick="switchView('monitor')"
-                class="nav-tab font-pixel px-4 py-2 rounded"
-                style="font-size: 0.55rem;">
-                &#9636; MONITOR
-            </button>
-            <button id="nav-skills" onclick="switchView('skills')"
-                class="nav-tab font-pixel px-4 py-2 rounded"
-                style="font-size: 0.55rem;">
-                &#9670; SKILLS
-            </button>
-            <button id="nav-engagements" onclick="switchView('engagements')"
-                class="nav-tab font-pixel px-4 py-2 rounded"
-                style="font-size: 0.55rem;">
-                &#9707; ENGAGEMENTS
-            </button>
-            <button id="nav-testlab" onclick="switchView('testlab')"
-                class="nav-tab font-pixel px-4 py-2 rounded"
-                style="font-size: 0.55rem;">
-                &#9635; TEST LAB
-            </button>
-            <button id="nav-arsenal" onclick="switchView('arsenal')"
-                class="nav-tab font-pixel px-4 py-2 rounded"
-                style="font-size: 0.55rem;">
-                &#9876; ARSENAL
-            </button>
-        </nav>
         <div class="flex items-center gap-2">
             <span id="health-dot" class="w-3 h-3 rounded-full" style="background:#3a3a4a;"></span>
             <span id="health-text" class="font-mono" style="color:#5a5a6a; font-size:0.95rem;">Checking...</span>
         </div>
     </header>
 
-    <main class="p-6 max-w-7xl mx-auto">
+    <div class="app-shell">
+    <aside id="app-sidebar">
+        <div class="side-group">
+            <div class="side-head">WORKSPACE</div>
+            <select id="side-engagement" class="side-select" onchange="sideEngagementPicked()">
+                <option value="">— no customer selected —</option>
+            </select>
+        </div>
+
+        <nav class="side-group">
+            <button id="nav-scanner" onclick="switchView('scanner')" class="side-link" type="button">
+                <span class="side-ico">&#9655;</span><span>Scanner</span>
+            </button>
+            <button id="nav-engagements" onclick="switchView('engagements')" class="side-link" type="button">
+                <span class="side-ico">&#9707;</span><span>Engagements</span>
+            </button>
+            <button id="nav-testlab" onclick="switchView('testlab')" class="side-link" type="button">
+                <span class="side-ico">&#9635;</span><span>Test Lab</span>
+            </button>
+            <button id="nav-arsenal" onclick="switchView('arsenal')" class="side-link" type="button">
+                <span class="side-ico">&#9876;</span><span>Arsenal</span>
+            </button>
+            <button id="nav-reports" onclick="switchView('reports')" class="side-link" type="button">
+                <span class="side-ico">&#9776;</span><span>Reports</span>
+            </button>
+            <button id="nav-monitor" onclick="switchView('monitor')" class="side-link" type="button">
+                <span class="side-ico">&#9636;</span><span>Monitor</span>
+            </button>
+            <button id="nav-skills" onclick="switchView('skills')" class="side-link" type="button">
+                <span class="side-ico">&#9670;</span><span>Skills</span>
+            </button>
+            <button id="nav-benchmark" onclick="switchView('benchmark')" class="side-link" type="button">
+                <span class="side-ico">&#9881;</span><span>Benchmark</span>
+            </button>
+        </nav>
+
+        <div class="side-group" id="side-assets-group">
+            <div class="side-head">ASSETS</div>
+            <div id="side-assets" class="side-rows">
+                <div class="side-empty">select a customer</div>
+            </div>
+        </div>
+
+        <div class="side-group" id="side-findings-group">
+            <div class="side-head">FINDINGS</div>
+            <div id="side-findings" class="side-rows">
+                <div class="side-empty">select a customer</div>
+            </div>
+        </div>
+
+        <div class="side-group">
+            <div class="side-head">ACTIVITY</div>
+            <div id="side-activity" class="side-rows">
+                <div class="side-empty">select a customer</div>
+            </div>
+        </div>
+    </aside>
+
+    <main class="p-6 flex-1 min-w-0">
 
         <!-- ===== Scanner View (existing content) ===== -->
         <div id="view-scanner" class="space-y-5">
@@ -1892,6 +1992,7 @@
             </div>
         </div>
     </main>
+    </div>
 
     <!-- Scanline Overlay -->
     <div class="scanline-overlay"></div>
@@ -2006,6 +2107,69 @@
             engRender(await r.json());
         }
 
+
+        // ===== Count cards and the execution table =====
+        // The engagement page listed run IDs and nothing else, so "what has
+        // actually happened for this customer" took reading a list of hex
+        // strings. A count row and a table with status and duration answer it
+        // at a glance — the same question Rekono's scan page answers.
+        function engStatCards(d) {
+            const a = d.asset_counts || {}, sev = d.findings_by_severity || {}, c = d.counts || {};
+            const cards = [
+                ['hosts', a.host || 0, '#00fff5'],
+                ['ports', a.port || 0, '#4ea8de'],
+                ['technologies', a.technology || 0, '#a05cff'],
+                ['endpoints', a.endpoint || 0, '#31d67a'],
+                ['critical', sev.critical || 0, '#ff2d6f'],
+                ['high', sev.high || 0, '#ff6b35'],
+                ['agent runs', c.sessions || 0, '#8a8aa0'],
+                ['wstg runs', c.v2_runs || 0, '#8a8aa0'],
+            ];
+            return `<div class="stat-cards">` + cards.map(([l, n, col]) =>
+                `<div class="stat-card" style="border-top-color:${n ? col : 'rgba(255,255,255,0.08)'};">
+                    <div class="n${n ? '' : ' zero'}">${n}</div>
+                    <div class="l">${tlEsc(l)}</div>
+                </div>`).join('') + `</div>`;
+        }
+
+        function engRunTable(d) {
+            const rows = [];
+            for (const r of (d.sessions || [])) {
+                rows.push({ what: 'agent · ' + (r.session_type || 'cold'),
+                            detail: r.model || '', id: r.id, status: r.status || '?',
+                            when: r.created_at, ms: r.total_duration_ms,
+                            extra: (r.total_steps || 0) + ' steps' });
+            }
+            for (const r of (d.v2_runs || [])) {
+                rows.push({ what: 'wstg', detail: r.test_case_id || '', id: r.id,
+                            status: r.stopped_early ? 'stopped early' : 'completed',
+                            when: r.created_at, ms: r.duration_ms, extra: '' });
+            }
+            rows.sort((x, y) => String(y.when || '').localeCompare(String(x.when || '')));
+            if (!rows.length) {
+                return '<div class="font-mono" style="font-size:0.6rem; opacity:.6;">' +
+                       'Nothing run yet under this engagement.</div>';
+            }
+            const dot = (st) => {
+                const s = String(st).toLowerCase();
+                const col = s.includes('complet') ? '#31d67a'
+                          : s.includes('run') ? '#ffd23f'
+                          : s.includes('error') || s.includes('fail') ? '#ff2d6f' : '#6a6a8a';
+                return `<span style="color:${col};">&#9679; ${tlEsc(st)}</span>`;
+            };
+            return `<div style="max-height:260px; overflow:auto;"><table class="run-table">
+                <thead><tr><th>Run</th><th>Detail</th><th>Status</th><th>Started</th>
+                <th>Duration</th><th></th></tr></thead><tbody>` +
+                rows.slice(0, 60).map(r => `<tr>
+                    <td>${tlEsc(r.what)}</td>
+                    <td style="opacity:.7;">${tlEsc(r.detail)}</td>
+                    <td>${dot(r.status)}</td>
+                    <td style="opacity:.7;">${tlEsc(fmtWhen(r.when))}</td>
+                    <td style="opacity:.7;">${tlEsc(fmtDuration(r.ms))}</td>
+                    <td style="opacity:.5;">${tlEsc(r.extra)}</td>
+                </tr>`).join('') + `</tbody></table></div>`;
+        }
+
         function engRender(d) {
             engCurrent = d.engagement.id;
             const e = d.engagement;
@@ -2097,6 +2261,19 @@
                             style="font-size:0.55rem;">CHECK</button>
                         <span id="eng-check-out" class="font-mono" style="font-size:0.6rem;"></span>
                     </div>
+                </div>
+
+                <div class="panel rounded p-4">
+                    <h3 class="font-pixel" style="font-size:0.62rem;">AT A GLANCE</h3>
+                    <div class="mt-3">${engStatCards(d)}</div>
+                </div>
+
+                <div class="panel rounded p-4">
+                    <h3 class="font-pixel" style="font-size:0.62rem;">EXECUTIONS</h3>
+                    <p class="font-mono mt-1" style="font-size:0.55rem; opacity:.55;">
+                        Every run recorded against this customer, newest first &mdash; both lanes.
+                    </p>
+                    <div class="mt-2">${engRunTable(d)}</div>
                 </div>
 
                 <div class="panel rounded p-4">
@@ -5374,6 +5551,13 @@ ${htmlBody}
             // Surface the authorisation window the operator is working inside.
             // It is displayed, not enforced here — the server decides.
             const sel = document.getElementById('session-engagement');
+            // Keep the sidebar in step, so the counts on screen always describe
+            // the customer the next run will be recorded against.
+            const side = document.getElementById('side-engagement');
+            if (side && sel && side.value !== sel.value) {
+                side.value = sel.value;
+                if (side.value === sel.value) sideRefresh();
+            }
             const hint = document.getElementById('eng-scope-hint');
             if (!sel || !hint) return;
             if (!sel.value) {
@@ -5388,8 +5572,109 @@ ${htmlBody}
             hint.style.color = '#00fff5';
         }
 
+
+        // ===== SIDEBAR: the customer's inventory, always visible =====
+        // These counts ARE the state of the work — what erlik has found, on
+        // whose assets, and what has actually been run. Keeping them behind a
+        // tab meant an operator had to go looking to find out whether anything
+        // had happened at all.
+        //
+        // One selection drives everything: the sidebar and the Scanner share a
+        // customer, so a run cannot be launched against a different engagement
+        // from the one the counts describe.
+        let __sideSummary = null;
+
+        function sideCount(label, n, color) {
+            const z = !n ? ' zero' : '';
+            return `<div class="side-row"><span>${tlEsc(label)}</span>` +
+                   `<b class="${z.trim()}"${color && n ? ` style="color:${color}"` : ''}>${n || 0}</b></div>`;
+        }
+
+        async function sideLoadEngagements() {
+            const sel = document.getElementById('side-engagement');
+            if (!sel) return;
+            let list = [];
+            try {
+                list = (await (await fetch('/api/engagements')).json()).engagements || [];
+            } catch (e) { return; }
+            const keep = sel.value;
+            sel.length = 1;
+            for (const e of list) {
+                if ((e.status || 'active') !== 'active') continue;
+                sel.add(new Option(
+                    e.root_domain ? `${e.client_name} — ${e.root_domain}` : e.client_name, e.id));
+            }
+            sel.value = keep;
+            if (sel.value !== keep) sel.value = '';
+            if (sel.value) sideRefresh();
+        }
+
+        function sideEngagementPicked() {
+            // Keep the Scanner's own selector in step — one customer, one run.
+            const sel = document.getElementById('side-engagement');
+            const scan = document.getElementById('session-engagement');
+            if (scan && scan.value !== sel.value) {
+                scan.value = sel.value;
+                if (typeof onEngagementPicked === 'function') onEngagementPicked();
+            }
+            sideRefresh();
+        }
+
+        function sideClear(msg) {
+            for (const id of ['side-assets', 'side-findings', 'side-activity']) {
+                const el = document.getElementById(id);
+                if (el) el.innerHTML = `<div class="side-empty">${tlEsc(msg)}</div>`;
+            }
+        }
+
+        async function sideRefresh() {
+            const id = (document.getElementById('side-engagement') || {}).value;
+            if (!id) { __sideSummary = null; sideClear('select a customer'); return; }
+            let d;
+            try {
+                d = await (await fetch(`/api/engagements/${encodeURIComponent(id)}`)).json();
+            } catch (e) { sideClear('could not load'); return; }
+            if (!d || !d.engagement) { sideClear('not found'); return; }
+            __sideSummary = d;
+
+            const a = d.asset_counts || {};
+            document.getElementById('side-assets').innerHTML =
+                ['host', 'port', 'service', 'technology', 'endpoint']
+                    .map(k => sideCount(k + 's', a[k] || 0)).join('')
+                || '<div class="side-empty">none yet</div>';
+
+            const sev = d.findings_by_severity || {};
+            const SEV = [['critical', '#ff2d6f'], ['high', '#ff6b35'], ['medium', '#ffd23f'],
+                         ['low', '#4ea8de'], ['info', '#7a7a8a']];
+            document.getElementById('side-findings').innerHTML =
+                SEV.map(([k, c]) => sideCount(k, sev[k] || 0, c)).join('');
+
+            const c = d.counts || {};
+            document.getElementById('side-activity').innerHTML =
+                sideCount('agent sessions', c.sessions || 0) +
+                sideCount('wstg runs', c.v2_runs || 0) +
+                sideCount('targets', c.targets || 0) +
+                sideCount('scope pending', c.pending_scope || 0,
+                          (c.pending_scope ? '#ffd23f' : null));
+        }
+
+        function fmtDuration(ms) {
+            if (!ms && ms !== 0) return '—';
+            const s = Math.round(ms / 1000);
+            if (s < 60) return `${s}s`;
+            const m = Math.floor(s / 60);
+            return `${m}m ${String(s % 60).padStart(2, '0')}s`;
+        }
+
+        function fmtWhen(v) {
+            if (!v) return '—';
+            const d = new Date(String(v).replace(' ', 'T') + (String(v).endsWith('Z') ? '' : 'Z'));
+            return isNaN(d) ? String(v) : d.toLocaleString();
+        }
+
         // ===== Init =====
         loadEngagementOptions();
+        sideLoadEngagements();
         checkHealth();
         setInterval(checkHealth, 15000);
         loadPresets();

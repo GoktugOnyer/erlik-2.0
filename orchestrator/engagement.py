@@ -218,13 +218,16 @@ async def summary(db, engagement_id: str) -> dict[str, Any]:
     out["targets"] = [dict(r) for r in await (await db.execute(
         "SELECT * FROM engagement_targets WHERE engagement_id = ? ORDER BY base_url",
         (engagement_id,))).fetchall()]
+    # duration and tool count come along so the workspace can show an
+    # execution table rather than a bare list of ids.
     out["sessions"] = [dict(r) for r in await (await db.execute(
-        "SELECT id, target_url, status, created_at, total_steps FROM sessions "
+        "SELECT id, target_url, status, created_at, total_steps, total_duration_ms, "
+        "session_type, model FROM sessions "
         "WHERE engagement_id = ? ORDER BY created_at DESC LIMIT 200",
         (engagement_id,))).fetchall()]
     out["v2_runs"] = [dict(r) for r in await (await db.execute(
-        "SELECT id, test_case_id, created_at FROM v2_runs "
-        "WHERE engagement_id = ? ORDER BY created_at DESC LIMIT 200",
+        "SELECT id, test_case_id, created_at, duration_ms, model, stopped_early "
+        "FROM v2_runs WHERE engagement_id = ? ORDER BY created_at DESC LIMIT 200",
         (engagement_id,))).fetchall()]
     sev = await (await db.execute(
         "SELECT f.severity, COUNT(*) c FROM findings f JOIN sessions s ON s.id = f.session_id "
