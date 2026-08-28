@@ -103,7 +103,8 @@ async def tool_available(tool: str) -> bool:
     return bool(re.search(r"\d+\.\d+\.\d+", out)) or tool in out
 
 
-async def enumerate_passive(domain: str, timeout: int = 180) -> tuple[list[str], str]:
+async def enumerate_passive(domain: str, timeout: int = 180,
+                            engagement_rows=None) -> tuple[list[str], str]:
     """(hostnames, note). Passive only — contacts third parties, not the customer."""
     from orchestrator.tool_executor import execute_tool
     if not valid_hostname(domain):
@@ -112,7 +113,8 @@ async def enumerate_passive(domain: str, timeout: int = 180) -> tuple[list[str],
         return [], "subfinder is not installed in the kali image"
     r = await execute_tool(
         f"subfinder -d {shlex.quote(domain)} -silent -all",
-        ["subfinder"], tool_hint="subfinder", custom_timeout=timeout)
+        ["subfinder"], tool_hint="subfinder", custom_timeout=timeout,
+        engagement_rows=engagement_rows)
     if not r.get("success"):
         return [], f"subfinder failed: {(r.get('output') or '')[:160]}"
     found = {h for h in (l.strip().lower() for l in (r.get("output") or "").splitlines())
@@ -125,7 +127,8 @@ async def enumerate_passive(domain: str, timeout: int = 180) -> tuple[list[str],
     return kept, note
 
 
-async def probe_live(hosts: list[str], timeout: int = 180) -> dict[str, dict]:
+async def probe_live(hosts: list[str], timeout: int = 180,
+                     engagement_rows=None) -> dict[str, dict]:
     """httpx over hosts the CALLER has already scope-checked. ACTIVE.
 
     VERIFIED IN THIS CONTAINER (v1.10.0, arm64):
@@ -153,7 +156,8 @@ async def probe_live(hosts: list[str], timeout: int = 180) -> dict[str, dict]:
     listed = " ".join(shlex.quote(h) for h in hosts[:200])
     r = await execute_tool(
         f"printf '%s\\n' {listed} | httpx -silent -json -title -tech-detect -status-code",
-        ["httpx"], tool_hint="httpx", custom_timeout=timeout)
+        ["httpx"], tool_hint="httpx", custom_timeout=timeout,
+        engagement_rows=engagement_rows)
     out: dict[str, dict] = {}
     for line in (r.get("output") or "").splitlines():
         line = line.strip()
@@ -185,7 +189,11 @@ async def run(db, engagement_id: str, *, probe: bool = True) -> dict[str, Any]:
     if not domain:
         return {"error": "engagement has no root domain to enumerate"}
 
-    hosts, note = await enumerate_passive(domain)
+    # These calls pass NO target_url, so the executor's session-target
+    # heuristic returned "no opinion" and enumeration ran with no scope check
+    # at all. The engagement's own rules are the check that belongs here.
+    _rows = await E.scope_rows(db, engagement_id)
+    hosts, note = await enumerate_passive(domain, engagement_rows=_rows)
     report: dict[str, Any] = {
         "domain": domain, "enumerated": len(hosts), "note": note,
         "authorised": [], "pending": [], "probed": [], "assets_created": 0,
@@ -193,7 +201,7 @@ async def run(db, engagement_id: str, *, probe: bool = True) -> dict[str, Any]:
     if not hosts:
         return report
 
-    rows = await E.scope_rows(db, engagement_id)
+    rows = _rows
     allowed_hosts = []
     for h in hosts:
         ok, why = E.evaluate_scope(rows, f"http://{h}")
@@ -208,7 +216,7 @@ async def run(db, engagement_id: str, *, probe: bool = True) -> dict[str, Any]:
     await db.commit()
 
     if probe and allowed_hosts:
-        live = await probe_live(allowed_hosts)
+        live = await probe_live(allowed_hosts, engagement_rows=rows)
         for host, info in live.items():
             url = info.get("url") or f"http://{host}"
             aid, _ = await A.path_for_url(db, engagement_id, url, source="recon")

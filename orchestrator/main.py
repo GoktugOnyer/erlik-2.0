@@ -3558,6 +3558,31 @@ async def _load_run_config(session_id: str) -> dict:
     return runconfig.resolve(raw)
 
 
+async def engagement_rows_for_session(session_id: str):
+    """The customer's scope rules for this run, or None when unassigned.
+
+    Resolved ONCE per session and handed to every execute_tool call, so the
+    executor enforces the same boundary the API gate does. Returns None (not
+    []) when there is no engagement: [] would mean "nothing is authorised" and
+    would refuse every command on the 110 sessions that predate engagements.
+    """
+    db = await get_db()
+    try:
+        row = await (await db.execute(
+            "SELECT engagement_id FROM sessions WHERE id = ?", (session_id,))).fetchone()
+        if not row or not row[0]:
+            return None
+        from orchestrator import engagement as _E
+        return await _E.scope_rows(db, row[0])
+    except Exception as e:  # noqa: BLE001
+        # Fail LOUD but do not fail open silently: an unreadable scope must not
+        # look like "no engagement".
+        print(f"[scope {session_id[:8]}] could not load engagement scope: {e}", flush=True)
+        return None
+    finally:
+        await db.close()
+
+
 async def agent_loop(session_id: str, target_url: str, scope_mode: str,
                      system_prompt: str, enabled_tools: list[str], model: str,
                      session_type: str = "cold", parent_session_id: str = None,
@@ -3569,6 +3594,10 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
     # would set up, inject context, then die on an opaque 404 at the first
     # generation. Never substitutes a near neighbour — see ensure_model_available.
     runcfg = await _load_run_config(session_id)
+    _eng_rows = await engagement_rows_for_session(session_id)
+    if _eng_rows is not None:
+        print(f"[scope {session_id[:8]}] engagement scope active: "
+              f"{len(_eng_rows)} rule(s)", flush=True)
     _provider = runcfg.get("provider")
     try:
         await llm_client.ensure_model_available(model, provider=_provider)
@@ -4388,7 +4417,8 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
                     result = await execute_tool(
                         command, enabled_tools, no_timeout=no_timeout,
                         target_url=target_url, custom_timeout=tool_timeout,
-                        safe_mode=runcfg.get("safe_mode", True))
+                        safe_mode=runcfg.get("safe_mode", True),
+                        engagement_rows=_eng_rows)
 
                     tool_name = result["tool"]
                     # Only count a tool the command actually reached a shell

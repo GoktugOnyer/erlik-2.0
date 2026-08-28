@@ -602,3 +602,119 @@ class TestTheDashboardActuallySendsIt:
         block = html[i:i + 1600]
         assert "new Option(" in block
         assert "innerHTML" not in block, "option list built with innerHTML"
+
+
+class TestTheExecutorEnforcesTheEngagementScope:
+    """The API gate and the execution guard enforced DIFFERENT boundaries.
+
+    `tool_executor._scope_violation` allowed any subdomain of the SESSION's
+    target, never read `engagement_scope`, could be switched off with
+    ERLIK_SCOPE_ENFORCE=0, and returned "no opinion" whenever `target_url` was
+    falsy — which is exactly how recon.py calls it, so subdomain enumeration
+    and liveness probing ran with no scope check at all.
+
+    So the front door was locked (see TestAnEngagementReachesTheRunItOwns)
+    while the tool that actually touches the customer was not.
+    """
+
+    DECLARED = [{"pattern": "acme.example", "kind": "domain", "in_scope": 1,
+                 "source": "declared", "approved_at": "2026-08-28",
+                 "approved_by": None}]
+    EXCLUDED = DECLARED + [{"pattern": "vpn.acme.example", "kind": "host",
+                            "in_scope": 0, "source": "declared",
+                            "approved_at": "2026-08-28", "approved_by": None}]
+
+    @staticmethod
+    def _check(command, rows, target_url=None):
+        from orchestrator.tool_executor import _scope_violation
+        return _scope_violation(command, target_url, rows)
+
+    def test_an_in_scope_host_is_allowed(self):
+        assert self._check("curl http://app.acme.example/", self.DECLARED) is None
+
+    def test_a_host_outside_the_engagement_is_refused(self):
+        why = self._check("curl http://not-acme.example/", self.DECLARED)
+        assert why and "outside the engagement" in why
+
+    def test_an_EXCLUDED_host_is_refused_even_though_it_is_a_subdomain(self):
+        """The old guard allowed any subdomain of the session target, so a host
+        the customer explicitly carved OUT still ran."""
+        why = self._check("curl http://vpn.acme.example/", self.EXCLUDED)
+        assert why, "an explicitly excluded host was allowed"
+
+    def test_a_discovered_but_unapproved_host_is_refused(self):
+        """Recon writes candidates; approval is a human act. If the executor
+        ignored that, the approval workflow would be decorative at the one
+        point it matters."""
+        rows = self.DECLARED + [{"pattern": "shared.acme.example", "kind": "host",
+                                 "in_scope": 1, "source": "discovered",
+                                 "approved_at": None, "approved_by": None}]
+        # ...but it IS under the declared domain, so the declared rule covers
+        # it. Use a host outside the domain, which only the candidate names.
+        rows = [{"pattern": "cdn.other.example", "kind": "host", "in_scope": 1,
+                 "source": "discovered", "approved_at": None, "approved_by": None}]
+        assert self._check("curl http://cdn.other.example/", rows)
+
+    def test_ERLIK_SCOPE_ENFORCE_0_CANNOT_disable_it(self, monkeypatch):
+        """An engagement is a legal boundary; an environment variable must not
+        be able to switch it off."""
+        monkeypatch.setenv("ERLIK_SCOPE_ENFORCE", "0")
+        from orchestrator.tool_executor import _scope_enforced
+        assert _scope_enforced() is False, "fixture did not actually disable it"
+        assert self._check("curl http://not-acme.example/", self.DECLARED), \
+            "an env var switched off the customer's legal boundary"
+
+    def test_a_missing_target_url_does_not_disable_it(self):
+        """THE recon hole. `not target_url` returned None, and recon.py calls
+        execute_tool without one."""
+        assert self._check("httpx -u http://not-acme.example", self.DECLARED,
+                           target_url=None), \
+            "enumeration ran unchecked because no target_url was supplied"
+
+    def test_with_no_engagement_behaviour_is_unchanged(self):
+        """110 sessions predate engagements. None must mean "no opinion" —
+        an empty list would mean "nothing is authorised" and refuse everything."""
+        assert self._check("curl http://anything.example/", None) is None
+        assert self._check("curl http://anything.example/", []) is None
+
+    def test_out_of_band_callback_domains_are_still_allowed(self):
+        """erlik's own detection infrastructure, not a customer asset. Blind
+        SSRF/XXE detection is unusable without it."""
+        assert self._check("curl http://abc.oast.fun/x", self.DECLARED) is None
+
+    def test_both_guards_use_the_same_matcher(self):
+        """Two implementations of one legal boundary is one implementation that
+        eventually stops matching the other — which is what happened."""
+        import inspect
+        from orchestrator import tool_executor as T
+        assert "evaluate_scope" in inspect.getsource(T._engagement_violation)
+
+
+class TestTheEngagementRulesActuallyReachTheExecutor:
+    """A guard nothing supplies rules to is another producer with no consumer."""
+
+    def test_the_agent_loop_loads_and_passes_them(self):
+        import inspect
+        import orchestrator.main as M
+        src = inspect.getsource(M.agent_loop)
+        assert "engagement_rows_for_session" in src, \
+            "the agent loop never loads the customer's scope"
+        assert "engagement_rows=_eng_rows" in src, \
+            "the loop loads the scope but never hands it to the executor"
+
+    def test_recon_passes_them_on_both_active_paths(self):
+        import inspect
+        from orchestrator import recon as R
+        run_src = inspect.getsource(R.run)
+        assert "engagement_rows=_rows" in run_src
+        assert "engagement_rows=rows" in run_src
+        for fn in (R.enumerate_passive, R.probe_live):
+            assert "engagement_rows=engagement_rows" in inspect.getsource(fn), fn.__name__
+
+    def test_an_unassigned_session_yields_None_not_empty(self):
+        """Returning [] would refuse every command on a run with no customer."""
+        import inspect
+        import orchestrator.main as M
+        src = inspect.getsource(M.engagement_rows_for_session)
+        assert "return None" in src
+        assert "[]" not in src.split('"""')[2], "an empty list would deny everything"

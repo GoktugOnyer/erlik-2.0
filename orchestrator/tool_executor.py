@@ -506,8 +506,49 @@ def _scope_allows(host: str, target_host: str, extra: list[str]) -> bool:
     return False
 
 
-def _scope_violation(command: str, target_url: str | None) -> str | None:
-    """Return a reason string if the command targets an unrelated public host."""
+def _engagement_violation(command: str, rows) -> str | None:
+    """Refuse a command that touches a host the CUSTOMER did not authorise.
+
+    Checked with `engagement.evaluate_scope` — the same matcher the API gate
+    uses — rather than a second implementation. The audit found the two
+    boundaries had already diverged: this module allowed any subdomain of the
+    session's target and never consulted `engagement_scope` at all, so a host
+    the customer had explicitly EXCLUDED still ran, and the approval workflow
+    for discovered hosts was decorative at the point it mattered most.
+
+    UNCONDITIONAL, unlike the session-target heuristic below. It ignores
+    ERLIK_SCOPE_ENFORCE and applies even when `target_url` is unknown, because:
+
+      * an engagement is a LEGAL boundary and an environment variable must not
+        be able to switch it off; and
+      * `target_url` is unknown on exactly the path that most needs checking —
+        recon.py calls execute_tool without one, so `not target_url` returned
+        None and enumeration ran with no scope check whatsoever.
+    """
+    if not rows:
+        return None
+    from orchestrator.engagement import evaluate_scope
+    for host in extract_hosts(command):
+        h = (host or "").lower().rstrip(".")
+        if not h:
+            continue
+        # erlik's own out-of-band callback infrastructure, not a customer
+        # asset: blind SSRF/XXE detection is unusable without it.
+        if _host_has_suffix(h, _OAST_DOMAINS):
+            continue
+        allowed, why = evaluate_scope(rows, f"http://{h}")
+        if not allowed:
+            return (f"host {h!r} is outside the engagement's authorised scope — {why}. "
+                    "Add it to the engagement (and approve it) before testing it.")
+    return None
+
+
+def _scope_violation(command: str, target_url: str | None,
+                     engagement_rows=None) -> str | None:
+    """Return a reason string if the command targets a host it must not."""
+    breach = _engagement_violation(command, engagement_rows)
+    if breach:
+        return breach
     if not _scope_enforced() or not target_url:
         return None
     target_host = (_safe_hostname(target_url if "://" in target_url else f"http://{target_url}") or "").lower()
@@ -664,7 +705,7 @@ def _sync_check_container() -> bool:
         return False
 
 
-async def execute_tool(command: str, enabled_tools: list[str], no_timeout: bool = False, target_url: str = None, tool_hint: str = None, custom_timeout: int = None, safe_mode: bool | None = None) -> dict:
+async def execute_tool(command: str, enabled_tools: list[str], no_timeout: bool = False, target_url: str = None, tool_hint: str = None, custom_timeout: int = None, safe_mode: bool | None = None, engagement_rows=None) -> dict:
     """
     Execute a command in the kali-tools Docker container.
 
@@ -739,7 +780,7 @@ async def execute_tool(command: str, enabled_tools: list[str], no_timeout: bool 
     sanitized = _sanitize_command(command, target_url=target_url)
 
     # Scope enforcement: refuse commands that target an unrelated public host.
-    scope_err = _scope_violation(sanitized, target_url)
+    scope_err = _scope_violation(sanitized, target_url, engagement_rows)
     if scope_err:
         return {"success": False, "output": "", "tool": tool_name, "duration_ms": 0,
                 "error": f"SCOPE: {scope_err}", "executed": False, "denied": True}

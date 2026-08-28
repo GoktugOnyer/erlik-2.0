@@ -95,11 +95,11 @@ class TestNothingUnauthorisedIsProbed:
         db_mod = _fresh(tmp_path, monkeypatch)
         probed: list[list[str]] = []
 
-        async def fake_enum(domain, timeout=180):
+        async def fake_enum(domain, timeout=180, **kw):
             # a real-looking mix: two under the domain, one that is not
             return ["app.acme.example", "vpn.acme.example"], "2 names"
 
-        async def fake_probe(hosts, timeout=180):
+        async def fake_probe(hosts, timeout=180, **kw):
             probed.append(list(hosts))
             return {h: {"url": f"http://{h}", "status": 200, "tech": []} for h in hosts}
 
@@ -128,10 +128,10 @@ class TestNothingUnauthorisedIsProbed:
         db_mod = _fresh(tmp_path, monkeypatch)
         probed: list[list[str]] = []
 
-        async def fake_enum(domain, timeout=180):
+        async def fake_enum(domain, timeout=180, **kw):
             return ["a.acme.example", "b.acme.example"], "2"
 
-        async def fake_probe(hosts, timeout=180):
+        async def fake_probe(hosts, timeout=180, **kw):
             probed.append(sorted(hosts))
             return {}
 
@@ -155,10 +155,10 @@ class TestNothingUnauthorisedIsProbed:
         db_mod = _fresh(tmp_path, monkeypatch)
         called = []
 
-        async def fake_enum(domain, timeout=180):
+        async def fake_enum(domain, timeout=180, **kw):
             return ["a.acme.example"], "1"
 
-        async def fake_probe(hosts, timeout=180):
+        async def fake_probe(hosts, timeout=180, **kw):
             called.append(hosts)
             return {}
 
@@ -183,7 +183,7 @@ class TestNothingUnauthorisedIsProbed:
         approval gate decorative."""
         db_mod = _fresh(tmp_path, monkeypatch)
 
-        async def fake_enum(domain, timeout=180):
+        async def fake_enum(domain, timeout=180, **kw):
             return ["vpn.other.example"], "1"
 
         monkeypatch.setattr(R, "enumerate_passive", fake_enum)
