@@ -2058,6 +2058,23 @@
                     </div>
                     <div class="flex gap-2 mt-3 flex-wrap items-center"
                         style="border-top:1px solid #1e242c; padding-top:10px;">
+                        <button onclick="engRecon(true)" class="font-pixel px-3 py-1 rounded border"
+                            style="font-size:0.55rem; color:var(--neon-green); border-color:var(--neon-green);">
+                            &#9678; DISCOVER SUBDOMAINS</button>
+                        <button onclick="engRecon(false)" class="font-pixel px-3 py-1 rounded border"
+                            style="font-size:0.55rem;">NAMES ONLY (touch nothing)</button>
+                        <span id="eng-recon-out" class="font-mono" style="font-size:0.58rem;"></span>
+                    </div>
+                    <div class="font-mono mt-1" style="font-size:0.55rem; opacity:.55; max-width:80ch;">
+                        Passive enumeration first &mdash; third-party datasets, never the customer's
+                        infrastructure. Every name found is scope-checked <b>before</b> anything
+                        connects to it: hosts a declared rule already covers get probed and
+                        inventoried, everything else is parked below as <b>awaiting approval</b> and
+                        authorises nothing.
+                    </div>
+
+                    <div class="flex gap-2 mt-3 flex-wrap items-center"
+                        style="border-top:1px solid #1e242c; padding-top:10px;">
                         <input id="eng-check" class="input-field font-mono px-2 py-1 rounded"
                             style="font-size:0.6rem; width:250px;" placeholder="test a target against this scope"
                             onkeydown="if(event.key==='Enter')engCheck()">
@@ -2195,6 +2212,39 @@
                 body: JSON.stringify({pattern})
             });
             if (r.ok) { engRender(await r.json()); engLoad(); }
+        }
+
+        // Domain recon. `probe=false` returns the name list without connecting
+        // to anything — the option an operator wants before a scan window opens.
+        async function engRecon(probe) {
+            const out = document.getElementById('eng-recon-out');
+            out.style.color = 'var(--neon-cyan)';
+            out.textContent = probe ? 'enumerating and probing…' : 'enumerating (no contact)…';
+            let r;
+            try {
+                r = await fetch(`/api/engagements/${engCurrent}/recon`, {
+                    method: 'POST', headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({probe: !!probe})
+                });
+            } catch (e) {
+                out.style.color = 'var(--neon-red)';
+                out.textContent = 'recon failed: ' + e;
+                return;
+            }
+            if (!r.ok) {
+                const msg = (await r.json().catch(() => ({}))).detail || r.statusText;
+                out.style.color = 'var(--neon-red)';
+                out.textContent = 'recon failed: ' + msg;
+                return;
+            }
+            const d = await r.json();
+            out.style.color = d.pending && d.pending.length ? 'var(--neon-yellow)' : 'var(--neon-green)';
+            out.textContent =
+                `${d.enumerated} name(s) · ${d.authorised.length} in scope · ` +
+                `${d.pending.length} awaiting approval · ${d.probed.length} probed · ` +
+                `${d.assets_created} asset(s)` + (d.note ? ` · ${d.note}` : '');
+            if (d.engagement) engRender(d.engagement);
+            engLoad();
         }
 
         async function engCheck() {

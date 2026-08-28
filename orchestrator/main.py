@@ -5272,6 +5272,44 @@ async def check_engagement_scope(engagement_id: str, body: dict):
     return {"allowed": allowed, "reason": reason}
 
 
+@app.post("/api/engagements/{engagement_id}/recon")
+async def run_engagement_recon(engagement_id: str, body: dict | None = None):
+    """Enumerate this engagement's root domain.
+
+    Passive enumeration first — third-party datasets, never the customer's
+    infrastructure. Every host it returns is then scope-checked BEFORE anything
+    connects to it: hosts a declared rule already covers are probed and
+    inventoried, and everything else is written as a pending candidate that
+    authorises nothing until a human approves it.
+
+    `probe: false` returns the name list without touching a single host.
+    """
+    from orchestrator import recon as _R
+    db = await get_db()
+    try:
+        rep = await _R.run(db, engagement_id,
+                           probe=bool((body or {}).get("probe", True)))
+        if rep.get("error"):
+            raise HTTPException(status_code=400, detail=rep["error"])
+        from orchestrator import engagement as _E
+        rep["engagement"] = await _E.summary(db, engagement_id)
+        return rep
+    finally:
+        await db.close()
+
+
+@app.get("/api/engagements/recon/tools")
+async def engagement_recon_tools():
+    """Which recon tools are actually present, and whether each CONTACTS the
+    target. An operator authorising a scan should be able to see that."""
+    from orchestrator import recon as _R
+    out = []
+    for name, spec in _R.TOOLS.items():
+        out.append({"tool": name, "active": spec["active"], "what": spec["what"],
+                    "installed": await _R.tool_available(name)})
+    return {"tools": out}
+
+
 @app.post("/api/engagements/{engagement_id}/targets")
 async def add_engagement_target(engagement_id: str, body: dict):
     """Add an application under this engagement. Refuses anything the
