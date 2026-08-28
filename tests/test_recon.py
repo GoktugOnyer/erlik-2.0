@@ -37,7 +37,17 @@ class TestHostnameValidation:
         assert R.valid_hostname(h) is True
 
     @pytest.mark.parametrize("h", [
-        "", "   ", "acme", "acme..com", "-acme.com", "acme-.com",
+        "intranet", "jira", "vpn", "kali-tools", "juice-shop",
+    ])
+    def test_single_label_internal_names_are_accepted(self, h):
+        """A dot is not required. On an internal engagement `intranet` and
+        `jira` are ordinary targets, and refusing them would make recon
+        unusable exactly where it matters most. What may be CONTACTED is
+        decided by scope, not by label count."""
+        assert R.valid_hostname(h) is True
+
+    @pytest.mark.parametrize("h", [
+        "", "   ", "acme..com", "-acme.com", "acme-.com",
         "acme.com/../etc", "acme.com;id", "acme.com`id`", "acme.com$(id)",
         'acme.com"', "acme com", "acme.com\nevil.com", "*.acme.com",
         "a" * 60 + "." + "b" * 200 + ".com",

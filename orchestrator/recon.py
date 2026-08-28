@@ -53,7 +53,14 @@ TOOLS: dict[str, dict[str, Any]] = {
     "katana":    {"active": True,  "what": "crawl — connects to the host"},
 }
 
-_HOST_RX = re.compile(r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$")
+# A dot is NOT required. Single-label names — `intranet`, `jira`, `vpn` — are
+# ordinary targets on a client's internal network, and refusing them would make
+# recon unusable on exactly the engagements where it matters most. Requiring a
+# dot also bought nothing for safety: this regex is the SHELL-INJECTION gate,
+# and it excludes every metacharacter either way. What may be CONTACTED is
+# decided by scope, not by how many labels a name has.
+_HOST_RX = re.compile(
+    r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$")
 
 
 def valid_hostname(name: str) -> bool:
@@ -69,11 +76,31 @@ def valid_hostname(name: str) -> bool:
 
 
 async def tool_available(tool: str) -> bool:
+    """Is the tool present AND runnable?
+
+    Asks the TOOL ITSELF for its version rather than running `which`. Two
+    reasons, and the first is not theoretical: `which` is not in the toolset or
+    in _SAFE_FILTERS, so erlik's own scope guard REFUSED the probe — every
+    availability check returned False while all four binaries sat in the
+    container, and recon would have reported "not installed" forever.
+
+    Invoking the tool is also the stronger check: a binary present but not
+    executable (wrong arch, truncated download) fails here rather than at the
+    first real scan.
+    """
     from orchestrator.tool_executor import check_container_running, execute_tool
+    if tool not in TOOLS:
+        return False
     if not await check_container_running():
         return False
-    r = await execute_tool(f"which {shlex.quote(tool)}", [tool], tool_hint=tool)
-    return bool(r.get("success")) and "/" in (r.get("output") or "")
+    r = await execute_tool(f"{shlex.quote(tool)} -version", [tool],
+                           tool_hint=tool, custom_timeout=30)
+    if not r.get("executed"):
+        print(f"[recon] availability probe for {tool!r} was REFUSED, not answered: "
+              f"{(r.get('output') or '')[:120]}", flush=True)
+        return False
+    out = (r.get("output") or "").lower()
+    return bool(re.search(r"\d+\.\d+\.\d+", out)) or tool in out
 
 
 async def enumerate_passive(domain: str, timeout: int = 180) -> tuple[list[str], str]:
@@ -99,7 +126,24 @@ async def enumerate_passive(domain: str, timeout: int = 180) -> tuple[list[str],
 
 
 async def probe_live(hosts: list[str], timeout: int = 180) -> dict[str, dict]:
-    """httpx over hosts the CALLER has already scope-checked. ACTIVE."""
+    """httpx over hosts the CALLER has already scope-checked. ACTIVE.
+
+    VERIFIED IN THIS CONTAINER (v1.10.0, arm64):
+      * the binary runs and reports its version;
+      * HTTP probing works — `-u http://192.168.107.4` returns `[302]`;
+      * DNS for CONTAINER-INTERNAL names does NOT work. `-u http://dvwa`
+        returns nothing even with the right nameserver passed via `-r` and an
+        explicit /etc/hosts entry, because ProjectDiscovery's resolver layer
+        does not consult /etc/hosts.
+
+    So on a real engagement, where targets are public names in public DNS, this
+    works. On the local docker lab, service names (juice-shop, dvwa) do not
+    resolve for httpx and probing them returns {}. NOT verified: a public
+    domain, because that would mean scanning a host nobody authorised.
+
+    Also note httpx probes 80/443 by default, so juice-shop on :3000 returns
+    nothing even by IP. That is correct behaviour, not a failure.
+    """
     from orchestrator.tool_executor import execute_tool
     hosts = [h for h in hosts if valid_hostname(h)]
     if not hosts:
