@@ -40,6 +40,10 @@ class RunResult(BaseModel):
     chain_next: list[str] = Field(default_factory=list)
     stopped_early: bool = False
     duration_ms: int = 0
+    # Target fields this run DISCOVERED, e.g. {"endpoint": ["/admin", "/api"]}.
+    # A case that finds three parameters can retarget three children; without
+    # this the chain walker hands every child the same target it started with.
+    produced: dict[str, list[str]] = Field(default_factory=dict)
 
 
 _TOOLS_ALL = [
@@ -93,6 +97,49 @@ def _validate_target(tc: TestCase, target: dict[str, Any]) -> str | None:
     return None
 
 
+# Bound on captured values. A crawl of a large site can emit thousands of
+# paths; the cap keeps one step from planning an unbounded fan-out, and the
+# truncation is reported rather than silent.
+MAX_PRODUCED_PER_FIELD = 200
+
+
+def _harvest(ev: Evaluator, output: str, flags: int) -> dict[str, list[str]]:
+    """Pull the values an evaluator declares it produces out of tool output.
+
+    EVERY occurrence, not just the first: a robots.txt has many Disallow lines
+    and a crawl emits many paths, and `re.search` would have found one and
+    discarded the rest.
+
+    Values are DROPPED, never escaped, if they do not survive the same
+    injection gate the sweep planner applies. This text came from the target,
+    and it is about to become a command argument.
+    """
+    if not ev.produces:
+        return {}
+    from orchestrator.engagement import looks_injectable
+
+    out: dict[str, list[str]] = {}
+    for field, group in ev.produces.items():
+        seen: list[str] = []
+        for m in re.finditer(ev.pattern or "", output, flags):
+            try:
+                value = m.group(group)
+            except (IndexError, re.error):
+                continue
+            if not value:
+                continue
+            value = value.strip()
+            if not value or looks_injectable(value):
+                continue
+            if value not in seen:
+                seen.append(value)
+            if len(seen) >= MAX_PRODUCED_PER_FIELD:
+                break
+        if seen:
+            out[field] = seen
+    return out
+
+
 async def _run_evaluator(
     ev: Evaluator,
     step_result: StepResult,
@@ -100,9 +147,10 @@ async def _run_evaluator(
     target: dict[str, Any],
     provider: str | None,
     model: str | None,
-) -> tuple[Finding | None, list[str], bool]:
-    """Apply one evaluator. Returns (finding_or_none, chain_to, stop)."""
+) -> tuple[Finding | None, list[str], bool, dict[str, list[str]]]:
+    """Apply one evaluator. Returns (finding_or_none, chain_to, stop, produced)."""
     matched = False
+    produced: dict[str, list[str]] = {}
 
     if ev.type == "regex" and ev.pattern:
         # MULTILINE so anchors (^ $) work line-by-line — tool output is almost
@@ -110,7 +158,12 @@ async def _run_evaluator(
         flags = re.MULTILINE
         if ev.case_insensitive:
             flags |= re.IGNORECASE
-        matched = bool(re.search(ev.pattern, step_result.output, flags))
+        # The Match used to be destroyed on the line that created it —
+        # `bool(re.search(...))` — so every capture group a case wrote was
+        # thrown away to keep a yes/no. Harvest first, then decide matched.
+        produced = _harvest(ev, step_result.output, flags)
+        matched = bool(produced) or bool(
+            re.search(ev.pattern, step_result.output, flags))
 
     elif ev.type == "status_code" and ev.expect is not None:
         # tool_executor doesn't return raw exit code, but encodes failure via success bool
@@ -142,7 +195,7 @@ async def _run_evaluator(
             print(f"[runner] llm evaluator error: {e}", file=sys.stderr)
 
     if not matched:
-        return None, [], False
+        return None, [], False, produced
 
     finding = None
     if ev.emit_finding:
@@ -156,7 +209,7 @@ async def _run_evaluator(
             parameter=target.get("parameter"),
             evidence=step_result.output[:1500],
         )
-    return finding, ev.chain_to or [], ev.stop_after
+    return finding, ev.chain_to or [], ev.stop_after, produced
 
 
 async def run_test_case(
@@ -246,9 +299,14 @@ async def run_test_case(
             for ev in step.evaluators:
                 if not _eval_when(ev.when, result.findings, sr):
                     continue
-                finding, chain_to, stop_after = await _run_evaluator(
+                finding, chain_to, stop_after, produced = await _run_evaluator(
                     ev, sr, tc, target, provider, model
                 )
+                for field, values in produced.items():
+                    bucket = result.produced.setdefault(field, [])
+                    for v in values:
+                        if v not in bucket and len(bucket) < MAX_PRODUCED_PER_FIELD:
+                            bucket.append(v)
                 if finding:
                     result.findings.append(finding)
                 for cid in chain_to:

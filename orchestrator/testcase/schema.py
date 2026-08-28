@@ -39,6 +39,21 @@ class Evaluator(BaseModel):
     chain_to: Optional[list[str]] = None
     stop_after: bool = False
 
+    # What this evaluator DISCOVERS, as {target_field: regex_capture_group}.
+    #
+    # target_schema.required declares what a case CONSUMES; this is the missing
+    # other half. Without it a case can only ever answer yes/no, and the
+    # deterministic lane fires every case at whatever URL it was handed —
+    # which is the same "cannot reach the endpoint" bottleneck measured in the
+    # agent lane, arrived at from the other direction.
+    #
+    #   produces: {endpoint: 1}   with pattern ^Disallow:\s*(\S+)
+    #
+    # Group 0 (the whole match) is allowed but rarely what you want. Regex
+    # evaluators only; an evaluator without `produces` behaves identically to
+    # before.
+    produces: Optional[dict[str, int]] = None
+
     @field_validator("pattern")
     @classmethod
     def _pattern_required_for_regex(cls, v, info):
