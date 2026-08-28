@@ -955,3 +955,200 @@ class TestTheParityToolsetIsReachable:
         block = src[i:i + 3000]
         j = block.index("searchsploit")
         assert "LOOKUP ONLY" in block[j:j + 200]
+
+
+class TestTheUrlDescribesWhatIsOnScreen:
+    """Every piece of dashboard state lived in CSS classes and closure
+    variables, so no screen could be linked to, bookmarked, reloaded into or
+    pasted into a ticket, and every reload dumped the operator back on the
+    Scanner form regardless of what they had been reading.
+
+    `switchView` was already the single funnel every transition went through,
+    so the URL is written there and read back on load.
+    """
+
+    @staticmethod
+    def _html():
+        from pathlib import Path
+        return Path("dashboard/templates/index.html").read_text()
+
+    @staticmethod
+    def _body(html, signature):
+        """The function's actual body, by brace matching.
+
+        A fixed character window is brittle: the first version of this test
+        used 2200 and the call sat at 2270, so it failed on formatting rather
+        than on behaviour."""
+        i = html.index(signature)
+        depth, j = 0, html.index("{", i)
+        for k in range(j, len(html)):
+            if html[k] == "{":
+                depth += 1
+            elif html[k] == "}":
+                depth -= 1
+                if depth == 0:
+                    return html[i:k + 1]
+        raise AssertionError(f"unbalanced braces after {signature!r}")
+
+    def test_the_view_is_written_to_the_url(self):
+        html = self._html()
+        body = self._body(html, "function switchView(view) {")
+        assert "urlWrite();" in body, "switchView does not record the view"
+
+    def test_the_url_is_read_on_load(self):
+        html = self._html()
+        assert "function bootFromUrl" in html
+        i = html.index("function bootFromUrl")
+        assert "switchView(st.view)" in html[i:i + 900], \
+            "the URL is written but never read, so every reload still lands on Scanner"
+
+    def test_a_hashchange_navigates(self):
+        html = self._html()
+        assert "addEventListener('hashchange'" in html
+        i = html.index("addEventListener('hashchange'")
+        assert "urlApply()" in html[i:i + 300]
+
+    def test_the_write_loop_is_guarded(self):
+        """Writing the hash fires hashchange, which would write the hash."""
+        html = self._html()
+        assert "__urlApplying" in html
+        i = html.index("addEventListener('hashchange'")
+        assert "if (__urlApplying) return" in html[i:i + 300]
+
+    def test_only_known_keys_are_honoured(self):
+        """The hash is attacker-supplied in the sense that anyone can send a
+        link. Unknown keys are dropped rather than reflected."""
+        html = self._html()
+        assert "const URL_KEYS = [" in html
+        i = html.index("function urlState()")
+        assert "URL_KEYS.includes(k)" in html[i:i + 700]
+
+    def test_the_selected_customer_is_in_the_url(self):
+        """It is the scope the rest of the app is read through; a link without
+        it shows the recipient a different application state."""
+        html = self._html()
+        i = html.index("function sideEngagementPicked")
+        assert "urlSet({eng:" in html[i:i + 900]
+
+    def test_typing_does_not_bury_the_back_button(self):
+        html = self._html()
+        i = html.index("function urlSet(")
+        block = html[i:i + 1100]
+        assert "replaceState" in block
+        assert "replace = true" in block, "the default must not push a history entry"
+
+
+class TestListsFilterSortAndTellTheTruth:
+    """A view that silently shows 30 of 127 rows reads exactly like a complete
+    one — the defect shape this project keeps hitting. Truncation is stated."""
+
+    @staticmethod
+    def _html():
+        from pathlib import Path
+        return Path("dashboard/templates/index.html").read_text()
+
+    def test_the_count_states_the_truth_when_filtered(self):
+        html = self._html()
+        assert "function listCountLabel" in html
+        i = html.index("function listCountLabel")
+        block = html[i:i + 700]
+        assert "shown === total" in block, "the label cannot distinguish filtered from complete"
+        assert "of" in block
+
+    def test_a_server_side_cap_is_reported_separately(self):
+        """A server LIMIT is a second truncation and must not be folded into
+        the same number."""
+        i = self._html().index("function listCountLabel")
+        assert "server returns at most" in self._html()[i:i + 700]
+
+    def test_reports_has_a_search_box_and_sortable_headers(self):
+        html = self._html()
+        assert 'id="reports-search"' in html
+        assert html.count('class="col-sort"') >= 6
+        assert ".col-sort { cursor: pointer" in html
+
+    def test_sorting_shows_which_column_and_direction(self):
+        """A header that sorts and does not say so is a feature nobody finds."""
+        html = self._html()
+        assert "function listMarkSort" in html
+        assert '.col-sort[data-active]::after' in html
+
+    def test_the_two_empty_states_are_different(self):
+        """"No sessions found" while a filter is active sends the operator
+        hunting for a bug that is their own search box."""
+        html = self._html()
+        i = html.index("async function loadReportsList")
+        block = html[i:i + 4200]
+        assert "No sessions found" in block
+        assert "No session matches" in block
+
+    def test_filtering_does_not_refetch(self):
+        html = self._html()
+        assert "__reportsCache" in html
+        i = html.index("async function loadReportsList")
+        assert "opts.fromCache" in self._html()[i:i + 900]
+
+    def test_the_search_input_is_the_source_of_truth(self):
+        """An earlier version copied the URL back into the input on every
+        render, so any change was reverted to a stale query and the list
+        filtered on something the box no longer said."""
+        html = self._html()
+        i = html.index("async function loadReportsList")
+        block = html[i:i + 4200]
+        assert "document.activeElement !== searchEl" not in block, \
+            "the URL is overwriting the input again"
+
+    def test_reports_is_scoped_to_the_selected_customer(self):
+        html = self._html()
+        i = html.index("async function loadReportsList")
+        block = html[i:i + 4200]
+        assert "side-engagement" in block
+        assert "engagement_id === eng" in block
+
+    def test_scoping_refuses_to_filter_on_a_field_the_api_omits(self):
+        """Filtering on a missing key does not error — it silently returns
+        nothing, and an empty list reads as "this customer has done no work".
+        /api/sessions did not send engagement_id when this was written."""
+        html = self._html()
+        i = html.index("async function loadReportsList")
+        block = html[i:i + 4200]
+        # The guard must be USED in the filter, not merely defined above it.
+        # The first version checked only that the words appeared, and passed
+        # with the filter reverted to the unguarded form.
+        assert "(eng && scopable) ?" in block, \
+            "the guard is defined but the filter does not consult it"
+        assert "NOT scoped" in block, "a missing field would be silently indistinguishable"
+
+    def test_the_sessions_api_actually_sends_it(self, tmp_path_factory):
+        """BEHAVIOURAL. The first version searched the handler's source and
+        passed with the column deleted from the SELECT, because the comment
+        above it still said "engagement_id". A test a comment satisfies is not
+        a test — the same trap as the Dockerfile check."""
+        import asyncio
+        import warnings
+        warnings.filterwarnings("ignore", category=DeprecationWarning)
+        from fastapi.testclient import TestClient
+        import orchestrator.database as db_mod
+        import orchestrator.main as M
+
+        original = db_mod.DB_PATH
+        db_mod.DB_PATH = str(tmp_path_factory.mktemp("sess") / "s.db")
+        try:
+            asyncio.run(db_mod.init_db())
+            client = TestClient(M.app)
+            eid = client.post("/api/engagements",
+                              json={"client_name": "Acme", "root_domain": "acme.example"}
+                              ).json()["engagement"]["id"]
+            r = client.post("/api/sessions", json={
+                "target_url": "http://app.acme.example", "scope_mode": "full",
+                "model": "m", "enabled_tools": ["curl"], "max_turns": 1,
+                "engagement_id": eid})
+            assert r.status_code == 200, r.text
+            rows = client.get("/api/sessions").json()
+            assert rows, "no session came back"
+            assert "engagement_id" in rows[0], (
+                "the UI scopes on a field the API does not return; the list "
+                f"would silently empty. keys={sorted(rows[0])}")
+            assert rows[0]["engagement_id"] == eid
+        finally:
+            db_mod.DB_PATH = original

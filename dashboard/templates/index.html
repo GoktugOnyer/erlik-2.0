@@ -697,6 +697,14 @@
                            max-height: none; border-right: none;
                            border-bottom: 1px solid rgba(0,255,245,0.18); }
         }
+
+        /* Sortable header cells. The arrow is the whole affordance — a header
+           that sorts and does not say so is a feature nobody finds. */
+        .col-sort { cursor: pointer; user-select: none; }
+        .col-sort:hover { color: var(--neon-cyan); }
+        .col-sort[data-active]::after {
+            content: attr(data-active); margin-left: 4px; color: var(--neon-cyan);
+        }
 </style>
 </head>
 <body class="min-h-screen">
@@ -1322,20 +1330,25 @@
                 <div class="px-4 py-2.5 flex items-center justify-between"
                     style="border-bottom: 1px solid var(--panel-border);">
                     <span class="font-pixel" style="font-size:0.55rem; color:#6a6a8a;">ALL SESSIONS</span>
-                    <span id="reports-count" class="font-mono" style="color:#4a4a5a; font-size:0.85rem;">Loading...</span>
+                    <span class="flex items-center gap-3">
+                        <input id="reports-search" type="search" placeholder="filter by id, target, status, type…"
+                            class="cyber-input rounded" style="font-size:0.68rem; width:250px; padding:3px 7px;"
+                            oninput="loadReportsList({fromCache: true})">
+                        <span id="reports-count" class="font-mono" style="color:#4a4a5a; font-size:0.85rem;">Loading...</span>
+                    </span>
                 </div>
 
                 <!-- Table header -->
                 <div class="px-4 py-2 grid gap-2 font-pixel hidden lg:grid"
                     style="font-size:0.45rem; color:#6a6a8a; border-bottom: 1px solid var(--panel-border);
                            grid-template-columns: 100px 1fr 90px 80px 70px 70px 90px 80px;">
-                    <span>SESSION ID</span>
-                    <span>TARGET</span>
-                    <span>STATUS</span>
-                    <span>TYPE</span>
-                    <span>STEPS</span>
-                    <span>FINDINGS</span>
-                    <span>DURATION</span>
+                    <span class="col-sort" data-sort="id">SESSION ID</span>
+                    <span class="col-sort" data-sort="target_url">TARGET</span>
+                    <span class="col-sort" data-sort="status">STATUS</span>
+                    <span class="col-sort" data-sort="session_type">TYPE</span>
+                    <span class="col-sort" data-sort="total_steps">STEPS</span>
+                    <span class="col-sort" data-sort="total_findings">FINDINGS</span>
+                    <span class="col-sort" data-sort="created_at">DURATION</span>
                     <span>ACTIONS</span>
                 </div>
 
@@ -2009,7 +2022,12 @@
         let reportDetailSessionId = null;
 
         // ===== View Switching =====
+        // Which view is showing. Read by urlWrite; declared above the only
+        // function that assigns it so no call site can hit the temporal dead zone.
+        let __currentView = 'scanner';
+
         function switchView(view) {
+            __currentView = view;
             const views = ['scanner', 'reports', 'benchmark', 'monitor', 'engagements', 'testlab', 'skills', 'arsenal'];
             const panels = {
                 scanner: document.getElementById('view-scanner'),
@@ -2051,7 +2069,84 @@
             if (view === 'testlab') tlInit();
             if (view === 'skills') loadSkills();
             if (view === 'arsenal') { loadArsenal(); loadAuthoring(); }
+
+            urlWrite();
         }
+
+
+        // ===== ADDRESSABLE STATE =====
+        // Everything the dashboard showed lived in CSS classes and closure
+        // variables, so no screen could be linked to, bookmarked, reloaded
+        // into, or pasted into a ticket — and every reload dumped the operator
+        // back on the Scanner form regardless of what they were reading.
+        //
+        // switchView is the single funnel every transition already goes
+        // through, so the URL is written there and read back on load. The
+        // hash is deliberately the whole of it: no history entries per
+        // keystroke, no server round-trip, and a link that survives a restart
+        // of the FastAPI process.
+        const URL_KEYS = ['view', 'eng', 'session', 'q', 'sort', 'dir'];
+        let __urlApplying = false;      // guards the write -> hashchange -> write loop
+
+        function urlState() {
+            const out = {};
+            for (const part of (location.hash || '').replace(/^#/, '').split('&')) {
+                if (!part) continue;
+                const i = part.indexOf('=');
+                const k = decodeURIComponent(i < 0 ? part : part.slice(0, i));
+                if (URL_KEYS.includes(k)) {
+                    out[k] = i < 0 ? '' : decodeURIComponent(part.slice(i + 1));
+                }
+            }
+            return out;
+        }
+
+        function urlSet(patch, {replace = true} = {}) {
+            const next = {...urlState(), ...patch};
+            const hash = URL_KEYS
+                .filter(k => next[k])
+                .map(k => `${k}=${encodeURIComponent(next[k])}`)
+                .join('&');
+            const target = `${location.pathname}${location.search}#${hash}`;
+            if (location.hash.replace(/^#/, '') === hash) return;
+            __urlApplying = true;
+            try {
+                // replaceState by default: switching a view is navigation, but
+                // typing in a search box should not bury the Back button under
+                // one entry per character.
+                if (replace) history.replaceState(null, '', target);
+                else history.pushState(null, '', target);
+            } finally {
+                __urlApplying = false;
+            }
+        }
+
+        function urlWrite() {
+            const eng = (document.getElementById('side-engagement') || {}).value || '';
+            urlSet({view: __currentView, eng, session: reportDetailSessionId || ''});
+        }
+
+        function urlApply() {
+            const st = urlState();
+            const eng = st.eng || '';
+            const side = document.getElementById('side-engagement');
+            if (side && eng && side.value !== eng) {
+                side.value = eng;
+                if (side.value === eng) sideEngagementPicked();
+            }
+            const searchEl = document.getElementById('reports-search');
+            if (searchEl && searchEl.value !== (st.q || '')) {
+                searchEl.value = st.q || '';
+                if (__currentView === 'reports') loadReportsList({fromCache: true});
+            }
+            const view = st.view || 'scanner';
+            if (view !== __currentView) switchView(view);
+        }
+
+        window.addEventListener('hashchange', () => {
+            if (__urlApplying) return;     // our own write, not a navigation
+            urlApply();
+        });
 
 
         // ===== ENGAGEMENTS =====
@@ -3201,28 +3296,133 @@
                 </div>`;
         }
 
-        async function loadReportsList() {
+
+        // ===== LIST STATE: filter, sort, and an honest count =====
+        // Three things every list here lacked, and the third is the one that
+        // matters: a view that silently shows 30 of 127 rows reads exactly
+        // like a complete one. Truncation is now stated, always.
+        //
+        // Search and sort live in the URL, so a filtered list is a link.
+        function listApply(rows, {searchKeys, searchValue, sortKey, sortDir}) {
+            let out = rows.slice();
+            const q = (searchValue || '').trim().toLowerCase();
+            if (q) {
+                out = out.filter(r => searchKeys.some(k =>
+                    String(r[k] ?? '').toLowerCase().includes(q)));
+            }
+            if (sortKey) {
+                const dir = sortDir === 'desc' ? -1 : 1;
+                out.sort((a, b) => {
+                    const x = a[sortKey], y = b[sortKey];
+                    const bothNum = typeof x === 'number' && typeof y === 'number';
+                    if (bothNum) return (x - y) * dir;
+                    return String(x ?? '').localeCompare(String(y ?? '')) * dir;
+                });
+            }
+            return out;
+        }
+
+        function listCountLabel(shown, total, capped, noun) {
+            // "42 of 127 sessions" when filtered; the bare total otherwise.
+            // `capped` is the SERVER's limit, which is a second truncation and
+            // must be said out loud rather than folded into the same number.
+            let txt = shown === total ? `${total} ${noun}` : `${shown} of ${total} ${noun}`;
+            if (capped) txt += ` · server returns at most ${capped}`;
+            return txt;
+        }
+
+        function listBindSort(container, onSort) {
+            container.querySelectorAll('.col-sort').forEach(el => {
+                if (el.dataset.bound) return;
+                el.dataset.bound = '1';
+                el.addEventListener('click', () => onSort(el.dataset.sort));
+            });
+        }
+
+        function listMarkSort(container, sortKey, sortDir) {
+            container.querySelectorAll('.col-sort').forEach(el => {
+                if (el.dataset.sort === sortKey) {
+                    el.dataset.active = sortDir === 'desc' ? '\u25BC' : '\u25B2';
+                } else {
+                    delete el.dataset.active;
+                }
+            });
+        }
+
+        let __reportsCache = null;      // the last fetch, so filtering never refetches
+
+        async function loadReportsList(opts = {}) {
             const container = document.getElementById('reports-list');
             const countEl = document.getElementById('reports-count');
-            container.innerHTML = '<div class="px-4 py-8 text-center" style="color:#3a3a4a; font-size:0.85rem;">Loading sessions...</div>';
+            const view = document.getElementById('view-reports');
+            const searchEl = document.getElementById('reports-search');
 
-            try {
-                const resp = await fetch('/api/sessions');
-                if (!resp.ok) {
-                    container.innerHTML = `<div class="px-4 py-8 text-center" style="color:var(--neon-red); font-size:0.85rem;">API error (${resp.status}). Is the backend running?</div>`;
-                    countEl.textContent = 'error';
+            if (!opts.fromCache || !__reportsCache) {
+                container.innerHTML = '<div class="px-4 py-8 text-center" style="color:#3a3a4a; font-size:0.85rem;">Loading sessions...</div>';
+                try {
+                    const resp = await fetch('/api/sessions');
+                    if (!resp.ok) {
+                        container.innerHTML = `<div class="px-4 py-8 text-center" style="color:var(--neon-red); font-size:0.85rem;">API error (${resp.status}). Is the backend running?</div>`;
+                        countEl.textContent = 'error';
+                        return;
+                    }
+                    const data = await resp.json();
+                    __reportsCache = Array.isArray(data) ? data : [];
+                } catch (err) {
+                    container.innerHTML = `<div class="px-4 py-8 text-center" style="color:var(--neon-red); font-size:0.85rem;">Error loading sessions: ${err.message}</div>`;
                     return;
                 }
-                const data = await resp.json();
-                const sessions = Array.isArray(data) ? data : [];
+            }
 
-                countEl.textContent = sessions.length + ' sessions';
+            const st = urlState();
+            // The INPUT is the source of truth while the operator is here; the
+            // URL is written from it. An earlier version copied the URL back
+            // into the input on every render, so any programmatic change was
+            // reverted to a stale query and the list filtered on something the
+            // box no longer said. The URL is read into the input only on load
+            // and on a real navigation — see urlApply.
+            const q = searchEl ? searchEl.value : '';
+            urlSet({q: q || '', sort: st.sort || '', dir: st.dir || ''});
 
-                if (sessions.length === 0) {
-                    container.innerHTML = '<div class="px-4 py-8 text-center" style="color:#3a3a4a; font-size:0.85rem;">No sessions found. Run a scan first.</div>';
-                    return;
-                }
+            listBindSort(view, key => {
+                const cur = urlState();
+                const dir = cur.sort === key && cur.dir !== 'desc' ? 'desc' : 'asc';
+                urlSet({sort: key, dir});
+                loadReportsList({fromCache: true});
+            });
+            listMarkSort(view, st.sort, st.dir);
 
+            const all = __reportsCache;
+            // Scoped to the selected customer when one is chosen, so the list
+            // agrees with the counts in the sidebar beside it.
+            const eng = (document.getElementById('side-engagement') || {}).value || '';
+            // Refuse to filter on a field the API does not send. Filtering on a
+            // missing key does not error — it silently returns nothing, and an
+            // empty list reads as "this customer has done no work".
+            const scopable = all.length === 0 || 'engagement_id' in all[0];
+            const scoped = (eng && scopable) ? all.filter(x => x.engagement_id === eng) : all;
+            const sessions = listApply(scoped, {
+                searchKeys: ['id', 'target_url', 'status', 'session_type', 'model'],
+                searchValue: q, sortKey: st.sort, sortDir: st.dir,
+            });
+
+            countEl.textContent = listCountLabel(sessions.length, all.length, 0, 'sessions')
+                + (eng && scopable ? ' · this customer' : '')
+                + (eng && !scopable ? ' · NOT scoped (API sends no engagement_id)' : '');
+
+            if (sessions.length === 0) {
+                // Two different situations, two different sentences. "No
+                // sessions found" when a filter is active sends the operator
+                // looking for a bug that is their own search box.
+                const msg = all.length === 0
+                    ? 'No sessions found. Run a scan first.'
+                    : (q ? `No session matches “${escapeHtml(q)}”.`
+                         : 'No sessions for this customer.');
+                container.innerHTML = `<div class="px-4 py-8 text-center" style="color:#3a3a4a; font-size:0.85rem;">${msg}</div>`;
+                return;
+            }
+
+            {
                 container.innerHTML = '';
                 for (const s of sessions) {
                     const row = document.createElement('div');
@@ -3268,8 +3468,6 @@
                     `;
                     container.appendChild(row);
                 }
-            } catch (err) {
-                container.innerHTML = `<div class="px-4 py-8 text-center" style="color:var(--neon-red); font-size:0.85rem;">Error loading sessions: ${err.message}</div>`;
             }
         }
 
@@ -5542,8 +5740,10 @@ ${htmlBody}
                     e.root_domain ? `${e.client_name} — ${e.root_domain}` : e.client_name,
                     e.id));
             }
-            sel.value = keep;
-            if (sel.value !== keep) sel.value = '';   // the engagement disappeared
+            const want = sel.dataset.pending || keep;
+            delete sel.dataset.pending;
+            sel.value = want;
+            if (sel.value !== want) sel.value = '';   // the engagement disappeared
             onEngagementPicked();
         }
 
@@ -5604,9 +5804,11 @@ ${htmlBody}
                 sel.add(new Option(
                     e.root_domain ? `${e.client_name} — ${e.root_domain}` : e.client_name, e.id));
             }
-            sel.value = keep;
-            if (sel.value !== keep) sel.value = '';
-            if (sel.value) sideRefresh();
+            const want = sel.dataset.pending || keep;
+            delete sel.dataset.pending;
+            sel.value = want;
+            if (sel.value !== want) sel.value = '';
+            if (sel.value) { sideEngagementPicked(); }
         }
 
         function sideEngagementPicked() {
@@ -5617,6 +5819,10 @@ ${htmlBody}
                 scan.value = sel.value;
                 if (typeof onEngagementPicked === 'function') onEngagementPicked();
             }
+            // The chosen customer belongs in the URL: it is the scope the rest
+            // of the app is being read through, so a pasted link has to carry
+            // it or the recipient sees a different application state.
+            urlSet({eng: sel.value || ''});
             sideRefresh();
         }
 
@@ -5639,8 +5845,9 @@ ${htmlBody}
 
             const a = d.asset_counts || {};
             document.getElementById('side-assets').innerHTML =
-                ['host', 'port', 'service', 'technology', 'endpoint']
-                    .map(k => sideCount(k + 's', a[k] || 0)).join('')
+                [['host', 'hosts'], ['port', 'ports'], ['service', 'services'],
+                 ['technology', 'technologies'], ['endpoint', 'endpoints']]
+                    .map(([k, label]) => sideCount(label, a[k] || 0)).join('')
                 || '<div class="side-empty">none yet</div>';
 
             const sev = d.findings_by_severity || {};
@@ -5673,6 +5880,24 @@ ${htmlBody}
         }
 
         // ===== Init =====
+        // The URL decides the first screen. Previously every reload — and every
+        // link anyone pasted — landed on the Scanner form regardless of what
+        // the operator had been reading.
+        (function bootFromUrl() {
+            const st = urlState();
+            if (st.eng) {
+                for (const id of ['side-engagement', 'session-engagement']) {
+                    const el = document.getElementById(id);
+                    if (el) el.dataset.pending = st.eng;   // applied once options load
+                }
+            }
+            if (st.q) {
+                const se = document.getElementById('reports-search');
+                if (se) se.value = st.q;
+            }
+            if (st.view && st.view !== 'scanner') switchView(st.view);
+        })();
+
         loadEngagementOptions();
         sideLoadEngagements();
         checkHealth();

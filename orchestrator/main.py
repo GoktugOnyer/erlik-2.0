@@ -5571,9 +5571,12 @@ async def list_sessions():
     db = await get_db()
     try:
         cursor = await db.execute(
+            # engagement_id is returned so the dashboard can scope this list to
+            # the selected customer. Without it the UI filtered on a field that
+            # was never sent, which does not error — it just empties the list.
             "SELECT id, target_url, scope_mode, session_type, vuln_category, status, "
             "total_steps, total_findings, total_duration_ms, created_at, "
-            "chain_id, chain_phase, chain_position "
+            "chain_id, chain_phase, chain_position, engagement_id "
             "FROM sessions ORDER BY created_at DESC"
         )
         rows = await cursor.fetchall()
