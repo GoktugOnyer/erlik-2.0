@@ -246,7 +246,9 @@ class TestAGuessIsNotKnowledge:
         """The juiceshop profile supplies real endpoints, so every recorded
         sweep against it must plan exactly as before: 19 runnable, 3 skipped."""
         plan = S.plan_sweep(_cases(client), BASE, "juiceshop")
-        assert plan["counts"] == {"runnable": 19, "skipped": 3, "total": 22}
+        assert plan["counts"]["runnable"] == 19
+        assert plan["counts"]["skipped"] == 3
+        assert plan["counts"]["cases"] == 22, "a case vanished from the plan"
 
     def test_an_unknown_target_skips_more_and_says_why(self, client):
         """The honest number for a target nobody has described."""
@@ -274,3 +276,79 @@ class TestAGuessIsNotKnowledge:
         for invented in ("parameter", "login_url"):
             assert invented not in derived_block, (
                 f"{invented!r} is back among the derived values")
+
+
+class TestDiscoveryFeedsThePlanner:
+    """`target_endpoints` had ZERO writers and ZERO readers — its only two
+    references in the repository were its own CREATE TABLE and its index. What
+    a producer discovered lived inside one chain run and died with it, so every
+    sweep began from the same bare URL the last one did.
+
+    Discovery is knowledge about THIS target, which is why it may satisfy a
+    required field that a guess may not.
+    """
+
+    DISC = {"url": ["http://target.test:8080/admin",
+                    "http://target.test:8080/backup"]}
+
+    def test_nothing_discovered_leaves_the_plan_identical(self, client):
+        """The whole feature must be inert until something is actually found."""
+        cases = _cases(client)
+        assert (S.plan_sweep(cases, BASE, "juiceshop")
+                == S.plan_sweep(cases, BASE, "juiceshop", discovered={}))
+        assert (S.plan_sweep(cases, BASE, "juiceshop")
+                == S.plan_sweep(cases, BASE, "juiceshop", discovered={"url": []}))
+
+    def test_a_case_is_fanned_over_discovered_endpoints(self, client):
+        case = [c for c in _cases(client) if c["id"] == "WSTG-CONF-04"]
+        plan = S.plan_sweep(case, BASE, "", discovered=self.DISC)
+        where = sorted(e["where"] for e in plan["runnable"])
+        assert where == [BASE, "http://target.test:8080/admin",
+                         "http://target.test:8080/backup"]
+
+    def test_the_base_url_is_not_replaced_by_discovery(self, client):
+        """Fanning over discovered values ALONE traded "test the site root" for
+        "test /admin" — one discovered path silently removed the base from the
+        plan. A coverage regression in the costume of a feature."""
+        case = [c for c in _cases(client) if c["id"] == "WSTG-CONF-04"]
+        plan = S.plan_sweep(case, BASE, "", discovered=self.DISC)
+        assert BASE in [e["where"] for e in plan["runnable"]]
+
+    def test_a_discovered_parameter_satisfies_what_a_guess_could_not(self, client):
+        """The pair that makes both changes worth having: refusing to invent a
+        parameter, and accepting a real one."""
+        case = [c for c in _cases(client) if c["id"] == "WSTG-INPV-19"]
+        assert S.plan_sweep(case, BASE, "")["counts"]["runnable"] == 0
+        found = S.plan_sweep(case, BASE, "", discovered={"parameter": ["imageUrl"]})
+        assert found["counts"]["runnable"] == 1
+        assert found["runnable"][0]["target"]["parameter"] == "imageUrl"
+
+    def test_a_parameter_is_not_padded_with_the_base(self, client):
+        """`url` has a legitimate default; `parameter` has none, which is the
+        entire point of refusing to invent one."""
+        case = [c for c in _cases(client) if c["id"] == "WSTG-INPV-19"]
+        plan = S.plan_sweep(case, BASE, "", discovered={"parameter": ["a", "b"]})
+        assert len(plan["runnable"]) == 2
+
+    def test_fan_out_is_capped(self, client):
+        case = [c for c in _cases(client) if c["id"] == "WSTG-CONF-04"]
+        many = {"url": [f"{BASE}/p{i}" for i in range(100)]}
+        plan = S.plan_sweep(case, BASE, "", discovered=many)
+        assert len(plan["runnable"]) <= S.MAX_FAN_OUT
+
+    def test_counts_separate_plan_entries_from_cases(self, client):
+        """Fanning one case over three endpoints makes three plan entries and
+        still one case. Conflating them would hide a dropped case behind a
+        bigger number."""
+        case = [c for c in _cases(client) if c["id"] == "WSTG-CONF-04"]
+        plan = S.plan_sweep(case, BASE, "", discovered=self.DISC)
+        assert plan["counts"]["total"] == 3
+        assert plan["counts"]["cases"] == 1
+
+    def test_every_fanned_entry_still_carries_scope(self, client):
+        """The fan-out builds a target per value; each must go through
+        build_target, not around it."""
+        case = [c for c in _cases(client) if c["id"] == "WSTG-CONF-04"]
+        plan = S.plan_sweep(case, BASE, "", discovered=self.DISC)
+        for e in plan["runnable"]:
+            assert e["target"]["scope"]["allow_hosts"] == ["target.test"]

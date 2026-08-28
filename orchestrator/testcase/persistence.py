@@ -76,6 +76,21 @@ async def save_run(result: RunResult, *, provider: str | None, model: str | None
                  "v2_testcase", f"v2:{f.test_case_id}:{f.step}",
                  await _asset_for(db, _eid, f.url)),
             )
+        # Persist what this run DISCOVERED, so the next sweep starts where this
+        # one ended instead of from the same bare URL. Best-effort: an
+        # inventory failure must never fail a run that already produced results.
+        try:
+            from orchestrator.testcase import endpoints as _EP
+            _t = result.target if isinstance(result.target, dict) else {}
+            _n = await _EP.record(db, _t.get("url") or _t.get("host") or "",
+                                  result.test_case_id, result.produced or {},
+                                  source="testcase")
+            if _n:
+                print(f"[endpoints {run_id[:8]}] recorded {_n} discovered "
+                      f"endpoint(s) for reuse", flush=True)
+        except Exception as e:  # noqa: BLE001
+            print(f"[endpoints {run_id[:8]}] skipped: {e}", flush=True)
+
         # Hand the results to the AI lane. Until now a deterministic run's
         # findings went only to v2_findings, which main.py never reads — so
         # every agent run started from a bare URL and rediscovered what a scan

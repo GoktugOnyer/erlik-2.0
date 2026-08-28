@@ -137,21 +137,76 @@ def build_target(case: dict[str, Any], base: str,
     return tgt, ""
 
 
+# One case fanned over a hundred discovered endpoints is a hundred runs. The
+# cap bounds a plan; the entries it drops are visible because the plan reports
+# how many values it fanned over.
+MAX_FAN_OUT = 25
+
+
+def _entry(case: dict[str, Any]) -> dict[str, Any]:
+    """The shape a plan row shares whether or not it was fanned out."""
+    return {"id": case.get("id"), "name": case.get("name"),
+            "category": case.get("category"), "severity": case.get("severity"),
+            "required": (case.get("target_schema") or {}).get("required") or [],
+            "optional": (case.get("target_schema") or {}).get("optional") or []}
+
+
 def plan_sweep(cases: list[dict[str, Any]], base: str, profile_name: str = "",
                only: list[str] | None = None,
-               extra: dict[str, Any] | None = None) -> dict[str, Any]:
-    """What a sweep WOULD do. Pure — no network, no database, no execution."""
+               extra: dict[str, Any] | None = None,
+               discovered: dict[str, list[str]] | None = None) -> dict[str, Any]:
+    """What a sweep WOULD do. Pure — no network, no database, no execution.
+
+    `discovered` is what earlier runs found for this target, shaped
+    {field: [values]} — see testcase.endpoints.as_sweep_inputs. It fans a case
+    out over real endpoints instead of running it once against the base URL,
+    and it can SATISFY a required field that would otherwise be a named skip.
+    Discovery is knowledge about this specific target; a default was a guess,
+    which is why one may fill a required field and the other may not.
+
+    With nothing discovered the plan is byte-identical to before.
+    """
     profile = PROFILES.get(profile_name or "", {})
     wanted = set(only or [])
+    discovered = {k: v for k, v in (discovered or {}).items() if v}
     runnable, skipped = [], []
     for case in cases:
         if wanted and case.get("id") not in wanted:
             continue
+        req = (case.get("target_schema") or {}).get("required") or []
+        fan_field = next(
+            (f for f in ("url", "parameter") if f in req and f in discovered), None)
+        if fan_field:
+            # The discovered values are ADDITIONAL targets, not replacements.
+            # Fanning over them alone traded "test the site root" for "test
+            # /ftp" — one discovered path silently removed the base URL from
+            # the plan, which is a coverage regression wearing the costume of a
+            # feature. `url` has a legitimate default (the base), so it leads;
+            # `parameter` has none, which is the whole point of refusing to
+            # invent one.
+            values = list(discovered[fan_field])
+            if fan_field == "url" and base not in values:
+                values.insert(0, base)
+            entries, reason = [], ""
+            for value in values[:MAX_FAN_OUT]:
+                t, w = build_target(case, base, profile,
+                                    {**(extra or {}), fan_field: value})
+                if t is None:
+                    reason = w
+                    break
+                entries.append((t, value))
+            if entries:
+                for t, value in entries:
+                    runnable.append({**_entry(case), "target": t,
+                                     "where": t.get("url") or t.get("login_url")
+                                              or t.get("host"),
+                                     "discovered": {fan_field: value}})
+                continue
+            if reason:
+                skipped.append({**_entry(case), "reason": reason})
+                continue
         tgt, why = build_target(case, base, profile, extra)
-        entry = {"id": case.get("id"), "name": case.get("name"),
-                 "category": case.get("category"), "severity": case.get("severity"),
-                 "required": (case.get("target_schema") or {}).get("required") or [],
-                 "optional": (case.get("target_schema") or {}).get("optional") or []}
+        entry = _entry(case)
         if tgt is None:
             skipped.append({**entry, "reason": why})
         else:
@@ -161,4 +216,12 @@ def plan_sweep(cases: list[dict[str, Any]], base: str, profile_name: str = "",
     return {"base": (base or "").rstrip("/"), "profile": profile_name or None,
             "runnable": runnable, "skipped": skipped,
             "counts": {"runnable": len(runnable), "skipped": len(skipped),
-                       "total": len(runnable) + len(skipped)}}
+                       # `total` counts PLAN ENTRIES, and fanning one case over
+                       # three endpoints makes three. `cases` counts distinct
+                       # test cases, which is what "did every case get a
+                       # verdict?" needs — the two diverge the moment discovery
+                       # is used, and conflating them would hide a dropped case
+                       # behind a larger number.
+                       "total": len(runnable) + len(skipped),
+                       "cases": len({e["id"] for e in runnable}
+                                    | {e["id"] for e in skipped})}}

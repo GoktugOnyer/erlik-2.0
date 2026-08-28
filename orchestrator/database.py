@@ -484,10 +484,24 @@ async def init_db():
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        # target_endpoints keys on an engagement_targets id, and the
+        # deterministic lane usually runs without an engagement — which is why
+        # the table sat empty. It gains the same host:port key recon_context and
+        # the handoff already use, so a discovered endpoint survives whether or
+        # not a customer record exists. target_id stays for the engagement case
+        # and is written as '' when there is none, because SQLite cannot drop a
+        # NOT NULL without rebuilding the table and the column has no rows.
+        try:
+            await db.execute(
+                "ALTER TABLE target_endpoints ADD COLUMN target_key TEXT DEFAULT NULL")
+        except Exception:
+            pass  # column already exists
+
         for tbl, idx, cols in (
             ("engagement_scope", "idx_scope_engagement", "engagement_id"),
             ("engagement_targets", "idx_targets_engagement", "engagement_id"),
             ("target_endpoints", "idx_endpoints_target", "target_id"),
+            ("target_endpoints", "idx_endpoints_target_key", "target_key"),
         ):
             try:
                 await db.execute(

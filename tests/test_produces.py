@@ -244,3 +244,122 @@ class TestHarvestIsActuallyCalled:
             r = asyncio.run(R.run_test_case(tc, {"scope": {}}))
         assert r.produced["endpoint"] == [
             "/ftp", "/admin", "/api/internal", "/backup", "/public"]
+
+
+class TestDiscoveredEndpointsPersist:
+    """The table existed with zero writers and zero readers. These assert the
+    round trip and the properties that keep a stored row from becoming a
+    liability."""
+
+    @staticmethod
+    def _db(tmp_path, monkeypatch):
+        import orchestrator.database as db_mod
+        monkeypatch.setattr(db_mod, "DB_PATH", str(tmp_path / "e.db"))
+        return db_mod
+
+    def test_round_trip(self, tmp_path, monkeypatch):
+        import asyncio
+        from orchestrator.testcase import endpoints as EP
+        db_mod = self._db(tmp_path, monkeypatch)
+
+        async def go():
+            await db_mod.init_db()
+            db = await db_mod.get_db()
+            n = await EP.record(db, "http://t.example", "WSTG-INFO-03",
+                                {"url": ["http://t.example/admin",
+                                         "http://t.example/backup"]})
+            await db.commit()
+            rows = await EP.known(db, "http://t.example")
+            await db.close()
+            return n, rows
+
+        n, rows = asyncio.run(go())
+        assert n == 2
+        assert sorted(r["path"] for r in rows) == ["/admin", "/backup"]
+
+    def test_recording_is_idempotent(self, tmp_path, monkeypatch):
+        """A sweep that revisits a site must not multiply its own inventory."""
+        import asyncio
+        from orchestrator.testcase import endpoints as EP
+        db_mod = self._db(tmp_path, monkeypatch)
+
+        async def go():
+            await db_mod.init_db()
+            db = await db_mod.get_db()
+            for _ in range(3):
+                await EP.record(db, "http://t.example", "X",
+                                {"url": ["http://t.example/a"]})
+            await db.commit()
+            rows = await EP.known(db, "http://t.example")
+            await db.close()
+            return rows
+
+        assert len(asyncio.run(go())) == 1
+
+    def test_paths_not_absolute_urls_are_stored(self, tmp_path, monkeypatch):
+        """The scheme and authority come from whatever base a later sweep is
+        planning against, so a stored row cannot smuggle in a different host."""
+        import asyncio
+        from orchestrator.testcase import endpoints as EP
+        db_mod = self._db(tmp_path, monkeypatch)
+
+        async def go():
+            await db_mod.init_db()
+            db = await db_mod.get_db()
+            await EP.record(db, "http://t.example", "X",
+                            {"url": ["http://t.example/admin"]})
+            await db.commit()
+            rows = await EP.known(db, "http://t.example")
+            await db.close()
+            return rows
+
+        rows = asyncio.run(go())
+        assert rows[0]["path"] == "/admin"
+        assert "t.example" not in rows[0]["path"]
+
+    def test_a_stored_row_cannot_retarget_another_host(self):
+        """as_sweep_inputs rebuilds from the CALLER's base, never from
+        anything stored."""
+        from orchestrator.testcase import endpoints as EP
+        got = EP.as_sweep_inputs([{"path": "/admin", "params": []}],
+                                 "http://other.example")
+        assert got == {"url": ["http://other.example/admin"]}
+
+    def test_targets_are_keyed_by_host_and_port(self):
+        from orchestrator.testcase import endpoints as EP
+        assert EP.target_key("http://t.example/x") == "t.example:80"
+        assert EP.target_key("https://t.example/x") == "t.example:443"
+        assert EP.target_key("http://t.example:8080") == "t.example:8080"
+
+    def test_the_key_matches_the_handoffs(self):
+        """recon_context and the handoff already key on host:port. A second
+        convention would mean discovery and recon never see each other's work."""
+        from orchestrator.testcase import endpoints as EP
+        from orchestrator.handoff import target_key as handoff_key
+        for u in ("http://a.test", "https://b.test:8443/x", "c.test:99"):
+            assert EP.target_key(u) == handoff_key(u)
+
+    def test_injectable_values_never_reach_the_table(self, tmp_path, monkeypatch):
+        import asyncio
+        from orchestrator.testcase import endpoints as EP
+        db_mod = self._db(tmp_path, monkeypatch)
+
+        async def go():
+            await db_mod.init_db()
+            db = await db_mod.get_db()
+            n = await EP.record(db, "http://t.example", "X",
+                                {"url": ["http://t.example/a$(id)"]})
+            await db.commit()
+            rows = await EP.known(db, "http://t.example")
+            await db.close()
+            return n, rows
+
+        n, rows = asyncio.run(go())
+        assert n == 0 and rows == []
+
+    def test_the_deterministic_lane_calls_the_writer(self):
+        """Wiring guard — the table sat empty because nothing wrote to it."""
+        import pathlib
+        src = (pathlib.Path(__file__).resolve().parents[1] / "orchestrator"
+               / "testcase" / "persistence.py").read_text()
+        assert "endpoints as _EP" in src and "_EP.record(" in src
