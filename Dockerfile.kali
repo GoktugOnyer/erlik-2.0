@@ -121,6 +121,35 @@ RUN ARCH=$(dpkg --print-architecture) && \
         || echo "[erlik] WARN: ${TOOL} install failed — recon degrades without it"; \
     done
 
+# ===== Rekono-parity toolset =====
+# Nine tools erlik lacked that a working pentester expects, all in Kali's own
+# repositories. Chosen to close specific gaps rather than to lengthen a list:
+#
+#   theharvester  OSINT — emails and subdomains from public sources
+#   dirsearch     content discovery (alternative shape to ffuf/gobuster)
+#   sslscan       TLS cipher/protocol audit (sslyze's faster complement)
+#   gitleaks      exposed secrets in a repository or a dumped .git
+#   ssh-audit     SSH algorithm and key exchange audit
+#   smbmap        SMB share enumeration
+#   cmseek        CMS identification
+#   joomscan      Joomla-specific checks
+#   exploitdb     provides `searchsploit` — LOOKUP ONLY, never exploitation
+#
+# Metasploit is already present in the base image but is deliberately NOT
+# registered as an erlik tool: `searchsploit` answers "is there a known exploit"
+# without the agent being handed a working exploitation framework.
+#
+# Best-effort, matching every other tool step: a repository hiccup must not
+# break an image that carries everything else. A tool that fails to install
+# reports "not installed" at runtime rather than failing a scan silently.
+RUN apt-get update && \
+    ( apt-get install -y --no-install-recommends \
+        theharvester dirsearch sslscan gitleaks ssh-audit \
+        smbmap cmseek joomscan exploitdb \
+      && echo "[erlik] rekono-parity toolset installed" ) \
+    || echo "[erlik] WARN: part of the parity toolset failed to install" ; \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
 # ===== ZAP CLI helper script =====
 RUN echo '#!/bin/bash\n\
 # Wrapper to call ZAP API from kali container\n\

@@ -862,3 +862,96 @@ class TestTheEngagementPageAnswersWhatHappened:
             assert "counts" in out and "asset_counts" in out
         finally:
             db_mod.DB_PATH = old
+
+
+class TestTheParityToolsetIsReachable:
+    """Nine tools a working pentester expects that erlik did not have.
+
+    A tool counts only when all three hold: registered with a timeout, enabled
+    by default, and installed in the image. Two of the three is the shape that
+    keeps biting — a tool declared but absent reports a failed scan, and a tool
+    installed but undeclared can never be selected.
+    """
+
+    NEW = ["theHarvester", "dirsearch", "sslscan", "ssh-audit", "smbmap",
+           "gitleaks", "cmseek", "joomscan", "searchsploit"]
+
+    def test_every_new_tool_has_a_timeout(self):
+        from orchestrator.tool_executor import TOOL_TIMEOUTS
+        for t in self.NEW:
+            assert t in TOOL_TIMEOUTS, f"{t} would fall back to the 60s default"
+
+    def test_every_new_tool_is_enabled_by_default(self):
+        from orchestrator.models import _DEFAULT_TOOLS
+        for t in self.NEW:
+            assert t in _DEFAULT_TOOLS, f"{t} can never be selected"
+
+    def test_every_registered_tool_has_a_timeout(self):
+        """Guard on the whole registry, not just the new rows."""
+        from orchestrator.models import _DEFAULT_TOOLS
+        from orchestrator.tool_executor import TOOL_TIMEOUTS
+        missing = [t for t in _DEFAULT_TOOLS if t not in TOOL_TIMEOUTS]
+        assert not missing, missing
+
+    def test_the_image_installs_them(self):
+        """Anchored to the apt-get INSTALL LINE, not the file.
+
+        The first version searched the whole Dockerfile and passed with the
+        package deleted from the install list, because every tool is also
+        named in the comment block above it. A test that a comment satisfies
+        is not a test."""
+        import re
+        from pathlib import Path
+        docker = Path("Dockerfile.kali").read_text()
+        m = re.search(r"apt-get install -y --no-install-recommends\s*\\\s*\n"
+                      r"((?:\s+[a-z0-9.\-+ ]+\\?\s*\n)+?)\s*&&\s*echo \"\[erlik\] rekono-parity",
+                      docker)
+        assert m, "the parity install step is gone from Dockerfile.kali"
+        packages = set(m.group(1).replace("\\", " ").split())
+        for t in ("theharvester", "dirsearch", "sslscan", "gitleaks",
+                  "ssh-audit", "smbmap", "cmseek", "joomscan", "exploitdb"):
+            assert t in packages, (
+                f"{t} is registered but is not in the apt install list "
+                f"(found: {sorted(packages)})")
+
+    def test_the_fixed_size_presets_were_not_grown(self):
+        """core_10 / standard_20 / full_30 are experiment ARMS — their sizes
+        are the independent variable in the action-space measurements, so
+        adding tools to them would silently invalidate every recorded
+        comparison."""
+        from orchestrator.main import TOOLSET_PRESETS
+        assert len(TOOLSET_PRESETS["core_10"]["tools"]) == 10
+        assert len(TOOLSET_PRESETS["standard_20"]["tools"]) == 20
+        assert len(TOOLSET_PRESETS["full_30"]["tools"]) == 30
+
+    def test_metasploit_is_not_registered(self):
+        """It is present in the base image. searchsploit answers "does an
+        exploit exist" without handing an agent a working exploitation
+        framework, which is a different decision from "can it look things up"."""
+        from orchestrator.tool_executor import TOOL_TIMEOUTS
+        from orchestrator.models import _DEFAULT_TOOLS
+        for name in ("msfconsole", "metasploit", "msfvenom"):
+            assert name not in TOOL_TIMEOUTS
+            assert name not in _DEFAULT_TOOLS
+
+    def test_the_agent_is_taught_the_working_gitleaks_form(self):
+        """`detect --no-git` was REMOVED in gitleaks 8 and silently reports
+        "no leaks found" — verified against a planted Slack token, which only
+        `dir` finds. Teaching the dead form would produce a confident clean
+        result from a scan that examined nothing."""
+        import inspect
+        import orchestrator.main as M
+        src = inspect.getsource(M)
+        i = src.index("TOOL USAGE EXAMPLES")
+        block = src[i:i + 3000]
+        assert "gitleaks dir" in block
+        assert "detect --no-git" not in block.split("NOTE:")[0]
+
+    def test_searchsploit_is_described_as_lookup_only(self):
+        import inspect
+        import orchestrator.main as M
+        src = inspect.getsource(M)
+        i = src.index("TOOL USAGE EXAMPLES")
+        block = src[i:i + 3000]
+        j = block.index("searchsploit")
+        assert "LOOKUP ONLY" in block[j:j + 200]

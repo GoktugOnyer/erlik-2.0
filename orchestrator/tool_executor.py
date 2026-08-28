@@ -83,6 +83,22 @@ TOOL_TIMEOUTS = {
     "pw-crawl": 30,
     "interactive-pw": 180,  # scriptable Playwright recipe runner
     "zap-cli": 300,
+    # OSINT & discovery (Rekono parity)
+    "theHarvester": 180,   # queries many third-party sources; slow by nature
+    "dirsearch": 180,
+    # TLS / SSH / SMB
+    "sslscan": 60,
+    "ssh-audit": 60,
+    "smbmap": 90,
+    # Secrets & CMS
+    "gitleaks": 120,
+    "cmseek": 120,
+    "joomscan": 180,
+    # Exploit LOOKUP, not execution. searchsploit reads a local database and
+    # runs nothing at the target; Metasploit is present in the image but is
+    # deliberately not registered, so an agent can learn an exploit exists
+    # without being handed a framework to fire it.
+    "searchsploit": 30,
     # Utilities
     "curl": 30,
     "netcat": 30,

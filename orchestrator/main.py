@@ -1110,6 +1110,15 @@ TOOL USAGE EXAMPLES (use the target URL {target_url} — NEVER use any other hos
 - zap-cli alerts {target_url}
 - pw-crawl {target_url}  (JS-rendered crawl — finds SPA routes and API calls that static tools miss)
 - nikto -h {target_url}
+- dirsearch -u {target_url} -q --no-color   (content discovery; different wordlist shape to ffuf/gobuster)
+- cmseek -u {target_url} --batch --follow-redirect   (identify the CMS before guessing at it)
+- joomscan --url {target_url}   (only worth running once cmseek says Joomla)
+- sslscan --no-colour {target_host}:443   (TLS ciphers/protocols; HTTP-only targets have nothing to report)
+- ssh-audit {target_host}:22   (only if nmap actually found ssh open)
+- smbmap -H {target_host}   (only if nmap found 139/445 open)
+- searchsploit <product> <version>   (LOOKUP ONLY against a local database — proves an exploit EXISTS, runs nothing at the target)
+- gitleaks dir <path>   (secrets in a dumped .git or downloaded source. NOTE: `detect --no-git` was REMOVED in gitleaks 8 and silently reports "no leaks found" — always use `dir` or `git`)
+- theHarvester -d <domain> -b crtsh,duckduckgo -l 100   (passive OSINT: third-party datasets only, never the target)
 
 AVAILABLE RESOURCES ON THIS SYSTEM:
 - Wordlists: /usr/share/dirb/wordlists/common.txt, /usr/share/wordlists/rockyou.txt

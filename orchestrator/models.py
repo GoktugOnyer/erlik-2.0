@@ -16,6 +16,13 @@ _DEFAULT_TOOLS: list[str] = [
     "hydra", "john", "hashcat", "jwt_tool",
     # Browser & Automation
     "playwright", "pw-crawl", "zap-cli",
+    # OSINT, discovery, TLS/SSH/SMB, secrets, CMS, exploit lookup.
+    # Added to the DEFAULT set only. The three named presets (core_10 /
+    # standard_20 / full_30) are fixed-size experiment arms — their sizes are
+    # the independent variable in the action-space measurements, so growing
+    # them would silently invalidate every recorded comparison.
+    "theHarvester", "dirsearch", "sslscan", "ssh-audit", "smbmap",
+    "gitleaks", "cmseek", "joomscan", "searchsploit",
     # Utilities
     "curl", "netcat",
     # Capability helpers (added 2026-04-06 for RQ3-b action-space ablation)
