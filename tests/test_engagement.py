@@ -1558,3 +1558,226 @@ class TestTheEngagementRecordIsEditableAndKeepsHistory:
         html = Path("dashboard/templates/index.html").read_text()
         block = js_body(html, "async function engSave() {")
         assert block.index("engRender(d)") < block.index("engSaveMessage(")
+
+
+class TestSeverityHasOneDefinition:
+    """`calibrated_severity` is written by an LLM pass, and the corpus contains
+    'CRITICAL', 'MEDIUM' and '** CRITICAL' — markdown bold that leaked out of a
+    model response into the column.
+
+    Returned raw, those become distinct severity buckets: a rollup shows
+    "** CRITICAL 1" beside "critical 3", and a filter for critical silently
+    misses the starred rows. Against the live corpus the critical filter
+    returned 10 findings when the answer was 11.
+    """
+
+    CASES = [
+        ("** CRITICAL", "critical"), ("CRITICAL", "critical"), ("critical", "critical"),
+        ("  High ", "high"), ("**medium**", "medium"), ("LOW", "low"),
+        ("bogus", "info"), ("", "info"), (None, "info"), ("  ", "info"), ("**", "info"),
+    ]
+
+    def test_normalisation_maps_dirty_values_onto_the_five_levels(self):
+        from orchestrator.submission_policy import normalise_severity, SEVERITIES
+        for raw, expect in self.CASES:
+            assert normalise_severity(raw) == expect, raw
+            assert normalise_severity(raw) in SEVERITIES
+
+    def test_an_unrecognised_severity_becomes_info_not_itself(self):
+        """Never invented: an unknown string must not become a sixth bucket."""
+        from orchestrator.submission_policy import normalise_severity
+        assert normalise_severity("catastrophic") == "info"
+
+    def test_current_severity_normalises_and_keeps_precedence(self):
+        from orchestrator.submission_policy import current_severity
+        assert current_severity({"severity": "high",
+                                 "calibrated_severity": "** CRITICAL"}) == "critical"
+        assert current_severity({"severity": "high", "calibrated_severity": "** CRITICAL",
+                                 "severity_override": "LOW"}) == "low"
+
+    def test_the_sql_expression_agrees_with_the_python_one(self, tmp_path):
+        """DIFFERENTIAL. The filter runs in SQL because severity is filtered and
+        ordered on, and a Python pass after LIMIT would return "the newest 500,
+        of which some are critical" while claiming to be "the criticals". Two
+        implementations of one definition must be shown to agree, not assumed
+        to."""
+        import asyncio
+        import itertools
+        import orchestrator.database as db_mod
+        from orchestrator.main import _EFFECTIVE_SEVERITY
+        from orchestrator.submission_policy import current_severity
+
+        values = [v for v, _ in self.CASES] + ["Medium", "INFO"]
+        combos = list(itertools.product(values, values, values))
+
+        old = db_mod.DB_PATH
+        db_mod.DB_PATH = str(tmp_path / "sev.db")
+        try:
+            async def go():
+                await db_mod.init_db()
+                db = await db_mod.get_db()
+                await db.execute(
+                    "INSERT INTO sessions (id,target_url,scope_mode,model,enabled_tools,status) "
+                    "VALUES ('s','http://a','full','m','curl','completed')")
+                for i, (sev, cal, ovr) in enumerate(combos):
+                    await db.execute(
+                        "INSERT INTO findings (id,session_id,vuln_type,url,severity,"
+                        "calibrated_severity,severity_override) VALUES (?,?,?,?,?,?,?)",
+                        (i, "s", "x", "http://a", sev, cal, ovr))
+                await db.commit()
+                rows = await (await db.execute(
+                    f"SELECT id, {_EFFECTIVE_SEVERITY} FROM findings f")).fetchall()
+                await db.close()
+                return rows
+            rows = asyncio.run(go())
+        finally:
+            db_mod.DB_PATH = old
+
+        assert len(rows) == len(combos)
+        bad = []
+        for fid, sql_val in rows:
+            sev, cal, ovr = combos[fid]
+            py = current_severity({"severity": sev, "calibrated_severity": cal,
+                                   "severity_override": ovr})
+            if py != sql_val:
+                bad.append((combos[fid], py, sql_val))
+        assert not bad, f"SQL and Python disagree on {len(bad)} of {len(combos)}: {bad[:5]}"
+
+
+class TestFindingsAcrossEngagements:
+    """Findings were reachable only one session at a time, so "show me every
+    critical" was a question erlik could not answer."""
+
+    @staticmethod
+    def _client(tmp_path, rows, engagement=True):
+        import asyncio
+        import warnings
+        warnings.filterwarnings("ignore", category=DeprecationWarning)
+        from fastapi.testclient import TestClient
+        import orchestrator.database as db_mod
+        import orchestrator.main as M
+
+        db_mod.DB_PATH = str(tmp_path / "fx.db")
+
+        async def seed():
+            await db_mod.init_db()
+            db = await db_mod.get_db()
+            eid = None
+            if engagement:
+                from orchestrator import engagement as E
+                eid = await E.create(db, "Acme", "acme.example")
+            await db.execute(
+                "INSERT INTO sessions (id,target_url,scope_mode,model,enabled_tools,"
+                "status,engagement_id) VALUES ('s1','http://a','full','m','curl',"
+                "'completed',?)", (eid,))
+            for vt, sev, cal, tri in rows:
+                await db.execute(
+                    "INSERT INTO findings (session_id,vuln_type,severity,url,"
+                    "calibrated_severity,triage_status) VALUES ('s1',?,?,?,?,?)",
+                    (vt, sev, "http://a/x", cal, tri))
+            await db.commit()
+            await db.close()
+            return eid
+
+        eid = asyncio.run(seed())
+        return TestClient(M.app), eid
+
+    def test_findings_with_no_engagement_are_shown_not_hidden(self, tmp_path):
+        """THE trap. Every finding recorded before engagements existed has a
+        session and no engagement — 462 of them. An inner join returns an empty
+        list, which reads as "no findings exist" rather than "none assigned"."""
+        import orchestrator.database as db_mod
+        old = db_mod.DB_PATH
+        try:
+            c, _ = self._client(tmp_path, [("SQLi", "critical", None, None)],
+                                engagement=False)
+            d = c.get("/api/findings").json()
+            assert d["counts"]["total"] == 1, "an unassigned finding vanished"
+            assert d["counts"]["unassigned"] == 1
+            assert d["findings"][0]["engagement_id"] is None
+        finally:
+            db_mod.DB_PATH = old
+
+    def test_a_dirty_calibrated_severity_still_matches_its_filter(self, tmp_path):
+        """The live corpus check that started this: severity=critical returned
+        10 when the answer was 11, because one row said '** CRITICAL'."""
+        import orchestrator.database as db_mod
+        old = db_mod.DB_PATH
+        try:
+            c, _ = self._client(tmp_path, [
+                ("A", "high", "** CRITICAL", None),
+                ("B", "critical", None, None),
+            ])
+            d = c.get("/api/findings?severity=critical").json()
+            assert d["counts"]["total"] == 2, d["counts"]
+            assert set(d["counts"]["by_severity"]) == {"critical"}
+        finally:
+            db_mod.DB_PATH = old
+
+    def test_open_is_the_default_and_triaged_out_is_still_reachable(self, tmp_path):
+        import orchestrator.database as db_mod
+        old = db_mod.DB_PATH
+        try:
+            c, _ = self._client(tmp_path, [
+                ("A", "high", None, None), ("B", "high", None, "rejected"),
+            ])
+            assert c.get("/api/findings").json()["counts"]["total"] == 1
+            assert c.get("/api/findings?status=all").json()["counts"]["total"] == 2
+            assert c.get("/api/findings?status=rejected").json()["counts"]["total"] == 1
+        finally:
+            db_mod.DB_PATH = old
+
+    def test_it_scopes_to_one_customer(self, tmp_path):
+        import orchestrator.database as db_mod
+        old = db_mod.DB_PATH
+        try:
+            c, eid = self._client(tmp_path, [("A", "high", None, None)])
+            assert c.get(f"/api/findings?engagement_id={eid}").json()["counts"]["total"] == 1
+            assert c.get("/api/findings?engagement_id=nope").json()["counts"]["total"] == 0
+        finally:
+            db_mod.DB_PATH = old
+
+    def test_the_page_reports_total_and_returned_separately(self, tmp_path):
+        """A page of 500 out of 4,000 renders identically to the complete set
+        unless the difference is stated."""
+        import orchestrator.database as db_mod
+        old = db_mod.DB_PATH
+        try:
+            c, _ = self._client(tmp_path, [(f"V{i}", "low", None, None) for i in range(8)])
+            d = c.get("/api/findings?limit=3").json()
+            assert d["counts"]["total"] == 8
+            assert d["counts"]["returned"] == 3
+            assert d["counts"]["limit"] == 3
+        finally:
+            db_mod.DB_PATH = old
+
+    def test_the_severity_filter_is_applied_before_the_limit(self, tmp_path):
+        """Filtering after LIMIT returns "the newest N, of which some are
+        critical" while claiming to be "the criticals"."""
+        import orchestrator.database as db_mod
+        old = db_mod.DB_PATH
+        try:
+            rows = [(f"L{i}", "low", None, None) for i in range(30)]
+            rows.append(("THE-CRITICAL", "critical", None, None))
+            c, _ = self._client(tmp_path, rows)
+            d = c.get("/api/findings?severity=critical&limit=5").json()
+            assert d["counts"]["total"] == 1
+            assert [f["vuln_type"] for f in d["findings"]] == ["THE-CRITICAL"]
+        finally:
+            db_mod.DB_PATH = old
+
+    def test_the_view_exists_and_is_registered(self):
+        from pathlib import Path
+        html = Path("dashboard/templates/index.html").read_text()
+        assert 'id="view-findings"' in html and 'id="nav-findings"' in html
+        body = js_body(html, "function switchView(view) {")
+        assert "'findings'" in body and "loadFindings()" in body
+
+    def test_the_rows_are_escaped(self):
+        """vuln_type and url come from tool output."""
+        from pathlib import Path
+        block = js_body(Path("dashboard/templates/index.html").read_text(),
+                        "async function fxFetch() {")
+        assert "escapeHtml(r.vuln_type" in block
+        assert "escapeHtml(r.url" in block
+        assert "escapeHtml(r.client_name)" in block

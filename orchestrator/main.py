@@ -5268,6 +5268,106 @@ async def get_engagement(engagement_id: str):
     return out
 
 
+# Effective severity, in SQL. Must stay identical to
+# submission_policy.current_severity, which is the one definition of what a
+# report would show — a test compares the two across a matrix of inputs rather
+# than trusting that they were written to match.
+#
+# It is expressed in SQL rather than computed in Python because it is FILTERED
+# and ORDERED on: applying a LIMIT first and then re-deriving severity would
+# return "the 500 newest findings, of which some are critical" while claiming
+# to be "the critical findings".
+_EFFECTIVE_SEVERITY = (
+    "CASE WHEN LOWER(TRIM(COALESCE(NULLIF(TRIM(f.severity_override),''), "
+    "NULLIF(TRIM(f.calibrated_severity),''), NULLIF(TRIM(f.severity),''), 'info'), ' *')) "
+    "IN ('critical','high','medium','low','info') "
+    "THEN LOWER(TRIM(COALESCE(NULLIF(TRIM(f.severity_override),''), "
+    "NULLIF(TRIM(f.calibrated_severity),''), NULLIF(TRIM(f.severity),''), 'info'), ' *')) "
+    "ELSE 'info' END")
+
+# Rank for ordering. SQLite has no natural order for these strings.
+_SEVERITY_RANK = ("CASE " + _EFFECTIVE_SEVERITY +
+                  " WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 "
+                  "WHEN 'low' THEN 3 ELSE 4 END")
+
+FINDINGS_PAGE_LIMIT = 500
+
+
+@app.get("/api/findings")
+async def list_findings(engagement_id: str | None = None, severity: str | None = None,
+                        status: str = "open", q: str | None = None,
+                        limit: int = FINDINGS_PAGE_LIMIT):
+    """Findings ACROSS engagements — "every critical, all customers".
+
+    Everything before this was per-session: /api/sessions/{id}/findings. There
+    was no way to ask a question that spans an engagement, let alone all of
+    them, which is the one thing an operator wants on a Monday morning.
+
+    LEFT JOIN, deliberately. All 462 findings recorded before engagements
+    existed have a session and NO engagement, so an inner join returns an empty
+    list — which reads as "no findings exist" rather than "none are assigned".
+    They are returned with engagement_id NULL and counted separately.
+
+    `status` defaults to OPEN, matching the badges. The rejected ones are still
+    counted and reachable with status=all|rejected, so triage never looks like
+    deletion.
+    """
+    limit = max(1, min(int(limit or FINDINGS_PAGE_LIMIT), 2000))
+    where, params = [], []
+
+    if engagement_id:
+        where.append("s.engagement_id = ?")
+        params.append(engagement_id)
+    if severity:
+        wanted = [x.strip().lower() for x in severity.split(",") if x.strip()]
+        if wanted:
+            where.append(f"LOWER({_EFFECTIVE_SEVERITY}) IN ({','.join('?' * len(wanted))})")
+            params.extend(wanted)
+    st = (status or "open").lower()
+    if st == "open":
+        where.append("COALESCE(LOWER(f.triage_status),'') NOT IN ('rejected','false_positive')")
+    elif st == "rejected":
+        where.append("COALESCE(LOWER(f.triage_status),'') IN ('rejected','false_positive')")
+    if q:
+        where.append("(LOWER(f.vuln_type) LIKE ? OR LOWER(f.url) LIKE ?)")
+        params.extend([f"%{q.lower()}%"] * 2)
+
+    clause = (" WHERE " + " AND ".join(where)) if where else ""
+    base = ("FROM findings f LEFT JOIN sessions s ON s.id = f.session_id "
+            "LEFT JOIN engagements e ON e.id = s.engagement_id" + clause)
+
+    db = await get_db()
+    try:
+        total = (await (await db.execute(f"SELECT COUNT(*) {base}", params)).fetchone())[0]
+        rows = [dict(r) for r in await (await db.execute(
+            f"SELECT f.id, f.vuln_type, {_EFFECTIVE_SEVERITY} AS severity, f.severity AS raw_severity, "
+            f"f.url, f.triage_status, f.created_at, f.session_id, "
+            f"s.engagement_id, s.target_url, e.client_name "
+            f"{base} ORDER BY {_SEVERITY_RANK}, f.id DESC LIMIT ?",
+            params + [limit])).fetchall()]
+
+        by_sev = {r[0]: r[1] for r in await (await db.execute(
+            f"SELECT {_EFFECTIVE_SEVERITY} sev, COUNT(*) {base} GROUP BY sev", params)).fetchall()}
+        unassigned = (await (await db.execute(
+            f"SELECT COUNT(*) {base}" + (" AND " if where else " WHERE ")
+            + "s.engagement_id IS NULL", params)).fetchone())[0]
+    finally:
+        await db.close()
+
+    return {
+        "findings": rows,
+        "counts": {
+            # `total` is what the filter matched; `returned` is what came back.
+            # Both, because a page of 500 out of 4,000 renders identically to
+            # the complete set unless the difference is stated.
+            "total": total, "returned": len(rows), "limit": limit,
+            "by_severity": by_sev, "unassigned": unassigned,
+        },
+        "filter": {"engagement_id": engagement_id, "severity": severity,
+                   "status": st, "q": q},
+    }
+
+
 @app.put("/api/engagements/{engagement_id}")
 async def update_engagement(engagement_id: str, body: dict):
     """Correct an engagement record. Explicit save, previous value retained.

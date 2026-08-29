@@ -177,16 +177,38 @@ def reset_cache() -> None:
     _CACHE = None
 
 
+# The five levels, and nothing else. `calibrated_severity` is written by an LLM
+# pass and the corpus contains 'CRITICAL', 'MEDIUM' and '** CRITICAL' — markdown
+# bold that leaked out of a model response and into the column. Returned raw,
+# those become distinct severity buckets: a rollup shows "** CRITICAL 1" beside
+# "critical 3", and a filter for critical silently misses the starred rows.
+SEVERITIES = ("critical", "high", "medium", "low", "info")
+
+# SQL equivalent of `normalise_severity`, for use where severity is FILTERED or
+# ORDERED on and a Python pass would come after LIMIT. TRIM(x, ' *') strips any
+# leading/trailing spaces and asterisks. A test compares the two across a matrix
+# of real corpus values rather than trusting they were written to match.
+SQL_NORMALISE = "LOWER(TRIM({col}, ' *'))"
+
+
+def normalise_severity(value: str | None) -> str:
+    """One of SEVERITIES. Anything unrecognised is 'info', never invented."""
+    v = (value or "").strip().strip("*").strip().lower()
+    return v if v in SEVERITIES else "info"
+
+
 def current_severity(finding: dict) -> str:
     """The severity a report would show, before policy.
 
     Re-derived on every call rather than stamped at write time, so escalation
-    by the calibration pass or by NVD enrichment is respected.
+    by the calibration pass or by NVD enrichment is respected. NORMALISED,
+    because the columns it reads are not clean.
     """
-    return (finding.get("severity_override")
-            or finding.get("calibrated_severity")
-            or finding.get("severity")
-            or "info")
+    for key in ("severity_override", "calibrated_severity", "severity"):
+        raw = finding.get(key)
+        if raw and str(raw).strip():
+            return normalise_severity(raw)
+    return "info"
 
 
 def classify(finding: dict, rules: list[Rule]) -> Decision:
