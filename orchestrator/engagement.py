@@ -204,6 +204,12 @@ async def add_target(db, engagement_id: str, base_url: str, **kw) -> str:
     return tid
 
 
+# How many rows the summary returns per list. Named, and reported back to the
+# caller in `returned`, because a cap the UI cannot see is a cap the UI cannot
+# label — and an unlabelled truncation reads as the complete set.
+SUMMARY_ROW_LIMIT = 200
+
+
 async def summary(db, engagement_id: str) -> dict[str, Any]:
     """Everything recorded under one customer — the customer page's data."""
     e = await (await db.execute(
@@ -223,11 +229,11 @@ async def summary(db, engagement_id: str) -> dict[str, Any]:
     out["sessions"] = [dict(r) for r in await (await db.execute(
         "SELECT id, target_url, status, created_at, total_steps, total_duration_ms, "
         "session_type, model FROM sessions "
-        "WHERE engagement_id = ? ORDER BY created_at DESC LIMIT 200",
+        f"WHERE engagement_id = ? ORDER BY created_at DESC LIMIT {SUMMARY_ROW_LIMIT}",
         (engagement_id,))).fetchall()]
     out["v2_runs"] = [dict(r) for r in await (await db.execute(
         "SELECT id, test_case_id, created_at, duration_ms, model, stopped_early "
-        "FROM v2_runs WHERE engagement_id = ? ORDER BY created_at DESC LIMIT 200",
+        f"FROM v2_runs WHERE engagement_id = ? ORDER BY created_at DESC LIMIT {SUMMARY_ROW_LIMIT}",
         (engagement_id,))).fetchall()]
     sev = await (await db.execute(
         "SELECT f.severity, COUNT(*) c FROM findings f JOIN sessions s ON s.id = f.session_id "
@@ -237,11 +243,28 @@ async def summary(db, engagement_id: str) -> dict[str, Any]:
     out["assets"] = await _A.tree(db, engagement_id)
     out["asset_counts"] = await _A.counts(db, engagement_id)
     out["asset_severity"] = _A.rollup(out["assets"])
+    # TOTALS, separate from the rows returned. Both list queries above are
+    # capped at 200; without the real totals the dashboard cannot tell an
+    # engagement with 200 sessions from one with 4,000, and a capped list
+    # renders identically to a complete one.
+    totals = {}
+    for key, table in (("sessions", "sessions"), ("v2_runs", "v2_runs")):
+        row = await (await db.execute(
+            f"SELECT COUNT(*) FROM {table} WHERE engagement_id = ?",
+            (engagement_id,))).fetchone()
+        totals[key] = row[0] if row else 0
+
     out["counts"] = {"assets": sum(out["asset_counts"].values()),
-                     "targets": len(out["targets"]), "sessions": len(out["sessions"]),
-                     "v2_runs": len(out["v2_runs"]),
+                     "targets": len(out["targets"]),
+                     "sessions": totals["sessions"],
+                     "v2_runs": totals["v2_runs"],
                      "findings": sum(out["findings_by_severity"].values()),
                      "pending_scope": len(out["pending_scope"])}
+    # What the caller actually received, and the cap that produced it, so the
+    # UI can say "showing 200 of 4,000" rather than implying it has them all.
+    out["returned"] = {"sessions": len(out["sessions"]),
+                       "v2_runs": len(out["v2_runs"]),
+                       "row_limit": SUMMARY_ROW_LIMIT}
     return out
 
 

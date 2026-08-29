@@ -32,6 +32,27 @@ def ok(target, rows):
 DECLARED = {"source": "declared", "approved_at": "2026-08-18"}
 
 
+def js_body(html, signature):
+    """A JS function's actual body, by brace matching.
+
+    Fixed character windows are brittle and were wrong twice: one test used
+    2200 characters and the call sat at 2270; another used 2600 and a
+    truncation note pushed the columns past it. Both failed on formatting
+    rather than on behaviour, which trains you to widen the number instead of
+    reading the diff.
+    """
+    i = html.index(signature)
+    depth = 0
+    for k in range(html.index("{", i), len(html)):
+        if html[k] == "{":
+            depth += 1
+        elif html[k] == "}":
+            depth -= 1
+            if depth == 0:
+                return html[i:k + 1]
+    raise AssertionError(f"unbalanced braces after {signature!r}")
+
+
 class TestNothingIsInScopeByDefault:
     def test_empty_scope_authorises_nothing(self):
         allowed, why = E.evaluate_scope([], "https://acme.com")
@@ -807,16 +828,14 @@ class TestTheEngagementPageAnswersWhatHappened:
         html = self._html()
         assert "function engRunTable" in html
         assert "${engRunTable(d)}" in html, "the table is built but never rendered"
-        i = html.index("function engRunTable")
-        block = html[i:i + 2600]
+        block = js_body(html, "function engRunTable(d) {")
         for col in ("Status", "Started", "Duration"):
             assert col in block, col
 
     def test_the_table_covers_BOTH_lanes(self):
         """A customer page that showed only agent runs would misrepresent the
         deterministic lane as idle."""
-        i = self._html().index("function engRunTable")
-        block = self._html()[i:i + 2600]
+        block = js_body(self._html(), "function engRunTable(d) {")
         assert "d.sessions" in block and "d.v2_runs" in block
 
     def test_duration_is_formatted_not_raw_milliseconds(self):
@@ -972,35 +991,17 @@ class TestTheUrlDescribesWhatIsOnScreen:
         from pathlib import Path
         return Path("dashboard/templates/index.html").read_text()
 
-    @staticmethod
-    def _body(html, signature):
-        """The function's actual body, by brace matching.
-
-        A fixed character window is brittle: the first version of this test
-        used 2200 and the call sat at 2270, so it failed on formatting rather
-        than on behaviour."""
-        i = html.index(signature)
-        depth, j = 0, html.index("{", i)
-        for k in range(j, len(html)):
-            if html[k] == "{":
-                depth += 1
-            elif html[k] == "}":
-                depth -= 1
-                if depth == 0:
-                    return html[i:k + 1]
-        raise AssertionError(f"unbalanced braces after {signature!r}")
-
     def test_the_view_is_written_to_the_url(self):
         html = self._html()
-        body = self._body(html, "function switchView(view) {")
+        body = js_body(html, "function switchView(view) {")
         assert "urlWrite();" in body, "switchView does not record the view"
 
     def test_the_url_is_read_on_load(self):
         html = self._html()
         assert "function bootFromUrl" in html
         i = html.index("function bootFromUrl")
-        assert "switchView(st.view)" in html[i:i + 900], \
-            "the URL is written but never read, so every reload still lands on Scanner"
+        assert "switchView(st.view || 'overview')" in html[i:i + 900], \
+            "the URL is written but never read, so every reload lands on the default view"
 
     def test_a_hashchange_navigates(self):
         html = self._html()
@@ -1152,3 +1153,176 @@ class TestListsFilterSortAndTellTheTruth:
             assert rows[0]["engagement_id"] == eid
         finally:
             db_mod.DB_PATH = original
+
+
+class TestTruncationIsAlwaysStated:
+    """A view that silently shows 30 of 127 rows reads exactly like a complete
+    one. This project has shipped that shape repeatedly, so every cap between
+    the database and the screen is now named and reported."""
+
+    @staticmethod
+    def _html():
+        from pathlib import Path
+        return Path("dashboard/templates/index.html").read_text()
+
+    def test_the_summary_reports_true_totals_not_row_counts(self):
+        """`counts.sessions` was len(rows) of a LIMIT 200 query, so an
+        engagement with 4,000 sessions and one with 200 were indistinguishable."""
+        import asyncio
+        import os
+        import tempfile
+        import orchestrator.database as db_mod
+        from orchestrator import engagement as E
+
+        old = db_mod.DB_PATH
+        db_mod.DB_PATH = os.path.join(tempfile.mkdtemp(), "cap.db")
+        try:
+            async def go():
+                await db_mod.init_db()
+                db = await db_mod.get_db()
+                eid = await E.create(db, "Acme", "acme.example")
+                await db.commit()
+                for i in range(E.SUMMARY_ROW_LIMIT + 5):
+                    await db.execute(
+                        "INSERT INTO sessions (id, target_url, scope_mode, model, "
+                        "enabled_tools, status, engagement_id) VALUES (?,?,?,?,?,?,?)",
+                        (f"s{i:05d}", "http://a", "full", "m", "curl", "completed", eid))
+                await db.commit()
+                out = await E.summary(db, eid)
+                await db.close()
+                return out
+            out = asyncio.run(go())
+        finally:
+            db_mod.DB_PATH = old
+
+        assert out["counts"]["sessions"] == E.SUMMARY_ROW_LIMIT + 5, \
+            "counts reports the returned rows, not the real total"
+        assert out["returned"]["sessions"] == E.SUMMARY_ROW_LIMIT
+        assert out["returned"]["row_limit"] == E.SUMMARY_ROW_LIMIT
+
+    def test_the_cap_is_a_named_constant(self):
+        from orchestrator import engagement as E
+        assert isinstance(E.SUMMARY_ROW_LIMIT, int) and E.SUMMARY_ROW_LIMIT > 0
+
+    def test_the_execution_table_states_both_caps(self):
+        """Two caps sit between the database and that table: the server's
+        row_limit and the table's own render cap."""
+        block = js_body(self._html(), "function engRunTable(d) {")
+        assert "TABLE_CAP" in block
+        assert "Showing ${shown} of ${trueTotal}" in block
+        assert "returns at most" in block, "the server cap is not mentioned"
+
+    def test_the_capped_lists_on_the_engagement_page_say_so(self):
+        html = self._html()
+        assert "function engCapNote" in html
+        assert html.count("engCapNote(") >= 3, "a capped list is unlabelled"
+
+    def test_the_monitor_says_its_metrics_come_from_a_sample(self):
+        """Not a display cap: every tier count is computed from those rows, so
+        an unlabelled sample is a coverage number that describes the latest 30
+        sessions and claims to describe the corpus."""
+        html = self._html()
+        assert "MONITOR_SAMPLE" in html
+        assert 'id="mon-sample-note"' in html
+        assert "not the full corpus" in html
+
+    def test_no_bare_numeric_slice_caps_remain_in_list_rendering(self):
+        """Guard on the guard: a new `.slice(0, 40)` on a rendered list is the
+        same defect returning under a different literal."""
+        import re
+        html = self._html()
+        allowed = {"TABLE_CAP", "MONITOR_SAMPLE", "MONITOR_ROWS"}
+        offenders = []
+        for m in re.finditer(r"\.slice\(0,\s*(\d+)\)", html):
+            line = html[html.rfind("\n", 0, m.start()) + 1: html.find("\n", m.end())]
+            # string truncation of a single value is display, not a hidden cap
+            if any(x in line for x in (".id", "text()", "await r.text()", "r.url",
+                                       "chainId", "run_id", "selected_for", "join")):
+                continue
+            offenders.append(line.strip()[:90])
+        assert not offenders, (
+            "list caps that are not named constants:\n  " + "\n  ".join(offenders))
+
+
+class TestTheOverviewAnswersWhatIsGoingOn:
+    """erlik opened on an empty Scanner form, which answers "what can I start"
+    and never "what is already going on"."""
+
+    @staticmethod
+    def _html():
+        from pathlib import Path
+        return Path("dashboard/templates/index.html").read_text()
+
+    def test_the_view_and_its_nav_entry_exist(self):
+        html = self._html()
+        assert 'id="view-overview"' in html
+        assert 'id="nav-overview"' in html
+
+    def test_it_is_registered_with_the_view_switcher(self):
+        """A view the switcher does not know about can never be shown."""
+        body = js_body(self._html(), "function switchView(view) {")
+        assert "'overview'" in body
+        assert "overview: document.getElementById('view-overview')" in body
+        assert "loadOverview()" in body
+
+    def test_it_is_the_landing_view(self):
+        html = self._html()
+        assert "switchView(st.view || 'overview')" in html
+        assert "let __currentView = 'overview';" in html
+
+    def test_the_tiles_are_links_not_just_numbers(self):
+        """A number you cannot act on is a number you read once."""
+        block = js_body(self._html(), "function ovTile(label, n, href, colour) {")
+        assert "<a" in block and "href=" in block
+
+    def test_the_tiles_carry_the_selected_customer(self):
+        block = js_body(self._html(), "async function loadOverview() {")
+        assert "&eng=${encodeURIComponent(eng)}" in block, \
+            "tile links drop the customer, so they land unscoped"
+
+    def test_only_the_first_unmet_rung_is_actionable(self):
+        """Showing all five as a flat checklist offers five equally-plausible
+        next actions, four of which are blocked."""
+        block = js_body(self._html(), "function ovLadder(rungs) {")
+        assert "blocked" in block
+        assert "if (!r.done) blocked = true" in block
+
+    def test_the_rungs_are_genuinely_ordered(self):
+        """A first version listed "a target is recorded" as a rung and showed
+        it blocking two rungs that were already complete — a target record is
+        endpoint knowledge, not a gate. A ladder whose rungs are not really
+        ordered names the wrong next action."""
+        block = js_body(self._html(), "async function loadOverview() {")
+        # EVERY ladder in the function, not just the first. loadOverview builds
+        # two — the no-customer empty state and the scoped one — and checking
+        # only `block.index("ovLadder([")` inspected the empty state, so a bad
+        # rung added to the real ladder passed unnoticed.
+        ladders, at = [], 0
+        while True:
+            i = block.find("ovLadder([", at)
+            if i < 0:
+                break
+            j = block.index("]);", i)
+            ladders.append(block[i:j])
+            at = j
+        assert len(ladders) >= 2, f"expected the empty-state and scoped ladders, got {len(ladders)}"
+
+        for rungs in ladders:
+            assert "A target is recorded" not in rungs, \
+                "a non-blocking step is back in the dependency chain"
+
+        scoped = ladders[-1]
+        assert "Scope is declared" in scoped and "Work has been run" in scoped
+        assert scoped.index("Scope is declared") < scoped.index("Work has been run"), \
+            "scope must precede running: the gate refuses an unscoped run"
+
+    def test_it_works_before_any_customer_exists(self):
+        """The empty state is the one a new operator sees first."""
+        block = js_body(self._html(), "async function loadOverview() {")
+        assert "if (!eng) {" in block
+        assert "A customer exists" in block
+
+    def test_pending_scope_is_surfaced_as_needing_a_human(self):
+        block = js_body(self._html(), "async function loadOverview() {")
+        assert "pending_scope" in block
+        assert "awaiting approval" in block

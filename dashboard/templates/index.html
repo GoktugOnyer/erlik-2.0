@@ -734,6 +734,9 @@
         </div>
 
         <nav class="side-group">
+            <button id="nav-overview" onclick="switchView('overview')" class="side-link" type="button">
+                <span class="side-ico">&#9673;</span><span>Overview</span>
+            </button>
             <button id="nav-scanner" onclick="switchView('scanner')" class="side-link" type="button">
                 <span class="side-ico">&#9655;</span><span>Scanner</span>
             </button>
@@ -783,6 +786,35 @@
     </aside>
 
     <main class="p-6 flex-1 min-w-0">
+
+        <!-- ===== Overview: the landing screen ===== -->
+        <div id="view-overview" class="hidden space-y-5">
+            <div class="panel rounded p-4">
+                <div class="flex items-baseline justify-between flex-wrap gap-2">
+                    <h2 class="font-pixel" style="font-size:0.7rem;">&#9673; OVERVIEW</h2>
+                    <span id="ov-scope" class="font-mono" style="font-size:0.6rem; opacity:.7;"></span>
+                </div>
+                <p class="font-mono mt-2" style="font-size:0.6rem; opacity:.7; max-width:80ch;">
+                    The state of the work, and the next thing that is blocking it. erlik used to
+                    open on an empty Scanner form, which answers &ldquo;what can I start&rdquo;
+                    and never &ldquo;what is already going on&rdquo;.
+                </p>
+            </div>
+
+            <div class="panel rounded p-4">
+                <h3 class="font-pixel" style="font-size:0.62rem;">WHERE THINGS STAND</h3>
+                <div id="ov-tiles" class="stat-cards mt-3"></div>
+            </div>
+
+            <div class="panel rounded p-4">
+                <h3 class="font-pixel" style="font-size:0.62rem;">WHAT IS BLOCKING PROGRESS</h3>
+                <p class="font-mono mt-1" style="font-size:0.55rem; opacity:.55; max-width:80ch;">
+                    Each rung depends on the one above it. The first unmet rung is the only one
+                    worth acting on &mdash; everything below it is blocked by definition.
+                </p>
+                <div id="ov-ladder" class="mt-3"></div>
+            </div>
+        </div>
 
         <!-- ===== Scanner View (existing content) ===== -->
         <div id="view-scanner" class="space-y-5">
@@ -1620,6 +1652,8 @@
                 </div>
 
                 <!-- TIER PROGRESS -->
+                <div id="mon-sample-note" class="font-mono mb-2"
+                    style="font-size:0.62rem; color:var(--neon-yellow);"></div>
                 <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
                     <div class="cyber-panel rounded p-3" style="border-left:3px solid var(--neon-cyan); background:#0d0d18;">
                         <div class="font-pixel" style="font-size:0.45rem; color:var(--neon-cyan);">▍ CORE-10</div>
@@ -2024,12 +2058,13 @@
         // ===== View Switching =====
         // Which view is showing. Read by urlWrite; declared above the only
         // function that assigns it so no call site can hit the temporal dead zone.
-        let __currentView = 'scanner';
+        let __currentView = 'overview';
 
         function switchView(view) {
             __currentView = view;
-            const views = ['scanner', 'reports', 'benchmark', 'monitor', 'engagements', 'testlab', 'skills', 'arsenal'];
+            const views = ['overview', 'scanner', 'reports', 'benchmark', 'monitor', 'engagements', 'testlab', 'skills', 'arsenal'];
             const panels = {
+                overview: document.getElementById('view-overview'),
                 scanner: document.getElementById('view-scanner'),
                 reports: document.getElementById('view-reports'),
                 benchmark: document.getElementById('view-benchmark'),
@@ -2040,6 +2075,7 @@
                 arsenal: document.getElementById('view-arsenal'),
             };
             const navs = {
+                overview: document.getElementById('nav-overview'),
                 scanner: document.getElementById('nav-scanner'),
                 reports: document.getElementById('nav-reports'),
                 benchmark: document.getElementById('nav-benchmark'),
@@ -2063,6 +2099,7 @@
                 if (navs[v]) navs[v].classList.toggle('nav-tab-active', v === view);
             });
 
+            if (view === 'overview') loadOverview();
             if (view === 'reports') loadReportsList();
             if (view === 'benchmark') loadBenchmarkHistory();
             if (view === 'engagements') engLoad();
@@ -2139,7 +2176,7 @@
                 searchEl.value = st.q || '';
                 if (__currentView === 'reports') loadReportsList({fromCache: true});
             }
-            const view = st.view || 'scanner';
+            const view = st.view || 'overview';
             if (view !== __currentView) switchView(view);
         }
 
@@ -2227,6 +2264,37 @@
                 </div>`).join('') + `</div>`;
         }
 
+        // Rendered rows per execution table. Named so the label below can
+        // quote it instead of repeating a literal that later drifts.
+        // One sentence, wherever a list is cut short. The alternative is what
+        // erlik shipped: a capped list that renders identically to a complete
+        // one, so the operator reads twelve rows as "everything".
+        function engCapNote(returnedN, trueTotal, renderCap, noun) {
+            const total = trueTotal ?? returnedN;
+            const shown = Math.min(returnedN, renderCap);
+            if (shown >= total) return '';
+            return `<div class="font-mono" style="font-size:0.55rem; color:var(--neon-yellow);">
+                      showing ${shown} of ${total} ${tlEsc(noun)}(s)
+                    </div>`;
+        }
+
+        const TABLE_CAP = 60;
+
+        // How many sessions the Monitor hydrates and renders. MONITOR_SAMPLE is
+        // the one that changes an ANSWER rather than a view: every tier count
+        // is derived from that many sessions, so it is stated on screen.
+        const MONITOR_SAMPLE = 30;
+        const MONITOR_ROWS = 25;
+
+        // Rows rendered in the two per-engagement lane lists.
+        const ENG_LIST_CAP = 12;
+        // Characters of a step's captured output shown inline. This one is
+        // EVIDENCE: an operator reading a truncated tool output and not being
+        // told is being shown a different result from the one recorded.
+        const STEP_OUTPUT_CAP = 1400;
+        // Distinct tools named in the findings summary line.
+        const TOOL_SUMMARY_CAP = 6;
+
         function engRunTable(d) {
             const rows = [];
             for (const r of (d.sessions || [])) {
@@ -2245,6 +2313,21 @@
                 return '<div class="font-mono" style="font-size:0.6rem; opacity:.6;">' +
                        'Nothing run yet under this engagement.</div>';
             }
+            // TWO caps sit between the database and this table: the server
+            // returns at most `row_limit` per list, and the table renders at
+            // most TABLE_CAP of those. Both are stated. A table that shows 60
+            // of 4,000 runs and says "60" is not a smaller table — it is a
+            // wrong answer to "what has been done for this customer".
+            const trueTotal = (d.counts || {}).sessions + (d.counts || {}).v2_runs;
+            const ret = d.returned || {};
+            const serverCapped = (ret.sessions || 0) + (ret.v2_runs || 0) < trueTotal;
+            const shown = Math.min(rows.length, TABLE_CAP);
+            const note = (shown < trueTotal)
+                ? `<div class="font-mono" style="font-size:0.55rem; color:var(--neon-yellow); margin-bottom:4px;">
+                     Showing ${shown} of ${trueTotal} run(s)${serverCapped
+                       ? ` — the API returns at most ${ret.row_limit} per lane` : ''}.
+                   </div>`
+                : '';
             const dot = (st) => {
                 const s = String(st).toLowerCase();
                 const col = s.includes('complet') ? '#31d67a'
@@ -2252,10 +2335,10 @@
                           : s.includes('error') || s.includes('fail') ? '#ff2d6f' : '#6a6a8a';
                 return `<span style="color:${col};">&#9679; ${tlEsc(st)}</span>`;
             };
-            return `<div style="max-height:260px; overflow:auto;"><table class="run-table">
+            return note + `<div style="max-height:260px; overflow:auto;"><table class="run-table">
                 <thead><tr><th>Run</th><th>Detail</th><th>Status</th><th>Started</th>
                 <th>Duration</th><th></th></tr></thead><tbody>` +
-                rows.slice(0, 60).map(r => `<tr>
+                rows.slice(0, TABLE_CAP).map(r => `<tr>
                     <td>${tlEsc(r.what)}</td>
                     <td style="opacity:.7;">${tlEsc(r.detail)}</td>
                     <td>${dot(r.status)}</td>
@@ -2413,12 +2496,14 @@
                 <div class="panel rounded p-4">
                     <h3 class="font-pixel" style="font-size:0.62rem;">WORK RECORDED FOR THIS CUSTOMER</h3>
                     <div class="mt-2 font-mono" style="font-size:0.6rem;">
-                        ${(d.sessions || []).slice(0, 12).map(x => `
+                        ${engCapNote((d.sessions || []).length, (d.counts || {}).sessions, ENG_LIST_CAP, 'agent session')}
+                        ${(d.sessions || []).slice(0, ENG_LIST_CAP).map(x => `
                             <div class="py-0.5" style="opacity:.8;">
                                 <span style="color:var(--neon-cyan);">${tlEsc(x.id.slice(0, 8))}</span>
                                 <span style="opacity:.7;"> agent · ${tlEsc(x.target_url)} · ${tlEsc(x.status)}</span>
                             </div>`).join('')}
-                        ${(d.v2_runs || []).slice(0, 12).map(x => `
+                        ${engCapNote((d.v2_runs || []).length, (d.counts || {}).v2_runs, ENG_LIST_CAP, 'deterministic run')}
+                        ${(d.v2_runs || []).slice(0, ENG_LIST_CAP).map(x => `
                             <div class="py-0.5" style="opacity:.8;">
                                 <span style="color:var(--neon-green);">${tlEsc(x.id.slice(0, 8))}</span>
                                 <span style="opacity:.7;"> deterministic · ${tlEsc(x.test_case_id)}</span>
@@ -2792,7 +2877,10 @@
                         ${tlEsc(s.step)} <span style="opacity:.5;">· ${s.duration_ms}ms${s.success ? '' : ' · failed'}</span>
                     </div>
                     <pre class="font-mono mt-1" style="font-size:0.55rem; opacity:.75; white-space:pre-wrap; word-break:break-all; max-height:110px; overflow:auto;">${tlEsc(s.command)}</pre>
-                    <pre class="font-mono" style="font-size:0.55rem; opacity:.6; white-space:pre-wrap; word-break:break-all; max-height:170px; overflow:auto;">${tlEsc((s.output || '').slice(0, 1400))}</pre>
+                    <pre class="font-mono" style="font-size:0.55rem; opacity:.6; white-space:pre-wrap; word-break:break-all; max-height:170px; overflow:auto;">${tlEsc((s.output || '').slice(0, STEP_OUTPUT_CAP))}${
+                        (s.output || '').length > STEP_OUTPUT_CAP
+                          ? `\n\u2026 ${(s.output || '').length - STEP_OUTPUT_CAP} more character(s) not shown`
+                          : ''}</pre>
                 </div>`).join('');
             const finds = (d.findings || []).map(f => `
                 <div class="font-mono mt-1" style="font-size:0.6rem;">
@@ -5269,9 +5357,17 @@ ${htmlBody}
             } catch (e) { /* keep stale chainMap */ }
 
             // The list endpoint doesn't include toolset_preset. Hydrate the
-            // top ~30 most recent sessions with their full detail rows so we
-            // know which ones belong to the matrix.
-            const top = list.slice(0, 30);
+            // most recent sessions with their full detail rows so we know
+            // which ones belong to the matrix.
+            //
+            // THIS CAP IS NOT COSMETIC. Every tier count below is computed from
+            // these rows alone, so the matrix describes the latest
+            // MONITOR_SAMPLE sessions and not the corpus — and it said so
+            // nowhere. A coverage number derived from a truncated sample and
+            // presented as the whole is the same defect as an unlabelled list,
+            // with worse consequences: someone plans work from it.
+            const top = list.slice(0, MONITOR_SAMPLE);
+            window.__monSample = {used: top.length, total: list.length};
             const details = await Promise.all(top.map(s => _monGetDetail(s.id, s.status)));
             // Merge chain_id from the list view onto the detail rows so we can
             // look up the parent chain's max_turns_per_session.
@@ -5386,8 +5482,18 @@ ${htmlBody}
             document.getElementById('mon-tier-full-f').textContent = tiers.full_30.f;
             document.getElementById('mon-tier-full-s').textContent = `${tiers.full_30.s} sessions`;
 
-            // Sessions table — show the latest 25 with toolset_preset
-            const recent = matrix.slice(0, 25);
+            // The tier numbers above describe the sample, not the corpus.
+            const smp = window.__monSample || {};
+            const noteEl = document.getElementById('mon-sample-note');
+            if (noteEl) {
+                noteEl.textContent = (smp.total && smp.used < smp.total)
+                    ? `Tier coverage is computed from the ${smp.used} most recent `
+                      + `sessions of ${smp.total} — not the full corpus.`
+                    : '';
+            }
+
+            // Sessions table — the latest MONITOR_ROWS with toolset_preset
+            const recent = matrix.slice(0, MONITOR_ROWS);
             const tbody = document.getElementById('mon-sessions-tbody');
             if (recent.length === 0) {
                 tbody.innerHTML = '<tr><td colspan="9" class="text-center py-4" style="color:#5a5a6a;">no matrix sessions yet</td></tr>';
@@ -5497,11 +5603,13 @@ ${htmlBody}
                 // Group counts per tool for the meta line
                 const byTool = {};
                 findingsRows.forEach(r => { byTool[r.tool] = (byTool[r.tool] || 0) + 1; });
-                const toolSummary = Object.entries(byTool)
-                    .sort((a, b) => b[1] - a[1])
-                    .slice(0, 6)
+                const toolPairs = Object.entries(byTool).sort((a, b) => b[1] - a[1]);
+                const toolSummary = toolPairs
+                    .slice(0, TOOL_SUMMARY_CAP)
                     .map(([t, n]) => `${t}×${n}`)
-                    .join(' · ');
+                    .join(' · ')
+                    + (toolPairs.length > TOOL_SUMMARY_CAP
+                        ? ` · +${toolPairs.length - TOOL_SUMMARY_CAP} more tool(s)` : '');
                 fmeta.textContent = `${findingsRows.length} findings · ${toolSummary}`;
 
                 // Render newest sessions first
@@ -5773,6 +5881,136 @@ ${htmlBody}
         }
 
 
+
+        // ===== OVERVIEW =====
+        // erlik opened on an empty Scanner form, which answers "what can I
+        // start" and never "what is already going on". The tiles are LINKS,
+        // pre-scoped to the selected customer, so a number is somewhere to go
+        // rather than something to read.
+        //
+        // The ladder exists because these steps are strictly ordered: scope is
+        // meaningless without a customer, a run is refused without scope, and
+        // triage has nothing to work on without runs. Showing all five as a
+        // flat checklist invites starting at the wrong one.
+        function ovTile(label, n, href, colour) {
+            const dead = !n;
+            return `<a class="stat-card" href="${href}" style="display:block; text-decoration:none;
+                        border-top-color:${dead ? 'rgba(255,255,255,0.08)' : colour};">
+                        <div class="n${dead ? ' zero' : ''}">${n}</div>
+                        <div class="l">${tlEsc(label)}</div>
+                    </a>`;
+        }
+
+        function ovLadder(rungs) {
+            // The first unmet rung is the ONLY actionable one; the rest are
+            // blocked by it. Marking them all "todo" would be a list of five
+            // equally-plausible next actions, four of which cannot be done.
+            let blocked = false;
+            return rungs.map(r => {
+                const state = r.done ? 'done' : (blocked ? 'blocked' : 'next');
+                if (!r.done) blocked = true;
+                const mark = {done: '\u2713', next: '\u25B6', blocked: '\u00B7'}[state];
+                const col = {done: '#31d67a', next: 'var(--neon-cyan)', blocked: '#4a4a5a'}[state];
+                const action = (state === 'next' && r.action)
+                    ? ` &mdash; <a href="${r.action.href}" style="color:var(--neon-cyan);">${tlEsc(r.action.label)} &rarr;</a>`
+                    : '';
+                return `<div class="font-mono" style="font-size:0.68rem; color:${col}; padding:2px 0;">
+                            <span style="display:inline-block; width:14px;">${mark}</span>
+                            ${tlEsc(r.label)}${action}
+                        </div>`;
+            }).join('');
+        }
+
+        async function loadOverview() {
+            const eng = (document.getElementById('side-engagement') || {}).value || '';
+            const tiles = document.getElementById('ov-tiles');
+            const ladder = document.getElementById('ov-ladder');
+            const scope = document.getElementById('ov-scope');
+
+            let engs = [];
+            try { engs = (await (await fetch('/api/engagements')).json()).engagements || []; }
+            catch (e) { /* offline: the ladder below still reads correctly */ }
+
+            if (!eng) {
+                scope.textContent = `${engs.length} customer(s) · none selected`;
+                tiles.innerHTML = ovTile('customers', engs.length, '#view=engagements', '#00fff5');
+                ladder.innerHTML = ovLadder([
+                    {label: 'A customer exists', done: engs.length > 0,
+                     action: {href: '#view=engagements', label: 'create one'}},
+                    {label: 'A customer is selected', done: false,
+                     action: {href: '#view=engagements', label: 'pick one in the sidebar'}},
+                    {label: 'Scope is declared', done: false},
+                    {label: 'Work has been run', done: false},
+                    {label: 'Findings are triaged', done: false},
+                ]);
+                return;
+            }
+
+            let d = null;
+            try { d = await (await fetch(`/api/engagements/${encodeURIComponent(eng)}`)).json(); }
+            catch (e) { /* fall through to the unreachable state below */ }
+            if (!d || !d.engagement) {
+                scope.textContent = 'could not load this customer';
+                tiles.innerHTML = '';
+                ladder.innerHTML = '';
+                return;
+            }
+
+            const c = d.counts || {}, sev = d.findings_by_severity || {}, a = d.asset_counts || {};
+            const e = `&eng=${encodeURIComponent(eng)}`;
+            scope.textContent = d.engagement.client_name
+                + (d.engagement.root_domain ? ` · ${d.engagement.root_domain}` : '');
+
+            tiles.innerHTML = [
+                ovTile('critical', sev.critical || 0, `#view=reports${e}`, '#ff2d6f'),
+                ovTile('high', sev.high || 0, `#view=reports${e}`, '#ff6b35'),
+                ovTile('hosts', a.host || 0, `#view=engagements${e}`, '#00fff5'),
+                ovTile('endpoints', a.endpoint || 0, `#view=engagements${e}`, '#31d67a'),
+                ovTile('agent runs', c.sessions || 0, `#view=reports${e}`, '#8a8aa0'),
+                ovTile('wstg runs', c.v2_runs || 0, `#view=testlab${e}`, '#8a8aa0'),
+                ovTile('scope pending', c.pending_scope || 0, `#view=engagements${e}`, '#ffd23f'),
+            ].join('');
+
+            // ONLY genuine prerequisites belong here. A first version listed
+            // "a target is recorded" as a rung and then showed it blocking two
+            // rungs that were already complete — because a target record is
+            // endpoint knowledge, a convenience, not a gate: the Scanner takes
+            // a URL directly. A ladder whose rungs are not really ordered is
+            // worse than no ladder, because it names the wrong next action.
+            const declared = (d.scope || []).filter(r => (r.source || 'declared') === 'declared');
+            const runs = (c.sessions || 0) + (c.v2_runs || 0);
+            ladder.innerHTML = ovLadder([
+                {label: 'A customer is selected', done: true},
+                {label: `Scope is declared (${declared.length} rule(s)) — a run against an ` +
+                        `unscoped target is refused`,
+                 done: declared.length > 0,
+                 action: {href: `#view=engagements${e}`, label: 'declare scope'}},
+                {label: `Work has been run (${runs})`, done: runs > 0,
+                 action: {href: `#view=scanner${e}`, label: 'start a run'}},
+                {label: `Findings exist to triage (${c.findings || 0})`, done: (c.findings || 0) > 0,
+                 action: {href: `#view=reports${e}`, label: 'open reports'}},
+            ]);
+
+            // Not a rung: useful, never blocking.
+            if (!(c.targets || 0)) {
+                ladder.innerHTML += `<div class="font-mono" style="font-size:0.6rem;
+                    color:#6a6a8a; margin-top:8px;">
+                    No target recorded. Optional &mdash; it supplies endpoint knowledge to the
+                    deterministic lane, which otherwise tests the base URL only.
+                    <a href="#view=engagements${e}" style="color:var(--neon-cyan);">add one &rarr;</a>
+                </div>`;
+            }
+
+            if (c.pending_scope) {
+                ladder.innerHTML += `<div class="font-mono" style="font-size:0.62rem;
+                    color:var(--neon-yellow); margin-top:8px;">
+                    ${c.pending_scope} discovered host(s) awaiting approval &mdash; they are
+                    inert until a human approves them.
+                    <a href="#view=engagements${e}" style="color:var(--neon-cyan);">review &rarr;</a>
+                </div>`;
+            }
+        }
+
         // ===== SIDEBAR: the customer's inventory, always visible =====
         // These counts ARE the state of the work — what erlik has found, on
         // whose assets, and what has actually been run. Keeping them behind a
@@ -5824,6 +6062,8 @@ ${htmlBody}
             // it or the recipient sees a different application state.
             urlSet({eng: sel.value || ''});
             sideRefresh();
+            if (__currentView === 'overview') loadOverview();
+            if (__currentView === 'reports') loadReportsList({fromCache: true});
         }
 
         function sideClear(msg) {
@@ -5895,7 +6135,7 @@ ${htmlBody}
                 const se = document.getElementById('reports-search');
                 if (se) se.value = st.q;
             }
-            if (st.view && st.view !== 'scanner') switchView(st.view);
+            switchView(st.view || 'overview');
         })();
 
         loadEngagementOptions();
