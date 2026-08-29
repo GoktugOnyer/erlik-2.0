@@ -235,10 +235,39 @@ async def summary(db, engagement_id: str) -> dict[str, Any]:
         "SELECT id, test_case_id, created_at, duration_ms, model, stopped_early "
         f"FROM v2_runs WHERE engagement_id = ? ORDER BY created_at DESC LIMIT {SUMMARY_ROW_LIMIT}",
         (engagement_id,))).fetchall()]
-    sev = await (await db.execute(
-        "SELECT f.severity, COUNT(*) c FROM findings f JOIN sessions s ON s.id = f.session_id "
-        "WHERE s.engagement_id = ? GROUP BY f.severity", (engagement_id,))).fetchall()
-    out["findings_by_severity"] = {r[0] or "unknown": r[1] for r in sev}
+    # Severity is EFFECTIVE severity, and rejected findings are excluded.
+    #
+    # Two defects, both of which made a badge contradict the operator:
+    #
+    #   * the rollup grouped on the raw `severity` column, ignoring
+    #     `severity_override` and `calibrated_severity`. Someone triages a
+    #     critical down to low and the sidebar keeps saying critical, for ever.
+    #     `submission_policy.current_severity` is the one definition of what a
+    #     report would show, so it is used here rather than re-derived.
+    #   * a finding marked a false positive still counted. A triaged engagement
+    #     showed its original count until someone deleted rows, which is the
+    #     opposite of what triage is for.
+    #
+    # Both totals are returned: `findings_by_severity` is OPEN work, and
+    # `findings_total` is everything ever recorded, so "3 of 14" is expressible
+    # and nothing looks deleted.
+    from orchestrator.submission_policy import current_severity
+    rows = await (await db.execute(
+        "SELECT f.severity, f.calibrated_severity, f.severity_override, f.triage_status "
+        "FROM findings f JOIN sessions s ON s.id = f.session_id "
+        "WHERE s.engagement_id = ?", (engagement_id,))).fetchall()
+    open_sev: dict[str, int] = {}
+    rejected = 0
+    for r in rows:
+        d = dict(r)
+        if (d.get("triage_status") or "").lower() in ("rejected", "false_positive"):
+            rejected += 1
+            continue
+        key = current_severity(d) or "unknown"
+        open_sev[key] = open_sev.get(key, 0) + 1
+    out["findings_by_severity"] = open_sev
+    out["findings_total"] = len(rows)
+    out["findings_rejected"] = rejected
     from orchestrator import assets as _A
     out["assets"] = await _A.tree(db, engagement_id)
     out["asset_counts"] = await _A.counts(db, engagement_id)
@@ -259,6 +288,8 @@ async def summary(db, engagement_id: str) -> dict[str, Any]:
                      "sessions": totals["sessions"],
                      "v2_runs": totals["v2_runs"],
                      "findings": sum(out["findings_by_severity"].values()),
+                     "findings_total": out["findings_total"],
+                     "findings_rejected": out["findings_rejected"],
                      "pending_scope": len(out["pending_scope"])}
     # What the caller actually received, and the cap that produced it, so the
     # UI can say "showing 200 of 4,000" rather than implying it has them all.
@@ -266,6 +297,74 @@ async def summary(db, engagement_id: str) -> dict[str, Any]:
                        "v2_runs": len(out["v2_runs"]),
                        "row_limit": SUMMARY_ROW_LIMIT}
     return out
+
+
+# Fields an operator may correct. `client_name` is included because a typo in
+# a customer name was otherwise permanent; `status` is not, because archiving
+# goes through `archive()` so the transition is explicit and auditable.
+EDITABLE = ("client_name", "root_domain", "authorised_by",
+            "authorised_from", "authorised_until", "notes")
+
+
+async def update(db, engagement_id: str, patch: dict) -> dict:
+    """Apply an explicit edit, retaining every previous value.
+
+    Returns {changed: [...], ignored: [...]}. Unknown keys are IGNORED rather
+    than written: a typo in a field name must not silently create a column's
+    worth of data nobody asked for, and must not look like it succeeded.
+    """
+    row = await (await db.execute(
+        "SELECT * FROM engagements WHERE id = ?", (engagement_id,))).fetchone()
+    if not row:
+        raise KeyError(engagement_id)
+    before = dict(row)
+
+    changed, ignored = [], []
+    for key, value in (patch or {}).items():
+        if key not in EDITABLE:
+            ignored.append(key)
+            continue
+        new = None if value is None else str(value).strip()
+        old = before.get(key)
+        if (old or "") == (new or ""):
+            continue          # a no-op edit is not a revision
+        await db.execute(
+            "INSERT INTO engagement_revisions (engagement_id, field, old_value, new_value) "
+            "VALUES (?,?,?,?)", (engagement_id, key, old, new))
+        await db.execute(f"UPDATE engagements SET {key} = ? WHERE id = ?",
+                         (new, engagement_id))
+        changed.append(key)
+    return {"changed": changed, "ignored": ignored}
+
+
+async def archive(db, engagement_id: str, archived: bool = True) -> bool:
+    """Close an engagement without destroying it.
+
+    Never a DELETE. Sessions, findings, scope rules and assets all reference
+    this row, and the project's rule is that an identifier is deprecated, not
+    removed. `status` had no writer at all before this.
+    """
+    row = await (await db.execute(
+        "SELECT status FROM engagements WHERE id = ?", (engagement_id,))).fetchone()
+    if not row:
+        return False
+    old = row[0] or "active"
+    new = "archived" if archived else "active"
+    if old == new:
+        return True
+    await db.execute(
+        "INSERT INTO engagement_revisions (engagement_id, field, old_value, new_value) "
+        "VALUES (?,?,?,?)", (engagement_id, "status", old, new))
+    await db.execute("UPDATE engagements SET status = ? WHERE id = ?", (new, engagement_id))
+    return True
+
+
+async def revisions(db, engagement_id: str, limit: int = 100) -> list[dict]:
+    """The edit history, newest first."""
+    cur = await db.execute(
+        "SELECT field, old_value, new_value, changed_at FROM engagement_revisions "
+        "WHERE engagement_id = ? ORDER BY id DESC LIMIT ?", (engagement_id, limit))
+    return [dict(r) for r in await cur.fetchall()]
 
 
 async def list_all(db) -> list[dict]:

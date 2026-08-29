@@ -1326,3 +1326,235 @@ class TestTheOverviewAnswersWhatIsGoingOn:
         block = js_body(self._html(), "async function loadOverview() {")
         assert "pending_scope" in block
         assert "awaiting approval" in block
+
+
+class TestBadgesCountOpenWork:
+    """Two defects, both of which made a badge contradict the operator.
+
+    The rollup grouped on the raw `severity` column, so someone could triage a
+    critical down to low and the sidebar would keep saying critical for ever —
+    `submission_policy.current_severity` was the one definition of what a
+    report shows, and this rollup ignored it. And a finding marked a false
+    positive still counted, so a triaged engagement displayed its original
+    number until someone deleted rows, which is the opposite of what triage is
+    for.
+    """
+
+    @staticmethod
+    def _summary(tmp_path, rows):
+        import asyncio
+        import orchestrator.database as db_mod
+        from orchestrator import engagement as E
+        old = db_mod.DB_PATH
+        db_mod.DB_PATH = str(tmp_path / "sev.db")
+        try:
+            async def go():
+                await db_mod.init_db()
+                db = await db_mod.get_db()
+                eid = await E.create(db, "Acme", "acme.example")
+                await db.execute(
+                    "INSERT INTO sessions (id, target_url, scope_mode, model, enabled_tools, "
+                    "status, engagement_id) VALUES ('s1','http://a','full','m','curl',"
+                    "'completed',?)", (eid,))
+                for vt, sev, override, triage in rows:
+                    await db.execute(
+                        "INSERT INTO findings (session_id, vuln_type, severity, url, "
+                        "severity_override, triage_status) VALUES ('s1',?,?,?,?,?)",
+                        (vt, sev, "http://a/x", override, triage))
+                await db.commit()
+                out = await E.summary(db, eid)
+                await db.close()
+                return out
+            return asyncio.run(go())
+        finally:
+            db_mod.DB_PATH = old
+
+    def test_a_rejected_finding_does_not_count_as_open(self, tmp_path):
+        out = self._summary(tmp_path, [
+            ("SQLi", "critical", None, None),
+            ("XSS", "high", None, "rejected"),
+        ])
+        assert out["findings_by_severity"] == {"critical": 1}
+        assert out["counts"]["findings"] == 1
+        assert out["counts"]["findings_total"] == 2
+        assert out["counts"]["findings_rejected"] == 1
+
+    def test_a_severity_override_is_respected(self, tmp_path):
+        """THE case: an operator downgrades a critical, and the badge must
+        follow their decision rather than the detector's first guess."""
+        out = self._summary(tmp_path, [("SQLi", "critical", "low", None)])
+        assert out["findings_by_severity"] == {"low": 1}, out["findings_by_severity"]
+
+    def test_the_total_is_still_reported_so_nothing_looks_deleted(self, tmp_path):
+        out = self._summary(tmp_path, [
+            ("A", "high", None, "rejected"), ("B", "high", None, "rejected"),
+            ("C", "low", None, None),
+        ])
+        assert out["counts"]["findings"] == 1
+        assert out["counts"]["findings_total"] == 3
+
+    def test_it_uses_the_shared_definition_of_effective_severity(self):
+        """Two implementations of "what severity is this" is one that
+        eventually disagrees with the report."""
+        import inspect
+        from orchestrator import engagement as E
+        assert "current_severity" in inspect.getsource(E.summary)
+
+    def test_the_ui_says_how_many_were_triaged_out(self):
+        from pathlib import Path
+        html = Path("dashboard/templates/index.html").read_text()
+        assert "triaged out" in html, \
+            "the numbers just shrink, which reads as data loss rather than work done"
+
+
+class TestTheSidebarCollapses:
+    @staticmethod
+    def _html():
+        from pathlib import Path
+        return Path("dashboard/templates/index.html").read_text()
+
+    def test_there_is_a_toggle_and_a_collapsed_style(self):
+        html = self._html()
+        assert 'id="rail-toggle"' in html
+        assert "body.rail #app-sidebar" in html
+
+    def test_the_choice_persists_per_operator_not_in_the_url(self):
+        """A link someone pastes must not impose their sidebar width on the
+        person opening it."""
+        html = self._html()
+        assert "localStorage" in html and "erlik.sidebar.rail" in html
+        assert "rail" not in "".join(
+            html[html.index("const URL_KEYS = ["):html.index("]", html.index("const URL_KEYS = ["))])
+
+    def test_storage_failure_does_not_break_the_page(self):
+        """localStorage throws outright in a private window or with site data
+        blocked, and a sidebar preference is not worth losing the page over."""
+        html = self._html()
+        i = html.index("function toggleRail")
+        assert "try {" in html[i:i + 400] and "catch" in html[i:i + 400]
+        j = html.index("function restoreRail")
+        assert "try {" in html[j:j + 400] and "catch" in html[j:j + 400]
+
+    def test_the_rail_is_disabled_on_narrow_screens(self):
+        """Below 900px the sidebar is already a stacked strip; shrinking it to
+        icons there hides the counts for no gain."""
+        html = self._html()
+        i = html.index("@media (max-width: 900px)", html.index("body.rail"))
+        block = html[i:i + 700]
+        assert "body.rail #app-sidebar" in block
+        assert "#rail-toggle { display: none; }" in block
+
+
+class TestTheEngagementRecordIsEditableAndKeepsHistory:
+    """An engagement carries the AUTHORISATION for a test. Being able to
+    silently rewrite who approved it, and from when, is the one edit that must
+    not be possible — so edits are allowed and every previous value is kept."""
+
+    @staticmethod
+    def _client(tmp_path):
+        import asyncio
+        import warnings
+        warnings.filterwarnings("ignore", category=DeprecationWarning)
+        from fastapi.testclient import TestClient
+        import orchestrator.database as db_mod
+        import orchestrator.main as M
+        db_mod.DB_PATH = str(tmp_path / "ed.db")
+        asyncio.run(db_mod.init_db())
+        return TestClient(M.app)
+
+    def test_an_edit_is_recorded_with_its_previous_value(self, tmp_path):
+        import orchestrator.database as db_mod
+        old = db_mod.DB_PATH
+        try:
+            c = self._client(tmp_path)
+            eid = c.post("/api/engagements",
+                         json={"client_name": "Acme Crop"}).json()["engagement"]["id"]
+            r = c.put(f"/api/engagements/{eid}", json={"client_name": "Acme Corp"})
+            assert r.status_code == 200
+            assert r.json()["updated"]["changed"] == ["client_name"]
+            revs = c.get(f"/api/engagements/{eid}/revisions").json()["revisions"]
+            assert revs[0]["field"] == "client_name"
+            assert revs[0]["old_value"] == "Acme Crop"
+            assert revs[0]["new_value"] == "Acme Corp"
+        finally:
+            db_mod.DB_PATH = old
+
+    def test_an_unknown_field_is_ignored_not_written(self, tmp_path):
+        """A typo in a field name must not silently succeed."""
+        import orchestrator.database as db_mod
+        old = db_mod.DB_PATH
+        try:
+            c = self._client(tmp_path)
+            eid = c.post("/api/engagements",
+                         json={"client_name": "Acme"}).json()["engagement"]["id"]
+            r = c.put(f"/api/engagements/{eid}", json={"nonsense": "x", "notes": "n"})
+            assert r.json()["updated"]["ignored"] == ["nonsense"]
+            assert r.json()["updated"]["changed"] == ["notes"]
+        finally:
+            db_mod.DB_PATH = old
+
+    def test_a_noop_edit_records_no_revision(self, tmp_path):
+        import orchestrator.database as db_mod
+        old = db_mod.DB_PATH
+        try:
+            c = self._client(tmp_path)
+            eid = c.post("/api/engagements",
+                         json={"client_name": "Acme"}).json()["engagement"]["id"]
+            c.put(f"/api/engagements/{eid}", json={"client_name": "Acme"})
+            assert c.get(f"/api/engagements/{eid}/revisions").json()["revisions"] == []
+        finally:
+            db_mod.DB_PATH = old
+
+    def test_archiving_never_deletes(self, tmp_path):
+        """Sessions, findings, scope rules and assets all reference this row,
+        and the project's rule is that an identifier is deprecated, not
+        removed."""
+        import orchestrator.database as db_mod
+        old = db_mod.DB_PATH
+        try:
+            c = self._client(tmp_path)
+            eid = c.post("/api/engagements",
+                         json={"client_name": "Acme"}).json()["engagement"]["id"]
+            a = c.post(f"/api/engagements/{eid}/archive", json={"archived": True})
+            assert a.json()["engagement"]["status"] == "archived"
+            assert c.get(f"/api/engagements/{eid}").status_code == 200
+            back = c.post(f"/api/engagements/{eid}/archive", json={"archived": False})
+            assert back.json()["engagement"]["status"] == "active"
+            fields = [r["field"] for r in
+                      c.get(f"/api/engagements/{eid}/revisions").json()["revisions"]]
+            assert fields.count("status") == 2, "the archive transition was not recorded"
+        finally:
+            db_mod.DB_PATH = old
+
+    def test_an_unknown_engagement_is_a_404(self, tmp_path):
+        import orchestrator.database as db_mod
+        old = db_mod.DB_PATH
+        try:
+            c = self._client(tmp_path)
+            assert c.put("/api/engagements/nope", json={"notes": "x"}).status_code == 404
+            assert c.post("/api/engagements/nope/archive", json={}).status_code == 404
+        finally:
+            db_mod.DB_PATH = old
+
+    def test_the_ui_saves_explicitly_not_as_you_type(self):
+        """A field that commits while you are still typing can store half an
+        approval reference."""
+        from pathlib import Path
+        html = Path("dashboard/templates/index.html").read_text()
+        assert 'onclick="engSave()"' in html
+        i = html.index('id="eng-e-by"')
+        assert "oninput=" not in html[i:i + 300] and "onchange=" not in html[i:i + 300]
+
+    def test_the_ui_shows_the_edit_history(self):
+        from pathlib import Path
+        html = Path("dashboard/templates/index.html").read_text()
+        assert "engLoadRevisions" in html
+        assert "EDIT HISTORY" in html
+
+    def test_the_confirmation_survives_the_re_render(self):
+        """engRender replaces the panel, taking the status span with it.
+        Setting the message first made a successful save look like a no-op."""
+        from pathlib import Path
+        html = Path("dashboard/templates/index.html").read_text()
+        block = js_body(html, "async function engSave() {")
+        assert block.index("engRender(d)") < block.index("engSaveMessage(")

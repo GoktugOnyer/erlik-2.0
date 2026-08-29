@@ -442,6 +442,33 @@ async def init_db():
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        # Every change to an engagement record, kept.
+        #
+        # An engagement carries the AUTHORISATION for a test: who approved it,
+        # from when, until when. Being able to silently rewrite that after the
+        # fact is the one edit that must not be possible — a report is evidence
+        # about work someone permitted, and "who permitted it" cannot become
+        # whatever the record says today.
+        #
+        # So edits are allowed (a typo in a reference was otherwise permanent)
+        # and the previous value is retained. This is also why archiving sets
+        # a status instead of deleting: identifiers are permanent here.
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS engagement_revisions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                engagement_id TEXT NOT NULL,
+                field TEXT NOT NULL,
+                old_value TEXT,
+                new_value TEXT,
+                changed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        try:
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_revisions_engagement "
+                             "ON engagement_revisions(engagement_id)")
+        except Exception:
+            pass
+
         # One row per host/pattern, IN or OUT of scope, and where it came from.
         # `source` matters: a host a human typed is authorised, a host discovered
         # by enumeration is a CANDIDATE and must stay inert until approved —

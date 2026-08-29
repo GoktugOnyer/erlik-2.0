@@ -5268,6 +5268,56 @@ async def get_engagement(engagement_id: str):
     return out
 
 
+@app.put("/api/engagements/{engagement_id}")
+async def update_engagement(engagement_id: str, body: dict):
+    """Correct an engagement record. Explicit save, previous value retained.
+
+    PUT rather than PATCH-as-you-type on purpose: this record carries the
+    AUTHORISATION for the test, and a field that saves while you are still
+    typing it can commit a half-written approval reference.
+    """
+    from orchestrator import engagement as E
+    db = await get_db()
+    try:
+        try:
+            result = await E.update(db, engagement_id, body or {})
+        except KeyError:
+            raise HTTPException(status_code=404, detail="engagement not found")
+        await db.commit()
+        out = await E.summary(db, engagement_id)
+        out["updated"] = result
+        return out
+    finally:
+        await db.close()
+
+
+@app.post("/api/engagements/{engagement_id}/archive")
+async def archive_engagement(engagement_id: str, body: dict | None = None):
+    """Close or reopen an engagement. Never deletes: sessions, findings, scope
+    rules and assets all reference this row."""
+    from orchestrator import engagement as E
+    archived = True if not body else bool(body.get("archived", True))
+    db = await get_db()
+    try:
+        if not await E.archive(db, engagement_id, archived):
+            raise HTTPException(status_code=404, detail="engagement not found")
+        await db.commit()
+        return await E.summary(db, engagement_id)
+    finally:
+        await db.close()
+
+
+@app.get("/api/engagements/{engagement_id}/revisions")
+async def engagement_revisions(engagement_id: str):
+    """Every change ever made to this engagement record."""
+    from orchestrator import engagement as E
+    db = await get_db()
+    try:
+        return {"revisions": await E.revisions(db, engagement_id)}
+    finally:
+        await db.close()
+
+
 @app.post("/api/engagements/{engagement_id}/scope")
 async def add_engagement_scope(engagement_id: str, body: dict):
     """Add a scope rule. `source=discovered` rows land UNAPPROVED and authorise

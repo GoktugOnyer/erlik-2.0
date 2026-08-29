@@ -705,6 +705,37 @@
         .col-sort[data-active]::after {
             content: attr(data-active); margin-left: 4px; color: var(--neon-cyan);
         }
+
+        /* Collapsed rail. Evidence tables are wide — a full-width command, a
+           URL and an output excerpt do not fit beside 224px of navigation, and
+           the operator should not have to choose permanently. */
+        #app-sidebar { transition: width .12s ease, flex-basis .12s ease; }
+        body.rail #app-sidebar { width: 46px; flex: 0 0 46px; padding-left: 6px; padding-right: 6px; }
+        body.rail #app-sidebar .side-head,
+        body.rail #app-sidebar .side-rows,
+        body.rail #app-sidebar .side-select,
+        body.rail #app-sidebar .side-link > span:not(.side-ico) { display: none; }
+        body.rail #app-sidebar .side-link { justify-content: center; padding: 6px 0; }
+        #rail-toggle {
+            width: 100%; margin-bottom: 10px; padding: 3px 0; cursor: pointer;
+            background: transparent; border: 1px solid rgba(0,255,245,0.22);
+            border-radius: 3px; color: #6a6a8a;
+            font-family: ui-monospace, monospace; font-size: 0.7rem;
+        }
+        #rail-toggle:hover { color: var(--neon-cyan); border-color: var(--neon-cyan); }
+
+        /* Below 900px the sidebar stops being a column and becomes a strip, so
+           the rail choice is irrelevant there and must not shrink it to icons
+           on a screen that is already stacking. */
+        @media (max-width: 900px) {
+            body.rail #app-sidebar { width: 100%; flex: 1 1 auto; padding: 14px 12px 40px; }
+            body.rail #app-sidebar .side-head,
+            body.rail #app-sidebar .side-rows,
+            body.rail #app-sidebar .side-select,
+            body.rail #app-sidebar .side-link > span:not(.side-ico) { display: revert; }
+            body.rail #app-sidebar .side-link { justify-content: flex-start; padding: 6px 8px; }
+            #rail-toggle { display: none; }
+        }
 </style>
 </head>
 <body class="min-h-screen">
@@ -726,6 +757,8 @@
 
     <div class="app-shell">
     <aside id="app-sidebar">
+        <button id="rail-toggle" type="button" onclick="toggleRail()"
+            title="Collapse the sidebar to icons">&#9776;</button>
         <div class="side-group">
             <div class="side-head">WORKSPACE</div>
             <select id="side-engagement" class="side-select" onchange="sideEngagementPicked()">
@@ -2252,8 +2285,8 @@
                 ['ports', a.port || 0, '#4ea8de'],
                 ['technologies', a.technology || 0, '#a05cff'],
                 ['endpoints', a.endpoint || 0, '#31d67a'],
-                ['critical', sev.critical || 0, '#ff2d6f'],
-                ['high', sev.high || 0, '#ff6b35'],
+                ['critical open', sev.critical || 0, '#ff2d6f'],
+                ['high open', sev.high || 0, '#ff6b35'],
                 ['agent runs', c.sessions || 0, '#8a8aa0'],
                 ['wstg runs', c.v2_runs || 0, '#8a8aa0'],
             ];
@@ -2442,6 +2475,36 @@
                 </div>
 
                 <div class="panel rounded p-4">
+                    <div class="flex items-baseline justify-between flex-wrap gap-2">
+                        <h3 class="font-pixel" style="font-size:0.62rem;">ENGAGEMENT RECORD</h3>
+                        <span class="font-mono" style="font-size:0.55rem; opacity:.55;">
+                            explicit save &mdash; every previous value is kept
+                        </span>
+                    </div>
+                    <div class="flex flex-wrap gap-2 mt-3">
+                        <input id="eng-e-name" class="cyber-input rounded" placeholder="client name"
+                            style="font-size:0.65rem; width:190px;">
+                        <input id="eng-e-domain" class="cyber-input rounded" placeholder="root domain"
+                            style="font-size:0.65rem; width:170px;">
+                        <input id="eng-e-by" class="cyber-input rounded" placeholder="authorised by"
+                            style="font-size:0.65rem; width:190px;">
+                        <input id="eng-e-from" class="cyber-input rounded" placeholder="from (YYYY-MM-DD)"
+                            style="font-size:0.65rem; width:140px;">
+                        <input id="eng-e-until" class="cyber-input rounded" placeholder="until (YYYY-MM-DD)"
+                            style="font-size:0.65rem; width:140px;">
+                        <input id="eng-e-notes" class="cyber-input rounded" placeholder="notes"
+                            style="font-size:0.65rem; flex:1; min-width:200px;">
+                        <button onclick="engSave()" class="font-pixel px-3 py-1 rounded border"
+                            style="font-size:0.55rem;">SAVE</button>
+                        <button id="eng-archive-btn" onclick="engArchive()"
+                            class="font-pixel px-3 py-1 rounded border"
+                            style="font-size:0.55rem; color:var(--neon-yellow); border-color:var(--neon-yellow);">ARCHIVE</button>
+                        <span id="eng-save-out" class="font-mono" style="font-size:0.6rem;"></span>
+                    </div>
+                    <div id="eng-revisions" class="mt-3"></div>
+                </div>
+
+                <div class="panel rounded p-4">
                     <h3 class="font-pixel" style="font-size:0.62rem;">AT A GLANCE</h3>
                     <div class="mt-3">${engStatCards(d)}</div>
                 </div>
@@ -2517,7 +2580,110 @@
                 b.addEventListener('click', () => engApprove(b.dataset.engapprove)));
             det.querySelectorAll('[data-engtestlab]').forEach(b =>
                 b.addEventListener('click', () => engToTestLab(b.dataset.engtestlab, engCurrent)));
+            engFillRecord(e);
+            engLoadRevisions(engCurrent);
             det.classList.remove('hidden');
+        }
+
+
+        // ===== ENGAGEMENT RECORD =====
+        // Editable because a typo in an authorisation reference was otherwise
+        // permanent. Explicit SAVE rather than save-as-you-type: this record
+        // carries the authorisation for the test, and a field that commits
+        // while you are still typing can store half an approval reference.
+        //
+        // Every previous value is kept server-side and shown below the form,
+        // because "who authorised this" must not become whatever the record
+        // happens to say today.
+        function engSaveMessage(text, colour) {
+            const el = document.getElementById('eng-save-out');
+            if (!el) return;
+            el.textContent = text;
+            el.style.color = colour;
+        }
+
+        function engFillRecord(e) {
+            const set = (id, v) => { const el = document.getElementById(id); if (el) el.value = v || ''; };
+            set('eng-e-name', e.client_name);
+            set('eng-e-domain', e.root_domain);
+            set('eng-e-by', e.authorised_by);
+            set('eng-e-from', e.authorised_from);
+            set('eng-e-until', e.authorised_until);
+            set('eng-e-notes', e.notes);
+            const btn = document.getElementById('eng-archive-btn');
+            if (btn) btn.textContent = (e.status === 'archived') ? 'REOPEN' : 'ARCHIVE';
+        }
+
+        async function engSave() {
+            const out = document.getElementById('eng-save-out');
+            const val = id => (document.getElementById(id) || {}).value ?? '';
+            out.textContent = 'saving…'; out.style.color = '#6a6a8a';
+            try {
+                const r = await fetch(`/api/engagements/${encodeURIComponent(engCurrent)}`, {
+                    method: 'PUT', headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        client_name: val('eng-e-name'), root_domain: val('eng-e-domain'),
+                        authorised_by: val('eng-e-by'), authorised_from: val('eng-e-from'),
+                        authorised_until: val('eng-e-until'), notes: val('eng-e-notes'),
+                    }),
+                });
+                if (!r.ok) throw new Error(await describeApiError(r));
+                const d = await r.json();
+                const n = (d.updated || {}).changed || [];
+                // engRender REPLACES this panel, taking the status span with
+                // it, so the message is written after the re-render. Setting
+                // it first looked like the save had silently done nothing.
+                engRender(d);
+                loadEngagementOptions();
+                sideLoadEngagements();
+                engSaveMessage(n.length ? `saved: ${n.join(', ')}` : 'no change',
+                               n.length ? 'var(--neon-green)' : '#6a6a8a');
+            } catch (err) {
+                out.textContent = err.message;
+                out.style.color = 'var(--neon-red)';
+            }
+        }
+
+        async function engArchive() {
+            const btn = document.getElementById('eng-archive-btn');
+            const reopening = btn && btn.textContent === 'REOPEN';
+            const out = document.getElementById('eng-save-out');
+            try {
+                const r = await fetch(
+                    `/api/engagements/${encodeURIComponent(engCurrent)}/archive`, {
+                        method: 'POST', headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({archived: !reopening}),
+                    });
+                if (!r.ok) throw new Error(await describeApiError(r));
+                const d = await r.json();
+                engRender(d);
+                loadEngagementOptions();
+                sideLoadEngagements();
+                engSaveMessage(reopening ? 'reopened' : 'archived — the record is kept',
+                               'var(--neon-green)');
+            } catch (err) {
+                out.textContent = err.message;
+                out.style.color = 'var(--neon-red)';
+            }
+        }
+
+        async function engLoadRevisions(id) {
+            const el = document.getElementById('eng-revisions');
+            if (!el) return;
+            let rows = [];
+            try {
+                rows = (await (await fetch(
+                    `/api/engagements/${encodeURIComponent(id)}/revisions`)).json()).revisions || [];
+            } catch (e) { return; }
+            if (!rows.length) { el.innerHTML = ''; return; }
+            el.innerHTML = `<div class="font-pixel" style="font-size:0.45rem; color:#6a6a8a;
+                margin-bottom:3px;">EDIT HISTORY</div>` + rows.map(r => `
+                <div class="font-mono" style="font-size:0.58rem; color:#7a7a8a; padding:1px 0;">
+                    <span style="opacity:.6;">${tlEsc(fmtWhen(r.changed_at))}</span>
+                    &nbsp;${tlEsc(r.field)}:
+                    <span style="color:#8a5a5a;">${tlEsc(r.old_value || '(empty)')}</span>
+                    &rarr; <span style="color:#d8d8e8;">${tlEsc(r.new_value || '(empty)')}</span>
+                </div>`).join('');
         }
 
         // ===== Asset inventory =====
@@ -5962,8 +6128,8 @@ ${htmlBody}
                 + (d.engagement.root_domain ? ` · ${d.engagement.root_domain}` : '');
 
             tiles.innerHTML = [
-                ovTile('critical', sev.critical || 0, `#view=reports${e}`, '#ff2d6f'),
-                ovTile('high', sev.high || 0, `#view=reports${e}`, '#ff6b35'),
+                ovTile('critical open', sev.critical || 0, `#view=reports${e}`, '#ff2d6f'),
+                ovTile('high open', sev.high || 0, `#view=reports${e}`, '#ff6b35'),
                 ovTile('hosts', a.host || 0, `#view=engagements${e}`, '#00fff5'),
                 ovTile('endpoints', a.endpoint || 0, `#view=engagements${e}`, '#31d67a'),
                 ovTile('agent runs', c.sessions || 0, `#view=reports${e}`, '#8a8aa0'),
@@ -5987,7 +6153,10 @@ ${htmlBody}
                  action: {href: `#view=engagements${e}`, label: 'declare scope'}},
                 {label: `Work has been run (${runs})`, done: runs > 0,
                  action: {href: `#view=scanner${e}`, label: 'start a run'}},
-                {label: `Findings exist to triage (${c.findings || 0})`, done: (c.findings || 0) > 0,
+                {label: `Findings exist to triage (${c.findings || 0} open`
+                        + ((c.findings_total ?? c.findings) > (c.findings || 0)
+                            ? ` of ${c.findings_total}` : '') + ')',
+                 done: (c.findings || 0) > 0,
                  action: {href: `#view=reports${e}`, label: 'open reports'}},
             ]);
 
@@ -6010,6 +6179,39 @@ ${htmlBody}
                 </div>`;
             }
         }
+
+
+        // ===== SIDEBAR RAIL =====
+        // The choice is per-operator and per-machine, so localStorage rather
+        // than the URL: a link someone pastes should not impose their sidebar
+        // width on the person opening it.
+        //
+        // Wrapped because localStorage throws outright in some contexts (a
+        // private window, site data blocked), and a sidebar preference is not
+        // worth breaking the page over.
+        const RAIL_KEY = 'erlik.sidebar.rail';
+
+        function applyRail(on) {
+            document.body.classList.toggle('rail', !!on);
+            const b = document.getElementById('rail-toggle');
+            if (b) {
+                b.textContent = on ? '\u00BB' : '\u2630';
+                b.title = on ? 'Expand the sidebar' : 'Collapse the sidebar to icons';
+                b.setAttribute('aria-expanded', String(!on));
+            }
+        }
+
+        function toggleRail() {
+            const on = !document.body.classList.contains('rail');
+            applyRail(on);
+            try { localStorage.setItem(RAIL_KEY, on ? '1' : '0'); } catch (e) { /* not fatal */ }
+        }
+
+        (function restoreRail() {
+            let v = null;
+            try { v = localStorage.getItem(RAIL_KEY); } catch (e) { /* not fatal */ }
+            applyRail(v === '1');
+        })();
 
         // ===== SIDEBAR: the customer's inventory, always visible =====
         // These counts ARE the state of the work — what erlik has found, on
@@ -6093,8 +6295,18 @@ ${htmlBody}
             const sev = d.findings_by_severity || {};
             const SEV = [['critical', '#ff2d6f'], ['high', '#ff6b35'], ['medium', '#ffd23f'],
                          ['low', '#4ea8de'], ['info', '#7a7a8a']];
+            // These are OPEN findings at their EFFECTIVE severity. When triage
+            // has closed some, say so — otherwise the numbers just shrink and
+            // it reads as data loss rather than as work done.
+            const openN = (d.counts || {}).findings || 0;
+            const totalN = (d.counts || {}).findings_total ?? openN;
             document.getElementById('side-findings').innerHTML =
-                SEV.map(([k, c]) => sideCount(k, sev[k] || 0, c)).join('');
+                SEV.map(([k, c]) => sideCount(k, sev[k] || 0, c)).join('')
+                + (totalN > openN
+                    ? `<div class="side-empty" style="margin-top:3px;">
+                         ${openN} open of ${totalN} · ${totalN - openN} triaged out
+                       </div>`
+                    : '');
 
             const c = d.counts || {};
             document.getElementById('side-activity').innerHTML =
