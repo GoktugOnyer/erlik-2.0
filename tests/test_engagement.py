@@ -42,8 +42,15 @@ def js_body(html, signature):
     reading the diff.
     """
     i = html.index(signature)
+    # Start at the brace that ENDS the signature, not the first brace after the
+    # name: `loadReportsList(opts = {})` has a default-parameter `{}` in its
+    # parameter list, and matching from there returned the signature alone —
+    # so assertions "passed" against an empty body.
+    assert signature.rstrip().endswith("{"), f"signature must end with '{{': {signature!r}"
+    start = i + len(signature) - 1
+    assert html[start] == "{", signature
     depth = 0
-    for k in range(html.index("{", i), len(html)):
+    for k in range(start, len(html)):
         if html[k] == "{":
             depth += 1
         elif html[k] == "}":
@@ -1078,31 +1085,27 @@ class TestListsFilterSortAndTellTheTruth:
         """"No sessions found" while a filter is active sends the operator
         hunting for a bug that is their own search box."""
         html = self._html()
-        i = html.index("async function loadReportsList")
-        block = html[i:i + 4200]
+        block = js_body(html, "async function loadReportsList(opts = {}) {")
         assert "No sessions found" in block
         assert "No session matches" in block
 
     def test_filtering_does_not_refetch(self):
         html = self._html()
         assert "__reportsCache" in html
-        i = html.index("async function loadReportsList")
-        assert "opts.fromCache" in self._html()[i:i + 900]
+        assert "opts.fromCache" in js_body(html, "async function loadReportsList(opts = {}) {")
 
     def test_the_search_input_is_the_source_of_truth(self):
         """An earlier version copied the URL back into the input on every
         render, so any change was reverted to a stale query and the list
         filtered on something the box no longer said."""
         html = self._html()
-        i = html.index("async function loadReportsList")
-        block = html[i:i + 4200]
+        block = js_body(html, "async function loadReportsList(opts = {}) {")
         assert "document.activeElement !== searchEl" not in block, \
             "the URL is overwriting the input again"
 
     def test_reports_is_scoped_to_the_selected_customer(self):
         html = self._html()
-        i = html.index("async function loadReportsList")
-        block = html[i:i + 4200]
+        block = js_body(html, "async function loadReportsList(opts = {}) {")
         assert "side-engagement" in block
         assert "engagement_id === eng" in block
 
@@ -1111,8 +1114,7 @@ class TestListsFilterSortAndTellTheTruth:
         nothing, and an empty list reads as "this customer has done no work".
         /api/sessions did not send engagement_id when this was written."""
         html = self._html()
-        i = html.index("async function loadReportsList")
-        block = html[i:i + 4200]
+        block = js_body(html, "async function loadReportsList(opts = {}) {")
         # The guard must be USED in the filter, not merely defined above it.
         # The first version checked only that the words appeared, and passed
         # with the filter reverted to the unguarded form.
@@ -1781,3 +1783,112 @@ class TestFindingsAcrossEngagements:
         assert "escapeHtml(r.vuln_type" in block
         assert "escapeHtml(r.url" in block
         assert "escapeHtml(r.client_name)" in block
+
+
+class TestDefectsFoundByAdversarialReview:
+    """Four defects an adversarial review of the UI change set confirmed.
+    Every one produced a confident wrong answer rather than an error, which is
+    this project's recurring shape."""
+
+    @staticmethod
+    def _html():
+        from pathlib import Path
+        return Path("dashboard/templates/index.html").read_text()
+
+    def test_the_ladder_asks_the_question_the_gate_asks(self):
+        """It counted scope rows by `source` alone while `evaluate_scope`
+        branches on in_scope AND approved_at, so it was wrong in both
+        directions: a declared EXCLUDE rule read as "scope declared" and the
+        ladder invited a run the gate then 403'd, while an APPROVED discovered
+        host read as "no scope" because approval sets approved_at and never
+        rewrites source."""
+        block = js_body(self._html(), "async function loadOverview() {")
+        i = block.index("const declared =")
+        expr = block[i:block.index(";", i)]
+        assert "in_scope" in expr, "the rung ignores whether a rule is an EXCLUDE"
+        assert "approved_at" in expr, "an approved discovered host still reads as no scope"
+
+    def test_the_ladder_and_the_gate_agree_on_a_declared_exclude(self):
+        """The behavioural half: a lone EXCLUDE rule authorises nothing."""
+        from orchestrator.engagement import evaluate_scope
+        rows = [{"pattern": "vpn.acme.example", "kind": "host", "in_scope": 0,
+                 "source": "declared", "approved_at": "2026-08-29"}]
+        allowed, _ = evaluate_scope(rows, "http://app.acme.example")
+        assert allowed is False, "fixture is wrong: this should authorise nothing"
+        # ...and the UI expression must reach the same verdict.
+        assert not [r for r in rows
+                    if int(r["in_scope"]) and (r["source"] == "declared" or r["approved_at"])]
+
+    def test_an_approved_discovered_host_counts_as_scope(self):
+        from orchestrator.engagement import evaluate_scope
+        rows = [{"pattern": "app.acme.example", "kind": "host", "in_scope": 1,
+                 "source": "discovered", "approved_at": "2026-08-29"}]
+        allowed, _ = evaluate_scope(rows, "http://app.acme.example")
+        assert allowed is True
+        assert [r for r in rows
+                if int(r["in_scope"]) and (r["source"] == "declared" or r["approved_at"])]
+
+    def test_the_reports_denominator_is_the_scoped_set(self):
+        """It used the corpus-wide session count, rendering "5 of 127 sessions
+        · this customer" when the customer owned 5 of 5 — beside a sidebar
+        reading 5 from a real per-engagement COUNT(*)."""
+        block = js_body(self._html(), "async function loadReportsList(opts = {}) {")
+        i = block.index("listCountLabel(sessions.length")
+        call = block[i:block.index(")", i)]
+        assert "scoped.length" in call, f"denominator is not the scoped set: {call}"
+        assert "all.length" not in call
+
+    def test_the_duration_column_sorts_by_duration(self):
+        """It carried data-sort="created_at" while printing DURATION, and
+        listMarkSort painted the arrow on DURATION — so the affordance
+        confirmed a sort the column does not show. A 30s run started at 09:00
+        and a 45m run started at 08:00 ordered exactly inverted."""
+        html = self._html()
+        i = html.index(">DURATION<")
+        tag = html[html.rfind("<span", 0, i):i]
+        assert 'data-sort="total_duration_ms"' in tag, tag
+
+    def test_every_sortable_header_sorts_by_what_it_names(self):
+        """Guard on the guard, since this class of mistake is invisible: the
+        list reorders and the arrow appears, so the click looks honoured."""
+        import re
+        html = self._html()
+        expected = {"SESSION ID": "id", "TARGET": "target_url", "STATUS": "status",
+                    "TYPE": "session_type", "STEPS": "total_steps",
+                    "FINDINGS": "total_findings", "DURATION": "total_duration_ms"}
+        found = dict(re.findall(r'<span class="col-sort" data-sort="([^"]+)">([A-Z ]+)</span>', html))
+        for label, key in expected.items():
+            assert found.get(key) == label, f"{label} sorts by {[k for k,v in found.items() if v==label]}"
+
+    def test_the_session_key_is_read_not_only_written(self):
+        """A written-and-never-read URL key is a URL that lies: switching view
+        with a report open left session=abc in the hash, claiming an open
+        report on a screen that has none."""
+        html = self._html()
+        assert "st.session" in html, "the key is written and never read"
+        body = js_body(html, "function urlApply() {")
+        assert "st.session" in body
+
+    def test_the_session_key_is_only_carried_by_the_view_that_owns_it(self):
+        body = js_body(self._html(), "function urlWrite() {")
+        assert "__currentView === 'reports'" in body, \
+            "the key rides along on views that have no report open"
+
+
+class TestTheTestHelperItself:
+    """js_body extracts a JS function body by brace matching. It matched from
+    the first brace after the NAME, which for `loadReportsList(opts = {})` is
+    the default-parameter braces — so it returned the signature alone and five
+    assertions passed against an empty string."""
+
+    def test_it_returns_a_real_body_for_a_default_parameter_signature(self):
+        from pathlib import Path
+        html = Path("dashboard/templates/index.html").read_text()
+        body = js_body(html, "async function loadReportsList(opts = {}) {")
+        assert len(body) > 1000, f"body is {len(body)} chars — the matcher stopped early"
+        assert "__reportsCache" in body
+
+    def test_it_refuses_a_signature_that_does_not_end_in_a_brace(self):
+        import pytest
+        with pytest.raises(AssertionError):
+            js_body("function f() { }", "function f()")

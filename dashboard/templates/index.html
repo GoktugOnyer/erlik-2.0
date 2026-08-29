@@ -1460,7 +1460,7 @@
                     <span class="col-sort" data-sort="session_type">TYPE</span>
                     <span class="col-sort" data-sort="total_steps">STEPS</span>
                     <span class="col-sort" data-sort="total_findings">FINDINGS</span>
-                    <span class="col-sort" data-sort="created_at">DURATION</span>
+                    <span class="col-sort" data-sort="total_duration_ms">DURATION</span>
                     <span>ACTIONS</span>
                 </div>
 
@@ -2243,7 +2243,8 @@
 
         function urlWrite() {
             const eng = (document.getElementById('side-engagement') || {}).value || '';
-            urlSet({view: __currentView, eng, session: reportDetailSessionId || ''});
+            urlSet({view: __currentView, eng,
+                    session: (__currentView === 'reports' && reportDetailSessionId) || ''});
         }
 
         function urlApply() {
@@ -2253,6 +2254,14 @@
             if (side && eng && side.value !== eng) {
                 side.value = eng;
                 if (side.value === eng) sideEngagementPicked();
+            }
+            // A written-and-never-read key is a URL that lies: switching view
+            // with a report open left `session=abc` in the hash claiming an
+            // open report on a screen that has none. Reading it makes a report
+            // link shareable, which is the point of putting it there.
+            if (st.session && st.session !== reportDetailSessionId
+                && typeof viewReport === 'function') {
+                viewReport(st.session);
             }
             const searchEl = document.getElementById('reports-search');
             if (searchEl && searchEl.value !== (st.q || '')) {
@@ -3710,8 +3719,13 @@
                 searchValue: q, sortKey: st.sort, sortDir: st.dir,
             });
 
-            countEl.textContent = listCountLabel(sessions.length, all.length, 0, 'sessions')
-                + (eng && scopable ? ' · this customer' : '')
+            // The denominator is the SCOPED set, not the corpus. Using
+            // all.length rendered "5 of 127 sessions · this customer" when the
+            // customer owned 5 of 5 — beside a sidebar reading "agent sessions
+            // 5" from a real per-engagement COUNT(*). The operator goes hunting
+            // for a filter hiding 122 rows that does not exist.
+            countEl.textContent = listCountLabel(sessions.length, scoped.length, 0, 'sessions')
+                + (eng && scopable ? ` · this customer (${all.length} in total)` : '')
                 + (eng && !scopable ? ' · NOT scoped (API sends no engagement_id)' : '');
 
             if (sessions.length === 0) {
@@ -6193,7 +6207,20 @@ ${htmlBody}
             // endpoint knowledge, a convenience, not a gate: the Scanner takes
             // a URL directly. A ladder whose rungs are not really ordered is
             // worse than no ladder, because it names the wrong next action.
-            const declared = (d.scope || []).filter(r => (r.source || 'declared') === 'declared');
+            // The rung must ask the question `evaluate_scope` asks, not a
+            // similar-looking one. Counting rows by `source` alone was wrong in
+            // BOTH directions:
+            //   * a declared EXCLUDE rule counted as "scope declared", so the
+            //     ladder said "start a run" and every run it invited was then
+            //     403'd by the gate;
+            //   * an APPROVED discovered host did not count, because approval
+            //     sets approved_at and never rewrites source, so the ladder
+            //     demanded scope that already existed.
+            // The gate authorises on in_scope AND (declared OR approved), and
+            // scope_rows already returns all three fields.
+            const declared = (d.scope || []).filter(
+                r => Number(r.in_scope) && ((r.source || 'declared') === 'declared'
+                                            || r.approved_at));
             const runs = (c.sessions || 0) + (c.v2_runs || 0);
             ladder.innerHTML = ovLadder([
                 {label: 'A customer is selected', done: true},
@@ -6482,6 +6509,12 @@ ${htmlBody}
             if (st.q) {
                 const se = document.getElementById('reports-search');
                 if (se) se.value = st.q;
+            }
+            if (st.session && st.view === 'reports') {
+                // after the view is up, so the detail panel exists
+                setTimeout(() => {
+                    if (typeof viewReport === 'function') viewReport(st.session);
+                }, 0);
             }
             switchView(st.view || 'overview');
         })();
