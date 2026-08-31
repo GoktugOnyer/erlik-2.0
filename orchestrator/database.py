@@ -516,6 +516,45 @@ async def init_db():
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        # DECLARED per-case targeting. What `PROFILES` in
+        # orchestrator/testcase/sweep.py holds as Python source — "for this
+        # application, WSTG-INPV-05 goes to /vulnerabilities/sqli/ with
+        # parameter id" — as data an operator can enter for their own customer.
+        #
+        # NOT target_endpoints, which is a different relation. That is a
+        # resource inventory: one row per discovered path, no column naming
+        # WHICH target-schema field a value fills, so `login_url` and DVWA's
+        # `submit` have nowhere to live; its dedup is (target_key, path) so the
+        # second case to learn a path is dropped; and its reader discards the
+        # case binding entirely. This is a per-case FIELD BINDING, one row per
+        # (case, field).
+        #
+        # Keyed on target_key (host:port), like recon_context and the handoff.
+        # engagement_target_id is carried for the customer case but is never
+        # the lookup key: the deterministic lane usually runs with no
+        # engagement, and target_endpoints already sat empty for a year for
+        # exactly that reason.
+        #
+        # `retired_at` rather than DELETE — an operator's declaration is a
+        # statement about a client's application and the reason it stopped
+        # being true is worth keeping.
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS target_case_inputs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                target_key TEXT NOT NULL,
+                engagement_target_id TEXT DEFAULT '',
+                test_case_id TEXT NOT NULL,
+                field TEXT NOT NULL,
+                value TEXT NOT NULL,
+                source TEXT DEFAULT 'declared',
+                declared_by TEXT,
+                notes TEXT,
+                retired_at TIMESTAMP DEFAULT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(target_key, test_case_id, field)
+            )
+        """)
+
         # ===== Credentials =====
         #
         # A pentest tool has to log in, so it has to hold a client's secret.
@@ -590,6 +629,7 @@ async def init_db():
             ("engagement_targets", "idx_targets_engagement", "engagement_id"),
             ("target_endpoints", "idx_endpoints_target", "target_id"),
             ("target_endpoints", "idx_endpoints_target_key", "target_key"),
+            ("target_case_inputs", "idx_case_inputs_key", "target_key"),
         ):
             try:
                 await db.execute(

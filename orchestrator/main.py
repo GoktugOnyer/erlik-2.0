@@ -5795,15 +5795,85 @@ async def v2_sweep_plan(body: dict):
     # what erlik inferred, and should not be silently ignored.
     discovered = as_sweep_inputs(await known(db, target), target)
     extra = {**(await creds.auth_inputs(db, target)), **(body.get("extra") or {})}
+
+    # DECLARED per-case targeting, entered by the operator for THIS customer's
+    # application. Same shape and same precedence as a built-in profile, and
+    # merged over it per (case, field) — so correcting one stale parameter does
+    # not discard the rest of what the profile knows about that case.
+    #
+    # `refused` rows are surfaced rather than dropped. A declaration that stops
+    # applying looks exactly like one that was never saved.
+    from orchestrator.testcase import declared as _decl
+    _declared, _refused = await _decl.profile_for(db, target, target)
     plan = plan_sweep(cases, target, body.get("profile") or "",
-                      body.get("only"), extra, discovered=discovered)
+                      body.get("only"), extra, discovered=discovered,
+                      declared=_declared)
+    plan["declared_refused"] = _refused
     plan["inputs"] = {
+        "declared": sum(len(v) for v in _declared.values()),
         "discovered": {k: len(v) for k, v in discovered.items() if v},
         "auth_fields": sorted(k for k in extra if k in
                               ("low_priv_token", "high_priv_token", "auth_header",
                                "jwt", "cookie")),
     }
     return plan
+
+
+@app.get("/api/v2/targets/declared")
+async def v2_declared_list(target: str):
+    """What an operator has declared about this target's endpoints."""
+    from orchestrator.testcase import declared as _decl
+    db = await get_db()
+    try:
+        rows = await _decl.rows_for(db, target)
+        _, refused = await _decl.profile_for(db, target, target)
+    finally:
+        await db.close()
+    return {"target": target, "declared": rows, "refused": refused,
+            "declarable": list(_decl.DECLARABLE),
+            "path_fields": list(_decl.PATH_FIELDS)}
+
+
+@app.post("/api/v2/targets/declared")
+async def v2_declared_set(body: dict):
+    """Declare "for this target, case X's field F is V".
+
+    Refuses with a NAMED reason rather than storing something the planner will
+    later drop in silence — these values are rendered into command templates.
+    """
+    from orchestrator.testcase import declared as _decl
+    target = (body.get("target") or "").strip()
+    if not target:
+        raise HTTPException(status_code=400, detail="target required")
+    db = await get_db()
+    try:
+        ok, why = await _decl.declare(
+            db, target, (body.get("test_case_id") or "").strip(),
+            (body.get("field") or "").strip(), body.get("value") or "",
+            engagement_target_id=(body.get("engagement_target_id") or ""),
+            declared_by=(body.get("declared_by") or ""),
+            notes=(body.get("notes") or ""))
+        if not ok:
+            raise HTTPException(status_code=400, detail=why)
+        await db.commit()
+        rows = await _decl.rows_for(db, target)
+    finally:
+        await db.close()
+    return {"ok": True, "declared": rows}
+
+
+@app.delete("/api/v2/targets/declared")
+async def v2_declared_retire(target: str, test_case_id: str, field: str):
+    """Stop applying a declaration. RETIRES it — the row is kept."""
+    from orchestrator.testcase import declared as _decl
+    db = await get_db()
+    try:
+        done = await _decl.retire(db, target, test_case_id, field)
+        await db.commit()
+        rows = await _decl.rows_for(db, target)
+    finally:
+        await db.close()
+    return {"ok": done, "declared": rows}
 
 
 @app.get("/api/v2/sweep/profiles")

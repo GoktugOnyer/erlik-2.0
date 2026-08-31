@@ -1936,10 +1936,41 @@
                     <span id="tl-progress" class="font-mono" style="font-size:0.6rem; opacity:.8;"></span>
                 </div>
                 <div class="font-mono mt-2" style="font-size:0.55rem; opacity:.55;">
-                    A profile supplies this application's real endpoints. Without one, cases needing
-                    a specific parameter get the base URL &mdash; which is how the SSRF case came to
-                    be aimed at a search box and report a finding there.
+                    A profile supplies this application's real endpoints. Without one, a case that
+                    needs a specific parameter is SKIPPED rather than aimed at the base URL &mdash;
+                    guessing is how the SSRF case came to be pointed at a search box and report a
+                    finding there. The two built-in profiles cover the lab targets; for a real
+                    customer, declare the endpoints below.
                 </div>
+            </div>
+
+            <div class="panel rounded p-4">
+                <div class="flex items-baseline justify-between flex-wrap gap-2">
+                    <h3 class="font-pixel" style="font-size:0.62rem;">DECLARED ENDPOINTS
+                        &mdash; THIS TARGET</h3>
+                    <span id="tl-decl-count" class="font-mono"
+                          style="font-size:0.58rem; opacity:.75;"></span>
+                </div>
+                <div class="font-mono mt-1" style="font-size:0.55rem; opacity:.55;">
+                    What a built-in profile knows about a lab app, for your customer's app instead
+                    &mdash; no code change. Paths only: the base URL above is prepended, so a
+                    declaration cannot point a case at another host. A declared field also stops
+                    that case fanning out over discovered paths, because a human vouched for this
+                    one.
+                </div>
+                <div class="flex gap-2 mt-3 flex-wrap items-center">
+                    <input id="tl-decl-case" class="input-field font-mono px-2 py-1 rounded"
+                        style="font-size:0.6rem; min-width:150px;" placeholder="WSTG-INPV-05">
+                    <select id="tl-decl-field" class="input-field font-mono px-2 py-1 rounded"
+                        style="font-size:0.6rem;"></select>
+                    <input id="tl-decl-value" class="input-field font-mono px-2 py-1 rounded"
+                        style="font-size:0.6rem; min-width:220px;" placeholder="/search">
+                    <button id="tl-decl-add" class="font-pixel px-3 py-1 rounded border"
+                        style="font-size:0.55rem; color:var(--neon-green);
+                               border-color:var(--neon-green);">+ DECLARE</button>
+                    <span id="tl-decl-msg" class="font-mono" style="font-size:0.58rem;"></span>
+                </div>
+                <div id="tl-decl-rows" class="mt-3 space-y-1"></div>
             </div>
 
             <div id="tl-skipped-panel" class="panel rounded p-4 hidden">
@@ -3037,6 +3068,9 @@
             } catch (e) {
                 document.getElementById('tl-meta').textContent = 'catalogue unavailable: ' + e;
             }
+            const addBtn = document.getElementById('tl-decl-add');
+            if (addBtn) addBtn.addEventListener('click', tlDeclSet);
+            await tlDeclLoad();
             tlPlan();
         }
 
@@ -3055,6 +3089,100 @@
             }
             tlPlanData = await r.json();
             tlRender();
+            tlDeclRender(tlPlanData.declared_refused || []);
+        }
+
+        // ---- declared endpoints -------------------------------------------
+        // The operator's own per-case targeting, for an application no built-in
+        // profile describes. Bound with addEventListener after innerHTML rather
+        // than inline onclick, like the rest of this page, so a value that came
+        // from the server is never re-parsed as markup.
+        let tlDeclFields = [];
+
+        async function tlDeclLoad() {
+            const target = document.getElementById('tl-target').value.trim();
+            if (!target) return;
+            try {
+                const d = await (await fetch('/api/v2/targets/declared?target='
+                    + encodeURIComponent(target))).json();
+                tlDeclFields = d.declarable || [];
+                const sel = document.getElementById('tl-decl-field');
+                if (sel && !sel.options.length) {
+                    sel.innerHTML = tlDeclFields.map(f =>
+                        `<option value="${tlEsc(f)}">${tlEsc(f)}</option>`).join('');
+                }
+                tlDeclRender(d.refused || [], d.declared || []);
+            } catch (e) { /* the panel is additive; a failure must not break PLAN */ }
+        }
+
+        function tlDeclRender(refused, rows) {
+            const box = document.getElementById('tl-decl-rows');
+            if (!box) return;
+            if (rows) box._rows = rows;
+            rows = rows || box._rows || [];
+            document.getElementById('tl-decl-count').textContent =
+                rows.length ? `${rows.length} declaration(s)` : 'none for this target';
+            const bad = {};
+            for (const r of (refused || [])) bad[`${r.test_case_id}|${r.field}`] = r.reason;
+            box.innerHTML = rows.map(r => {
+                const key = `${r.test_case_id}|${r.field}`;
+                const why = bad[key];
+                return `<div class="flex items-center gap-2 font-mono"
+                             style="font-size:0.6rem; border-bottom:1px solid #1e242c;
+                                    padding:3px 0;">
+                    <span style="color:var(--neon-cyan); min-width:130px;">${tlEsc(r.test_case_id)}</span>
+                    <span style="opacity:.7; min-width:96px;">${tlEsc(r.field)}</span>
+                    <span style="flex:1;">${tlEsc(r.value)}</span>
+                    ${why ? `<span style="color:var(--neon-red);">refused &mdash; ${tlEsc(why)}</span>` : ''}
+                    <button data-decl-retire="1" data-case="${tlEsc(r.test_case_id)}"
+                            data-field="${tlEsc(r.field)}"
+                            style="opacity:.6; border:1px solid #2a3038; padding:0 6px;
+                                   border-radius:3px;">retire</button>
+                </div>`;
+            }).join('') || '<div class="font-mono" style="font-size:0.58rem; opacity:.45;">'
+                + 'Nothing declared. A case needing a parameter this target has not '
+                + 'described will be skipped, and say so.</div>';
+            box.querySelectorAll('[data-decl-retire]').forEach(b =>
+                b.addEventListener('click', () =>
+                    tlDeclRetire(b.dataset.case, b.dataset.field)));
+        }
+
+        async function tlDeclSet() {
+            const target = document.getElementById('tl-target').value.trim();
+            const msg = document.getElementById('tl-decl-msg');
+            const body = {
+                target,
+                test_case_id: document.getElementById('tl-decl-case').value.trim(),
+                field: document.getElementById('tl-decl-field').value,
+                value: document.getElementById('tl-decl-value').value.trim(),
+            };
+            const r = await fetch('/api/v2/targets/declared', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(body)});
+            const j = await r.json().catch(() => ({}));
+            if (!r.ok) {
+                // A refusal is shown verbatim. It names the field and the
+                // reason, which is the whole point of refusing on write.
+                msg.style.color = 'var(--neon-red)';
+                msg.textContent = j.detail || 'refused';
+                return;
+            }
+            msg.style.color = 'var(--neon-green)';
+            msg.textContent = 'declared';
+            document.getElementById('tl-decl-value').value = '';
+            tlDeclRender([], j.declared || []);
+            tlPlan();
+        }
+
+        async function tlDeclRetire(caseId, field) {
+            const target = document.getElementById('tl-target').value.trim();
+            const q = `target=${encodeURIComponent(target)}`
+                + `&test_case_id=${encodeURIComponent(caseId)}`
+                + `&field=${encodeURIComponent(field)}`;
+            const r = await fetch('/api/v2/targets/declared?' + q, {method: 'DELETE'});
+            const j = await r.json().catch(() => ({}));
+            tlDeclRender([], j.declared || []);
+            tlPlan();
         }
 
         function tlRender() {
