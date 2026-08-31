@@ -626,3 +626,98 @@ class TestTheChainReportIsAlsoADeliverable:
         assert "_sp.current_severity" in src
         assert 'or f.get("calibrated_severity")' not in src, (
             "a second effective-severity definition is back")
+
+
+class TestTheExecutiveSummaryPromptAgreesWithItself:
+    """The fourth render point the `_deliverable_view` docstring names, and the
+    only one no test had ever looked at — `_gen`'s `fake_chat(*a, **k)`
+    discards the prompt.
+
+    `total_findings` is the agent loop's own counter. It excludes nettacker
+    pre-scan findings by design while the report SELECT returns them, and it
+    knows nothing about triage withholding. The FINDINGS block two lines below
+    it in the same prompt derives from the split. Measured: `TOTAL FINDINGS: 3`
+    directly above a single listed finding. The model writes the client's
+    executive summary from that.
+    """
+
+    @staticmethod
+    def _prompt(tmp_path, rows, agent_counter):
+        import asyncio
+        import orchestrator.database as db_mod
+        import orchestrator.main as M
+        old = db_mod.DB_PATH, db_mod.DB_DIR
+        db_mod.DB_DIR = tmp_path
+        db_mod.DB_PATH = tmp_path / "p.db"
+        seen = {}
+        try:
+            async def go():
+                await db_mod.init_db()
+                db = await db_mod.get_db()
+                await db.execute(
+                    "INSERT INTO sessions (id,target_url,system_prompt,status) "
+                    "VALUES ('s1','http://a','p','completed')")
+                for vt, tri in rows:
+                    await db.execute(
+                        "INSERT INTO findings (session_id,vuln_type,severity,url,"
+                        "evidence,triage_status) VALUES ('s1',?,'high',"
+                        "'http://a/x','ev',?)", (vt, tri))
+                await db.commit()
+                await db.close()
+
+                async def spy(msgs, *a, **k):
+                    seen["p"] = (msgs[0]["content"] if isinstance(msgs, list)
+                                 else str(msgs))
+                    return "stub"
+                M.llm_client.chat = spy
+                await M._generate_report("s1", "m", "http://a", "cold",
+                                         "general", 3, agent_counter, 500)
+                return seen["p"]
+            return asyncio.run(go())
+        finally:
+            db_mod.DB_PATH, db_mod.DB_DIR = old
+
+    def test_the_stated_total_matches_the_listed_findings(self, tmp_path):
+        p = self._prompt(tmp_path, [("Ghost", "rejected"), ("SQLi", "accepted")],
+                         agent_counter=2)
+        assert "TOTAL FINDINGS: 1" in p, p[:400]
+        assert p.count("\nFINDING ") == 1
+
+    def test_the_agent_counter_does_not_leak_in(self, tmp_path):
+        """The counter says 99. The prompt must not repeat it."""
+        p = self._prompt(tmp_path, [("SQLi", "accepted")], agent_counter=99)
+        assert "TOTAL FINDINGS: 1" in p
+        assert "TOTAL FINDINGS: 99" not in p
+
+
+class TestSarifLevelHonoursThePolicy:
+    """SARIF is read by CI gates, which act on `level`, not on `properties`.
+
+    The downgrade was written as a comment and never applied: `level` was
+    unconditional, so a NOT-submittable CRITICAL emitted `error` — identical to
+    a submittable one — and a gate broke the build on a finding erlik itself
+    says must never be submitted. `test_sarif_carries_it` reads only
+    `properties` and passes with the bug present.
+    """
+
+    @staticmethod
+    def _levels(findings):
+        from orchestrator.reporting import report_to_sarif
+        sar = report_to_sarif({"findings": findings, "session": {},
+                               "statistics": {}})
+        return {r["ruleId"]: r["level"] for r in sar["runs"][0]["results"]}
+
+    def test_severity_is_held_constant_across_the_pair(self):
+        """Both CRITICAL, so the test cannot pass by reading severity."""
+        lv = self._levels([
+            {"title": "CORS", "severity": "critical", "submittable": False,
+             "policy_rule": "cors_wildcard"},
+            {"title": "SQLi", "severity": "critical", "submittable": True}])
+        assert lv["CORS"] == "note", lv
+        # the control: a blanket "note" for everything would be no better
+        assert lv["SQLi"] == "error", lv
+
+    def test_an_unmarked_finding_keeps_its_severity_level(self):
+        """`submittable` absent must not read as withheld."""
+        lv = self._levels([{"title": "SQLi", "severity": "critical"}])
+        assert lv["SQLi"] == "error"

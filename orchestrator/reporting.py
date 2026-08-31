@@ -172,12 +172,17 @@ def report_to_sarif(report: dict, session_id: str = "") -> dict:
         # SARIF is read by CI gates, which act on `level`. A finding the policy
         # says must not be submitted is downgraded to "note" so an automated
         # consumer does not fail a build on something erlik itself withholds.
-        if not f.get("submittable", True):
+        _blocked = not f.get("submittable", True)
+        if _blocked:
             props["policy_note"] = _policy_note(f)
         loc = f.get("affected_url") or ""
         results.append({
             "ruleId": rule_id,
-            "level": _sarif_level(f.get("severity")),
+            # The downgrade the comment above promised. It was written but
+            # never applied: `level` was unconditional, so a NOT-submittable
+            # CRITICAL emitted `error`, identical to a submittable one, and a
+            # CI gate broke the build on a finding erlik itself withholds.
+            "level": "note" if _blocked else _sarif_level(f.get("severity")),
             "message": {"text": (f.get("description") or f.get("title") or "Finding")},
             "locations": ([{"physicalLocation": {"artifactLocation": {"uri": loc}}}]
                           if loc else []),

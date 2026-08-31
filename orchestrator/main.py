@@ -2534,7 +2534,13 @@ async def _generate_report(session_id: str, model: str, target_url: str,
         target_url=target_url,
         duration=duration_str,
         total_steps=total_steps,
-        total_findings=total_findings,
+        # From the SPLIT, not from the agent loop's counter. That counter by
+        # design excludes nettacker pre-scan findings while the report SELECT
+        # returns them, and it knows nothing about triage withholding — so the
+        # prompt stated a total that contradicted the FINDINGS block directly
+        # beneath it (measured: "TOTAL FINDINGS: 3" above a single listed
+        # finding). The model writes the client's executive summary from this.
+        total_findings=len(findings),
         findings_text=findings_text,
         phases_completed=phases_completed_str,
         phases_missed=phases_missed_str,
