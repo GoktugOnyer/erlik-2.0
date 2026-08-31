@@ -337,3 +337,107 @@ class TestControlledVocabularyCannotCarryASecret:
         assert out[0]["vuln_type"] == "SQL Injection"
         assert out[0]["severity"] == "high"
         assert not counts
+
+
+class TestTheReportMarkdownItself:
+    """The OTHER half of the downloadable file — and the one served by
+    `/api/sessions/{id}/report`.
+
+    `TestTheDownloadableReport` above renders with `llm_report="# Report\\n"`, a
+    stub. So it only ever exercised the untruncated step log, which was masked,
+    and never the hybrid markdown that `_generate_report` builds — which was
+    not. That markdown re-reads `steps.tool_input` / `tool_output` from the DB
+    and rendered them verbatim into the Command block, the parsed-findings
+    block and the raw-output section.
+
+    Measured before the fix: a session's JWT appeared TWICE and its cookie
+    THREE times in the file `/report/download` serves, underneath that file's
+    own header saying `Applied: **yes**` and `Distinct secrets masked: **3**`.
+    The census counted the secrets it masked in the bottom half while the top
+    half carried them in clear. A false assurance is worse than none — it is
+    the reason someone forwards the file without reading it.
+    """
+
+    JWT = ("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9."
+           "eyJzdWIiOiJhZG1pbkBqdWljZS1zaC5vcCIsInJvbGUiOiJhZG1pbiJ9."
+           "QW5vdGhlclNlY3JldFNpZ25hdHVyZVZhbHVlSGVyZQ")
+    COOKIE = "PHPSESSID=8f2b91c4de77a05b3e6aa1a9d0"
+    CMD = ('curl -s http://juice-shop:3000/rest/admin/all-users '
+           '-H "Authorization: Bearer {jwt}" -b "{cookie}"')
+
+    @classmethod
+    def _run(cls, tmp_path):
+        """The REAL generator, end to end, then the real file writer."""
+        import asyncio
+        import orchestrator.database as db_mod
+        import orchestrator.main as M
+        old = db_mod.DB_PATH, db_mod.DB_DIR, M.REPORTS_DIR
+        db_mod.DB_DIR = tmp_path
+        db_mod.DB_PATH = tmp_path / "r.db"
+        M.REPORTS_DIR = tmp_path / "reports"
+        cmd = cls.CMD.format(jwt=cls.JWT, cookie=cls.COOKIE)
+        try:
+            async def go():
+                await db_mod.init_db()
+                db = await db_mod.get_db()
+                await db.execute(
+                    "INSERT INTO sessions (id,target_url,system_prompt,status) "
+                    "VALUES ('s1','http://juice-shop:3000','p','completed')")
+                await db.execute(
+                    "INSERT INTO steps (session_id,step_number,phase,tool_called,"
+                    "tool_input,tool_output,duration_ms,prompt_sent) "
+                    "VALUES ('s1',1,'exploitation','curl',?,?,120,'p')",
+                    (cmd, f"HTTP/1.1 200 OK\nSet-Cookie: {cls.COOKIE}\n\n{{}}"))
+                await db.execute(
+                    "INSERT INTO findings (session_id,vuln_type,severity,url,"
+                    "evidence) VALUES ('s1','Broken Access Control','high',"
+                    "'http://juice-shop:3000/a','admin route reachable')")
+                await db.commit()
+                await db.close()
+
+                async def fake_chat(*a, **k):
+                    return "stub"
+                M.llm_client.chat = fake_chat
+                md, _s, _ms = await M._generate_report(
+                    "s1", "m", "http://juice-shop:3000", "cold", "general",
+                    1, 1, 500)
+                steps = [{"step": 1, "tool": "curl", "phase": "exploitation",
+                          "success": True, "duration_ms": 120,
+                          "command": cmd, "output": f"Set-Cookie: {cls.COOKIE}"}]
+                path = await M._save_report_file(
+                    "s1", "http://juice-shop:3000", "cold", "general", "m",
+                    "full", 1, 1, 500, steps, [], md)
+                return md, Path(path).read_text()
+            return asyncio.run(go())
+        finally:
+            db_mod.DB_PATH, db_mod.DB_DIR, M.REPORTS_DIR = old
+
+    def test_the_served_markdown_carries_no_credential(self, tmp_path):
+        """`GET /api/sessions/{id}/report` returns this string."""
+        md, _file = self._run(tmp_path)
+        assert self.JWT not in md
+        assert self.COOKIE not in md
+        assert "<jwt:redacted:" in md, "masked, not merely absent"
+
+    def test_the_downloaded_file_carries_no_credential(self, tmp_path):
+        """`GET /api/sessions/{id}/report/download` serves this file. It
+        embeds the markdown above, so the leak reached it twice over."""
+        _md, text = self._run(tmp_path)
+        assert text.count(self.JWT) == 0
+        assert text.count(self.COOKIE) == 0
+
+    def test_the_redaction_header_is_not_lying(self, tmp_path):
+        """The whole point. The file may only DECLARE redaction if the
+        declaration holds for the entire file, both halves."""
+        _md, text = self._run(tmp_path)
+        assert "Applied: **yes**" in text
+        assert self.JWT not in text and self.COOKIE not in text
+
+    def test_reproduction_detail_survives_masking(self, tmp_path):
+        """NEGATIVE CONTROL, in the other direction: a redactor broad enough to
+        eat the request itself would make the report useless for reproducing
+        the finding. The URL, the tool and the flags must all still be there."""
+        md, _file = self._run(tmp_path)
+        assert "curl -s http://juice-shop:3000/rest/admin/all-users" in md
+        assert "Authorization: Bearer" in md, "the header NAME is not a secret"
+        assert "Broken Access Control" in md

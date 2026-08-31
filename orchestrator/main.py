@@ -2139,6 +2139,7 @@ async def _generate_report(session_id: str, model: str, target_url: str,
                            total_steps: int, total_findings: int,
                            total_duration_ms: int):
     """Generate a hybrid pentest report: programmatic data sections + LLM analysis."""
+    from orchestrator.redaction import mask as _mask
     db = await get_db()
     try:
         # Fetch steps — convert to dicts immediately for safe key access
@@ -2277,8 +2278,23 @@ async def _generate_report(session_id: str, model: str, target_url: str,
             sn = s["step_number"]
             tool = s["tool_called"]
             phase = s["phase"]
-            cmd = s["tool_input"]
-            output = s["tool_output"]
+            # MASK HERE, at the top of the loop, not at the append sites.
+            # `parsed`, `summary`, `cleaned_output` and the raw-output section
+            # all derive from these two names, so this is the single point
+            # where a secret can enter the rendered markdown — and this
+            # markdown is what /report and /report/download serve.
+            #
+            # It was rendered verbatim. `primitives.inject_credentials` writes
+            # real bearer tokens and session cookies into `tool_input`, and a
+            # session's JWT appeared twice and its cookie three times in the
+            # downloaded file — beneath that same file's own header declaring
+            # "Redaction — Applied: yes / Distinct secrets masked: 3". The
+            # bottom half (the untruncated step log) was masked and counted;
+            # the top half, this one, never called the redactor. A stated
+            # assurance that is false is worse than no assurance: it is
+            # exactly what stops someone reading the file before forwarding it.
+            cmd = _mask(s["tool_input"])
+            output = _mask(s["tool_output"])
             dur = s["duration_ms"]
             phases_seen.add(phase)
 
