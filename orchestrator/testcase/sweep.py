@@ -161,10 +161,21 @@ def build_target(case: dict[str, Any], base: str,
     # fields, and those are substituted into `bash -c '...'` command templates.
     from orchestrator.engagement import looks_injectable
     for k, v in tgt.items():
-        if isinstance(v, str):
-            bad = looks_injectable(v)
-            if bad:
-                return None, f"target field {k!r} {bad}"
+        # `if isinstance(v, str)` let EVERY non-string value past the gate
+        # untouched, and the runner stringifies whatever it is into the command
+        # template — so a list value carried its contents through verbatim.
+        # Harmless while profiles were Python source written by us; not
+        # harmless the moment this knowledge becomes data an operator types.
+        if isinstance(v, bool) or v is None:
+            return None, f"target field {k!r} must be text or a number"
+        if isinstance(v, (int, float)):
+            continue                       # port, parallel_n — no shell surface
+        if not isinstance(v, str):
+            return None, (f"target field {k!r} must be text, not "
+                          f"{type(v).__name__}")
+        bad = looks_injectable(v)
+        if bad:
+            return None, f"target field {k!r} {bad}"
     # Scope travels WITH the target. The runner enforces it, so a plan that
     # omitted it would hand the executor a case with no boundary.
     tgt["scope"] = {"allow_hosts": [host], "allow_ports": [port]}
@@ -188,7 +199,8 @@ def _entry(case: dict[str, Any]) -> dict[str, Any]:
 def plan_sweep(cases: list[dict[str, Any]], base: str, profile_name: str = "",
                only: list[str] | None = None,
                extra: dict[str, Any] | None = None,
-               discovered: dict[str, list[str]] | None = None) -> dict[str, Any]:
+               discovered: dict[str, list[str]] | None = None,
+               declared: dict[str, dict[str, str]] | None = None) -> dict[str, Any]:
     """What a sweep WOULD do. Pure — no network, no database, no execution.
 
     `discovered` is what earlier runs found for this target, shaped
@@ -200,7 +212,14 @@ def plan_sweep(cases: list[dict[str, Any]], base: str, profile_name: str = "",
 
     With nothing discovered the plan is byte-identical to before.
     """
-    profile = PROFILES.get(profile_name or "", {})
+    # PROFILES is the BUILT-IN layer, not the only layer. It stays a plain
+    # module-level dict: scripts/deterministic_sweep.py imports it, five tests
+    # subscript it synchronously with no event loop, and the benchmark depends
+    # on the two lab profiles resolving with no database at all. What an
+    # operator declares for their own customer is merged OVER it, per
+    # (case, field) — see orchestrator/testcase/declared.py.
+    from orchestrator.testcase.declared import merge
+    profile = merge(PROFILES.get(profile_name or "", {}), declared or {})
     wanted = set(only or [])
     discovered = {k: v for k, v in (discovered or {}).items() if v}
     runnable, skipped = [], []
@@ -208,8 +227,33 @@ def plan_sweep(cases: list[dict[str, Any]], base: str, profile_name: str = "",
         if wanted and case.get("id") not in wanted:
             continue
         req = (case.get("target_schema") or {}).get("required") or []
+        # A field something already BOUND for this case is not a candidate for
+        # fan-out. The fanned value was passed through `extra`, and `extra`
+        # beats the profile in build_target — so one discovered path DELETED
+        # the profile's declared endpoint from the plan:
+        #
+        #   dvwa / WSTG-INPV-05, declared {base}/vulnerabilities/sqli/
+        #   + any discovered path
+        #   -> ran at /, /robots.txt and /ftp, each with parameter=id, and the
+        #      declared SQLi endpoint appeared NOWHERE.
+        #
+        # Three confident "no SQLi" verdicts about pages with no `id`
+        # parameter, and zero runs against the one endpoint erlik knew was
+        # right. `endpoints.record` runs after every v2 run, so a target
+        # acquires discovered paths and then permanently stops being tested
+        # where it matters. The comment below says discovered values are
+        # "ADDITIONAL targets, not replacements" — that was only ever true of
+        # the no-profile path.
+        #
+        # A declaration binds case <-> field <-> value; a discovered row asserts
+        # only "this path exists on this host". The tighter binding wins.
+        bound = set((profile.get(case.get("id", "")) or {}))
+        bound |= {k for k, v in (extra or {}).items() if v not in (None, "")}
         fan_field = next(
-            (f for f in ("url", "parameter") if f in req and f in discovered), None)
+            (f for f in ("url", "parameter")
+             if f in req and f in discovered and f not in bound), None)
+        suppressed = sorted(f for f in ("url", "parameter")
+                            if f in req and f in discovered and f in bound)
         if fan_field:
             # The discovered values are ADDITIONAL targets, not replacements.
             # Fanning over them alone traded "test the site root" for "test
@@ -241,6 +285,10 @@ def plan_sweep(cases: list[dict[str, Any]], base: str, profile_name: str = "",
                 continue
         tgt, why = build_target(case, base, profile, extra)
         entry = _entry(case)
+        if suppressed:
+            # NAMED, not silent. An operator seeing three fewer rows cannot
+            # otherwise tell a declaration taking over from a regression.
+            entry["suppressed_discovered"] = suppressed
         if tgt is None:
             skipped.append({**entry, "reason": why})
         else:
