@@ -2669,7 +2669,9 @@ async def _build_report_json(session_id: str) -> dict:
             "SELECT * FROM sessions WHERE id = ?", (session_id,))).fetchone()
         session = dict(srow) if srow else {}
         cur = await db.execute(
-            "SELECT vuln_type, severity, url, evidence, cve_id, cvss_score, cvss_vector, "
+            # `id` is selected because the policy verdict is keyed on it.
+            # Without it these five exports could not be gated at all.
+            "SELECT id, vuln_type, severity, url, evidence, cve_id, cvss_score, cvss_vector, "
             "cwe, calibrated_severity, owasp_category, mitre, impact, remediation, confidence, "
             "ref_links, triage_status, severity_override "
             "FROM findings WHERE session_id = ? ORDER BY id", (session_id,)
@@ -2680,6 +2682,16 @@ async def _build_report_json(session_id: str) -> dict:
 
     stats = {"total": 0, "critical": 0, "high": 0, "medium": 0, "low": 0,
              "informational": 0}
+    # THE GATE these five exports never had. /report.json, .html, .sarif,
+    # .defectdojo.json and .jira.csv all derive from this function, and none of
+    # them passed through the submission policy — so an operator clicking
+    # SARIF shipped a deliverable containing findings the policy says must
+    # never be submitted. The markdown report has applied it all along, which
+    # made the two disagree about the same session.
+    #
+    # Same semantics as the markdown path: ANNOTATE, never remove. The stored
+    # severity is unchanged and every finding is still listed.
+    verdicts = _policy_verdicts(rows)
     report_findings = []
     i = 0
     for r in rows:
@@ -2688,8 +2700,12 @@ async def _build_report_json(session_id: str) -> dict:
         if r.get("triage_status") == "rejected":
             continue
         i += 1
-        sev = (r.get("severity_override") or r.get("calibrated_severity")
-               or r.get("severity") or "INFO").upper()
+        # Normalised, not merely upper-cased. `calibrated_severity` is written
+        # by an LLM pass and the corpus contains '** CRITICAL'; upper-casing
+        # that leaves it unmatched by _SEV_STAT_KEY, so a CRITICAL finding was
+        # counted as informational in the statistics of a client report.
+        from orchestrator.submission_policy import current_severity
+        sev = current_severity(r).upper()
         refs = [x.strip() for x in (r.get("ref_links") or "").split(",") if x.strip()]
         report_findings.append(ReportFinding(
             id=f"F-{i:03d}",
@@ -2706,9 +2722,13 @@ async def _build_report_json(session_id: str) -> dict:
             confidence=r.get("confidence"),
             remediation=r.get("remediation"),
             references=refs,
+            submittable=r.get("id") not in verdicts,
+            policy_rule=verdicts.get(r.get("id")),
         ))
         stats["total"] += 1
         stats[_SEV_STAT_KEY.get(sev, "informational")] += 1
+
+    stats["not_submittable"] = sum(1 for f in report_findings if not f.submittable)
 
     report = PentestReport(
         engagement={

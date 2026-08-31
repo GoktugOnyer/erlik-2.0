@@ -38,6 +38,17 @@ def _sev(f: dict) -> str:
 # HTML
 # --------------------------------------------------------------------------- #
 
+# A finding the submission policy marks informational. Every export format
+# carries this, because a deliverable that omits it is one an operator can send
+# to a client or a bug-bounty programme believing it was gated. Annotated,
+# never removed — the same rule the markdown report follows.
+def _policy_note(f: dict) -> str:
+    if f.get("submittable", True):
+        return ""
+    rule = f.get("policy_rule") or "submission policy"
+    return f"NOT SUBMITTABLE — marked informational by {rule}"
+
+
 def report_to_html(report: dict) -> str:
     eng = report.get("engagement", {}) or {}
     stats = report.get("statistics", {}) or {}
@@ -82,9 +93,14 @@ def report_to_html(report: dict) -> str:
             if refs:
                 items = "".join(f'<li>{_e(r)}</li>' for r in refs)
                 sections.append(f'<h4>References</h4><ul>{items}</ul>')
+            note = _policy_note(f)
+            banner = (f'<p style="margin:6px 0;padding:6px 8px;background:#fff4e5;'
+                      f'border:1px solid #f0c68a;font-size:13px;">{_e(note)}</p>'
+                      if note else "")
             cards.append(f'''
     <div class="finding" style="border-left:4px solid {col}">
       <h3>{_e(f.get("id") or "F-?")} — {_e(f.get("title") or "Finding")}</h3>
+      {banner}
       <table class="meta">{meta}</table>
       {"".join(sections)}
     </div>''')
@@ -151,7 +167,13 @@ def report_to_sarif(report: dict, session_id: str = "") -> dict:
             }
         props = {k: f.get(k) for k in
                  ("severity", "cvss_score", "cvss_vector", "cwe", "owasp",
-                  "confidence", "remediation", "id") if f.get(k) is not None}
+                  "confidence", "remediation", "id", "submittable", "policy_rule")
+                 if f.get(k) is not None}
+        # SARIF is read by CI gates, which act on `level`. A finding the policy
+        # says must not be submitted is downgraded to "note" so an automated
+        # consumer does not fail a build on something erlik itself withholds.
+        if not f.get("submittable", True):
+            props["policy_note"] = _policy_note(f)
         loc = f.get("affected_url") or ""
         results.append({
             "ruleId": rule_id,
@@ -199,7 +221,8 @@ def report_to_defectdojo(report: dict) -> dict:
         sev = _sev(f)
         out.append({
             "title": f.get("title") or "Finding",
-            "description": f.get("description") or "",
+            "description": ((f.get("description") or "")
+                            + (("\n\n" + _policy_note(f)) if _policy_note(f) else "")),
             "severity": _DD_SEV.get(sev, "Info"),
             "cwe": _cwe_int(f.get("cwe")),
             "cvssv3": f.get("cvss_vector") or None,
@@ -212,7 +235,12 @@ def report_to_defectdojo(report: dict) -> dict:
             "endpoints": [f["affected_url"]] if f.get("affected_url") else [],
             "static_finding": False,
             "dynamic_finding": True,
-            "active": True,
+            # DefectDojo's `active` is what its triage views filter on, so a
+            # finding the submission policy withholds must arrive inactive. An
+            # earlier version set this key EARLIER in the same dict literal,
+            # where the line below silently shadowed it — the change looked
+            # applied and did nothing.
+            "active": bool(f.get("submittable", True)),
             "verified": (f.get("confidence") == "confirmed"),
         })
     return {"findings": out}
@@ -222,10 +250,13 @@ def report_to_jira_csv(report: dict) -> str:
     """CSV for Jira's CSV issue import (map the columns during import)."""
     buf = io.StringIO()
     w = csv.writer(buf)
-    w.writerow(["Summary", "Priority", "Labels", "Description", "URL", "CVSS", "CWE", "OWASP"])
+    w.writerow(["Summary", "Priority", "Labels", "Description", "URL", "CVSS", "CWE",
+                "OWASP", "Submittable"])
     for f in report.get("findings", []) or []:
         sev = _sev(f)
         parts = [f.get("description") or ""]
+        if _policy_note(f):
+            parts.append(_policy_note(f))
         if f.get("impact"):
             parts.append("Impact: " + f["impact"])
         if f.get("remediation"):
@@ -241,5 +272,6 @@ def report_to_jira_csv(report: dict) -> str:
             cvss,
             f.get("cwe") or "",
             f.get("owasp") or "",
+            "yes" if f.get("submittable", True) else "no",
         ])
     return buf.getvalue()
