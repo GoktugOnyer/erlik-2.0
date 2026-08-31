@@ -14,6 +14,16 @@ else
     exit 1
 fi
 
+# Load .env if present. Provider credentials live there (gitignored) rather
+# than in a tracked file, and without this the server starts on whatever the
+# shell happens to hold — which silently ran the wrong provider.
+if [ -f ".env" ]; then
+    set -a
+    . ./.env
+    set +a
+    echo "[+] Loaded .env (provider: ${ERLIK_LLM_PROVIDER:-ollama})"
+fi
+
 find . -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true
 
 # Ensure the docker binary is reachable so tool_executor can run `docker exec`

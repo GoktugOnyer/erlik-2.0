@@ -39,6 +39,21 @@ class Evaluator(BaseModel):
     chain_to: Optional[list[str]] = None
     stop_after: bool = False
 
+    # What this evaluator DISCOVERS, as {target_field: regex_capture_group}.
+    #
+    # target_schema.required declares what a case CONSUMES; this is the missing
+    # other half. Without it a case can only ever answer yes/no, and the
+    # deterministic lane fires every case at whatever URL it was handed —
+    # which is the same "cannot reach the endpoint" bottleneck measured in the
+    # agent lane, arrived at from the other direction.
+    #
+    #   produces: {endpoint: 1}   with pattern ^Disallow:\s*(\S+)
+    #
+    # Group 0 (the whole match) is allowed but rarely what you want. Regex
+    # evaluators only; an evaluator without `produces` behaves identically to
+    # before.
+    produces: Optional[dict[str, int]] = None
+
     @field_validator("pattern")
     @classmethod
     def _pattern_required_for_regex(cls, v, info):
@@ -67,6 +82,21 @@ class TestCase(BaseModel):
     severity: str = "medium"
     references: list[str] = Field(default_factory=list)
     target_schema: TargetSchema = Field(default_factory=TargetSchema)
+    # Which attack CLASS this case proves, as a capabilities.CLASSES key.
+    #
+    # The case declares it, not the join table, because the join table got it
+    # wrong in three places and nothing could tell: WSTG-INPV-19
+    # ("Server-Side Request Forgery") was filed under `ssti`, WSTG-INPV-06
+    # ("LDAP Injection") under `cmdi`, and WSTG-INPV-05.6 ("NoSQL Operator
+    # Injection") under `sqli`. The Arsenal therefore told the operator that
+    # SSRF, LDAP and NoSQL had no deterministic coverage while claiming SSTI
+    # and command injection did — wrong in both directions at once.
+    #
+    # The existing integrity audit could not see it: it checked that every
+    # declared id EXISTS and every case is claimed by SOMEONE, which was true
+    # the whole time. Correct attribution needs a second opinion, and the case
+    # itself is the one source that knows what it tests.
+    attack_class: Optional[str] = None
     steps: list[TestStep]
     chain: Optional[ChainRule] = None
 

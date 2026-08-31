@@ -83,6 +83,22 @@ TOOL_TIMEOUTS = {
     "pw-crawl": 30,
     "interactive-pw": 180,  # scriptable Playwright recipe runner
     "zap-cli": 300,
+    # OSINT & discovery (Rekono parity)
+    "theHarvester": 180,   # queries many third-party sources; slow by nature
+    "dirsearch": 180,
+    # TLS / SSH / SMB
+    "sslscan": 60,
+    "ssh-audit": 60,
+    "smbmap": 90,
+    # Secrets & CMS
+    "gitleaks": 120,
+    "cmseek": 120,
+    "joomscan": 180,
+    # Exploit LOOKUP, not execution. searchsploit reads a local database and
+    # runs nothing at the target; Metasploit is present in the image but is
+    # deliberately not registered, so an agent can learn an exploit exists
+    # without being handed a framework to fire it.
+    "searchsploit": 30,
     # Utilities
     "curl": 30,
     "netcat": 30,
@@ -438,6 +454,32 @@ def _safe_hostname(url: str) -> str:
         return ""
 
 
+# Extensions that are NOT delegated TLDs. Deliberately not "common file
+# extensions": .zip, .mov, .md, .sh, .io, .app and .dev are all real TLDs, and
+# skipping one would let `evil.zip` through a scope guard as a filename.
+_NON_TLD_FILE_EXT = (
+    ".txt", ".json", ".yaml", ".yml", ".html", ".php", ".js", ".csv",
+    ".jpg", ".jpeg", ".png", ".gif", ".svg", ".webp", ".ico",
+    ".pdf", ".doc", ".docx", ".xls", ".xlsx",
+    ".gz", ".bz2", ".xz", ".tar", ".rar", ".7z",
+    ".xml", ".log", ".conf", ".ini", ".bak", ".old", ".sql", ".db",
+    ".jar", ".war", ".exe", ".dll", ".bin", ".pem", ".key", ".crt",
+)
+
+
+def looks_like_filename(token: str) -> bool:
+    """A path or a filename, not a host erlik could contact.
+
+    ONE definition, used by both scope guards. They had separate lists —
+    tool_executor knew eight extensions, testcase/scope.py knew two — so a
+    command was refused by one and allowed by the other depending on which
+    lane ran it. The file-upload case was blocked by the narrower copy before
+    it ever sent a request.
+    """
+    t = (token or "").lower()
+    return "/" in t or t.endswith(_NON_TLD_FILE_EXT)
+
+
 def extract_hosts(text: str) -> list[str]:
     """Every hostname referenced by `text`, in order, deduplicated.
 
@@ -459,9 +501,7 @@ def extract_hosts(text: str) -> list[str]:
     masked = _SCOPE_URL_RX.sub(" ", text or "")
     for m in _SCOPE_BARE_HOST_RX.finditer(masked):
         tok = m.group(0)
-        # skip filesystem paths / wordlist filenames that look host-ish
-        if "/" in tok or tok.endswith((".txt", ".json", ".yaml", ".yml", ".html",
-                                       ".php", ".js", ".csv")):
+        if looks_like_filename(tok):
             continue
         add(tok.split(":")[0])
     return out
@@ -506,8 +546,49 @@ def _scope_allows(host: str, target_host: str, extra: list[str]) -> bool:
     return False
 
 
-def _scope_violation(command: str, target_url: str | None) -> str | None:
-    """Return a reason string if the command targets an unrelated public host."""
+def _engagement_violation(command: str, rows) -> str | None:
+    """Refuse a command that touches a host the CUSTOMER did not authorise.
+
+    Checked with `engagement.evaluate_scope` — the same matcher the API gate
+    uses — rather than a second implementation. The audit found the two
+    boundaries had already diverged: this module allowed any subdomain of the
+    session's target and never consulted `engagement_scope` at all, so a host
+    the customer had explicitly EXCLUDED still ran, and the approval workflow
+    for discovered hosts was decorative at the point it mattered most.
+
+    UNCONDITIONAL, unlike the session-target heuristic below. It ignores
+    ERLIK_SCOPE_ENFORCE and applies even when `target_url` is unknown, because:
+
+      * an engagement is a LEGAL boundary and an environment variable must not
+        be able to switch it off; and
+      * `target_url` is unknown on exactly the path that most needs checking —
+        recon.py calls execute_tool without one, so `not target_url` returned
+        None and enumeration ran with no scope check whatsoever.
+    """
+    if not rows:
+        return None
+    from orchestrator.engagement import evaluate_scope
+    for host in extract_hosts(command):
+        h = (host or "").lower().rstrip(".")
+        if not h:
+            continue
+        # erlik's own out-of-band callback infrastructure, not a customer
+        # asset: blind SSRF/XXE detection is unusable without it.
+        if _host_has_suffix(h, _OAST_DOMAINS):
+            continue
+        allowed, why = evaluate_scope(rows, f"http://{h}")
+        if not allowed:
+            return (f"host {h!r} is outside the engagement's authorised scope — {why}. "
+                    "Add it to the engagement (and approve it) before testing it.")
+    return None
+
+
+def _scope_violation(command: str, target_url: str | None,
+                     engagement_rows=None) -> str | None:
+    """Return a reason string if the command targets a host it must not."""
+    breach = _engagement_violation(command, engagement_rows)
+    if breach:
+        return breach
     if not _scope_enforced() or not target_url:
         return None
     target_host = (_safe_hostname(target_url if "://" in target_url else f"http://{target_url}") or "").lower()
@@ -664,7 +745,7 @@ def _sync_check_container() -> bool:
         return False
 
 
-async def execute_tool(command: str, enabled_tools: list[str], no_timeout: bool = False, target_url: str = None, tool_hint: str = None, custom_timeout: int = None, safe_mode: bool | None = None) -> dict:
+async def execute_tool(command: str, enabled_tools: list[str], no_timeout: bool = False, target_url: str = None, tool_hint: str = None, custom_timeout: int = None, safe_mode: bool | None = None, engagement_rows=None) -> dict:
     """
     Execute a command in the kali-tools Docker container.
 
@@ -739,7 +820,7 @@ async def execute_tool(command: str, enabled_tools: list[str], no_timeout: bool 
     sanitized = _sanitize_command(command, target_url=target_url)
 
     # Scope enforcement: refuse commands that target an unrelated public host.
-    scope_err = _scope_violation(sanitized, target_url)
+    scope_err = _scope_violation(sanitized, target_url, engagement_rows)
     if scope_err:
         return {"success": False, "output": "", "tool": tool_name, "duration_ms": 0,
                 "error": f"SCOPE: {scope_err}", "executed": False, "denied": True}

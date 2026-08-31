@@ -8,6 +8,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from orchestrator import llm_client
+from orchestrator import credentials as _CRED
 from orchestrator.testcase.schema import TestCase, TestStep, Evaluator
 from orchestrator.testcase.scope import Scope, ScopeViolation, check_command, from_target
 from orchestrator.tool_executor import execute_tool
@@ -40,6 +41,10 @@ class RunResult(BaseModel):
     chain_next: list[str] = Field(default_factory=list)
     stopped_early: bool = False
     duration_ms: int = 0
+    # Target fields this run DISCOVERED, e.g. {"endpoint": ["/admin", "/api"]}.
+    # A case that finds three parameters can retarget three children; without
+    # this the chain walker hands every child the same target it started with.
+    produced: dict[str, list[str]] = Field(default_factory=dict)
 
 
 _TOOLS_ALL = [
@@ -93,6 +98,91 @@ def _validate_target(tc: TestCase, target: dict[str, Any]) -> str | None:
     return None
 
 
+# Bound on captured values. A crawl of a large site can emit thousands of
+# paths; the cap keeps one step from planning an unbounded fan-out, and the
+# truncation is reported rather than silent.
+MAX_PRODUCED_PER_FIELD = 200
+
+
+def _resolve_url(value: str, base: str) -> str | None:
+    """Absolutise a produced URL, or None if it must not be used.
+
+    robots.txt yields paths (`/admin`); sitemap.xml yields absolute URLs. Both
+    have to become something the 18 cases that require `url` can consume, so a
+    relative value is joined to the target's own URL.
+
+    THE HOST CHECK IS THE POINT. A sitemap can list URLs on any host, and a
+    target file is attacker-controlled: `<loc>https://evil.example/</loc>` in a
+    customer's sitemap would otherwise retarget a chained case at a third party
+    erlik was never authorised to touch. Same-host only, and no scheme other
+    than http/https — `javascript:` and `data:` are not targets.
+    """
+    from urllib.parse import urljoin, urlparse
+
+    if not base:
+        return None
+    try:
+        absolute = urljoin(base, value)
+        p, b = urlparse(absolute), urlparse(base)
+    except ValueError:
+        return None
+    if p.scheme not in ("http", "https"):
+        return None
+    if (p.hostname or "").lower() != (b.hostname or "").lower():
+        return None
+    if (p.port or (443 if p.scheme == "https" else 80)) != \
+       (b.port or (443 if b.scheme == "https" else 80)):
+        return None
+    return absolute
+
+
+def _harvest(ev: Evaluator, output: str, flags: int,
+             target: dict[str, Any] | None = None) -> dict[str, list[str]]:
+    """Pull the values an evaluator declares it produces out of tool output.
+
+    EVERY occurrence, not just the first: a robots.txt has many Disallow lines
+    and a crawl emits many paths, and `re.search` would have found one and
+    discarded the rest.
+
+    Values are DROPPED, never escaped, if they do not survive the same
+    injection gate the sweep planner applies. This text came from the target,
+    and it is about to become a command argument.
+
+    A produced `url` is additionally absolutised against the target and
+    restricted to the SAME HOST — see _resolve_url.
+    """
+    if not ev.produces:
+        return {}
+    from orchestrator.engagement import looks_injectable
+
+    base = (target or {}).get("url") or ""
+    out: dict[str, list[str]] = {}
+    for field, group in ev.produces.items():
+        seen: list[str] = []
+        for m in re.finditer(ev.pattern or "", output, flags):
+            try:
+                value = m.group(group)
+            except (IndexError, re.error):
+                continue
+            if not value:
+                continue
+            value = value.strip()
+            if not value or looks_injectable(value):
+                continue
+            if field == "url":
+                resolved = _resolve_url(value, base)
+                if not resolved:
+                    continue
+                value = resolved
+            if value not in seen:
+                seen.append(value)
+            if len(seen) >= MAX_PRODUCED_PER_FIELD:
+                break
+        if seen:
+            out[field] = seen
+    return out
+
+
 async def _run_evaluator(
     ev: Evaluator,
     step_result: StepResult,
@@ -100,9 +190,10 @@ async def _run_evaluator(
     target: dict[str, Any],
     provider: str | None,
     model: str | None,
-) -> tuple[Finding | None, list[str], bool]:
-    """Apply one evaluator. Returns (finding_or_none, chain_to, stop)."""
+) -> tuple[Finding | None, list[str], bool, dict[str, list[str]]]:
+    """Apply one evaluator. Returns (finding_or_none, chain_to, stop, produced)."""
     matched = False
+    produced: dict[str, list[str]] = {}
 
     if ev.type == "regex" and ev.pattern:
         # MULTILINE so anchors (^ $) work line-by-line — tool output is almost
@@ -110,7 +201,12 @@ async def _run_evaluator(
         flags = re.MULTILINE
         if ev.case_insensitive:
             flags |= re.IGNORECASE
-        matched = bool(re.search(ev.pattern, step_result.output, flags))
+        # The Match used to be destroyed on the line that created it —
+        # `bool(re.search(...))` — so every capture group a case wrote was
+        # thrown away to keep a yes/no. Harvest first, then decide matched.
+        produced = _harvest(ev, step_result.output, flags, target)
+        matched = bool(produced) or bool(
+            re.search(ev.pattern, step_result.output, flags))
 
     elif ev.type == "status_code" and ev.expect is not None:
         # tool_executor doesn't return raw exit code, but encodes failure via success bool
@@ -142,7 +238,7 @@ async def _run_evaluator(
             print(f"[runner] llm evaluator error: {e}", file=sys.stderr)
 
     if not matched:
-        return None, [], False
+        return None, [], False, produced
 
     finding = None
     if ev.emit_finding:
@@ -156,7 +252,7 @@ async def _run_evaluator(
             parameter=target.get("parameter"),
             evidence=step_result.output[:1500],
         )
-    return finding, ev.chain_to or [], ev.stop_after
+    return finding, ev.chain_to or [], ev.stop_after, produced
 
 
 async def run_test_case(
@@ -165,6 +261,7 @@ async def run_test_case(
     provider: str | None = None,
     model: str | None = None,
     dry_run: bool = False,
+    db: Any = None,
 ) -> RunResult:
     """Execute a TestCase. provider/model override env defaults for LLM evaluators.
 
@@ -223,9 +320,40 @@ async def run_test_case(
                 last_step = sr
                 continue
 
+            # AUTH RESOLUTION. `cmd` carries opaque handles; the secret exists
+            # only in `live_cmd`, only for the duration of this call, and is
+            # never stored. See credentials.HANDLE_RX.
+            live_cmd, secret_values = cmd, []
+            if _CRED.has_handle(cmd):
+                if db is None:
+                    sr = StepResult(
+                        step=step.name, command=cmd, success=False, output="",
+                        duration_ms=0,
+                        error="this step needs an authenticated session and the "
+                              "runner was given no credential store; refusing to "
+                              "send the request unauthenticated")
+                    result.steps.append(sr)
+                    result.stopped_early = True
+                    break
+                live_cmd, secret_values = await _CRED.resolve(db, cmd)
+                if _CRED.has_handle(live_cmd):
+                    # A session was revoked, unverified, or deleted between
+                    # planning and running. Sending the request anyway would
+                    # produce an UNAUTHENTICATED result labelled authenticated —
+                    # a false negative wearing a clean bill of health.
+                    sr = StepResult(
+                        step=step.name, command=cmd, success=False, output="",
+                        duration_ms=0,
+                        error="the session this step needs is no longer verified; "
+                              "re-authenticate and re-run (refusing to fall back "
+                              "to an unauthenticated request)")
+                    result.steps.append(sr)
+                    result.stopped_early = True
+                    break
+
             t0 = time.time()
             raw = await execute_tool(
-                cmd,
+                live_cmd,
                 enabled_tools=_TOOLS_ALL,
                 target_url=target.get("url"),
                 no_timeout=False,
@@ -233,11 +361,11 @@ async def run_test_case(
             )
             sr = StepResult(
                 step=step.name,
-                command=cmd,
+                command=cmd,                       # handles, never the secret
                 success=bool(raw.get("success")),
-                output=raw.get("output", "") or "",
+                output=_CRED.scrub(raw.get("output", "") or "", secret_values),
                 duration_ms=int((time.time() - t0) * 1000),
-                error=raw.get("error"),
+                error=_CRED.scrub(raw.get("error") or "", secret_values) or None,
             )
             result.steps.append(sr)
             last_step = sr
@@ -246,9 +374,14 @@ async def run_test_case(
             for ev in step.evaluators:
                 if not _eval_when(ev.when, result.findings, sr):
                     continue
-                finding, chain_to, stop_after = await _run_evaluator(
+                finding, chain_to, stop_after, produced = await _run_evaluator(
                     ev, sr, tc, target, provider, model
                 )
+                for field, values in produced.items():
+                    bucket = result.produced.setdefault(field, [])
+                    for v in values:
+                        if v not in bucket and len(bucket) < MAX_PRODUCED_PER_FIELD:
+                            bucket.append(v)
                 if finding:
                     result.findings.append(finding)
                 for cid in chain_to:

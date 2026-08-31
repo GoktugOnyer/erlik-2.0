@@ -1,6 +1,7 @@
 id: WSTG-INFO-03
 name: Review Webserver Metafiles
 category: Information Gathering
+attack_class: disclosure
 severity: low
 references:
   - https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/01-Information_Gathering/03-Review_Webserver_Metafiles_for_Information_Leakage
@@ -19,6 +20,15 @@ steps:
         emit_finding:
           vuln_type: robots.txt Discloses Paths
           severity: info
+      # PRODUCER. A separate evaluator on purpose: the detection above keeps
+      # its exact pattern, so what this case REPORTS is byte-identical and
+      # every recorded run stays comparable. This one only harvests.
+      # robots.txt names the paths a site does not want indexed, which is a
+      # good working definition of where to look.
+      - type: regex
+        pattern: '^(?:Disallow|Allow):[ \t]*(/\S*)'
+        produces:
+          url: 1
 
   - name: sitemap
     tool: curl
@@ -30,6 +40,12 @@ steps:
         emit_finding:
           vuln_type: sitemap.xml Discloses URLs
           severity: info
+      # PRODUCER. <loc> holds absolute URLs and a sitemap is target-controlled,
+      # so off-host entries are refused by _resolve_url rather than trusted.
+      - type: regex
+        pattern: '<loc>\s*([^<\s]+)\s*</loc>'
+        produces:
+          url: 1
 
   - name: security_txt
     tool: curl
@@ -74,3 +90,12 @@ steps:
         emit_finding:
           vuln_type: Exposed .env File (secrets disclosure)
           severity: critical
+
+chain:
+  # A path robots.txt asks crawlers to avoid is a path worth looking at, and
+  # backup or VCS artefacts are what tends to be sitting in one. The producer
+  # above turns each Disallow entry into a `url`, and the walker queues this
+  # case once per discovered path — so this edge fans out rather than running
+  # once against the site root.
+  on_finding:
+    - WSTG-CONF-04

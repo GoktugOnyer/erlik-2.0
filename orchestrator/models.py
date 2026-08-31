@@ -16,6 +16,13 @@ _DEFAULT_TOOLS: list[str] = [
     "hydra", "john", "hashcat", "jwt_tool",
     # Browser & Automation
     "playwright", "pw-crawl", "zap-cli",
+    # OSINT, discovery, TLS/SSH/SMB, secrets, CMS, exploit lookup.
+    # Added to the DEFAULT set only. The three named presets (core_10 /
+    # standard_20 / full_30) are fixed-size experiment arms — their sizes are
+    # the independent variable in the action-space measurements, so growing
+    # them would silently invalidate every recorded comparison.
+    "theHarvester", "dirsearch", "sslscan", "ssh-audit", "smbmap",
+    "gitleaks", "cmseek", "joomscan", "searchsploit",
     # Utilities
     "curl", "netcat",
     # Capability helpers (added 2026-04-06 for RQ3-b action-space ablation)
@@ -47,6 +54,10 @@ class SessionCreate(BaseModel):
     disable_stagnation: bool = False  # benchmark opt-out for the agent-loop stagnation auto-stop
     extra_system_prompt: str = ""  # injected memory/context appended to system prompt
     run_config: Optional[dict] = None  # per-session automation flow (see orchestrator/runconfig.py)
+    # The customer this run belongs to. Optional, because 462 findings and 110
+    # sessions predate engagements — but when set, the engagement's scope is
+    # ENFORCED on the target and every finding is inventoried against its asset.
+    engagement_id: Optional[str] = None
     # Engagement authorisation reference (SOW number, ticket, written approval).
     # Optional by design — see the note in database.py. Recorded verbatim and
     # rendered in the report; its absence is rendered loudly.
@@ -184,6 +195,11 @@ class ChainCreate(BaseModel):
     auto_progress: bool = True
     disable_stagnation: bool = False
     run_config: Optional[dict] = None  # per-session automation flow (applied to every chain sub-session)
+    # Same two fields as SessionCreate, and for the same reason: a chain is a
+    # run against a customer's asset. The engagement's scope is enforced before
+    # the chain exists, and every sub-session inherits the engagement.
+    engagement_id: Optional[str] = None
+    authorization_ref: Optional[str] = None
 
 
 class ChainResponse(BaseModel):

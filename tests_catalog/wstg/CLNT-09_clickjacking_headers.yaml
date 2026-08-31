@@ -1,6 +1,7 @@
 id: WSTG-CLNT-09
 name: Clickjacking Protection Headers
 category: Client-side
+attack_class: recon
 severity: medium
 references:
   - https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/11-Client-side_Testing/09-Testing_for_Clickjacking

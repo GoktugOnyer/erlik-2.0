@@ -1,6 +1,7 @@
 id: WSTG-BUSL-04
 name: Process Timing / Race Condition
 category: Business Logic
+attack_class: logic
 severity: high
 references:
   - https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/10-Business_Logic_Testing/04-Test_for_Process_Timing
@@ -11,7 +12,12 @@ references:
 # succeeded when only one should have.
 target_schema:
   required: [request_template, success_marker]
-  optional: [parallel_n, auth_header]
+  # No auth field here on purpose: this case fires the operator's own
+  # `request_template` verbatim, so a session belongs INSIDE that
+  # template. Declaring `auth_header` promised something the case has
+  # no way to apply — and a promise the engine keeps on a case's behalf
+  # is one the case then breaks, silently.
+  optional: [parallel_n]
 
 steps:
   - name: race_burst

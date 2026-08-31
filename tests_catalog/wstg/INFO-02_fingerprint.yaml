@@ -1,6 +1,7 @@
 id: WSTG-INFO-02
 name: Fingerprint Web Server
 category: Information Gathering
+attack_class: disclosure
 severity: low
 references:
   - https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/01-Information_Gathering/02-Fingerprint_Web_Server
@@ -46,4 +47,10 @@ steps:
           severity: info
 
 chain:
-  always: []
+  # Was `[]` — a declaration shaped like configuration that scheduled nothing.
+  # Fingerprinting into metafile review is the ordinary information-gathering
+  # sequence, and both cases need only `url`, so this edge actually traverses.
+  # It is also the first producer in the catalogue: INFO-03 harvests paths out
+  # of robots.txt, which is what a typed chain will fan out over.
+  always:
+    - WSTG-INFO-03

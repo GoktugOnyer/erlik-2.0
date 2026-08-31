@@ -613,7 +613,130 @@
         .report-rendered .road-step {
             color: var(--neon-cyan);
         }
-    </style>
+    
+        /* ===== App shell: persistent left sidebar =====
+           The dashboard was eight top tabs and nothing else, so the operator
+           could not see what a customer's engagement contained without opening
+           a view and waiting for a fetch. The sidebar keeps the inventory —
+           assets, findings by severity, what has actually been run — visible
+           the whole time, because those counts are the state of the work. */
+        .app-shell { display: flex; align-items: flex-start; gap: 0; }
+        #app-sidebar {
+            width: 224px; flex: 0 0 224px; align-self: stretch;
+            padding: 14px 12px 40px; box-sizing: border-box;
+            border-right: 1px solid rgba(0,255,245,0.18);
+            background: rgba(8,8,20,0.55);
+            position: sticky; top: 0; max-height: 100vh; overflow-y: auto;
+        }
+        .side-group { margin-bottom: 18px; }
+        .side-head {
+            font-family: 'Press Start 2P', monospace; font-size: 0.45rem;
+            letter-spacing: 1px; color: #6a6a8a; margin-bottom: 8px;
+        }
+        .side-select {
+            width: 100%; background: rgba(0,0,0,0.45); color: #d8d8e8;
+            border: 1px solid rgba(0,255,245,0.25); border-radius: 3px;
+            padding: 5px 6px; font-family: ui-monospace, monospace; font-size: 0.66rem;
+        }
+        .side-link {
+            display: flex; align-items: center; gap: 8px; width: 100%;
+            padding: 6px 8px; margin-bottom: 2px; border-radius: 3px;
+            background: transparent; border: 1px solid transparent;
+            color: #8a8aa0; text-align: left; cursor: pointer;
+            font-family: ui-monospace, monospace; font-size: 0.72rem;
+        }
+        .side-link:hover { background: rgba(0,255,245,0.06); color: #d8d8e8; }
+        .side-link.nav-tab-active {
+            background: rgba(0,255,245,0.10); color: var(--neon-cyan);
+            border-color: rgba(0,255,245,0.35);
+        }
+        .side-ico { width: 14px; text-align: center; opacity: .85; }
+        .side-rows { display: flex; flex-direction: column; gap: 1px; }
+        .side-row {
+            display: flex; align-items: center; justify-content: space-between;
+            gap: 8px; padding: 3px 8px; border-radius: 3px;
+            font-family: ui-monospace, monospace; font-size: 0.68rem; color: #8a8aa0;
+        }
+        .side-row:hover { background: rgba(255,255,255,0.03); }
+        .side-row b { color: #d8d8e8; font-weight: 600; }
+        .side-row .zero { color: #4a4a5a; font-weight: 400; }
+        .side-empty {
+            font-family: ui-monospace, monospace; font-size: 0.64rem;
+            color: #5a5a6a; padding: 2px 8px;
+        }
+        /* Count cards — the at-a-glance row above a customer's work. */
+        .stat-cards { display: flex; flex-wrap: wrap; gap: 10px; }
+        .stat-card {
+            flex: 1 1 110px; min-width: 100px; padding: 10px 12px;
+            border-radius: 6px; background: rgba(10,10,26,0.65);
+            border: 1px solid rgba(255,255,255,0.07); border-top-width: 2px;
+        }
+        .stat-card .n {
+            font-family: ui-monospace, monospace; font-size: 1.35rem;
+            font-weight: 600; color: #e8e8f4; line-height: 1.1;
+        }
+        .stat-card .n.zero { color: #4a4a5a; }
+        .stat-card .l {
+            font-family: ui-monospace, monospace; font-size: 0.6rem;
+            color: #7a7a8a; margin-top: 2px;
+        }
+        .run-table { width: 100%; border-collapse: collapse; font-size: 0.7rem; }
+        .run-table th {
+            text-align: left; padding: 5px 8px; color: #6a6a8a;
+            font-family: ui-monospace, monospace; font-size: 0.6rem;
+            border-bottom: 1px solid rgba(255,255,255,0.08);
+        }
+        .run-table td {
+            padding: 5px 8px; color: #b8b8c8;
+            font-family: ui-monospace, monospace;
+            border-bottom: 1px solid rgba(255,255,255,0.04);
+        }
+        @media (max-width: 900px) {
+            .app-shell { flex-direction: column; }
+            #app-sidebar { width: 100%; flex: 1 1 auto; position: static;
+                           max-height: none; border-right: none;
+                           border-bottom: 1px solid rgba(0,255,245,0.18); }
+        }
+
+        /* Sortable header cells. The arrow is the whole affordance — a header
+           that sorts and does not say so is a feature nobody finds. */
+        .col-sort { cursor: pointer; user-select: none; }
+        .col-sort:hover { color: var(--neon-cyan); }
+        .col-sort[data-active]::after {
+            content: attr(data-active); margin-left: 4px; color: var(--neon-cyan);
+        }
+
+        /* Collapsed rail. Evidence tables are wide — a full-width command, a
+           URL and an output excerpt do not fit beside 224px of navigation, and
+           the operator should not have to choose permanently. */
+        #app-sidebar { transition: width .12s ease, flex-basis .12s ease; }
+        body.rail #app-sidebar { width: 46px; flex: 0 0 46px; padding-left: 6px; padding-right: 6px; }
+        body.rail #app-sidebar .side-head,
+        body.rail #app-sidebar .side-rows,
+        body.rail #app-sidebar .side-select,
+        body.rail #app-sidebar .side-link > span:not(.side-ico) { display: none; }
+        body.rail #app-sidebar .side-link { justify-content: center; padding: 6px 0; }
+        #rail-toggle {
+            width: 100%; margin-bottom: 10px; padding: 3px 0; cursor: pointer;
+            background: transparent; border: 1px solid rgba(0,255,245,0.22);
+            border-radius: 3px; color: #6a6a8a;
+            font-family: ui-monospace, monospace; font-size: 0.7rem;
+        }
+        #rail-toggle:hover { color: var(--neon-cyan); border-color: var(--neon-cyan); }
+
+        /* Below 900px the sidebar stops being a column and becomes a strip, so
+           the rail choice is irrelevant there and must not shrink it to icons
+           on a screen that is already stacking. */
+        @media (max-width: 900px) {
+            body.rail #app-sidebar { width: 100%; flex: 1 1 auto; padding: 14px 12px 40px; }
+            body.rail #app-sidebar .side-head,
+            body.rail #app-sidebar .side-rows,
+            body.rail #app-sidebar .side-select,
+            body.rail #app-sidebar .side-link > span:not(.side-ico) { display: revert; }
+            body.rail #app-sidebar .side-link { justify-content: flex-start; padding: 6px 8px; }
+            #rail-toggle { display: none; }
+        }
+</style>
 </head>
 <body class="min-h-screen">
     <!-- ===== Header ===== -->
@@ -626,45 +749,152 @@
                 v0.1 // qwen2.5-coder-7b
             </span>
         </div>
-        <nav class="flex items-center gap-1">
-            <button id="nav-scanner" onclick="switchView('scanner')"
-                class="nav-tab nav-tab-active font-pixel px-4 py-2 rounded"
-                style="font-size: 0.55rem;">
-                &#9655; SCANNER
-            </button>
-            <button id="nav-reports" onclick="switchView('reports')"
-                class="nav-tab font-pixel px-4 py-2 rounded"
-                style="font-size: 0.55rem;">
-                &#9776; REPORTS
-            </button>
-            <button id="nav-benchmark" onclick="switchView('benchmark')"
-                class="nav-tab font-pixel px-4 py-2 rounded"
-                style="font-size: 0.55rem;">
-                &#9881; BENCHMARK
-            </button>
-            <button id="nav-monitor" onclick="switchView('monitor')"
-                class="nav-tab font-pixel px-4 py-2 rounded"
-                style="font-size: 0.55rem;">
-                &#9636; MONITOR
-            </button>
-            <button id="nav-skills" onclick="switchView('skills')"
-                class="nav-tab font-pixel px-4 py-2 rounded"
-                style="font-size: 0.55rem;">
-                &#9670; SKILLS
-            </button>
-            <button id="nav-arsenal" onclick="switchView('arsenal')"
-                class="nav-tab font-pixel px-4 py-2 rounded"
-                style="font-size: 0.55rem;">
-                &#9876; ARSENAL
-            </button>
-        </nav>
         <div class="flex items-center gap-2">
             <span id="health-dot" class="w-3 h-3 rounded-full" style="background:#3a3a4a;"></span>
             <span id="health-text" class="font-mono" style="color:#5a5a6a; font-size:0.95rem;">Checking...</span>
         </div>
     </header>
 
-    <main class="p-6 max-w-7xl mx-auto">
+    <div class="app-shell">
+    <aside id="app-sidebar">
+        <button id="rail-toggle" type="button" onclick="toggleRail()"
+            title="Collapse the sidebar to icons">&#9776;</button>
+        <div class="side-group">
+            <div class="side-head">WORKSPACE</div>
+            <select id="side-engagement" class="side-select" onchange="sideEngagementPicked()">
+                <option value="">— no customer selected —</option>
+            </select>
+        </div>
+
+        <nav class="side-group">
+            <button id="nav-overview" onclick="switchView('overview')" class="side-link" type="button">
+                <span class="side-ico">&#9673;</span><span>Overview</span>
+            </button>
+            <button id="nav-findings" onclick="switchView('findings')" class="side-link" type="button">
+                <span class="side-ico">&#9888;</span><span>Findings</span>
+            </button>
+            <button id="nav-scanner" onclick="switchView('scanner')" class="side-link" type="button">
+                <span class="side-ico">&#9655;</span><span>Scanner</span>
+            </button>
+            <button id="nav-engagements" onclick="switchView('engagements')" class="side-link" type="button">
+                <span class="side-ico">&#9707;</span><span>Engagements</span>
+            </button>
+            <button id="nav-testlab" onclick="switchView('testlab')" class="side-link" type="button">
+                <span class="side-ico">&#9635;</span><span>Test Lab</span>
+            </button>
+            <button id="nav-arsenal" onclick="switchView('arsenal')" class="side-link" type="button">
+                <span class="side-ico">&#9876;</span><span>Arsenal</span>
+            </button>
+            <button id="nav-reports" onclick="switchView('reports')" class="side-link" type="button">
+                <span class="side-ico">&#9776;</span><span>Reports</span>
+            </button>
+            <button id="nav-monitor" onclick="switchView('monitor')" class="side-link" type="button">
+                <span class="side-ico">&#9636;</span><span>Monitor</span>
+            </button>
+            <button id="nav-skills" onclick="switchView('skills')" class="side-link" type="button">
+                <span class="side-ico">&#9670;</span><span>Skills</span>
+            </button>
+            <button id="nav-benchmark" onclick="switchView('benchmark')" class="side-link" type="button">
+                <span class="side-ico">&#9881;</span><span>Benchmark</span>
+            </button>
+        </nav>
+
+        <div class="side-group" id="side-assets-group">
+            <div class="side-head">ASSETS</div>
+            <div id="side-assets" class="side-rows">
+                <div class="side-empty">select a customer</div>
+            </div>
+        </div>
+
+        <div class="side-group" id="side-findings-group">
+            <div class="side-head">FINDINGS</div>
+            <div id="side-findings" class="side-rows">
+                <div class="side-empty">select a customer</div>
+            </div>
+        </div>
+
+        <div class="side-group">
+            <div class="side-head">ACTIVITY</div>
+            <div id="side-activity" class="side-rows">
+                <div class="side-empty">select a customer</div>
+            </div>
+        </div>
+    </aside>
+
+    <main class="p-6 flex-1 min-w-0">
+
+        <!-- ===== Overview: the landing screen ===== -->
+        <div id="view-overview" class="hidden space-y-5">
+            <div class="panel rounded p-4">
+                <div class="flex items-baseline justify-between flex-wrap gap-2">
+                    <h2 class="font-pixel" style="font-size:0.7rem;">&#9673; OVERVIEW</h2>
+                    <span id="ov-scope" class="font-mono" style="font-size:0.6rem; opacity:.7;"></span>
+                </div>
+                <p class="font-mono mt-2" style="font-size:0.6rem; opacity:.7; max-width:80ch;">
+                    The state of the work, and the next thing that is blocking it. erlik used to
+                    open on an empty Scanner form, which answers &ldquo;what can I start&rdquo;
+                    and never &ldquo;what is already going on&rdquo;.
+                </p>
+            </div>
+
+            <div class="panel rounded p-4">
+                <h3 class="font-pixel" style="font-size:0.62rem;">WHERE THINGS STAND</h3>
+                <div id="ov-tiles" class="stat-cards mt-3"></div>
+            </div>
+
+            <div class="panel rounded p-4">
+                <h3 class="font-pixel" style="font-size:0.62rem;">WHAT IS BLOCKING PROGRESS</h3>
+                <p class="font-mono mt-1" style="font-size:0.55rem; opacity:.55; max-width:80ch;">
+                    Each rung depends on the one above it. The first unmet rung is the only one
+                    worth acting on &mdash; everything below it is blocked by definition.
+                </p>
+                <div id="ov-ladder" class="mt-3"></div>
+            </div>
+        </div>
+
+        <!-- ===== Findings: across every engagement ===== -->
+        <div id="view-findings" class="hidden space-y-5">
+            <div class="panel rounded p-4">
+                <div class="flex items-baseline justify-between flex-wrap gap-2">
+                    <h2 class="font-pixel" style="font-size:0.7rem;">&#9888; FINDINGS</h2>
+                    <span id="fx-scope" class="font-mono" style="font-size:0.6rem; opacity:.7;"></span>
+                </div>
+                <p class="font-mono mt-2" style="font-size:0.6rem; opacity:.7; max-width:80ch;">
+                    Every finding, across every customer. Until now these were reachable only one
+                    session at a time, so &ldquo;show me every critical&rdquo; was a question erlik
+                    could not answer.
+                </p>
+            </div>
+
+            <div class="cyber-panel neon-border-cyan rounded-lg">
+                <div class="px-4 py-2.5 flex items-center justify-between flex-wrap gap-2"
+                    style="border-bottom: 1px solid var(--panel-border);">
+                    <span class="flex items-center gap-2 flex-wrap">
+                        <select id="fx-severity" class="cyber-input cyber-select rounded"
+                            style="font-size:0.65rem;" onchange="loadFindings()">
+                            <option value="">all severities</option>
+                            <option value="critical">critical</option>
+                            <option value="critical,high">critical + high</option>
+                            <option value="high">high</option>
+                            <option value="medium">medium</option>
+                            <option value="low">low</option>
+                            <option value="info">info</option>
+                        </select>
+                        <select id="fx-status" class="cyber-input cyber-select rounded"
+                            style="font-size:0.65rem;" onchange="loadFindings()">
+                            <option value="open">open</option>
+                            <option value="all">open + triaged out</option>
+                            <option value="rejected">triaged out only</option>
+                        </select>
+                        <input id="fx-q" type="search" placeholder="vuln type or URL…"
+                            class="cyber-input rounded" style="font-size:0.68rem; width:220px; padding:3px 7px;"
+                            oninput="loadFindings()">
+                    </span>
+                    <span id="fx-count" class="font-mono" style="color:#4a4a5a; font-size:0.85rem;">—</span>
+                </div>
+                <div id="fx-rows" style="max-height:60vh; overflow:auto;"></div>
+            </div>
+        </div>
 
         <!-- ===== Scanner View (existing content) ===== -->
         <div id="view-scanner" class="space-y-5">
@@ -676,7 +906,7 @@
                 <div class="flex-1 min-w-[280px]">
                     <label class="block font-pixel mb-2" style="font-size:0.55rem; color:#6a6a8a;">TARGET URL</label>
                     <input id="target-url" type="text" value="http://localhost:3000"
-                        class="cyber-input w-full rounded">
+                        oninput="onEngagementPicked()" class="cyber-input w-full rounded">
                 </div>
                 <div>
                     <label class="block font-pixel mb-2" style="font-size:0.55rem; color:#6a6a8a;">SCOPE</label>
@@ -694,6 +924,18 @@
                         <option value="qwen2.5-coder:7b">Loading models...</option>
                     </select>
                 </div>
+                <div class="min-w-[190px]">
+                    <label class="block font-pixel mb-2" style="font-size:0.55rem; color:#6a6a8a;">CUSTOMER</label>
+                    <select id="session-engagement" class="cyber-input cyber-select rounded w-full"
+                            onchange="onEngagementPicked()">
+                        <option value="">&mdash; none (unassigned) &mdash;</option>
+                    </select>
+                </div>
+                <div class="min-w-[170px]">
+                    <label class="block font-pixel mb-2" style="font-size:0.55rem; color:#6a6a8a;">AUTHORIZATION REF</label>
+                    <input id="session-authref" type="text" placeholder="SOW / ticket / approval"
+                        class="cyber-input w-full rounded">
+                </div>
                 <div class="flex gap-2">
                     <button id="start-btn" onclick="startSession()" class="pixel-btn rounded">
                         &gt; START
@@ -702,6 +944,9 @@
                         &#9632; STOP
                     </button>
                 </div>
+            </div>
+            <div id="eng-scope-hint" style="font-size:0.66rem; color:#6a6a8a;">
+                No customer &mdash; this run is recorded as unassigned work.
             </div>
 
             <!-- Row 1.5: Session Type + Vuln Category (thesis controls) -->
@@ -1197,20 +1442,25 @@
                 <div class="px-4 py-2.5 flex items-center justify-between"
                     style="border-bottom: 1px solid var(--panel-border);">
                     <span class="font-pixel" style="font-size:0.55rem; color:#6a6a8a;">ALL SESSIONS</span>
-                    <span id="reports-count" class="font-mono" style="color:#4a4a5a; font-size:0.85rem;">Loading...</span>
+                    <span class="flex items-center gap-3">
+                        <input id="reports-search" type="search" placeholder="filter by id, target, status, type…"
+                            class="cyber-input rounded" style="font-size:0.68rem; width:250px; padding:3px 7px;"
+                            oninput="loadReportsList({fromCache: true})">
+                        <span id="reports-count" class="font-mono" style="color:#4a4a5a; font-size:0.85rem;">Loading...</span>
+                    </span>
                 </div>
 
                 <!-- Table header -->
                 <div class="px-4 py-2 grid gap-2 font-pixel hidden lg:grid"
                     style="font-size:0.45rem; color:#6a6a8a; border-bottom: 1px solid var(--panel-border);
                            grid-template-columns: 100px 1fr 90px 80px 70px 70px 90px 80px;">
-                    <span>SESSION ID</span>
-                    <span>TARGET</span>
-                    <span>STATUS</span>
-                    <span>TYPE</span>
-                    <span>STEPS</span>
-                    <span>FINDINGS</span>
-                    <span>DURATION</span>
+                    <span class="col-sort" data-sort="id">SESSION ID</span>
+                    <span class="col-sort" data-sort="target_url">TARGET</span>
+                    <span class="col-sort" data-sort="status">STATUS</span>
+                    <span class="col-sort" data-sort="session_type">TYPE</span>
+                    <span class="col-sort" data-sort="total_steps">STEPS</span>
+                    <span class="col-sort" data-sort="total_findings">FINDINGS</span>
+                    <span class="col-sort" data-sort="total_duration_ms">DURATION</span>
                     <span>ACTIONS</span>
                 </div>
 
@@ -1283,6 +1533,13 @@
                 <!-- Findings triage (accept / reject / severity override) -->
                 <div id="report-detail-triage" class="px-4 py-2 hidden"
                     style="border-bottom: 1px solid var(--panel-border);">
+                </div>
+
+                <!-- Run critique. The AI REVIEW toggle pays for a second LLM pass
+                     and writes session_reviews; until now nothing ever read it back,
+                     so five critiques sat in the database unseen. -->
+                <div id="report-detail-review" class="px-4 py-3 hidden"
+                    style="border-bottom: 1px solid var(--panel-border); background: rgba(160,92,255,0.03);">
                 </div>
 
                 <!-- Full Report Markdown -->
@@ -1475,6 +1732,8 @@
                 </div>
 
                 <!-- TIER PROGRESS -->
+                <div id="mon-sample-note" class="font-mono mb-2"
+                    style="font-size:0.62rem; color:var(--neon-yellow);"></div>
                 <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
                     <div class="cyber-panel rounded p-3" style="border-left:3px solid var(--neon-cyan); background:#0d0d18;">
                         <div class="font-pixel" style="font-size:0.45rem; color:var(--neon-cyan);">▍ CORE-10</div>
@@ -1576,7 +1835,8 @@
                     Reusable pentest knowledge — payloads, detection probes, exploitation steps. When the
                     <b style="color:#a05cff;">SKILLS</b> toggle is on, a router injects the 1&ndash;3 most relevant
                     sheets for your target's tech&nbsp;+&nbsp;<b>VULN CATEGORY</b> into the agent's prompt (this is
-                    generic technique knowledge, not target-specific endpoints &mdash; that's what the playbook adds).
+                    generic technique knowledge; exploit playbooks add class-specific attack &amp; confirmation
+                    steps, also target-agnostic unless you select a target profile).
                     Files live in <code style="color:#9ad;">skills_catalog/skills/</code>.
                 </p>
                 <div class="flex items-center gap-2 mt-3 flex-wrap">
@@ -1598,6 +1858,126 @@
                 </div>
             </div>
         </div><!-- /view-skills -->
+
+
+        <!-- ===== ENGAGEMENTS: one customer, one page, one boundary ===== -->
+        <!-- Nothing in the schema had a customer concept: 108 sessions and 91
+             deterministic runs were keyed only by target URL, and scope was
+             retyped per run. Scope is the LEGAL boundary of a test, so it is
+             declared once here and inherited by everything run beneath it. -->
+        <div id="view-engagements" class="hidden space-y-5">
+
+            <div class="panel rounded p-4">
+                <div class="flex items-baseline justify-between flex-wrap gap-2">
+                    <h2 class="font-pixel" style="font-size:0.7rem;">&#9707; ENGAGEMENTS</h2>
+                    <div id="eng-meta" class="font-mono" style="font-size:0.6rem; opacity:.75;"></div>
+                </div>
+                <p class="font-mono mt-2" style="font-size:0.6rem; opacity:.7; max-width:82ch;">
+                    A customer, the assets they authorised, and everything ever run against them.
+                    Scope is enforced here rather than per run &mdash; an engagement with no scope
+                    rules authorises <b>nothing</b>, an explicit exclusion beats any wildcard, and a
+                    host found by enumeration stays inert until a human approves it.
+                </p>
+                <div class="flex gap-2 mt-3 flex-wrap items-center">
+                    <input id="eng-name" class="input-field font-mono px-2 py-1 rounded"
+                        style="font-size:0.65rem; width:190px;" placeholder="client name">
+                    <input id="eng-domain" class="input-field font-mono px-2 py-1 rounded"
+                        style="font-size:0.65rem; width:190px;" placeholder="root domain (acme.com)">
+                    <input id="eng-auth" class="input-field font-mono px-2 py-1 rounded"
+                        style="font-size:0.65rem; width:170px;" placeholder="authorised by">
+                    <button onclick="engCreate()" class="font-pixel px-3 py-1 rounded border"
+                        style="font-size:0.55rem; color:var(--neon-green); border-color:var(--neon-green);">
+                        + NEW ENGAGEMENT</button>
+                </div>
+            </div>
+
+            <div class="panel rounded p-4">
+                <h3 class="font-pixel" style="font-size:0.62rem;">CUSTOMERS</h3>
+                <div id="eng-list" class="mt-3 space-y-1"></div>
+            </div>
+
+            <div id="eng-detail" class="hidden space-y-5"></div>
+        </div><!-- /view-engagements -->
+
+
+        <!-- ===== TEST LAB: the deterministic WSTG lane, finally clickable ===== -->
+        <!-- Until now all six /api/v2/* endpoints had ZERO callers in this file:
+             the 22 committed test cases could not be listed, run or reviewed
+             from the dashboard at all. This is the half of erlik that produces
+             evidence rather than model assertions, and it was API-only. -->
+        <div id="view-testlab" class="hidden space-y-5">
+
+            <div class="panel rounded p-4">
+                <div class="flex items-baseline justify-between flex-wrap gap-2">
+                    <h2 class="font-pixel" style="font-size:0.7rem;">&#9635; TEST LAB</h2>
+                    <div id="tl-meta" class="font-mono" style="font-size:0.6rem; opacity:.75;">loading&hellip;</div>
+                </div>
+                <p class="font-mono mt-2" style="font-size:0.6rem; opacity:.7; max-width:82ch;">
+                    Committed WSTG test cases. Each one runs fixed steps and asserts on the
+                    response &mdash; no model decides what to try, and every result names the case
+                    that produced it. A case whose required inputs cannot be supplied is listed as
+                    <b>skipped with its reason</b>, never dropped: a missing case reads exactly like
+                    a clean result.
+                </p>
+
+                <div class="flex gap-2 mt-3 flex-wrap items-center">
+                    <input id="tl-target" class="input-field font-mono px-2 py-1 rounded"
+                        style="font-size:0.65rem; min-width:290px;"
+                        placeholder="http://target:port" value="http://juice-shop:3000">
+                    <select id="tl-profile" class="input-field font-mono px-2 py-1 rounded"
+                        style="font-size:0.65rem;"></select>
+                    <button onclick="tlPlan()" class="font-pixel px-3 py-1 rounded border"
+                        style="font-size:0.55rem;">PLAN</button>
+                    <button id="tl-sweep-btn" onclick="tlSweep()" class="font-pixel px-3 py-1 rounded border"
+                        style="font-size:0.55rem; color:var(--neon-green); border-color:var(--neon-green);">
+                        &#9654; RUN SWEEP</button>
+                    <button id="tl-stop-btn" onclick="tlStop()" class="font-pixel px-3 py-1 rounded border hidden"
+                        style="font-size:0.55rem; color:var(--neon-red); border-color:var(--neon-red);">STOP</button>
+                    <span id="tl-progress" class="font-mono" style="font-size:0.6rem; opacity:.8;"></span>
+                </div>
+                <div class="font-mono mt-2" style="font-size:0.55rem; opacity:.55;">
+                    A profile supplies this application's real endpoints. Without one, cases needing
+                    a specific parameter get the base URL &mdash; which is how the SSRF case came to
+                    be aimed at a search box and report a finding there.
+                </div>
+            </div>
+
+            <div id="tl-skipped-panel" class="panel rounded p-4 hidden">
+                <h3 class="font-pixel" style="font-size:0.62rem;">SKIPPED &mdash; AND WHY</h3>
+                <div id="tl-skipped" class="mt-2 space-y-1"></div>
+            </div>
+
+            <div class="panel rounded p-4">
+                <div class="flex items-baseline justify-between flex-wrap gap-2">
+                    <h3 class="font-pixel" style="font-size:0.62rem;">TEST CASES</h3>
+                    <div id="tl-summary" class="font-mono" style="font-size:0.58rem; opacity:.75;"></div>
+                </div>
+                <div class="overflow-x-auto mt-3">
+                    <table class="w-full font-mono" style="font-size:0.6rem; border-collapse:collapse;">
+                        <thead>
+                            <tr style="border-bottom:1px solid #2a3038; opacity:.7;">
+                                <th class="text-left py-1 pr-3">CASE</th>
+                                <th class="text-left py-1 pr-3">CLASS</th>
+                                <th class="text-left py-1 pr-3">SEV</th>
+                                <th class="text-left py-1 pr-3">TARGET</th>
+                                <th class="text-left py-1 pr-3">STATUS</th>
+                                <th class="text-left py-1">FINDINGS</th>
+                            </tr>
+                        </thead>
+                        <tbody id="tl-rows"></tbody>
+                    </table>
+                </div>
+            </div>
+
+            <div id="tl-detail" class="panel rounded p-4 hidden">
+                <div class="flex items-baseline justify-between flex-wrap gap-2">
+                    <h3 class="font-pixel" style="font-size:0.62rem;">RUN DETAIL</h3>
+                    <button onclick="document.getElementById('tl-detail').classList.add('hidden')"
+                        class="font-pixel px-2 py-1 rounded border" style="font-size:0.5rem;">CLOSE</button>
+                </div>
+                <div id="tl-detail-body" class="mt-3"></div>
+            </div>
+        </div><!-- /view-testlab -->
 
 
         <!-- ===== ARSENAL: every attack erlik can run ===== -->
@@ -1721,7 +2101,11 @@
                 <div class="mt-3" style="border-left:2px solid #ffb545; padding-left:8px;">
                     <div class="font-mono" style="font-size:0.57rem; color:#ffb545;">What was actually measured</div>
                     <div class="font-mono mt-1" style="font-size:0.55rem; opacity:.78; max-width:78ch;">
-                        Experiments varied <b>skills on/off</b> and <b>playbook on/off</b> only.
+                        Experiments varied <b>skills on/off</b> and <b>playbook on/off</b> only, and the
+                        playbook arm was the old Juice-Shop-specific block (all six, ~9&nbsp;KB,
+                        every run). Playbooks are now generic and routed to the mission's classes
+                        (~1.4&nbsp;KB), which is <b>unmeasured</b> &mdash; the numbers below describe
+                        what was replaced, not what now ships.
                         Injecting this material costs recall on both models tested:
                         <b>7B</b> 0.114&nbsp;&rarr;&nbsp;0.014, <b>27B</b> 0.086&nbsp;&rarr;&nbsp;0.014
                         (n&nbsp;=&nbsp;2 per cell). Precision falls with it (0.90&nbsp;&rarr;&nbsp;0.07 on the 7B),
@@ -1742,6 +2126,7 @@
             </div>
         </div>
     </main>
+    </div>
 
     <!-- Scanline Overlay -->
     <div class="scanline-overlay"></div>
@@ -1758,21 +2143,34 @@
         let reportDetailSessionId = null;
 
         // ===== View Switching =====
+        // Which view is showing. Read by urlWrite; declared above the only
+        // function that assigns it so no call site can hit the temporal dead zone.
+        let __currentView = 'overview';
+
         function switchView(view) {
-            const views = ['scanner', 'reports', 'benchmark', 'monitor', 'skills', 'arsenal'];
+            __currentView = view;
+            const views = ['overview', 'findings', 'scanner', 'reports', 'benchmark', 'monitor', 'engagements', 'testlab', 'skills', 'arsenal'];
             const panels = {
+                overview: document.getElementById('view-overview'),
+                findings: document.getElementById('view-findings'),
                 scanner: document.getElementById('view-scanner'),
                 reports: document.getElementById('view-reports'),
                 benchmark: document.getElementById('view-benchmark'),
                 monitor: document.getElementById('view-monitor'),
+                engagements: document.getElementById('view-engagements'),
+                testlab: document.getElementById('view-testlab'),
                 skills: document.getElementById('view-skills'),
                 arsenal: document.getElementById('view-arsenal'),
             };
             const navs = {
+                overview: document.getElementById('nav-overview'),
+                findings: document.getElementById('nav-findings'),
                 scanner: document.getElementById('nav-scanner'),
                 reports: document.getElementById('nav-reports'),
                 benchmark: document.getElementById('nav-benchmark'),
                 monitor: document.getElementById('nav-monitor'),
+                engagements: document.getElementById('nav-engagements'),
+                testlab: document.getElementById('nav-testlab'),
                 skills: document.getElementById('nav-skills'),
                 arsenal: document.getElementById('nav-arsenal'),
             };
@@ -1790,10 +2188,950 @@
                 if (navs[v]) navs[v].classList.toggle('nav-tab-active', v === view);
             });
 
+            if (view === 'overview') loadOverview();
+            if (view === 'findings') loadFindings();
             if (view === 'reports') loadReportsList();
             if (view === 'benchmark') loadBenchmarkHistory();
+            if (view === 'engagements') engLoad();
+            if (view === 'testlab') tlInit();
             if (view === 'skills') loadSkills();
             if (view === 'arsenal') { loadArsenal(); loadAuthoring(); }
+
+            urlWrite();
+        }
+
+
+        // ===== ADDRESSABLE STATE =====
+        // Everything the dashboard showed lived in CSS classes and closure
+        // variables, so no screen could be linked to, bookmarked, reloaded
+        // into, or pasted into a ticket — and every reload dumped the operator
+        // back on the Scanner form regardless of what they were reading.
+        //
+        // switchView is the single funnel every transition already goes
+        // through, so the URL is written there and read back on load. The
+        // hash is deliberately the whole of it: no history entries per
+        // keystroke, no server round-trip, and a link that survives a restart
+        // of the FastAPI process.
+        const URL_KEYS = ['view', 'eng', 'session', 'q', 'sort', 'dir'];
+        let __urlApplying = false;      // guards the write -> hashchange -> write loop
+
+        function urlState() {
+            const out = {};
+            for (const part of (location.hash || '').replace(/^#/, '').split('&')) {
+                if (!part) continue;
+                const i = part.indexOf('=');
+                const k = decodeURIComponent(i < 0 ? part : part.slice(0, i));
+                if (URL_KEYS.includes(k)) {
+                    out[k] = i < 0 ? '' : decodeURIComponent(part.slice(i + 1));
+                }
+            }
+            return out;
+        }
+
+        function urlSet(patch, {replace = true} = {}) {
+            const next = {...urlState(), ...patch};
+            const hash = URL_KEYS
+                .filter(k => next[k])
+                .map(k => `${k}=${encodeURIComponent(next[k])}`)
+                .join('&');
+            const target = `${location.pathname}${location.search}#${hash}`;
+            if (location.hash.replace(/^#/, '') === hash) return;
+            __urlApplying = true;
+            try {
+                // replaceState by default: switching a view is navigation, but
+                // typing in a search box should not bury the Back button under
+                // one entry per character.
+                if (replace) history.replaceState(null, '', target);
+                else history.pushState(null, '', target);
+            } finally {
+                __urlApplying = false;
+            }
+        }
+
+        function urlWrite() {
+            const eng = (document.getElementById('side-engagement') || {}).value || '';
+            urlSet({view: __currentView, eng,
+                    session: (__currentView === 'reports' && reportDetailSessionId) || ''});
+        }
+
+        function urlApply() {
+            const st = urlState();
+            const eng = st.eng || '';
+            const side = document.getElementById('side-engagement');
+            if (side && eng && side.value !== eng) {
+                side.value = eng;
+                if (side.value === eng) sideEngagementPicked();
+            }
+            // A written-and-never-read key is a URL that lies: switching view
+            // with a report open left `session=abc` in the hash claiming an
+            // open report on a screen that has none. Reading it makes a report
+            // link shareable, which is the point of putting it there.
+            if (st.session && st.session !== reportDetailSessionId
+                && typeof viewReport === 'function') {
+                viewReport(st.session);
+            }
+            const searchEl = document.getElementById('reports-search');
+            if (searchEl && searchEl.value !== (st.q || '')) {
+                searchEl.value = st.q || '';
+                if (__currentView === 'reports') loadReportsList({fromCache: true});
+            }
+            const view = st.view || 'overview';
+            if (view !== __currentView) switchView(view);
+        }
+
+        window.addEventListener('hashchange', () => {
+            if (__urlApplying) return;     // our own write, not a navigation
+            urlApply();
+        });
+
+
+        // ===== ENGAGEMENTS =====
+        // Everything for one customer, and the boundary their work may not
+        // cross. The scope panel is the important half: it shows WHY a target
+        // is allowed or refused, and it never silently authorises a host that
+        // enumeration merely found.
+        let engCurrent = null;
+
+        async function engLoad() {
+            const d = await (await fetch('/api/engagements')).json();
+            const list = d.engagements || [];
+            document.getElementById('eng-meta').textContent =
+                `${list.length} engagement(s)`;
+            document.getElementById('eng-list').innerHTML = list.length ? list.map(e => `
+                <div class="flex items-center gap-3 flex-wrap font-mono py-1"
+                    style="font-size:0.62rem; border-bottom:1px solid #1e242c; cursor:pointer;"
+                    data-engopen="${tlEsc(e.id)}">
+                    <span style="color:var(--neon-cyan); min-width:170px;">${tlEsc(e.client_name)}</span>
+                    <span style="opacity:.75; min-width:150px;">${tlEsc(e.root_domain || '—')}</span>
+                    <span style="opacity:.55;">${e.n_targets} target(s) · ${e.n_sessions} session(s)</span>
+                    ${e.n_pending ? `<span style="color:var(--neon-yellow);">${e.n_pending} awaiting approval</span>` : ''}
+                    <span style="opacity:.4;">${tlEsc((e.authorised_by || 'no authorisation recorded'))}</span>
+                </div>`).join('')
+                : '<div class="font-mono" style="font-size:0.6rem; opacity:.6;">No engagements yet. Create one above — a run without a customer has no recorded authorisation.</div>';
+            document.querySelectorAll('[data-engopen]').forEach(el =>
+                el.addEventListener('click', () => engOpen(el.dataset.engopen)));
+        }
+
+        async function engCreate() {
+            const client_name = document.getElementById('eng-name').value.trim();
+            if (!client_name) { alert('Client name is required'); return; }
+            const body = {
+                client_name,
+                root_domain: document.getElementById('eng-domain').value.trim(),
+                authorised_by: document.getElementById('eng-auth').value.trim()
+            };
+            const r = await fetch('/api/engagements', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(body)
+            });
+            if (!r.ok) { alert('Create failed: ' + (await r.text()).slice(0, 160)); return; }
+            const d = await r.json();
+            document.getElementById('eng-name').value = '';
+            document.getElementById('eng-domain').value = '';
+            await engLoad();
+            engRender(d);
+        }
+
+        async function engOpen(id) {
+            const r = await fetch(`/api/engagements/${encodeURIComponent(id)}`);
+            if (!r.ok) return;
+            engRender(await r.json());
+        }
+
+
+        // ===== Count cards and the execution table =====
+        // The engagement page listed run IDs and nothing else, so "what has
+        // actually happened for this customer" took reading a list of hex
+        // strings. A count row and a table with status and duration answer it
+        // at a glance — the same question Rekono's scan page answers.
+        function engStatCards(d) {
+            const a = d.asset_counts || {}, sev = d.findings_by_severity || {}, c = d.counts || {};
+            const cards = [
+                ['hosts', a.host || 0, '#00fff5'],
+                ['ports', a.port || 0, '#4ea8de'],
+                ['technologies', a.technology || 0, '#a05cff'],
+                ['endpoints', a.endpoint || 0, '#31d67a'],
+                ['critical open', sev.critical || 0, '#ff2d6f'],
+                ['high open', sev.high || 0, '#ff6b35'],
+                ['agent runs', c.sessions || 0, '#8a8aa0'],
+                ['wstg runs', c.v2_runs || 0, '#8a8aa0'],
+            ];
+            return `<div class="stat-cards">` + cards.map(([l, n, col]) =>
+                `<div class="stat-card" style="border-top-color:${n ? col : 'rgba(255,255,255,0.08)'};">
+                    <div class="n${n ? '' : ' zero'}">${n}</div>
+                    <div class="l">${tlEsc(l)}</div>
+                </div>`).join('') + `</div>`;
+        }
+
+        // Rendered rows per execution table. Named so the label below can
+        // quote it instead of repeating a literal that later drifts.
+        // One sentence, wherever a list is cut short. The alternative is what
+        // erlik shipped: a capped list that renders identically to a complete
+        // one, so the operator reads twelve rows as "everything".
+        function engCapNote(returnedN, trueTotal, renderCap, noun) {
+            const total = trueTotal ?? returnedN;
+            const shown = Math.min(returnedN, renderCap);
+            if (shown >= total) return '';
+            return `<div class="font-mono" style="font-size:0.55rem; color:var(--neon-yellow);">
+                      showing ${shown} of ${total} ${tlEsc(noun)}(s)
+                    </div>`;
+        }
+
+        const TABLE_CAP = 60;
+
+        // How many sessions the Monitor hydrates and renders. MONITOR_SAMPLE is
+        // the one that changes an ANSWER rather than a view: every tier count
+        // is derived from that many sessions, so it is stated on screen.
+        const MONITOR_SAMPLE = 30;
+        const MONITOR_ROWS = 25;
+
+        // Rows rendered in the two per-engagement lane lists.
+        const ENG_LIST_CAP = 12;
+        // Characters of a step's captured output shown inline. This one is
+        // EVIDENCE: an operator reading a truncated tool output and not being
+        // told is being shown a different result from the one recorded.
+        const STEP_OUTPUT_CAP = 1400;
+        // Distinct tools named in the findings summary line.
+        const TOOL_SUMMARY_CAP = 6;
+
+        function engRunTable(d) {
+            const rows = [];
+            for (const r of (d.sessions || [])) {
+                rows.push({ what: 'agent · ' + (r.session_type || 'cold'),
+                            detail: r.model || '', id: r.id, status: r.status || '?',
+                            when: r.created_at, ms: r.total_duration_ms,
+                            extra: (r.total_steps || 0) + ' steps' });
+            }
+            for (const r of (d.v2_runs || [])) {
+                rows.push({ what: 'wstg', detail: r.test_case_id || '', id: r.id,
+                            status: r.stopped_early ? 'stopped early' : 'completed',
+                            when: r.created_at, ms: r.duration_ms, extra: '' });
+            }
+            rows.sort((x, y) => String(y.when || '').localeCompare(String(x.when || '')));
+            if (!rows.length) {
+                return '<div class="font-mono" style="font-size:0.6rem; opacity:.6;">' +
+                       'Nothing run yet under this engagement.</div>';
+            }
+            // TWO caps sit between the database and this table: the server
+            // returns at most `row_limit` per list, and the table renders at
+            // most TABLE_CAP of those. Both are stated. A table that shows 60
+            // of 4,000 runs and says "60" is not a smaller table — it is a
+            // wrong answer to "what has been done for this customer".
+            const trueTotal = (d.counts || {}).sessions + (d.counts || {}).v2_runs;
+            const ret = d.returned || {};
+            const serverCapped = (ret.sessions || 0) + (ret.v2_runs || 0) < trueTotal;
+            const shown = Math.min(rows.length, TABLE_CAP);
+            const note = (shown < trueTotal)
+                ? `<div class="font-mono" style="font-size:0.55rem; color:var(--neon-yellow); margin-bottom:4px;">
+                     Showing ${shown} of ${trueTotal} run(s)${serverCapped
+                       ? ` — the API returns at most ${ret.row_limit} per lane` : ''}.
+                   </div>`
+                : '';
+            const dot = (st) => {
+                const s = String(st).toLowerCase();
+                const col = s.includes('complet') ? '#31d67a'
+                          : s.includes('run') ? '#ffd23f'
+                          : s.includes('error') || s.includes('fail') ? '#ff2d6f' : '#6a6a8a';
+                return `<span style="color:${col};">&#9679; ${tlEsc(st)}</span>`;
+            };
+            return note + `<div style="max-height:260px; overflow:auto;"><table class="run-table">
+                <thead><tr><th>Run</th><th>Detail</th><th>Status</th><th>Started</th>
+                <th>Duration</th><th></th></tr></thead><tbody>` +
+                rows.slice(0, TABLE_CAP).map(r => `<tr>
+                    <td>${tlEsc(r.what)}</td>
+                    <td style="opacity:.7;">${tlEsc(r.detail)}</td>
+                    <td>${dot(r.status)}</td>
+                    <td style="opacity:.7;">${tlEsc(fmtWhen(r.when))}</td>
+                    <td style="opacity:.7;">${tlEsc(fmtDuration(r.ms))}</td>
+                    <td style="opacity:.5;">${tlEsc(r.extra)}</td>
+                </tr>`).join('') + `</tbody></table></div>`;
+        }
+
+        function engRender(d) {
+            engCurrent = d.engagement.id;
+            const e = d.engagement;
+            const sev = d.findings_by_severity || {};
+            const sevOrder = ['critical', 'high', 'medium', 'low', 'info'];
+            const sevBar = sevOrder.filter(k => sev[k]).map(k =>
+                `<span class="font-mono" style="font-size:0.6rem;">${tlSev(k)} ${sev[k]}</span>`).join(' · ')
+                || '<span class="font-mono" style="font-size:0.6rem; opacity:.5;">no findings recorded</span>';
+
+            const scopeRow = (r) => {
+                const pending = (r.source || 'declared') !== 'declared' && !r.approved_at;
+                const colour = !Number(r.in_scope) ? 'var(--neon-red)'
+                             : pending ? 'var(--neon-yellow)' : 'var(--neon-green)';
+                const label = !Number(r.in_scope) ? 'EXCLUDED'
+                            : pending ? 'AWAITING APPROVAL' : 'in scope';
+                return `<div class="flex items-center gap-3 flex-wrap font-mono py-0.5" style="font-size:0.6rem;">
+                    <span style="color:${colour}; min-width:135px;">${tlEsc(label)}</span>
+                    <span style="min-width:190px;">${tlEsc(r.pattern)}</span>
+                    <span style="opacity:.5; min-width:70px;">${tlEsc(r.kind)}</span>
+                    <span style="opacity:.5;">${tlEsc(r.source)}</span>
+                    ${pending ? `<button data-engapprove="${tlEsc(r.pattern)}"
+                        class="font-pixel px-2 py-0.5 rounded border" style="font-size:0.45rem;">APPROVE</button>` : ''}
+                </div>`;
+            };
+
+            document.getElementById('eng-detail').innerHTML = `
+                <div class="panel rounded p-4">
+                    <div class="flex items-baseline justify-between flex-wrap gap-2">
+                        <h3 class="font-pixel" style="font-size:0.66rem; color:var(--neon-cyan);">${tlEsc(e.client_name)}</h3>
+                        <span class="font-mono" style="font-size:0.58rem; opacity:.6;">${tlEsc(e.id)}</span>
+                    </div>
+                    <div class="font-mono mt-1" style="font-size:0.6rem; opacity:.75;">
+                        ${tlEsc(e.root_domain || 'no root domain')} ·
+                        authorised by ${tlEsc(e.authorised_by || '— NOT RECORDED —')}
+                        ${e.authorised_from || e.authorised_until
+                            ? ` · window ${tlEsc(e.authorised_from || '?')} → ${tlEsc(e.authorised_until || '?')}`
+                            : ' · <span style="color:var(--neon-yellow);">no authorisation window recorded</span>'}
+                    </div>
+                    <div class="mt-2 flex gap-3 flex-wrap">${sevBar}</div>
+                    <div class="font-mono mt-1" style="font-size:0.58rem; opacity:.6;">
+                        ${d.counts.targets} target(s) · ${d.counts.sessions} agent session(s) ·
+                        ${d.counts.v2_runs} deterministic run(s)
+                    </div>
+                </div>
+
+                <div class="panel rounded p-4">
+                    <h3 class="font-pixel" style="font-size:0.62rem;">SCOPE &mdash; THE BOUNDARY</h3>
+                    <div class="mt-2">${(d.scope || []).map(scopeRow).join('') ||
+                        '<div class="font-mono" style="font-size:0.6rem; color:var(--neon-yellow);">No scope rules — this engagement authorises nothing.</div>'}</div>
+                    <div class="flex gap-2 mt-3 flex-wrap items-center">
+                        <input id="eng-scope-pattern" class="input-field font-mono px-2 py-1 rounded"
+                            style="font-size:0.6rem; width:200px;" placeholder="acme.com or 10.0.0.0/24">
+                        <select id="eng-scope-kind" class="input-field font-mono px-2 py-1 rounded" style="font-size:0.6rem;">
+                            <option value="domain">domain (+subdomains)</option>
+                            <option value="host">host (exact)</option>
+                            <option value="cidr">cidr</option>
+                            <option value="ip">ip</option>
+                            <option value="url">url prefix</option>
+                        </select>
+                        <label class="font-mono flex items-center gap-1" style="font-size:0.6rem;">
+                            <input type="checkbox" id="eng-scope-exclude" style="width:13px;height:13px;"> exclude
+                        </label>
+                        <button onclick="engAddScope()" class="font-pixel px-3 py-1 rounded border"
+                            style="font-size:0.55rem;">ADD RULE</button>
+                    </div>
+                    <div class="flex gap-2 mt-3 flex-wrap items-center"
+                        style="border-top:1px solid #1e242c; padding-top:10px;">
+                        <button onclick="engRecon(true)" class="font-pixel px-3 py-1 rounded border"
+                            style="font-size:0.55rem; color:var(--neon-green); border-color:var(--neon-green);">
+                            &#9678; DISCOVER SUBDOMAINS</button>
+                        <button onclick="engRecon(false)" class="font-pixel px-3 py-1 rounded border"
+                            style="font-size:0.55rem;">NAMES ONLY (touch nothing)</button>
+                        <span id="eng-recon-out" class="font-mono" style="font-size:0.58rem;"></span>
+                    </div>
+                    <div class="font-mono mt-1" style="font-size:0.55rem; opacity:.55; max-width:80ch;">
+                        Passive enumeration first &mdash; third-party datasets, never the customer's
+                        infrastructure. Every name found is scope-checked <b>before</b> anything
+                        connects to it: hosts a declared rule already covers get probed and
+                        inventoried, everything else is parked below as <b>awaiting approval</b> and
+                        authorises nothing.
+                    </div>
+
+                    <div class="flex gap-2 mt-3 flex-wrap items-center"
+                        style="border-top:1px solid #1e242c; padding-top:10px;">
+                        <input id="eng-check" class="input-field font-mono px-2 py-1 rounded"
+                            style="font-size:0.6rem; width:250px;" placeholder="test a target against this scope"
+                            onkeydown="if(event.key==='Enter')engCheck()">
+                        <button onclick="engCheck()" class="font-pixel px-3 py-1 rounded border"
+                            style="font-size:0.55rem;">CHECK</button>
+                        <span id="eng-check-out" class="font-mono" style="font-size:0.6rem;"></span>
+                    </div>
+                </div>
+
+                <div class="panel rounded p-4">
+                    <div class="flex items-baseline justify-between flex-wrap gap-2">
+                        <h3 class="font-pixel" style="font-size:0.62rem;">ENGAGEMENT RECORD</h3>
+                        <span class="font-mono" style="font-size:0.55rem; opacity:.55;">
+                            explicit save &mdash; every previous value is kept
+                        </span>
+                    </div>
+                    <div class="flex flex-wrap gap-2 mt-3">
+                        <input id="eng-e-name" class="cyber-input rounded" placeholder="client name"
+                            style="font-size:0.65rem; width:190px;">
+                        <input id="eng-e-domain" class="cyber-input rounded" placeholder="root domain"
+                            style="font-size:0.65rem; width:170px;">
+                        <input id="eng-e-by" class="cyber-input rounded" placeholder="authorised by"
+                            style="font-size:0.65rem; width:190px;">
+                        <input id="eng-e-from" class="cyber-input rounded" placeholder="from (YYYY-MM-DD)"
+                            style="font-size:0.65rem; width:140px;">
+                        <input id="eng-e-until" class="cyber-input rounded" placeholder="until (YYYY-MM-DD)"
+                            style="font-size:0.65rem; width:140px;">
+                        <input id="eng-e-notes" class="cyber-input rounded" placeholder="notes"
+                            style="font-size:0.65rem; flex:1; min-width:200px;">
+                        <button onclick="engSave()" class="font-pixel px-3 py-1 rounded border"
+                            style="font-size:0.55rem;">SAVE</button>
+                        <button id="eng-archive-btn" onclick="engArchive()"
+                            class="font-pixel px-3 py-1 rounded border"
+                            style="font-size:0.55rem; color:var(--neon-yellow); border-color:var(--neon-yellow);">ARCHIVE</button>
+                        <span id="eng-save-out" class="font-mono" style="font-size:0.6rem;"></span>
+                    </div>
+                    <div id="eng-revisions" class="mt-3"></div>
+                </div>
+
+                <div class="panel rounded p-4">
+                    <h3 class="font-pixel" style="font-size:0.62rem;">AT A GLANCE</h3>
+                    <div class="mt-3">${engStatCards(d)}</div>
+                </div>
+
+                <div class="panel rounded p-4">
+                    <h3 class="font-pixel" style="font-size:0.62rem;">EXECUTIONS</h3>
+                    <p class="font-mono mt-1" style="font-size:0.55rem; opacity:.55;">
+                        Every run recorded against this customer, newest first &mdash; both lanes.
+                    </p>
+                    <div class="mt-2">${engRunTable(d)}</div>
+                </div>
+
+                <div class="panel rounded p-4">
+                    <div class="flex items-baseline justify-between flex-wrap gap-2">
+                        <h3 class="font-pixel" style="font-size:0.62rem;">ASSET INVENTORY</h3>
+                        <span class="font-mono" style="font-size:0.58rem; opacity:.6;">
+                            ${engAssetSummary(d)}</span>
+                    </div>
+                    <p class="font-mono mt-1" style="font-size:0.55rem; opacity:.55; max-width:78ch;">
+                        What the findings are ABOUT, as host &rarr; port &rarr; endpoint. Findings are
+                        grouped here for reading; the underlying rows are untouched, so a count of
+                        &ldquo;SQL Injection &times;3&rdquo; and a metric counting three findings are
+                        both correct.
+                    </p>
+                    <div class="mt-2">${engAssetTree(d.assets || [], 0)}</div>
+                </div>
+
+                <div class="panel rounded p-4">
+                    <h3 class="font-pixel" style="font-size:0.62rem;">TARGETS</h3>
+                    <div class="mt-2">${(d.targets || []).map(t => `
+                        <div class="flex items-center gap-3 flex-wrap font-mono py-0.5" style="font-size:0.6rem;">
+                            <span style="color:var(--neon-cyan); min-width:230px;">${tlEsc(t.base_url)}</span>
+                            <span style="opacity:.6;">${tlEsc(t.title || '')}</span>
+                            <span style="opacity:.5;">auth: ${tlEsc(t.auth_state || 'none')}</span>
+                            <button data-engtestlab="${tlEsc(t.base_url)}"
+                                class="font-pixel px-2 py-0.5 rounded border" style="font-size:0.45rem;">TEST LAB &rarr;</button>
+                        </div>`).join('') ||
+                        '<div class="font-mono" style="font-size:0.6rem; opacity:.6;">No targets yet.</div>'}</div>
+                    <div class="flex gap-2 mt-3 flex-wrap items-center">
+                        <input id="eng-target-url" class="input-field font-mono px-2 py-1 rounded"
+                            style="font-size:0.6rem; width:250px;" placeholder="https://app.acme.com">
+                        <input id="eng-target-title" class="input-field font-mono px-2 py-1 rounded"
+                            style="font-size:0.6rem; width:170px;" placeholder="name (optional)">
+                        <button onclick="engAddTarget()" class="font-pixel px-3 py-1 rounded border"
+                            style="font-size:0.55rem;">ADD TARGET</button>
+                    </div>
+                    <div class="font-mono mt-2" style="font-size:0.55rem; opacity:.55;">
+                        A target outside this engagement's scope is refused here, not merely flagged.
+                    </div>
+                </div>
+
+                <div class="panel rounded p-4">
+                    <h3 class="font-pixel" style="font-size:0.62rem;">WORK RECORDED FOR THIS CUSTOMER</h3>
+                    <div class="mt-2 font-mono" style="font-size:0.6rem;">
+                        ${engCapNote((d.sessions || []).length, (d.counts || {}).sessions, ENG_LIST_CAP, 'agent session')}
+                        ${(d.sessions || []).slice(0, ENG_LIST_CAP).map(x => `
+                            <div class="py-0.5" style="opacity:.8;">
+                                <span style="color:var(--neon-cyan);">${tlEsc(x.id.slice(0, 8))}</span>
+                                <span style="opacity:.7;"> agent · ${tlEsc(x.target_url)} · ${tlEsc(x.status)}</span>
+                            </div>`).join('')}
+                        ${engCapNote((d.v2_runs || []).length, (d.counts || {}).v2_runs, ENG_LIST_CAP, 'deterministic run')}
+                        ${(d.v2_runs || []).slice(0, ENG_LIST_CAP).map(x => `
+                            <div class="py-0.5" style="opacity:.8;">
+                                <span style="color:var(--neon-green);">${tlEsc(x.id.slice(0, 8))}</span>
+                                <span style="opacity:.7;"> deterministic · ${tlEsc(x.test_case_id)}</span>
+                            </div>`).join('')}
+                        ${!(d.sessions || []).length && !(d.v2_runs || []).length
+                            ? '<span style="opacity:.6;">Nothing run yet under this engagement.</span>' : ''}
+                    </div>
+                </div>`;
+            const det = document.getElementById('eng-detail');
+            det.querySelectorAll('[data-engapprove]').forEach(b =>
+                b.addEventListener('click', () => engApprove(b.dataset.engapprove)));
+            det.querySelectorAll('[data-engtestlab]').forEach(b =>
+                b.addEventListener('click', () => engToTestLab(b.dataset.engtestlab, engCurrent)));
+            engFillRecord(e);
+            engLoadRevisions(engCurrent);
+            det.classList.remove('hidden');
+        }
+
+
+        // ===== ENGAGEMENT RECORD =====
+        // Editable because a typo in an authorisation reference was otherwise
+        // permanent. Explicit SAVE rather than save-as-you-type: this record
+        // carries the authorisation for the test, and a field that commits
+        // while you are still typing can store half an approval reference.
+        //
+        // Every previous value is kept server-side and shown below the form,
+        // because "who authorised this" must not become whatever the record
+        // happens to say today.
+        function engSaveMessage(text, colour) {
+            const el = document.getElementById('eng-save-out');
+            if (!el) return;
+            el.textContent = text;
+            el.style.color = colour;
+        }
+
+        function engFillRecord(e) {
+            const set = (id, v) => { const el = document.getElementById(id); if (el) el.value = v || ''; };
+            set('eng-e-name', e.client_name);
+            set('eng-e-domain', e.root_domain);
+            set('eng-e-by', e.authorised_by);
+            set('eng-e-from', e.authorised_from);
+            set('eng-e-until', e.authorised_until);
+            set('eng-e-notes', e.notes);
+            const btn = document.getElementById('eng-archive-btn');
+            if (btn) btn.textContent = (e.status === 'archived') ? 'REOPEN' : 'ARCHIVE';
+        }
+
+        async function engSave() {
+            const out = document.getElementById('eng-save-out');
+            const val = id => (document.getElementById(id) || {}).value ?? '';
+            out.textContent = 'saving…'; out.style.color = '#6a6a8a';
+            try {
+                const r = await fetch(`/api/engagements/${encodeURIComponent(engCurrent)}`, {
+                    method: 'PUT', headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        client_name: val('eng-e-name'), root_domain: val('eng-e-domain'),
+                        authorised_by: val('eng-e-by'), authorised_from: val('eng-e-from'),
+                        authorised_until: val('eng-e-until'), notes: val('eng-e-notes'),
+                    }),
+                });
+                if (!r.ok) throw new Error(await describeApiError(r));
+                const d = await r.json();
+                const n = (d.updated || {}).changed || [];
+                // engRender REPLACES this panel, taking the status span with
+                // it, so the message is written after the re-render. Setting
+                // it first looked like the save had silently done nothing.
+                engRender(d);
+                loadEngagementOptions();
+                sideLoadEngagements();
+                engSaveMessage(n.length ? `saved: ${n.join(', ')}` : 'no change',
+                               n.length ? 'var(--neon-green)' : '#6a6a8a');
+            } catch (err) {
+                out.textContent = err.message;
+                out.style.color = 'var(--neon-red)';
+            }
+        }
+
+        async function engArchive() {
+            const btn = document.getElementById('eng-archive-btn');
+            const reopening = btn && btn.textContent === 'REOPEN';
+            const out = document.getElementById('eng-save-out');
+            try {
+                const r = await fetch(
+                    `/api/engagements/${encodeURIComponent(engCurrent)}/archive`, {
+                        method: 'POST', headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({archived: !reopening}),
+                    });
+                if (!r.ok) throw new Error(await describeApiError(r));
+                const d = await r.json();
+                engRender(d);
+                loadEngagementOptions();
+                sideLoadEngagements();
+                engSaveMessage(reopening ? 'reopened' : 'archived — the record is kept',
+                               'var(--neon-green)');
+            } catch (err) {
+                out.textContent = err.message;
+                out.style.color = 'var(--neon-red)';
+            }
+        }
+
+        async function engLoadRevisions(id) {
+            const el = document.getElementById('eng-revisions');
+            if (!el) return;
+            let rows = [];
+            try {
+                rows = (await (await fetch(
+                    `/api/engagements/${encodeURIComponent(id)}/revisions`)).json()).revisions || [];
+            } catch (e) { return; }
+            if (!rows.length) { el.innerHTML = ''; return; }
+            el.innerHTML = `<div class="font-pixel" style="font-size:0.45rem; color:#6a6a8a;
+                margin-bottom:3px;">EDIT HISTORY</div>` + rows.map(r => `
+                <div class="font-mono" style="font-size:0.58rem; color:#7a7a8a; padding:1px 0;">
+                    <span style="opacity:.6;">${tlEsc(fmtWhen(r.changed_at))}</span>
+                    &nbsp;${tlEsc(r.field)}:
+                    <span style="color:#8a5a5a;">${tlEsc(r.old_value || '(empty)')}</span>
+                    &rarr; <span style="color:#d8d8e8;">${tlEsc(r.new_value || '(empty)')}</span>
+                </div>`).join('');
+        }
+
+        // ===== Asset inventory =====
+        // host -> port -> endpoint, with findings rolled up per node. Grouping
+        // is presentational: the findings table still holds every row.
+        function engAssetSummary(d) {
+            const c = d.asset_counts || {};
+            const parts = ['host', 'port', 'service', 'technology', 'endpoint']
+                .filter(k => c[k]).map(k => `${c[k]} ${k}${c[k] > 1 ? 's' : ''}`);
+            return parts.length ? parts.join(' · ') : 'nothing inventoried yet';
+        }
+
+        function engAssetTree(nodes, depth) {
+            if (!nodes.length) {
+                return depth === 0
+                    ? '<div class="font-mono" style="font-size:0.6rem; opacity:.6;">No assets yet — they are created as findings arrive, and only for hosts this engagement authorises.</div>'
+                    : '';
+            }
+            const icon = {host: '▣', port: '·', service: '◇', technology: '◆', endpoint: '→'};
+            return nodes.map(n => {
+                const sev = {};
+                (n.findings || []).forEach(f => { sev[f.severity] = (sev[f.severity] || 0) + f.count; });
+                const chips = ['critical', 'high', 'medium', 'low', 'info']
+                    .filter(k => sev[k])
+                    .map(k => `<span class="font-mono" style="font-size:0.55rem;">${tlSev(k)}&nbsp;${sev[k]}</span>`)
+                    .join(' ');
+                const finds = (n.findings || []).map(f =>
+                    `<div class="font-mono" style="font-size:0.57rem; opacity:.8; padding-left:${(depth + 1) * 14}px;">
+                        ${tlSev(f.severity)} ${tlEsc(f.vuln_type)}${f.count > 1 ? ` <span style="opacity:.6;">&times;${f.count}</span>` : ''}
+                     </div>`).join('');
+                return `
+                    <div style="padding-left:${depth * 14}px;">
+                        <div class="font-mono flex items-center gap-2 flex-wrap" style="font-size:0.62rem; padding:1px 0;">
+                            <span style="opacity:.45;">${icon[n.kind] || '·'}</span>
+                            <span style="color:${n.kind === 'host' ? 'var(--neon-cyan)' : 'inherit'};">${tlEsc(n.value)}</span>
+                            <span style="opacity:.4; font-size:0.52rem;">${tlEsc(n.kind)}</span>
+                            ${n.source && n.source !== 'observed' ? `<span style="opacity:.4; font-size:0.52rem;">${tlEsc(n.source)}</span>` : ''}
+                            ${chips}
+                        </div>
+                        ${finds}
+                        ${engAssetTree(n.children || [], depth + 1)}
+                    </div>`;
+            }).join('');
+        }
+
+        async function engAddScope() {
+            const pattern = document.getElementById('eng-scope-pattern').value.trim();
+            if (!pattern) return;
+            const body = {
+                pattern,
+                kind: document.getElementById('eng-scope-kind').value,
+                in_scope: !document.getElementById('eng-scope-exclude').checked
+            };
+            const r = await fetch(`/api/engagements/${engCurrent}/scope`, {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(body)
+            });
+            if (r.ok) { engRender(await r.json()); engLoad(); }
+        }
+
+        async function engApprove(pattern) {
+            const r = await fetch(`/api/engagements/${engCurrent}/scope/approve`, {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({pattern})
+            });
+            if (r.ok) { engRender(await r.json()); engLoad(); }
+        }
+
+        // Domain recon. `probe=false` returns the name list without connecting
+        // to anything — the option an operator wants before a scan window opens.
+        async function engRecon(probe) {
+            const out = document.getElementById('eng-recon-out');
+            out.style.color = 'var(--neon-cyan)';
+            out.textContent = probe ? 'enumerating and probing…' : 'enumerating (no contact)…';
+            let r;
+            try {
+                r = await fetch(`/api/engagements/${engCurrent}/recon`, {
+                    method: 'POST', headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({probe: !!probe})
+                });
+            } catch (e) {
+                out.style.color = 'var(--neon-red)';
+                out.textContent = 'recon failed: ' + e;
+                return;
+            }
+            if (!r.ok) {
+                const msg = (await r.json().catch(() => ({}))).detail || r.statusText;
+                out.style.color = 'var(--neon-red)';
+                out.textContent = 'recon failed: ' + msg;
+                return;
+            }
+            const d = await r.json();
+            out.style.color = d.pending && d.pending.length ? 'var(--neon-yellow)' : 'var(--neon-green)';
+            out.textContent =
+                `${d.enumerated} name(s) · ${d.authorised.length} in scope · ` +
+                `${d.pending.length} awaiting approval · ${d.probed.length} probed · ` +
+                `${d.assets_created} asset(s)` + (d.note ? ` · ${d.note}` : '');
+            if (d.engagement) engRender(d.engagement);
+            engLoad();
+        }
+
+        async function engCheck() {
+            const target = document.getElementById('eng-check').value.trim();
+            const out = document.getElementById('eng-check-out');
+            if (!target) return;
+            const d = await (await fetch(`/api/engagements/${engCurrent}/scope/check`, {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({target})
+            })).json();
+            out.textContent = (d.allowed ? 'ALLOWED — ' : 'REFUSED — ') + d.reason;
+            out.style.color = d.allowed ? 'var(--neon-green)' : 'var(--neon-red)';
+        }
+
+        async function engAddTarget() {
+            const base_url = document.getElementById('eng-target-url').value.trim();
+            if (!base_url) return;
+            const r = await fetch(`/api/engagements/${engCurrent}/targets`, {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({base_url, title: document.getElementById('eng-target-title').value.trim()})
+            });
+            if (!r.ok) {
+                const msg = (await r.json().catch(() => ({}))).detail || 'failed';
+                alert('Target refused: ' + msg);
+                return;
+            }
+            engRender(await r.json());
+            engLoad();   // else the customer list keeps showing a stale count
+        }
+
+        function engToTestLab(url, engagementId) {
+            switchView('testlab');
+            tlInit().then(() => {
+                document.getElementById('tl-target').value = url;
+                // Carry the customer across the handoff. It used to forward the
+                // URL alone, so a run launched from an engagement arrived at the
+                // deterministic lane with no idea whose asset it was.
+                if (engagementId) {
+                    const sel = document.getElementById('session-engagement');
+                    if (sel) { sel.value = engagementId; onEngagementPicked(); }
+                }
+                tlPlan();
+            });
+        }
+
+
+        // ===== TEST LAB: drive the deterministic WSTG lane =====
+        // Sweep is deliberately PLAN-then-execute rather than one server call.
+        // The plan is a pure function, so an operator can inspect targeting
+        // before anything touches the network — and bad targeting is not a miss
+        // here, it is a confident wrong answer (the SSRF case aimed at a search
+        // parameter duly reported "SSRF suspected" there). Executing case by
+        // case also gives live progress and a working STOP.
+        let tlPlanData = null;
+        let tlAbort = false;
+
+        // Escapes the apostrophe too: several call sites interpolate into
+        // single-quoted attribute values, where a bare ' closes the attribute.
+        function tlEsc(x) {
+            return String(x == null ? '' : x).replace(/[&<>"']/g,
+                c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;', "'":'&#39;'}[c]));
+        }
+
+        // Run results, keyed by case id. Holding the parsed object means nothing
+        // target-controlled is ever serialised back through the HTML parser.
+        const tlRuns = {};
+
+        async function tlInit() {
+            if (tlPlanData) return;
+            try {
+                const p = await (await fetch('/api/v2/sweep/profiles')).json();
+                const sel = document.getElementById('tl-profile');
+                sel.innerHTML = '<option value="">no profile (generic)</option>' +
+                    (p.profiles || []).map(x => `<option value="${tlEsc(x)}">profile: ${tlEsc(x)}</option>`).join('');
+                if ((p.profiles || []).includes('juiceshop')) sel.value = 'juiceshop';
+                const c = await (await fetch('/api/v2/testcases')).json();
+                document.getElementById('tl-meta').textContent =
+                    `${c.count} committed cases · ${tlEsc(c.catalog_root || '')}`;
+            } catch (e) {
+                document.getElementById('tl-meta').textContent = 'catalogue unavailable: ' + e;
+            }
+            tlPlan();
+        }
+
+        async function tlPlan() {
+            const target = document.getElementById('tl-target').value.trim();
+            const profile = document.getElementById('tl-profile').value;
+            if (!target) { alert('Enter a target URL'); return; }
+            const r = await fetch('/api/v2/sweep/plan', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({target, profile})
+            });
+            if (!r.ok) {
+                document.getElementById('tl-summary').textContent =
+                    'plan failed: ' + (await r.text()).slice(0, 120);
+                return;
+            }
+            tlPlanData = await r.json();
+            tlRender();
+        }
+
+        function tlRender() {
+            const d = tlPlanData;
+            document.getElementById('tl-summary').textContent =
+                `${d.counts.runnable} runnable · ${d.counts.skipped} skipped · ${d.counts.total} total`;
+
+            const skipPanel = document.getElementById('tl-skipped-panel');
+            if (d.skipped.length) {
+                skipPanel.classList.remove('hidden');
+                document.getElementById('tl-skipped').innerHTML = d.skipped.map(sc => `
+                    <div class="font-mono flex gap-3" style="font-size:0.6rem;">
+                        <span style="color:var(--neon-yellow); min-width:130px;">${tlEsc(sc.id)}</span>
+                        <span style="opacity:.75;">${tlEsc(sc.reason)}</span>
+                    </div>`).join('');
+            } else {
+                skipPanel.classList.add('hidden');
+            }
+
+            document.getElementById('tl-rows').innerHTML = d.runnable.map(c => `
+                <tr id="tlrow-${tlEsc(c.id)}" style="border-bottom:1px solid #1e242c;">
+                    <td class="py-1 pr-3" style="color:var(--neon-cyan); white-space:nowrap;">${tlEsc(c.id)}</td>
+                    <td class="py-1 pr-3" style="opacity:.8;">${tlEsc(c.category || '')}</td>
+                    <td class="py-1 pr-3">${tlSev(c.severity)}</td>
+                    <td class="py-1 pr-3" style="opacity:.7; max-width:290px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;"
+                        title="${tlEsc(c.where)}">${tlEsc(c.where)}</td>
+                    <td class="py-1 pr-3" id="tlst-${tlEsc(c.id)}" style="opacity:.55;">ready</td>
+                    <td class="py-1" id="tlfd-${tlEsc(c.id)}">
+                        <button onclick="tlRunOne('${tlEsc(c.id)}')" class="font-pixel px-2 py-0.5 rounded border"
+                            style="font-size:0.45rem;">RUN</button>
+                    </td>
+                </tr>`).join('');
+        }
+
+        function tlSev(s) {
+            const col = {critical:'#ff2e63', high:'#ff6b35', medium:'var(--neon-yellow)',
+                         low:'#7ad', info:'#6a6a8a'}[s] || '#6a6a8a';
+            return `<span style="color:${col};">${tlEsc((s || '').toUpperCase())}</span>`;
+        }
+
+        function tlCase(id) { return (tlPlanData.runnable || []).find(c => c.id === id); }
+
+        // A case that DECLINED to assess is not a clean result, and must never
+        // be shown as one. WSTG-CLNT-09 against a host that 302s to a login
+        // emits ERLIK_FRAMING_NOT_ASSESSED_REDIRECT — it did not check framing,
+        // because a redirect is not the page an attacker would frame. Rendering
+        // that as "clean" would put "no clickjacking issue" in front of an
+        // operator when the truth is "not tested".
+        const TL_NOT_ASSESSED = /ERLIK_\w*(?:NOT_ASSESSED|NO_RESPONSE|INCONCLUSIVE)\w*/;
+        const tlLast = {};
+
+        function tlVerdict(d) {
+            const n = (d.findings || []).length;
+            if (n) return {kind: 'finding', label: 'FINDING', color: 'var(--neon-red)'};
+            const steps = d.steps || [];
+            const failed = steps.find(s => !s.success);
+            if (failed) return {kind: 'error', label: 'step failed',
+                                color: 'var(--neon-orange)',
+                                why: failed.error || failed.step};
+            for (const s of steps) {
+                const m = TL_NOT_ASSESSED.exec(s.output || '');
+                if (m) return {kind: 'unassessed', label: 'not assessed',
+                               color: 'var(--neon-yellow)', why: m[0]};
+            }
+            if (!steps.length) return {kind: 'error', label: 'no steps ran',
+                                       color: 'var(--neon-orange)'};
+            // "no finding" rather than "clean": the assertions did not fire,
+            // which is weaker than a claim that the target is safe.
+            return {kind: 'nofinding', label: 'no finding', color: 'var(--neon-green)'};
+        }
+
+        async function tlRunOne(id) {
+            const c = tlCase(id);
+            if (!c) return;
+            const st = document.getElementById('tlst-' + id);
+            const fd = document.getElementById('tlfd-' + id);
+            st.textContent = 'running…';
+            st.style.opacity = '1';
+            st.style.color = 'var(--neon-cyan)';
+            const t0 = Date.now();
+            try {
+                const r = await fetch(`/api/v2/testcases/${encodeURIComponent(id)}/run`, {
+                    method: 'POST', headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({target: c.target})
+                });
+                if (!r.ok) throw new Error((await r.text()).slice(0, 140));
+                const d = await r.json();
+                const n = (d.findings || []).length;
+                const secs = Math.round((Date.now() - t0) / 1000);
+                const v = tlVerdict(d);
+                tlLast[id] = v.kind;
+                st.textContent = v.label + ` · ${secs}s`;
+                st.style.color = v.color;
+                st.title = v.why || '';
+                // The run object is kept in JS and referenced by CASE ID only.
+                // It used to be JSON.stringify'd into an onclick attribute with
+                // .replace(/'/g,"&#39;") as the sole guard -- which is a
+                // round-trip, not an escape. Every byte of this object is chosen
+                // by the probed host (steps[].output is raw curl stdout), so a
+                // target emitting the literal characters `&quot;` produced a
+                // real `"` after HTML decoding, closed the JSON string literal
+                // and executed arbitrary JS in the operator's dashboard.
+                tlRuns[id] = d;
+                fd.innerHTML = n
+                    ? (d.findings.map(f =>
+                        `<div style="color:var(--neon-red);">${tlEsc(f.vuln_type)} <span style="opacity:.6;">[${tlEsc(f.severity)}]</span></div>`
+                      ).join('') +
+                      `<button data-tlrun="${tlEsc(id)}"
+                          class="font-pixel px-2 py-0.5 rounded border mt-1" style="font-size:0.45rem;">EVIDENCE</button>`)
+                    : `<button data-tlrun="${tlEsc(id)}"
+                          class="font-pixel px-2 py-0.5 rounded border" style="font-size:0.45rem; opacity:.6;">STEPS</button>`;
+                fd.querySelectorAll('[data-tlrun]').forEach(b =>
+                    b.addEventListener('click', () => tlDetail(tlRuns[b.dataset.tlrun])));
+                return n;
+            } catch (e) {
+                st.textContent = 'error';
+                st.style.color = 'var(--neon-orange)';
+                fd.innerHTML = `<span style="opacity:.7; font-size:0.55rem;">${tlEsc(e.message || e)}</span>`;
+                return 0;
+            }
+        }
+
+        async function tlSweep() {
+            if (!tlPlanData) { await tlPlan(); if (!tlPlanData) return; }
+            tlAbort = false;
+            document.getElementById('tl-sweep-btn').classList.add('hidden');
+            document.getElementById('tl-stop-btn').classList.remove('hidden');
+            const cases = tlPlanData.runnable;
+            let done = 0, hits = 0;
+            for (const c of cases) {
+                if (tlAbort) break;
+                document.getElementById('tl-progress').textContent =
+                    `${done}/${cases.length} · ${hits} finding(s)`;
+                hits += (await tlRunOne(c.id)) || 0;
+                done++;
+            }
+            // Counted separately on purpose. A sweep reporting "19 clean" when
+            // four of them never actually assessed anything is the single most
+            // dangerous thing this panel could print.
+            const tally = k => Object.values(tlLast).filter(v => v === k).length;
+            const un = tally('unassessed'), err = tally('error');
+            document.getElementById('tl-progress').textContent =
+                `${done}/${cases.length} run · ${hits} finding(s)` +
+                (un ? ` · ${un} not assessed` : '') +
+                (err ? ` · ${err} failed` : '') +
+                (tlPlanData.skipped.length ? ` · ${tlPlanData.skipped.length} skipped` : '') +
+                (tlAbort ? ' · STOPPED' : '');
+            document.getElementById('tl-sweep-btn').classList.remove('hidden');
+            document.getElementById('tl-stop-btn').classList.add('hidden');
+        }
+
+        function tlStop() { tlAbort = true; }
+
+        function tlDetail(d) {
+            const el = document.getElementById('tl-detail');
+            const steps = (d.steps || []).map(s => `
+                <div class="mt-2" style="border-left:2px solid ${s.success ? 'var(--neon-green)' : '#4a4a5a'}; padding-left:8px;">
+                    <div class="font-mono" style="font-size:0.58rem; color:var(--neon-cyan);">
+                        ${tlEsc(s.step)} <span style="opacity:.5;">· ${s.duration_ms}ms${s.success ? '' : ' · failed'}</span>
+                    </div>
+                    <pre class="font-mono mt-1" style="font-size:0.55rem; opacity:.75; white-space:pre-wrap; word-break:break-all; max-height:110px; overflow:auto;">${tlEsc(s.command)}</pre>
+                    <pre class="font-mono" style="font-size:0.55rem; opacity:.6; white-space:pre-wrap; word-break:break-all; max-height:170px; overflow:auto;">${tlEsc((s.output || '').slice(0, STEP_OUTPUT_CAP))}${
+                        (s.output || '').length > STEP_OUTPUT_CAP
+                          ? `\n\u2026 ${(s.output || '').length - STEP_OUTPUT_CAP} more character(s) not shown`
+                          : ''}</pre>
+                </div>`).join('');
+            const finds = (d.findings || []).map(f => `
+                <div class="font-mono mt-1" style="font-size:0.6rem;">
+                    <span style="color:var(--neon-red);">${tlEsc(f.vuln_type)}</span>
+                    <span style="opacity:.6;">[${tlEsc(f.severity)}] ${tlEsc(f.url || '')} ${tlEsc(f.parameter || '')}</span>
+                    <div style="opacity:.7; font-size:0.55rem;">from step <b>${tlEsc(f.step)}</b> of ${tlEsc(f.test_case_id)}</div>
+                </div>`).join('') || '<div class="font-mono" style="font-size:0.6rem; opacity:.6;">no findings — the assertions did not fire</div>';
+            document.getElementById('tl-detail-body').innerHTML = `
+                <div class="font-mono" style="font-size:0.6rem;">
+                    <b style="color:var(--neon-cyan);">${tlEsc(d.test_case_id)}</b>
+                    <span style="opacity:.6;"> · ${d.duration_ms}ms · run ${tlEsc((d.run_id || '').slice(0, 8))}</span>
+                    ${d.stopped_early ? '<span style="color:var(--neon-yellow);"> · stopped early</span>' : ''}
+                </div>
+                <div class="mt-2 font-pixel" style="font-size:0.5rem; opacity:.7;">FINDINGS</div>
+                ${finds}
+                <div class="mt-3 font-pixel" style="font-size:0.5rem; opacity:.7;">STEPS &mdash; EXACT COMMAND AND RESPONSE</div>
+                ${steps}`;
+            el.classList.remove('hidden');
+            el.scrollIntoView({behavior: 'smooth', block: 'nearest'});
         }
 
 
@@ -2278,28 +3616,138 @@
                 </div>`;
         }
 
-        async function loadReportsList() {
+
+        // ===== LIST STATE: filter, sort, and an honest count =====
+        // Three things every list here lacked, and the third is the one that
+        // matters: a view that silently shows 30 of 127 rows reads exactly
+        // like a complete one. Truncation is now stated, always.
+        //
+        // Search and sort live in the URL, so a filtered list is a link.
+        function listApply(rows, {searchKeys, searchValue, sortKey, sortDir}) {
+            let out = rows.slice();
+            const q = (searchValue || '').trim().toLowerCase();
+            if (q) {
+                out = out.filter(r => searchKeys.some(k =>
+                    String(r[k] ?? '').toLowerCase().includes(q)));
+            }
+            if (sortKey) {
+                const dir = sortDir === 'desc' ? -1 : 1;
+                out.sort((a, b) => {
+                    const x = a[sortKey], y = b[sortKey];
+                    const bothNum = typeof x === 'number' && typeof y === 'number';
+                    if (bothNum) return (x - y) * dir;
+                    return String(x ?? '').localeCompare(String(y ?? '')) * dir;
+                });
+            }
+            return out;
+        }
+
+        function listCountLabel(shown, total, capped, noun) {
+            // "42 of 127 sessions" when filtered; the bare total otherwise.
+            // `capped` is the SERVER's limit, which is a second truncation and
+            // must be said out loud rather than folded into the same number.
+            let txt = shown === total ? `${total} ${noun}` : `${shown} of ${total} ${noun}`;
+            if (capped) txt += ` · server returns at most ${capped}`;
+            return txt;
+        }
+
+        function listBindSort(container, onSort) {
+            container.querySelectorAll('.col-sort').forEach(el => {
+                if (el.dataset.bound) return;
+                el.dataset.bound = '1';
+                el.addEventListener('click', () => onSort(el.dataset.sort));
+            });
+        }
+
+        function listMarkSort(container, sortKey, sortDir) {
+            container.querySelectorAll('.col-sort').forEach(el => {
+                if (el.dataset.sort === sortKey) {
+                    el.dataset.active = sortDir === 'desc' ? '\u25BC' : '\u25B2';
+                } else {
+                    delete el.dataset.active;
+                }
+            });
+        }
+
+        let __reportsCache = null;      // the last fetch, so filtering never refetches
+
+        async function loadReportsList(opts = {}) {
             const container = document.getElementById('reports-list');
             const countEl = document.getElementById('reports-count');
-            container.innerHTML = '<div class="px-4 py-8 text-center" style="color:#3a3a4a; font-size:0.85rem;">Loading sessions...</div>';
+            const view = document.getElementById('view-reports');
+            const searchEl = document.getElementById('reports-search');
 
-            try {
-                const resp = await fetch('/api/sessions');
-                if (!resp.ok) {
-                    container.innerHTML = `<div class="px-4 py-8 text-center" style="color:var(--neon-red); font-size:0.85rem;">API error (${resp.status}). Is the backend running?</div>`;
-                    countEl.textContent = 'error';
+            if (!opts.fromCache || !__reportsCache) {
+                container.innerHTML = '<div class="px-4 py-8 text-center" style="color:#3a3a4a; font-size:0.85rem;">Loading sessions...</div>';
+                try {
+                    const resp = await fetch('/api/sessions');
+                    if (!resp.ok) {
+                        container.innerHTML = `<div class="px-4 py-8 text-center" style="color:var(--neon-red); font-size:0.85rem;">API error (${resp.status}). Is the backend running?</div>`;
+                        countEl.textContent = 'error';
+                        return;
+                    }
+                    const data = await resp.json();
+                    __reportsCache = Array.isArray(data) ? data : [];
+                } catch (err) {
+                    container.innerHTML = `<div class="px-4 py-8 text-center" style="color:var(--neon-red); font-size:0.85rem;">Error loading sessions: ${err.message}</div>`;
                     return;
                 }
-                const data = await resp.json();
-                const sessions = Array.isArray(data) ? data : [];
+            }
 
-                countEl.textContent = sessions.length + ' sessions';
+            const st = urlState();
+            // The INPUT is the source of truth while the operator is here; the
+            // URL is written from it. An earlier version copied the URL back
+            // into the input on every render, so any programmatic change was
+            // reverted to a stale query and the list filtered on something the
+            // box no longer said. The URL is read into the input only on load
+            // and on a real navigation — see urlApply.
+            const q = searchEl ? searchEl.value : '';
+            urlSet({q: q || '', sort: st.sort || '', dir: st.dir || ''});
 
-                if (sessions.length === 0) {
-                    container.innerHTML = '<div class="px-4 py-8 text-center" style="color:#3a3a4a; font-size:0.85rem;">No sessions found. Run a scan first.</div>';
-                    return;
-                }
+            listBindSort(view, key => {
+                const cur = urlState();
+                const dir = cur.sort === key && cur.dir !== 'desc' ? 'desc' : 'asc';
+                urlSet({sort: key, dir});
+                loadReportsList({fromCache: true});
+            });
+            listMarkSort(view, st.sort, st.dir);
 
+            const all = __reportsCache;
+            // Scoped to the selected customer when one is chosen, so the list
+            // agrees with the counts in the sidebar beside it.
+            const eng = (document.getElementById('side-engagement') || {}).value || '';
+            // Refuse to filter on a field the API does not send. Filtering on a
+            // missing key does not error — it silently returns nothing, and an
+            // empty list reads as "this customer has done no work".
+            const scopable = all.length === 0 || 'engagement_id' in all[0];
+            const scoped = (eng && scopable) ? all.filter(x => x.engagement_id === eng) : all;
+            const sessions = listApply(scoped, {
+                searchKeys: ['id', 'target_url', 'status', 'session_type', 'model'],
+                searchValue: q, sortKey: st.sort, sortDir: st.dir,
+            });
+
+            // The denominator is the SCOPED set, not the corpus. Using
+            // all.length rendered "5 of 127 sessions · this customer" when the
+            // customer owned 5 of 5 — beside a sidebar reading "agent sessions
+            // 5" from a real per-engagement COUNT(*). The operator goes hunting
+            // for a filter hiding 122 rows that does not exist.
+            countEl.textContent = listCountLabel(sessions.length, scoped.length, 0, 'sessions')
+                + (eng && scopable ? ` · this customer (${all.length} in total)` : '')
+                + (eng && !scopable ? ' · NOT scoped (API sends no engagement_id)' : '');
+
+            if (sessions.length === 0) {
+                // Two different situations, two different sentences. "No
+                // sessions found" when a filter is active sends the operator
+                // looking for a bug that is their own search box.
+                const msg = all.length === 0
+                    ? 'No sessions found. Run a scan first.'
+                    : (q ? `No session matches “${escapeHtml(q)}”.`
+                         : 'No sessions for this customer.');
+                container.innerHTML = `<div class="px-4 py-8 text-center" style="color:#3a3a4a; font-size:0.85rem;">${msg}</div>`;
+                return;
+            }
+
+            {
                 container.innerHTML = '';
                 for (const s of sessions) {
                     const row = document.createElement('div');
@@ -2345,10 +3793,65 @@
                     `;
                     container.appendChild(row);
                 }
-            } catch (err) {
-                container.innerHTML = `<div class="px-4 py-8 text-center" style="color:var(--neon-red); font-size:0.85rem;">Error loading sessions: ${err.message}</div>`;
             }
         }
+
+        // ===== Run critique =====
+        // The AI REVIEW toggle spends a second LLM pass per run and writes
+        // session_reviews. The dashboard shipped the switch that turns it on
+        // and then never fetched the result — five critiques accumulated
+        // unread, holding exactly the thing an operator wants next ("SQL
+        // Injection testing was omitted despite mission requirements").
+        //
+        // Rendered as ADVICE, explicitly outside the metrics: the critique is
+        // written by a model about a model's run, and must never read as
+        // evidence about the target.
+        async function renderRunReview(sid) {
+            const el = document.getElementById('report-detail-review');
+            el.classList.add('hidden');
+            el.innerHTML = '';
+            let r;
+            try {
+                const resp = await fetch(`/api/sessions/${sid}/review`);
+                if (!resp.ok) return;
+                r = await resp.json();
+            } catch (e) { return; }
+            if (!r || !Object.keys(r).length) return;   // toggle was off — say nothing
+
+            const list = (v) => {
+                let a = v;
+                if (typeof a === 'string') { try { a = JSON.parse(a); } catch (e) { a = [a]; } }
+                if (!Array.isArray(a)) a = a ? [a] : [];
+                return a.filter(Boolean);
+            };
+            const block = (label, items, colour) => {
+                if (!items.length) return '';
+                return `<div class="mt-2">
+                    <div class="font-pixel" style="font-size:0.42rem; color:${colour};">${label}</div>
+                    ${items.map(t => `<div class="font-mono mt-0.5" style="font-size:0.78rem; color:#c0c0d0;">— ${tlEsc(t)}</div>`).join('')}
+                </div>`;
+            };
+
+            const conf = (r.confidence || '').toLowerCase();
+            const confCol = {high:'var(--neon-green)', medium:'var(--neon-yellow)', low:'var(--neon-orange)'}[conf] || '#6a6a8a';
+
+            el.innerHTML = `
+                <div class="flex items-baseline gap-3 flex-wrap">
+                    <span class="font-pixel" style="font-size:0.45rem; color:var(--neon-purple);">RUN CRITIQUE</span>
+                    <span class="font-mono" style="font-size:0.6rem; opacity:.6;">${tlEsc(r.model || '')}</span>
+                    ${conf ? `<span class="font-mono" style="font-size:0.6rem; color:${confCol};">confidence: ${tlEsc(conf)}</span>` : ''}
+                    <span class="font-mono" style="font-size:0.58rem; opacity:.45;">advice about the RUN — not evidence about the target</span>
+                </div>
+                ${block('COVERAGE GAPS', list(r.coverage_gaps), 'var(--neon-red)')}
+                ${block('WASTED EFFORT', list(r.wasted_effort), 'var(--neon-orange)')}
+                ${block('CONFIG SUGGESTIONS', list(r.config_suggestions), 'var(--neon-cyan)')}
+                ${r.recommended_next_run ? `<div class="mt-2">
+                    <div class="font-pixel" style="font-size:0.42rem; color:var(--neon-green);">RECOMMENDED NEXT RUN</div>
+                    <div class="font-mono mt-0.5" style="font-size:0.78rem; color:#c0c0d0;">${tlEsc(r.recommended_next_run)}</div>
+                </div>` : ''}`;
+            el.classList.remove('hidden');
+        }
+
 
         // ===== View Report Detail =====
         async function viewReport(sid) {
@@ -2370,6 +3873,7 @@
 
             renderRunConfigBadges(sid);  // reproducibility: which automation flow this session used
             renderTriageTable(sid);      // accept / reject / severity-override controls
+            renderRunReview(sid);        // the critique the AI REVIEW toggle paid for
 
             try {
                 const [reportResp, findingsResp] = await Promise.all([
@@ -3034,6 +4538,23 @@ ${htmlBody}
         // Track current chain
         let currentChainId = null;
 
+        // A refused run must SAY SO. Both start paths used to call resp.json()
+        // without checking the status, so a 403 "not in scope for this
+        // engagement" set sessionId = undefined and the flow carried on: the
+        // scope gate fired and the operator saw nothing. A boundary that
+        // refuses silently is indistinguishable from one that never ran.
+        async function describeApiError(resp) {
+            let detail = '';
+            try {
+                const body = await resp.json();
+                detail = typeof body.detail === 'string'
+                    ? body.detail : JSON.stringify(body.detail || body);
+            } catch (e) {
+                try { detail = await resp.text(); } catch (e2) { detail = ''; }
+            }
+            return `HTTP ${resp.status} — ${detail || resp.statusText || 'request refused'}`;
+        }
+
         async function startSession() {
             const targetUrl = document.getElementById('target-url').value;
             const scopeMode = document.getElementById('scope-mode').value;
@@ -3043,6 +4564,8 @@ ${htmlBody}
             const sessionType = document.getElementById('session-type').value;
             const parentSessionId = document.getElementById('parent-session').value || null;
             const vulnCategory = document.getElementById('vuln-category').value || null;
+            const engagementId = document.getElementById('session-engagement').value || null;
+            const authorizationRef = document.getElementById('session-authref').value.trim() || null;
             const btn = document.getElementById('start-btn');
             btn.disabled = true;
             btn.textContent = '> STARTING...';
@@ -3079,8 +4602,11 @@ ${htmlBody}
                             no_timeout: document.getElementById('no-timeout-toggle').checked,
                             auto_progress: true,
                             run_config: buildRunConfig(),
+                            engagement_id: engagementId,
+                            authorization_ref: authorizationRef,
                         }),
                     });
+                    if (!resp.ok) throw new Error(await describeApiError(resp));
                     const chain = await resp.json();
                     currentChainId = chain.id;
                     sessionId = chain.first_session_id;
@@ -3121,8 +4647,11 @@ ${htmlBody}
                         tool_timeout: parseInt(document.getElementById('tool-timeout-input').value) || null,
                         max_turns: parseInt(document.getElementById('max-turns-slider').value) || 0,
                         run_config: buildRunConfig(),
+                        engagement_id: engagementId,
+                        authorization_ref: authorizationRef,
                     }),
                 });
+                if (!resp.ok) throw new Error(await describeApiError(resp));
                 const session = await resp.json();
                 sessionId = session.id;
 
@@ -4065,9 +5594,17 @@ ${htmlBody}
             } catch (e) { /* keep stale chainMap */ }
 
             // The list endpoint doesn't include toolset_preset. Hydrate the
-            // top ~30 most recent sessions with their full detail rows so we
-            // know which ones belong to the matrix.
-            const top = list.slice(0, 30);
+            // most recent sessions with their full detail rows so we know
+            // which ones belong to the matrix.
+            //
+            // THIS CAP IS NOT COSMETIC. Every tier count below is computed from
+            // these rows alone, so the matrix describes the latest
+            // MONITOR_SAMPLE sessions and not the corpus — and it said so
+            // nowhere. A coverage number derived from a truncated sample and
+            // presented as the whole is the same defect as an unlabelled list,
+            // with worse consequences: someone plans work from it.
+            const top = list.slice(0, MONITOR_SAMPLE);
+            window.__monSample = {used: top.length, total: list.length};
             const details = await Promise.all(top.map(s => _monGetDetail(s.id, s.status)));
             // Merge chain_id from the list view onto the detail rows so we can
             // look up the parent chain's max_turns_per_session.
@@ -4182,8 +5719,18 @@ ${htmlBody}
             document.getElementById('mon-tier-full-f').textContent = tiers.full_30.f;
             document.getElementById('mon-tier-full-s').textContent = `${tiers.full_30.s} sessions`;
 
-            // Sessions table — show the latest 25 with toolset_preset
-            const recent = matrix.slice(0, 25);
+            // The tier numbers above describe the sample, not the corpus.
+            const smp = window.__monSample || {};
+            const noteEl = document.getElementById('mon-sample-note');
+            if (noteEl) {
+                noteEl.textContent = (smp.total && smp.used < smp.total)
+                    ? `Tier coverage is computed from the ${smp.used} most recent `
+                      + `sessions of ${smp.total} — not the full corpus.`
+                    : '';
+            }
+
+            // Sessions table — the latest MONITOR_ROWS with toolset_preset
+            const recent = matrix.slice(0, MONITOR_ROWS);
             const tbody = document.getElementById('mon-sessions-tbody');
             if (recent.length === 0) {
                 tbody.innerHTML = '<tr><td colspan="9" class="text-center py-4" style="color:#5a5a6a;">no matrix sessions yet</td></tr>';
@@ -4293,11 +5840,13 @@ ${htmlBody}
                 // Group counts per tool for the meta line
                 const byTool = {};
                 findingsRows.forEach(r => { byTool[r.tool] = (byTool[r.tool] || 0) + 1; });
-                const toolSummary = Object.entries(byTool)
-                    .sort((a, b) => b[1] - a[1])
-                    .slice(0, 6)
+                const toolPairs = Object.entries(byTool).sort((a, b) => b[1] - a[1]);
+                const toolSummary = toolPairs
+                    .slice(0, TOOL_SUMMARY_CAP)
                     .map(([t, n]) => `${t}×${n}`)
-                    .join(' · ');
+                    .join(' · ')
+                    + (toolPairs.length > TOOL_SUMMARY_CAP
+                        ? ` · +${toolPairs.length - TOOL_SUMMARY_CAP} more tool(s)` : '');
                 fmeta.textContent = `${findingsRows.length} findings · ${toolSummary}`;
 
                 // Render newest sessions first
@@ -4517,7 +6066,475 @@ ${htmlBody}
             renderTriageTable(sid);  // reflect new state (report.json/html/sarif honor it live)
         }
 
+        // ===== ENGAGEMENT ON A RUN =====
+        // The engagement is the CUSTOMER a run belongs to, and its scope is the
+        // legal boundary the server enforces on the target. Both fields existed
+        // end-to-end in the backend — model, scope gate, INSERT, report line —
+        // and the dashboard simply never sent them, so the engagements table had
+        // never held a row that mattered: 127 sessions, 0 with an engagement.
+        // A gate that cannot be reached is not a gate.
+        async function loadEngagementOptions() {
+            const sel = document.getElementById('session-engagement');
+            if (!sel) return;
+            let list = [];
+            try {
+                list = (await (await fetch('/api/engagements')).json()).engagements || [];
+            } catch (e) {
+                return;   // leave "none"; the run is still legal, just unassigned
+            }
+            const keep = sel.value;
+            sel.length = 1;   // keep the "none" option, drop the rest
+            for (const e of list) {
+                if ((e.status || 'active') !== 'active') continue;
+                // new Option() sets text as TEXT, so a client name is never
+                // parsed as markup.
+                sel.add(new Option(
+                    e.root_domain ? `${e.client_name} — ${e.root_domain}` : e.client_name,
+                    e.id));
+            }
+            const want = sel.dataset.pending || keep;
+            delete sel.dataset.pending;
+            sel.value = want;
+            if (sel.value !== want) sel.value = '';   // the engagement disappeared
+            onEngagementPicked();
+        }
+
+        function onEngagementPicked() {
+            // Surface the authorisation window the operator is working inside.
+            // It is displayed, not enforced here — the server decides.
+            const sel = document.getElementById('session-engagement');
+            // Keep the sidebar in step, so the counts on screen always describe
+            // the customer the next run will be recorded against.
+            const side = document.getElementById('side-engagement');
+            if (side && sel && side.value !== sel.value) {
+                side.value = sel.value;
+                if (side.value === sel.value) sideRefresh();
+            }
+            const hint = document.getElementById('eng-scope-hint');
+            if (!sel || !hint) return;
+            if (!sel.value) {
+                hint.textContent = 'No customer — this run is recorded as unassigned work.';
+                hint.style.color = '#6a6a8a';
+                return;
+            }
+            const t = document.getElementById('target-url').value.trim() || '(no target)';
+            hint.textContent =
+                `Scope enforced — the server refuses this run if ${t} is outside `
+                + 'what this customer authorised.';
+            hint.style.color = '#00fff5';
+        }
+
+
+
+        // ===== OVERVIEW =====
+        // erlik opened on an empty Scanner form, which answers "what can I
+        // start" and never "what is already going on". The tiles are LINKS,
+        // pre-scoped to the selected customer, so a number is somewhere to go
+        // rather than something to read.
+        //
+        // The ladder exists because these steps are strictly ordered: scope is
+        // meaningless without a customer, a run is refused without scope, and
+        // triage has nothing to work on without runs. Showing all five as a
+        // flat checklist invites starting at the wrong one.
+        function ovTile(label, n, href, colour) {
+            const dead = !n;
+            return `<a class="stat-card" href="${href}" style="display:block; text-decoration:none;
+                        border-top-color:${dead ? 'rgba(255,255,255,0.08)' : colour};">
+                        <div class="n${dead ? ' zero' : ''}">${n}</div>
+                        <div class="l">${tlEsc(label)}</div>
+                    </a>`;
+        }
+
+        function ovLadder(rungs) {
+            // The first unmet rung is the ONLY actionable one; the rest are
+            // blocked by it. Marking them all "todo" would be a list of five
+            // equally-plausible next actions, four of which cannot be done.
+            let blocked = false;
+            return rungs.map(r => {
+                const state = r.done ? 'done' : (blocked ? 'blocked' : 'next');
+                if (!r.done) blocked = true;
+                const mark = {done: '\u2713', next: '\u25B6', blocked: '\u00B7'}[state];
+                const col = {done: '#31d67a', next: 'var(--neon-cyan)', blocked: '#4a4a5a'}[state];
+                const action = (state === 'next' && r.action)
+                    ? ` &mdash; <a href="${r.action.href}" style="color:var(--neon-cyan);">${tlEsc(r.action.label)} &rarr;</a>`
+                    : '';
+                return `<div class="font-mono" style="font-size:0.68rem; color:${col}; padding:2px 0;">
+                            <span style="display:inline-block; width:14px;">${mark}</span>
+                            ${tlEsc(r.label)}${action}
+                        </div>`;
+            }).join('');
+        }
+
+        async function loadOverview() {
+            const eng = (document.getElementById('side-engagement') || {}).value || '';
+            const tiles = document.getElementById('ov-tiles');
+            const ladder = document.getElementById('ov-ladder');
+            const scope = document.getElementById('ov-scope');
+
+            let engs = [];
+            try { engs = (await (await fetch('/api/engagements')).json()).engagements || []; }
+            catch (e) { /* offline: the ladder below still reads correctly */ }
+
+            if (!eng) {
+                scope.textContent = `${engs.length} customer(s) · none selected`;
+                tiles.innerHTML = ovTile('customers', engs.length, '#view=engagements', '#00fff5');
+                ladder.innerHTML = ovLadder([
+                    {label: 'A customer exists', done: engs.length > 0,
+                     action: {href: '#view=engagements', label: 'create one'}},
+                    {label: 'A customer is selected', done: false,
+                     action: {href: '#view=engagements', label: 'pick one in the sidebar'}},
+                    {label: 'Scope is declared', done: false},
+                    {label: 'Work has been run', done: false},
+                    {label: 'Findings are triaged', done: false},
+                ]);
+                return;
+            }
+
+            let d = null;
+            try { d = await (await fetch(`/api/engagements/${encodeURIComponent(eng)}`)).json(); }
+            catch (e) { /* fall through to the unreachable state below */ }
+            if (!d || !d.engagement) {
+                scope.textContent = 'could not load this customer';
+                tiles.innerHTML = '';
+                ladder.innerHTML = '';
+                return;
+            }
+
+            const c = d.counts || {}, sev = d.findings_by_severity || {}, a = d.asset_counts || {};
+            const e = `&eng=${encodeURIComponent(eng)}`;
+            scope.textContent = d.engagement.client_name
+                + (d.engagement.root_domain ? ` · ${d.engagement.root_domain}` : '');
+
+            tiles.innerHTML = [
+                ovTile('critical open', sev.critical || 0, `#view=findings${e}`, '#ff2d6f'),
+                ovTile('high open', sev.high || 0, `#view=findings${e}`, '#ff6b35'),
+                ovTile('hosts', a.host || 0, `#view=engagements${e}`, '#00fff5'),
+                ovTile('endpoints', a.endpoint || 0, `#view=engagements${e}`, '#31d67a'),
+                ovTile('agent runs', c.sessions || 0, `#view=reports${e}`, '#8a8aa0'),
+                ovTile('wstg runs', c.v2_runs || 0, `#view=testlab${e}`, '#8a8aa0'),
+                ovTile('scope pending', c.pending_scope || 0, `#view=engagements${e}`, '#ffd23f'),
+            ].join('');
+
+            // ONLY genuine prerequisites belong here. A first version listed
+            // "a target is recorded" as a rung and then showed it blocking two
+            // rungs that were already complete — because a target record is
+            // endpoint knowledge, a convenience, not a gate: the Scanner takes
+            // a URL directly. A ladder whose rungs are not really ordered is
+            // worse than no ladder, because it names the wrong next action.
+            // The rung must ask the question `evaluate_scope` asks, not a
+            // similar-looking one. Counting rows by `source` alone was wrong in
+            // BOTH directions:
+            //   * a declared EXCLUDE rule counted as "scope declared", so the
+            //     ladder said "start a run" and every run it invited was then
+            //     403'd by the gate;
+            //   * an APPROVED discovered host did not count, because approval
+            //     sets approved_at and never rewrites source, so the ladder
+            //     demanded scope that already existed.
+            // The gate authorises on in_scope AND (declared OR approved), and
+            // scope_rows already returns all three fields.
+            const declared = (d.scope || []).filter(
+                r => Number(r.in_scope) && ((r.source || 'declared') === 'declared'
+                                            || r.approved_at));
+            const runs = (c.sessions || 0) + (c.v2_runs || 0);
+            ladder.innerHTML = ovLadder([
+                {label: 'A customer is selected', done: true},
+                {label: `Scope is declared (${declared.length} rule(s)) — a run against an ` +
+                        `unscoped target is refused`,
+                 done: declared.length > 0,
+                 action: {href: `#view=engagements${e}`, label: 'declare scope'}},
+                {label: `Work has been run (${runs})`, done: runs > 0,
+                 action: {href: `#view=scanner${e}`, label: 'start a run'}},
+                {label: `Findings exist to triage (${c.findings || 0} open`
+                        + ((c.findings_total ?? c.findings) > (c.findings || 0)
+                            ? ` of ${c.findings_total}` : '') + ')',
+                 done: (c.findings || 0) > 0,
+                 action: {href: `#view=reports${e}`, label: 'open reports'}},
+            ]);
+
+            // Not a rung: useful, never blocking.
+            if (!(c.targets || 0)) {
+                ladder.innerHTML += `<div class="font-mono" style="font-size:0.6rem;
+                    color:#6a6a8a; margin-top:8px;">
+                    No target recorded. Optional &mdash; it supplies endpoint knowledge to the
+                    deterministic lane, which otherwise tests the base URL only.
+                    <a href="#view=engagements${e}" style="color:var(--neon-cyan);">add one &rarr;</a>
+                </div>`;
+            }
+
+            if (c.pending_scope) {
+                ladder.innerHTML += `<div class="font-mono" style="font-size:0.62rem;
+                    color:var(--neon-yellow); margin-top:8px;">
+                    ${c.pending_scope} discovered host(s) awaiting approval &mdash; they are
+                    inert until a human approves them.
+                    <a href="#view=engagements${e}" style="color:var(--neon-cyan);">review &rarr;</a>
+                </div>`;
+            }
+        }
+
+
+
+        // ===== FINDINGS ACROSS ENGAGEMENTS =====
+        // Findings were reachable only one session at a time, so "show me
+        // every critical" was a question erlik could not answer. Scoped to the
+        // selected customer when one is picked, and to everything otherwise.
+        let __fxTimer = null;
+
+        function loadFindings() {
+            // The search box fires per keystroke; the query hits SQLite, so it
+            // is debounced rather than issuing a request per character.
+            clearTimeout(__fxTimer);
+            __fxTimer = setTimeout(fxFetch, 180);
+        }
+
+        async function fxFetch() {
+            const rowsEl = document.getElementById('fx-rows');
+            const countEl = document.getElementById('fx-count');
+            const scopeEl = document.getElementById('fx-scope');
+            const eng = (document.getElementById('side-engagement') || {}).value || '';
+            const sev = (document.getElementById('fx-severity') || {}).value || '';
+            const st = (document.getElementById('fx-status') || {}).value || 'open';
+            const q = (document.getElementById('fx-q') || {}).value || '';
+
+            urlSet({q: q || '', sort: sev || '', dir: st === 'open' ? '' : st});
+
+            const params = new URLSearchParams();
+            if (eng) params.set('engagement_id', eng);
+            if (sev) params.set('severity', sev);
+            if (st) params.set('status', st);
+            if (q) params.set('q', q);
+
+            let d;
+            try {
+                d = await (await fetch('/api/findings?' + params.toString())).json();
+            } catch (err) {
+                rowsEl.innerHTML = `<div class="px-4 py-8 text-center font-mono"
+                    style="color:var(--neon-red); font-size:0.8rem;">${escapeHtml(err.message)}</div>`;
+                return;
+            }
+
+            const c = d.counts || {};
+            scopeEl.textContent = eng ? 'this customer only' : 'all customers';
+            // total vs returned, always. A page of 500 out of 4,000 renders
+            // identically to the complete set unless the difference is said.
+            countEl.textContent = listCountLabel(c.returned || 0, c.total || 0, 
+                (c.returned || 0) < (c.total || 0) ? c.limit : 0, 'findings');
+
+            const rows = d.findings || [];
+            if (!rows.length) {
+                const filtered = sev || q || st !== 'open' || eng;
+                rowsEl.innerHTML = `<div class="px-4 py-8 text-center font-mono"
+                    style="color:#3a3a4a; font-size:0.8rem;">${
+                        filtered ? 'No finding matches this filter.'
+                                 : 'No findings recorded yet.'}</div>`;
+                return;
+            }
+
+            const sevCol = {critical: '#ff2d6f', high: '#ff6b35', medium: '#ffd23f',
+                            low: '#4ea8de', info: '#7a7a8a'};
+            rowsEl.innerHTML = `<table class="run-table" style="width:100%;">
+                <thead><tr><th>Severity</th><th>Type</th><th>URL</th><th>Customer</th>
+                <th>Triage</th></tr></thead><tbody>` + rows.map(r => {
+                const triaged = ['rejected', 'false_positive']
+                    .includes(String(r.triage_status || '').toLowerCase());
+                return `<tr style="opacity:${triaged ? 0.45 : 1};">
+                    <td style="color:${sevCol[r.severity] || '#7a7a8a'}; font-weight:600;">
+                        ${escapeHtml(r.severity || '')}</td>
+                    <td>${escapeHtml(r.vuln_type || '')}</td>
+                    <td style="max-width:320px; overflow:hidden; text-overflow:ellipsis;
+                        white-space:nowrap; opacity:.75;" title="${escapeHtml(r.url || '')}">
+                        ${escapeHtml(r.url || '')}</td>
+                    <td style="opacity:.75;">${r.client_name
+                        ? escapeHtml(r.client_name)
+                        : '<span style="opacity:.5;">unassigned</span>'}</td>
+                    <td style="opacity:.7;">${escapeHtml(r.triage_status || '—')}</td>
+                </tr>`;
+            }).join('') + '</tbody></table>'
+            + (c.unassigned
+                ? `<div class="font-mono px-4 py-2" style="font-size:0.6rem; color:var(--neon-yellow);">
+                     ${c.unassigned} of these belong to no customer — they were recorded before
+                     engagements existed, and are shown rather than hidden.
+                   </div>`
+                : '');
+        }
+
+        // ===== SIDEBAR RAIL =====
+        // The choice is per-operator and per-machine, so localStorage rather
+        // than the URL: a link someone pastes should not impose their sidebar
+        // width on the person opening it.
+        //
+        // Wrapped because localStorage throws outright in some contexts (a
+        // private window, site data blocked), and a sidebar preference is not
+        // worth breaking the page over.
+        const RAIL_KEY = 'erlik.sidebar.rail';
+
+        function applyRail(on) {
+            document.body.classList.toggle('rail', !!on);
+            const b = document.getElementById('rail-toggle');
+            if (b) {
+                b.textContent = on ? '\u00BB' : '\u2630';
+                b.title = on ? 'Expand the sidebar' : 'Collapse the sidebar to icons';
+                b.setAttribute('aria-expanded', String(!on));
+            }
+        }
+
+        function toggleRail() {
+            const on = !document.body.classList.contains('rail');
+            applyRail(on);
+            try { localStorage.setItem(RAIL_KEY, on ? '1' : '0'); } catch (e) { /* not fatal */ }
+        }
+
+        (function restoreRail() {
+            let v = null;
+            try { v = localStorage.getItem(RAIL_KEY); } catch (e) { /* not fatal */ }
+            applyRail(v === '1');
+        })();
+
+        // ===== SIDEBAR: the customer's inventory, always visible =====
+        // These counts ARE the state of the work — what erlik has found, on
+        // whose assets, and what has actually been run. Keeping them behind a
+        // tab meant an operator had to go looking to find out whether anything
+        // had happened at all.
+        //
+        // One selection drives everything: the sidebar and the Scanner share a
+        // customer, so a run cannot be launched against a different engagement
+        // from the one the counts describe.
+        let __sideSummary = null;
+
+        function sideCount(label, n, color) {
+            const z = !n ? ' zero' : '';
+            return `<div class="side-row"><span>${tlEsc(label)}</span>` +
+                   `<b class="${z.trim()}"${color && n ? ` style="color:${color}"` : ''}>${n || 0}</b></div>`;
+        }
+
+        async function sideLoadEngagements() {
+            const sel = document.getElementById('side-engagement');
+            if (!sel) return;
+            let list = [];
+            try {
+                list = (await (await fetch('/api/engagements')).json()).engagements || [];
+            } catch (e) { return; }
+            const keep = sel.value;
+            sel.length = 1;
+            for (const e of list) {
+                if ((e.status || 'active') !== 'active') continue;
+                sel.add(new Option(
+                    e.root_domain ? `${e.client_name} — ${e.root_domain}` : e.client_name, e.id));
+            }
+            const want = sel.dataset.pending || keep;
+            delete sel.dataset.pending;
+            sel.value = want;
+            if (sel.value !== want) sel.value = '';
+            if (sel.value) { sideEngagementPicked(); }
+        }
+
+        function sideEngagementPicked() {
+            // Keep the Scanner's own selector in step — one customer, one run.
+            const sel = document.getElementById('side-engagement');
+            const scan = document.getElementById('session-engagement');
+            if (scan && scan.value !== sel.value) {
+                scan.value = sel.value;
+                if (typeof onEngagementPicked === 'function') onEngagementPicked();
+            }
+            // The chosen customer belongs in the URL: it is the scope the rest
+            // of the app is being read through, so a pasted link has to carry
+            // it or the recipient sees a different application state.
+            urlSet({eng: sel.value || ''});
+            sideRefresh();
+            if (__currentView === 'overview') loadOverview();
+            if (__currentView === 'findings') loadFindings();
+            if (__currentView === 'reports') loadReportsList({fromCache: true});
+        }
+
+        function sideClear(msg) {
+            for (const id of ['side-assets', 'side-findings', 'side-activity']) {
+                const el = document.getElementById(id);
+                if (el) el.innerHTML = `<div class="side-empty">${tlEsc(msg)}</div>`;
+            }
+        }
+
+        async function sideRefresh() {
+            const id = (document.getElementById('side-engagement') || {}).value;
+            if (!id) { __sideSummary = null; sideClear('select a customer'); return; }
+            let d;
+            try {
+                d = await (await fetch(`/api/engagements/${encodeURIComponent(id)}`)).json();
+            } catch (e) { sideClear('could not load'); return; }
+            if (!d || !d.engagement) { sideClear('not found'); return; }
+            __sideSummary = d;
+
+            const a = d.asset_counts || {};
+            document.getElementById('side-assets').innerHTML =
+                [['host', 'hosts'], ['port', 'ports'], ['service', 'services'],
+                 ['technology', 'technologies'], ['endpoint', 'endpoints']]
+                    .map(([k, label]) => sideCount(label, a[k] || 0)).join('')
+                || '<div class="side-empty">none yet</div>';
+
+            const sev = d.findings_by_severity || {};
+            const SEV = [['critical', '#ff2d6f'], ['high', '#ff6b35'], ['medium', '#ffd23f'],
+                         ['low', '#4ea8de'], ['info', '#7a7a8a']];
+            // These are OPEN findings at their EFFECTIVE severity. When triage
+            // has closed some, say so — otherwise the numbers just shrink and
+            // it reads as data loss rather than as work done.
+            const openN = (d.counts || {}).findings || 0;
+            const totalN = (d.counts || {}).findings_total ?? openN;
+            document.getElementById('side-findings').innerHTML =
+                SEV.map(([k, c]) => sideCount(k, sev[k] || 0, c)).join('')
+                + (totalN > openN
+                    ? `<div class="side-empty" style="margin-top:3px;">
+                         ${openN} open of ${totalN} · ${totalN - openN} triaged out
+                       </div>`
+                    : '');
+
+            const c = d.counts || {};
+            document.getElementById('side-activity').innerHTML =
+                sideCount('agent sessions', c.sessions || 0) +
+                sideCount('wstg runs', c.v2_runs || 0) +
+                sideCount('targets', c.targets || 0) +
+                sideCount('scope pending', c.pending_scope || 0,
+                          (c.pending_scope ? '#ffd23f' : null));
+        }
+
+        function fmtDuration(ms) {
+            if (!ms && ms !== 0) return '—';
+            const s = Math.round(ms / 1000);
+            if (s < 60) return `${s}s`;
+            const m = Math.floor(s / 60);
+            return `${m}m ${String(s % 60).padStart(2, '0')}s`;
+        }
+
+        function fmtWhen(v) {
+            if (!v) return '—';
+            const d = new Date(String(v).replace(' ', 'T') + (String(v).endsWith('Z') ? '' : 'Z'));
+            return isNaN(d) ? String(v) : d.toLocaleString();
+        }
+
         // ===== Init =====
+        // The URL decides the first screen. Previously every reload — and every
+        // link anyone pasted — landed on the Scanner form regardless of what
+        // the operator had been reading.
+        (function bootFromUrl() {
+            const st = urlState();
+            if (st.eng) {
+                for (const id of ['side-engagement', 'session-engagement']) {
+                    const el = document.getElementById(id);
+                    if (el) el.dataset.pending = st.eng;   // applied once options load
+                }
+            }
+            if (st.q) {
+                const se = document.getElementById('reports-search');
+                if (se) se.value = st.q;
+            }
+            if (st.session && st.view === 'reports') {
+                // after the view is up, so the detail panel exists
+                setTimeout(() => {
+                    if (typeof viewReport === 'function') viewReport(st.session);
+                }, 0);
+            }
+            switchView(st.view || 'overview');
+        })();
+
+        loadEngagementOptions();
+        sideLoadEngagements();
         checkHealth();
         setInterval(checkHealth, 15000);
         loadPresets();

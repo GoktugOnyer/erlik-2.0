@@ -162,3 +162,46 @@ def mask_url(url: str | None) -> str | None:
         else:
             parts.append(kv)
     return f"{base}?{'&'.join(parts)}"
+
+
+# Characters that do not belong in a vulnerability CLASS name. A controlled
+# vocabulary field holds "SQL Injection", not an assignment.
+_LABEL_FORBIDDEN = ('"', "'", "=", "\n", "\r", "\x00")
+
+LABEL_REDACTED = "Redacted (label contained a secret)"
+
+
+def safe_label(text: str | None, limit: int = 120) -> str:
+    """Sanitise a CONTROLLED-VOCABULARY value, e.g. findings.vuln_type.
+
+    WHY THIS EXISTS. `vuln_type` sits in _EXPORT_STRUCTURAL, which exempts it
+    from export masking on the grounds that it is a controlled vocabulary. That
+    exemption is correct in principle and false in practice: the value is
+    frequently written by a model, which can put anything there. Three rows in
+    the corpus have the vuln_type
+
+        password="password",username="admin"
+
+    at severity `critical` — a credential pair sitting in the one finding field
+    that is deliberately never masked, and which is also broadcast to the
+    dashboard and printed into client reports.
+
+    Rather than start masking the field (which would turn every readable class
+    name into a hash and break the ground-truth matcher), the write path
+    guarantees the exemption's premise: a label carrying a secret, or shaped
+    like an assignment rather than a class name, is replaced outright. The
+    original text is not lost — it remains in `evidence`, which IS masked on
+    export.
+
+    Legitimate class names pass through untouched.
+    """
+    t = (text or "").strip()
+    if not t:
+        return ""
+    if any(ch in t for ch in _LABEL_FORBIDDEN):
+        return LABEL_REDACTED
+    if census(t).get("secret"):
+        return LABEL_REDACTED
+    if mask(t) != t:
+        return LABEL_REDACTED
+    return t[:limit]

@@ -1,6 +1,7 @@
 id: WSTG-INPV-06
 name: LDAP Injection
 category: Input Validation
+attack_class: ldap
 severity: high
 references:
   - https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/07-Input_Validation_Testing/06-Testing_for_LDAP_Injection

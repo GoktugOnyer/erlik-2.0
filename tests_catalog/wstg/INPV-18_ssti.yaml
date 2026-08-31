@@ -1,0 +1,105 @@
+id: WSTG-INPV-18
+name: Server-Side Template Injection
+category: Input Validation
+attack_class: ssti
+severity: critical
+references:
+  - https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/07-Input_Validation_Testing/18-Testing_for_Server-side_Template_Injection
+
+# The arithmetic is deliberately absurd. `{{7*7}}` looks for `49` in the
+# response, and `49` occurs by accident in prices, IDs, timestamps and byte
+# counts on almost any page — a detector keyed on it reports template injection
+# on sites that have none. `31337*7` evaluates to 219359, which does not appear
+# by chance, so a match is evidence rather than a coincidence.
+#
+# Every payload is pure arithmetic or string repetition. None reads a file,
+# spawns a process or touches the object graph: proving the template engine
+# evaluates input is enough to report, and an RCE payload on a client's server
+# is not something to fire off to confirm a finding erlik can already prove.
+
+target_schema:
+  required: [url, parameter]
+  optional: [cookie, auth_header]
+
+steps:
+  - name: jinja_twig_braces
+    tool: curl
+    command: >-
+      curl -s -b "{{cookie}}" -H "{{auth_header}}" -G "{{url}}" --data-urlencode "{{parameter}}={{31337*7}}"
+    evaluators:
+      - type: regex
+        pattern: '219359'
+        emit_finding:
+          vuln_type: Server-Side Template Injection ({{ }} evaluated)
+          severity: critical
+        stop_after: true
+
+  - name: dollar_braces
+    tool: curl
+    when: no_finding_yet
+    command: >-
+      curl -s -b "{{cookie}}" -H "{{auth_header}}" -G "{{url}}" --data-urlencode "{{parameter}}=${31337*7}"
+    evaluators:
+      - type: regex
+        pattern: '219359'
+        emit_finding:
+          vuln_type: Server-Side Template Injection (${ } evaluated — Freemarker/Velocity/JSP EL)
+          severity: critical
+        stop_after: true
+
+  - name: erb_aspnet
+    tool: curl
+    when: no_finding_yet
+    command: >-
+      curl -s -b "{{cookie}}" -H "{{auth_header}}" -G "{{url}}" --data-urlencode "{{parameter}}=<%= 31337*7 %>"
+    evaluators:
+      - type: regex
+        pattern: '219359'
+        emit_finding:
+          vuln_type: Server-Side Template Injection (<%= %> evaluated — ERB/ASP)
+          severity: critical
+        stop_after: true
+
+  - name: hash_braces
+    tool: curl
+    when: no_finding_yet
+    command: >-
+      curl -s -b "{{cookie}}" -H "{{auth_header}}" -G "{{url}}" --data-urlencode "{{parameter}}=#{31337*7}"
+    evaluators:
+      - type: regex
+        pattern: '219359'
+        emit_finding:
+          vuln_type: Server-Side Template Injection (#{ } evaluated — Ruby/Slim/Pug)
+          severity: critical
+        stop_after: true
+
+  # String repetition separates a TEMPLATE engine from an expression evaluator:
+  # a language that multiplies a string by an integer is rendering, not merely
+  # doing maths in a sandbox.
+  - name: string_repetition
+    tool: curl
+    when: no_finding_yet
+    command: >-
+      curl -s -b "{{cookie}}" -H "{{auth_header}}" -G "{{url}}" --data-urlencode "{{parameter}}={{7*'7'}}"
+    evaluators:
+      - type: regex
+        pattern: '7777777'
+        emit_finding:
+          vuln_type: Server-Side Template Injection (string repetition — Jinja2/Twig)
+          severity: critical
+        stop_after: true
+
+  # An engine that REFUSES the payload still names itself in the error, which
+  # is a real finding: it proves user input reaches the template compiler even
+  # though this particular expression was rejected.
+  - name: engine_error_signature
+    tool: curl
+    when: no_finding_yet
+    command: >-
+      curl -s -b "{{cookie}}" -H "{{auth_header}}" -G "{{url}}" --data-urlencode "{{parameter}}={{31337*'7'}}"
+    evaluators:
+      - type: regex
+        pattern: 'jinja2\.exceptions|TemplateSyntaxError|freemarker\.core|org\.apache\.velocity|Twig\\\\Error|smarty_error|Liquid::SyntaxError'
+        emit_finding:
+          vuln_type: Template engine parses user input (SSTI likely — engine error disclosed)
+          severity: high

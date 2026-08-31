@@ -1,6 +1,7 @@
 id: WSTG-CONF-06
 name: HTTP Methods
 category: Configuration & Deployment Management
+attack_class: recon
 severity: medium
 references:
   - https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/02-Configuration_and_Deployment_Management_Testing/06-Test_HTTP_Methods
@@ -14,7 +15,7 @@ steps:
     tool: curl
     # Ask the server which methods it allows.
     command: >-
-      curl -s -i -X OPTIONS "{{url}}"
+      curl -s -b "{{cookie}}" -H "{{auth_header}}" -i -X OPTIONS "{{url}}"
     evaluators:
       - type: regex
         # Dangerous write/diagnostic methods advertised in the Allow header.
@@ -28,7 +29,7 @@ steps:
     when: no_finding_yet
     # A successful PUT of an arbitrary file is a serious upload/deploy flaw.
     command: >-
-      curl -s -i -X PUT --data "erlik-put-probe" "{{url}}/erlik_put_test.txt"
+      curl -s -b "{{cookie}}" -H "{{auth_header}}" -i -X PUT --data "erlik-put-probe" "{{url}}/erlik_put_test.txt"
     evaluators:
       - type: regex
         pattern: 'HTTP/[0-9.]+ (200|201|204)'

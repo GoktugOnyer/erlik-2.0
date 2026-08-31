@@ -1,0 +1,92 @@
+id: WSTG-AUTHZ-05
+name: OAuth Authorisation Flow Weaknesses
+category: Authorization
+attack_class: oauth
+severity: high
+references:
+  - https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/05-Authorization_Testing/05-Testing_for_OAuth_Weaknesses
+
+# `url` is the AUTHORISE endpoint (…/oauth/authorize), not the application
+# root. Pointed anywhere else every step returns a normal page and the case
+# reports nothing, which is the correct outcome but a wasted run — so the
+# endpoint is required rather than guessed.
+#
+# Nothing here completes a flow or captures a real token. Each step asks the
+# authorisation server to do something it should refuse, and reports its
+# ANSWER; no victim session is involved.
+
+target_schema:
+  required: [url]
+  optional: [client_id, collaborator_host, cookie, auth_header]
+
+steps:
+  # The core OAuth failure: an authorisation server that redirects to a
+  # redirect_uri it never registered hands the code to whoever asked.
+  - name: redirect_uri_not_validated
+    tool: curl
+    command: >-
+      curl -s -b "{{cookie}}" -H "{{auth_header}}" -i -o /dev/null -w "%{http_code} %{redirect_url}" -G "{{url}}"
+      --data-urlencode "response_type=code"
+      --data-urlencode "client_id={{client_id}}"
+      --data-urlencode "redirect_uri=https://erlik-not-registered.example/cb"
+      --data-urlencode "state=erlikstate"
+    evaluators:
+      - type: regex
+        pattern: 'erlik-not-registered\.example'
+        emit_finding:
+          vuln_type: OAuth redirect_uri not validated (authorisation code can be redirected off-origin)
+          severity: critical
+        stop_after: true
+
+  # Same failure, reached by appending rather than replacing — servers that
+  # prefix-match the registered URI accept this and reject the step above.
+  - name: redirect_uri_suffix_bypass
+    tool: curl
+    when: no_finding_yet
+    command: >-
+      curl -s -b "{{cookie}}" -H "{{auth_header}}" -i -o /dev/null -w "%{http_code} %{redirect_url}" -G "{{url}}"
+      --data-urlencode "response_type=code"
+      --data-urlencode "client_id={{client_id}}"
+      --data-urlencode "redirect_uri={{url}}.erlik-not-registered.example"
+      --data-urlencode "state=erlikstate"
+    evaluators:
+      - type: regex
+        pattern: '\.erlik-not-registered\.example'
+        emit_finding:
+          vuln_type: OAuth redirect_uri prefix-matched (suffix bypass)
+          severity: critical
+        stop_after: true
+
+  # The implicit flow puts the token in the URL fragment, where it reaches
+  # browser history, referrers and logs. Deprecated by OAuth 2.1.
+  - name: implicit_flow_supported
+    tool: curl
+    when: no_finding_yet
+    command: >-
+      curl -s -b "{{cookie}}" -H "{{auth_header}}" -i -G "{{url}}"
+      --data-urlencode "response_type=token"
+      --data-urlencode "client_id={{client_id}}"
+      --data-urlencode "state=erlikstate"
+    evaluators:
+      - type: regex
+        pattern: 'Location:[^\r\n]*#[^\r\n]*access_token='
+        emit_finding:
+          vuln_type: OAuth implicit flow enabled (access token exposed in URL fragment)
+          severity: medium
+        stop_after: true
+
+  # Without `state` the flow has no CSRF protection: an attacker can graft
+  # their own authorisation onto a victim's session.
+  - name: state_parameter_not_required
+    tool: curl
+    when: no_finding_yet
+    command: >-
+      curl -s -b "{{cookie}}" -H "{{auth_header}}" -i -o /dev/null -w "%{http_code} %{redirect_url}" -G "{{url}}"
+      --data-urlencode "response_type=code"
+      --data-urlencode "client_id={{client_id}}"
+    evaluators:
+      - type: regex
+        pattern: '^30[1237] .*[?&]code='
+        emit_finding:
+          vuln_type: OAuth authorisation proceeds without a state parameter (flow CSRF)
+          severity: medium

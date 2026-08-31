@@ -89,8 +89,11 @@ def check_command(command: str, scope: Scope, primary_url: str | None = None) ->
             # /usr/share/wordlists/common.txt — only fail if the candidate
             # looks like a plausible hostname (has a TLD-shaped suffix and
             # is not a filesystem path).
-            candidate = m.group(0)
-            if "/" in candidate or candidate.endswith(".txt") or candidate.endswith(".json"):
+            # Same predicate as the agent lane's guard, imported rather than
+            # re-listed: this copy knew only .txt and .json, so a command the
+            # other guard allowed was refused here purely by which lane ran it.
+            from orchestrator.tool_executor import looks_like_filename
+            if looks_like_filename(m.group(0)):
                 continue
             raise
 

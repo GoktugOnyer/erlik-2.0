@@ -1,6 +1,7 @@
 id: WSTG-INPV-05
 name: SQL Injection
 category: Input Validation
+attack_class: sqli
 severity: high
 references:
   - https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/07-Input_Validation_Testing/05-Testing_for_SQL_Injection
@@ -13,7 +14,7 @@ steps:
   - name: baseline
     tool: curl
     command: >-
-      curl -s -o /dev/null -w "%{http_code}" "{{url}}?{{parameter}}=1"
+      curl -s -b "{{cookie}}" -H "{{auth_header}}" -o /dev/null -w "%{http_code}" "{{url}}?{{parameter}}=1"
     evaluators:
       - type: regex
         pattern: '^[23]\d\d$'
@@ -59,7 +60,7 @@ steps:
     tool: curl
     when: no_finding_yet
     command: >-
-      curl -s -o /dev/null -w "noop" "{{url}}"
+      curl -s -b "{{cookie}}" -H "{{auth_header}}" -o /dev/null -w "noop" "{{url}}"
     evaluators:
       - type: llm
         instruction: >-
@@ -71,8 +72,17 @@ steps:
         emit_finding:
           vuln_type: SQL Injection (suspected, LLM-flagged)
           severity: medium
-        chain_to: [WSTG-INPV-05-WAF-BYPASS]
+        # Was [WSTG-INPV-05-WAF-BYPASS], a case nobody ever wrote — so this
+        # edge had never been traversed. When sqlmap reports nothing but the
+        # endpoint looks unstable, a verbose database error at the same URL is
+        # the corroboration that distinguishes "sqlmap missed it" from "safe".
+        chain_to: [WSTG-ERRH-01]
 
 chain:
   on_finding:
+    # Blocked, not dead: AUTHZ-04 requires low_priv_token and high_priv_token,
+    # which the sweep cannot synthesise, so it is recorded as a NAMED SKIP on
+    # every run today. It becomes live when authenticated testing lands. Kept
+    # deliberately — an edge that skips out loud is honest; removing it would
+    # hide that access-control testing is unreachable for want of credentials.
     - WSTG-AUTHZ-04

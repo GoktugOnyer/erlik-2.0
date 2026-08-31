@@ -26,6 +26,7 @@ further, and anything it then confirms it records itself.
 
 from __future__ import annotations
 
+import re
 from urllib.parse import urlparse
 
 
@@ -87,6 +88,21 @@ async def bridge_run(db, run_id: str, target_url: str, findings: list) -> int:
     return written
 
 
+def _evidence(val: str | None, limit: int = 110) -> str:
+    """One clean line of evidence.
+
+    The raw value is whatever the test case captured, which for an error-based
+    check is a full HTML error page. Injected verbatim that was multi-line
+    markup inside the prompt — and injected volume is the one variable measured
+    to cost recall dose-dependently, so noise here is not merely untidy.
+    Keeps the URL and the human-readable remainder; drops tags and whitespace.
+    """
+    t = re.sub(r"<[^>]{0,200}>", " ", str(val or ""))
+    t = t.replace("&quot;", '"').replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")
+    t = " ".join(t.split())
+    return t[:limit]
+
+
 def format_for_agent(rows: list) -> str:
     """Render deterministic results as a starting brief for the agent.
 
@@ -102,7 +118,7 @@ def format_for_agent(rows: list) -> str:
         ct = r["context_type"] if not isinstance(r, dict) else r.get("context_type")
         key = r["key"] if not isinstance(r, dict) else r.get("key")
         val = r["value"] if not isinstance(r, dict) else r.get("value")
-        lines.append(f"  [{ct}] {key} — {str(val)[:120]}")
+        lines.append(f"  [{ct}] {key} — {_evidence(val)}")
     lines.append("")
     lines.append("These are established facts. Spend your turns on what they do NOT cover.")
     return "\n".join(lines)

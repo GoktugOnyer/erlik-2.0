@@ -1,6 +1,7 @@
 id: WSTG-SESS-02
 name: Cookie Attributes
 category: Session Management
+attack_class: csrf
 severity: medium
 references:
   - https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/06-Session_Management_Testing/02-Testing_for_Cookies_Attributes
@@ -13,7 +14,7 @@ steps:
   - name: fetch_headers
     tool: curl
     command: >-
-      curl -s -i "{{url}}"
+      curl -s -b "{{cookie}}" -H "{{auth_header}}" -i "{{url}}"
     evaluators:
       - type: llm
         instruction: >-

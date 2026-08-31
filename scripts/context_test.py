@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import re
 import sys
@@ -42,8 +43,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 API = "http://127.0.0.1:8002"
 TARGET = "http://juice-shop:3000"
-MISSION = ("Assess the OWASP Juice Shop instance for injection, authentication and "
-           "access-control flaws. Report only what you can evidence from tool output.")
+MISSION = ("Assess the OWASP Juice Shop instance for injection, cross-site scripting, "
+           "SSRF, open redirect, broken access control and authentication flaws. "
+           "Report only what you can evidence from tool output.")
+# The mission is part of the independent variable now: `auto` routes playbooks
+# from the classes the mission NAMES, so the older MISSION (which named none of
+# the six playbook classes) would have made the arm vacuous. Recorded per row —
+# recall from a different mission is not comparable.
 
 # Everything except skills/playbooks is pinned, so the only thing that varies
 # between arms is how many bytes of guidance get injected.
@@ -56,10 +62,29 @@ BASE = {
     # recorded, and it now defaults ON — so leaving it implicit would vary a
     # lever between arms and across generations of the corpus without saying so.
     "safe_mode": True,
+    # Pinned. It was env-only and read once at import, so two runs of one arm
+    # could differ in treatment with nothing in the record showing it.
+    "max_playbooks": 3,
+    # PINNED TO LOCAL OLLAMA, deliberately. Every row already recorded ran on
+    # qwen2.5-coder:7b through Ollama. The process default is now a hosted
+    # provider, and a hosted model is a DIFFERENT model — an arm compared
+    # against archived rows has to take the same inference path or the
+    # comparison is between two things at once.
+    "provider": "ollama",
 }
 
 ARMS = {
     "none":          {"skills": False, "playbooks": ""},
+    # NEW. Generic playbooks routed to the classes the mission names — what
+    # ships by default now. `playbook_only` is the block it REPLACED, kept as
+    # the reference arm so "smaller" can be told apart from "better".
+    "auto":          {"skills": False, "playbooks": "auto"},
+
+    # HANDOFF — the deterministic WSTG lane's results as starting context.
+    # Gated on `handoff`, NOT `target_memory`: the latter also replays every
+    # prior agent finding for the target (436 rows / 102 sessions here), which
+    # would make this arm measure "hand the agent every answer ever recorded".
+    "handoff":       {"skills": False, "playbooks": "", "handoff": True},
     "playbook_only": {"skills": False, "playbooks": "juiceshop"},
     "skills_only":   {"skills": True,  "playbooks": ""},
     "both":          {"skills": True,  "playbooks": "juiceshop"},
@@ -85,6 +110,13 @@ ARMS = {
 }
 
 
+# One definition of the log format. Two copies is how one of them silently
+# stops matching the line it is supposed to read, and a control that stops
+# matching reports 0 or -1 — which reads as "treatment absent", not "parser
+# broken".
+_INJECTED_RX = re.compile(r"injected (\d+) chars")
+
+
 def injected_chars(server_log: Path, sid: str) -> int:
     """Bytes of guidance actually injected, read from the server's own log."""
     if not server_log.exists():
@@ -94,10 +126,51 @@ def injected_chars(server_log: Path, sid: str) -> int:
     for line in server_log.read_text(errors="replace").splitlines():
         if short not in line:
             continue
-        m = re.search(r"injected (\d+) chars", line)
+        m = _INJECTED_RX.search(line)
         if m:
             total += int(m.group(1))
     return total
+
+
+def tagged_chars(server_log: Path, sid: str, tag: str) -> int:
+    """Bytes injected by ONE named path, read from the server's own log.
+
+    THIS IS THE CONTROL THAT KEEPS GOING MISSING. Every run in
+    context_test_v2/v3.jsonl records injected_chars = -1 because --server-log
+    was never passed, so nothing in that corpus proves the arms ever differed in
+    what reached the model — a broken injection path would have produced two
+    runs of the SAME condition and a confident "no effect".
+
+    It then went missing a second time, differently: the first handoff runs
+    recorded playbook_chars = 0 for both arms, which is CORRECT (that experiment
+    varies the handoff, not playbooks) and therefore useless as a control. The
+    column measured the wrong lever, so the record could not distinguish the
+    arms at all. Hence one function, parameterised by tag, and every lever
+    recorded on every row.
+
+    Returns the byte count, 0 when the server logged an explicit skip (verified
+    silent), or -1 when unknown.
+    """
+    if not server_log.exists():
+        return -1
+    short = sid[:8]
+    for line in server_log.read_text(errors="replace").splitlines():
+        if f"[{tag} {short}]" not in line:
+            continue
+        m = _INJECTED_RX.search(line)
+        if m:
+            return int(m.group(1))
+        if "skipped" in line:
+            return 0
+    return -1
+
+
+def playbook_chars(server_log: Path, sid: str) -> int:
+    return tagged_chars(server_log, sid, "playbooks")
+
+
+def handoff_chars(server_log: Path, sid: str) -> int:
+    return tagged_chars(server_log, sid, "handoff-ctx")
 
 
 def _code_version() -> str:
@@ -216,8 +289,13 @@ async def main() -> int:
     total = len(arms) * ns.reps
     n = 0
     async with httpx.AsyncClient(timeout=60.0) as client:
-        for arm, flags in arms.items():
-            for rep in range(1, ns.reps + 1):
+        # INTERLEAVED, not arm-by-arm. Juice Shop is a stateful application:
+        # runs create users, upload files and store XSS payloads that persist
+        # for every later run. Executing all of arm A then all of arm B makes
+        # "later" a property of the arm, so target drift would be read as an
+        # arm effect. Interleaving spreads drift across arms instead.
+        for rep in range(1, ns.reps + 1):
+            for arm, flags in arms.items():
                 n += 1
                 if (ns.model, arm, rep) in done:
                     print(f"[{n}/{total}] {arm} rep{rep} — skipping", flush=True)
@@ -238,14 +316,33 @@ async def main() -> int:
                            "turns": sess.get("total_steps"),
                            "duration_s": round(time.time() - t0),
                            "commit": CODE_VERSION,
-                           "injected_chars": injected_chars(log, sid) if log else -1}
+                           "injected_chars": injected_chars(log, sid) if log else -1,
+                           "playbook_chars": playbook_chars(log, sid) if log else -1,
+                           "handoff_chars": handoff_chars(log, sid) if log else -1,
+                           "playbooks_mode": cfg.get("playbooks", ""),
+                           "handoff_on": bool(cfg.get("handoff")),
+                           "provider": cfg.get("provider") or "default",
+                           "mission_sha": hashlib.sha1(
+                               MISSION.encode()).hexdigest()[:8]}
                     row.update(await score(sid))
                     row.update(await run_facts(sid))
                 except Exception as e:  # noqa: BLE001
                     row = {"arm": arm, "rep": rep, "status": "error", "error": str(e)[:200]}
                 with out.open("a") as fh:
                     fh.write(json.dumps(row) + "\n")
-                print(f"      {row.get('status')} injected={row.get('injected_chars')} "
+                # A dead control is only useful if it is noticed while the
+                # experiment is still running. Analysis-time discovery means the
+                # GPU hours are already spent.
+                if row.get("handoff_on") and row.get("handoff_chars", -1) <= 0:
+                    print(f"      !! arm claims handoff but injected "
+                          f"{row.get('handoff_chars')} chars — TREATMENT DEAD",
+                          flush=True)
+                if cfg.get("playbooks") and row.get("playbook_chars", -1) <= 0:
+                    print(f"      !! arm claims playbooks={cfg.get('playbooks')!r} but "
+                          f"injected {row.get('playbook_chars')} chars — TREATMENT DEAD",
+                          flush=True)
+                print(f"      {row.get('status')} pb={row.get('playbook_chars')} "
+                      f"ho={row.get('handoff_chars')} "
                       f"turns={row.get('turns')} findings={row.get('total_findings')} "
                       f"recall={row.get('recall')} precision={row.get('precision')} "
                       f"{row.get('duration_s')}s", flush=True)

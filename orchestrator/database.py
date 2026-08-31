@@ -250,6 +250,11 @@ async def init_db():
             ("run_config", "TEXT DEFAULT NULL"),  # per-session automation flow (JSON)
             ("scope_extra", "TEXT DEFAULT NULL"),
             ("authorization_ref", "TEXT DEFAULT NULL"),
+            # A chain is a run like any other, so it belongs to a customer like
+            # any other. Without this the Scanner's engagement selector would be
+            # silently ignored the moment the operator picked "chain" — the
+            # failure this project keeps shipping.
+            ("engagement_id", "TEXT DEFAULT NULL"),
         ]
         for col_name, col_def in chain_migrations:
             try:
@@ -416,6 +421,241 @@ async def init_db():
                     await db.execute(f"ALTER TABLE {table} ADD COLUMN {col_name} {col_def}")
                 except Exception:
                     pass  # column already exists
+
+        # ===== Engagements: the customer a run belongs to =====
+        #
+        # Until now nothing in the schema had a customer concept. 108 sessions
+        # and 91 deterministic runs were keyed only by target URL, and scope was
+        # declared per session. Scope is the LEGAL BOUNDARY of a test, so it
+        # belongs to the engagement — stated once, with an authorisation window,
+        # and inherited by everything run under it.
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS engagements (
+                id TEXT PRIMARY KEY,
+                client_name TEXT NOT NULL,
+                root_domain TEXT,
+                status TEXT DEFAULT 'active',
+                authorised_by TEXT,
+                authorised_from TEXT,
+                authorised_until TEXT,
+                notes TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        # Every change to an engagement record, kept.
+        #
+        # An engagement carries the AUTHORISATION for a test: who approved it,
+        # from when, until when. Being able to silently rewrite that after the
+        # fact is the one edit that must not be possible — a report is evidence
+        # about work someone permitted, and "who permitted it" cannot become
+        # whatever the record says today.
+        #
+        # So edits are allowed (a typo in a reference was otherwise permanent)
+        # and the previous value is retained. This is also why archiving sets
+        # a status instead of deleting: identifiers are permanent here.
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS engagement_revisions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                engagement_id TEXT NOT NULL,
+                field TEXT NOT NULL,
+                old_value TEXT,
+                new_value TEXT,
+                changed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        try:
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_revisions_engagement "
+                             "ON engagement_revisions(engagement_id)")
+        except Exception:
+            pass
+
+        # One row per host/pattern, IN or OUT of scope, and where it came from.
+        # `source` matters: a host a human typed is authorised, a host discovered
+        # by enumeration is a CANDIDATE and must stay inert until approved —
+        # passive results routinely include shared hosting, CDN endpoints and
+        # parked third-party names that are not the customer's to test.
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS engagement_scope (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                engagement_id TEXT NOT NULL,
+                pattern TEXT NOT NULL,
+                kind TEXT DEFAULT 'domain',
+                in_scope INTEGER DEFAULT 1,
+                source TEXT DEFAULT 'declared',
+                approved_at TIMESTAMP DEFAULT NULL,
+                approved_by TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(engagement_id, pattern)
+            )
+        """)
+        # An application under the engagement. Replaces the hardcoded PROFILES
+        # dict in orchestrator/testcase/sweep.py: endpoint knowledge becomes
+        # data an operator enters for their own customer.
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS engagement_targets (
+                id TEXT PRIMARY KEY,
+                engagement_id TEXT NOT NULL,
+                base_url TEXT NOT NULL,
+                title TEXT,
+                tech TEXT,
+                auth_state TEXT DEFAULT 'none',
+                notes TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS target_endpoints (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                target_id TEXT NOT NULL,
+                test_case_id TEXT,
+                path TEXT,
+                method TEXT DEFAULT 'GET',
+                params TEXT,
+                source TEXT DEFAULT 'declared',
+                notes TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        # ===== Credentials =====
+        #
+        # A pentest tool has to log in, so it has to hold a client's secret.
+        # The secret is stored ENCRYPTED (Fernet, key outside the database —
+        # see orchestrator/secrets.py) and is never returned by an API, never
+        # logged, and never rendered into a report.
+        #
+        # `role` is what makes access-control testing possible at all:
+        # WSTG-AUTHZ-04 needs a LOW and a HIGH privilege session to compare,
+        # and it has been a named skip on every run for want of them. Broken
+        # Access Control is 6 of the 35 ground-truth items on the benchmark
+        # target and neither lane has ever matched one.
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS engagement_credentials (
+                id TEXT PRIMARY KEY,
+                engagement_id TEXT,
+                target_key TEXT NOT NULL,
+                label TEXT NOT NULL,
+                role TEXT DEFAULT 'user',
+                kind TEXT DEFAULT 'form',
+                username TEXT,
+                secret_enc TEXT,
+                login_url TEXT,
+                username_field TEXT DEFAULT 'username',
+                password_field TEXT DEFAULT 'password',
+                extra TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(target_key, label)
+            )
+        """)
+        # A captured session, kept apart from the credential that produced it:
+        # a token expires and is re-fetched, the credential does not change.
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS engagement_sessions (
+                id TEXT PRIMARY KEY,
+                credential_id TEXT NOT NULL,
+                target_key TEXT NOT NULL,
+                token_enc TEXT,
+                cookie_enc TEXT,
+                header_name TEXT DEFAULT 'Authorization',
+                acquired_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                verified_at TIMESTAMP,
+                status TEXT DEFAULT 'unverified'
+            )
+        """)
+        for idx, tbl, cols in (
+            ("idx_creds_target", "engagement_credentials", "target_key"),
+            ("idx_sessions_cred", "engagement_sessions", "credential_id"),
+            ("idx_sessions_target", "engagement_sessions", "target_key"),
+        ):
+            try:
+                await db.execute(
+                    f"CREATE INDEX IF NOT EXISTS {idx} ON {tbl}({cols})")
+            except Exception:
+                pass
+
+        # target_endpoints keys on an engagement_targets id, and the
+        # deterministic lane usually runs without an engagement — which is why
+        # the table sat empty. It gains the same host:port key recon_context and
+        # the handoff already use, so a discovered endpoint survives whether or
+        # not a customer record exists. target_id stays for the engagement case
+        # and is written as '' when there is none, because SQLite cannot drop a
+        # NOT NULL without rebuilding the table and the column has no rows.
+        try:
+            await db.execute(
+                "ALTER TABLE target_endpoints ADD COLUMN target_key TEXT DEFAULT NULL")
+        except Exception:
+            pass  # column already exists
+
+        for tbl, idx, cols in (
+            ("engagement_scope", "idx_scope_engagement", "engagement_id"),
+            ("engagement_targets", "idx_targets_engagement", "engagement_id"),
+            ("target_endpoints", "idx_endpoints_target", "target_id"),
+            ("target_endpoints", "idx_endpoints_target_key", "target_key"),
+        ):
+            try:
+                await db.execute(
+                    f"CREATE INDEX IF NOT EXISTS {idx} ON {tbl}({cols})")
+            except Exception:
+                pass
+
+        # ===== Assets: what the findings are ABOUT =====
+        #
+        # Findings were keyed only by URL, so 167 Information Disclosure rows
+        # could describe a handful of facts about a handful of hosts with
+        # nothing tying them together. An asset is the thing a finding is
+        # attached to, and it is a TREE, because that is how a target actually
+        # decomposes:
+        #
+        #     host  ->  port  ->  service / technology  ->  endpoint
+        #
+        # Idea taken from Rekono (GPL-3.0), which attaches every finding to the
+        # host, port or technology where it was found. The implementation here
+        # is original -- erlik is MIT and cannot take GPL code.
+        #
+        # This is ADDITIVE. `findings` rows are untouched and still counted the
+        # same way, so every recorded metric holds; assets are a layer for
+        # grouping, reporting and re-scan comparison.
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS engagement_assets (
+                id TEXT PRIMARY KEY,
+                engagement_id TEXT NOT NULL,
+                parent_id TEXT,
+                kind TEXT NOT NULL,
+                value TEXT NOT NULL,
+                source TEXT DEFAULT 'observed',
+                notes TEXT,
+                first_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(engagement_id, parent_id, kind, value)
+            )
+        """)
+        for idx, cols in (("idx_assets_engagement", "engagement_id"),
+                          ("idx_assets_parent", "parent_id")):
+            try:
+                await db.execute(
+                    f"CREATE INDEX IF NOT EXISTS {idx} ON engagement_assets({cols})")
+            except Exception:
+                pass
+        # Nullable on purpose: the 453 findings recorded before engagements
+        # existed have no asset, and inventing one would attribute a finding to
+        # a host nobody confirmed it came from.
+        for table in ("findings", "v2_findings"):
+            try:
+                await db.execute(
+                    f"ALTER TABLE {table} ADD COLUMN asset_id TEXT DEFAULT NULL")
+            except Exception:
+                pass
+
+        # Additive, nullable link from existing work to its owner. Nullable on
+        # purpose: the 108 sessions recorded before engagements existed genuinely
+        # have no customer, and must read as unassigned rather than be silently
+        # attributed to whichever engagement happens to be first.
+        for table, col in (("sessions", "engagement_id"), ("v2_runs", "engagement_id"),
+                           ("v2_runs", "target_id"), ("sessions", "target_id")):
+            try:
+                await db.execute(
+                    f"ALTER TABLE {table} ADD COLUMN {col} TEXT DEFAULT NULL")
+            except Exception:
+                pass  # column already exists
 
         await db.commit()
 

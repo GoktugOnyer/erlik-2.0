@@ -10,7 +10,8 @@ or full custom control over the automation *flow*:
   - nettacker           deterministic OWASP Nettacker pre-scan (ERLIK_NETTACKER)
   - nettacker_scenario  which Nettacker run mode               (ERLIK_NETTACKER_SCENARIO)
   - nettacker_findings  persist Nettacker findings             (ERLIK_NETTACKER_FINDINGS)
-  - playbooks           Juice-Shop exploit playbooks           (ERLIK_PLAYBOOKS)
+  - playbooks           exploit playbooks: ""|auto|<profile>  (ERLIK_PLAYBOOKS)
+  - max_playbooks       how many the router may inject       (ERLIK_MAX_PLAYBOOKS)
 
 A session may carry a `run_config` JSON object. Each boolean flag is TRI-STATE:
 True/False forces it; null/absent falls back to the process env default. This
@@ -39,6 +40,9 @@ _BOOL_KEYS = {
     "target_memory": "ERLIK_TARGET_MEMORY",
     "techniques": "ERLIK_TECHNIQUES",
     "ai_review": "ERLIK_AI_REVIEW",
+    # Deterministic WSTG results as the agent's starting context. Distinct
+    # from target_memory, which also replays prior AGENT findings.
+    "handoff": "ERLIK_HANDOFF",
 }
 
 # Sensible pre-selectable setups. Keys map to the flag bundle a preset turns on;
@@ -46,7 +50,7 @@ _BOOL_KEYS = {
 RUN_PRESETS: dict[str, dict] = {
     "ai_only": {
         "label": "AI Solo — raw model, no help (baseline)",
-        "desc": "Pure LLM agent. No skill injection, no target playbook, no pre-scan, "
+        "desc": "Pure LLM agent. No skill injection, no exploit playbooks, no pre-scan, "
                 "no memory, no primitive reuse. Measures the model's OWN capability — "
                 "use this as the unguided baseline. Everything is forced OFF, so a "
                 "stray env var can't leak help into the measurement.",
@@ -57,19 +61,19 @@ RUN_PRESETS: dict[str, dict] = {
                    "ai_review": False},
     },
     "guided_ai": {
-        "label": "Guided AI — skills + target playbook (most effective)",
+        "label": "Guided AI — skills + exploit playbooks (most effective)",
         "desc": "LLM agent + injected skill knowledge + the target's exploit playbook "
                 "(real endpoints & payloads) + primitive reuse + CVE enrichment. No "
                 "external scanner. The most effective setup for finding the most vulns.",
         # techniques is pinned False for the same reason nettacker is: this arm is
         # compared against ai_only, so no help lever may drift in from the env.
         "config": {"skills": True, "cve_enrich": True, "nettacker": False,
-                   "playbooks": "juiceshop", "primitives": True,
+                   "playbooks": "auto", "primitives": True,
                    "techniques": False, "ai_review": True},
     },
     "guided_techniques": {
         "label": "Guided Attack — environment-specific techniques",
-        "desc": "Skills + target playbook + techniques matched to what the target "
+        "desc": "Skills + exploit playbooks + techniques matched to what the target "
                 "actually runs (ports/tech observed by a light pre-scan), then an AI "
                 "review of the run at the end. Set ERLIK_HACKTRICKS_PATH for full "
                 "technique text; without it you still get titles and reference links.",
@@ -79,7 +83,7 @@ RUN_PRESETS: dict[str, dict] = {
         # high/critical findings with a usable URL, so the cost is small.
         "config": {"skills": True, "cve_enrich": True, "nettacker": True,
                    "nettacker_scenario": "recon", "techniques": True,
-                   "playbooks": "juiceshop", "primitives": True,
+                   "playbooks": "auto", "primitives": True,
                    "poc_verify": True, "ai_review": True},
     },
     "recon_first": {
@@ -87,26 +91,26 @@ RUN_PRESETS: dict[str, dict] = {
         "desc": "Deterministic Nettacker recon seeds the agent, then skills + target "
                 "playbook + CVE enrichment. Reuses durable per-target memory.",
         "config": {"nettacker": True, "nettacker_scenario": "recon",
-                   "skills": True, "cve_enrich": True, "playbooks": "juiceshop",
+                   "skills": True, "cve_enrich": True, "playbooks": "auto",
                    "primitives": True, "target_memory": True,
                    "techniques": True, "ai_review": True},
     },
     "deterministic_heavy": {
         "label": "Deterministic-heavy — broad pre-scan",
         "desc": "Broad Nettacker web/vuln pre-scan with findings persisted; skills + "
-                "target playbook; lighter AI reliance.",
+                "exploit playbooks; lighter AI reliance.",
         "config": {"nettacker": True, "nettacker_scenario": "web",
                    "nettacker_findings": True, "skills": True, "cve_enrich": True,
-                   "playbooks": "juiceshop", "poc_verify": True,
+                   "playbooks": "auto", "poc_verify": True,
                    "techniques": True, "ai_review": True},
     },
     "full_assessment": {
         "label": "Full assessment — everything on (slow)",
-        "desc": "Everything: Nettacker full scan, skills, target playbook, PoC "
+        "desc": "Everything: Nettacker full scan, skills, exploit playbooks, PoC "
                 "re-verification, primitive reuse and per-target memory. Slow & thorough.",
         "config": {"nettacker": True, "nettacker_scenario": "full",
                    "nettacker_findings": True, "skills": True, "cve_enrich": True,
-                   "playbooks": "juiceshop", "poc_verify": True, "primitives": True,
+                   "playbooks": "auto", "poc_verify": True, "primitives": True,
                    "target_memory": True, "techniques": True, "ai_review": True},
     },
 }
@@ -136,7 +140,8 @@ def resolve(run_config=None) -> dict:
 
     # Explicit per-key values in the session config override the preset.
     for k in ("cve_enrich", "skills", "nettacker", "nettacker_findings",
-              "nettacker_scenario", "playbooks", "poc_verify", "primitives",
+              "nettacker_scenario", "playbooks", "max_playbooks", "provider", "poc_verify", "primitives",
+              "handoff",
               "target_memory", "techniques", "ai_review", "review_model",
               "skills_exclude", "skills_pin", "skills_max_chars",
               "safe_mode", "safe_mode_ack", "skills_max_files"):
@@ -148,7 +153,8 @@ def resolve(run_config=None) -> dict:
     # recognise as intended-but-wrong rather than dropping them without a word.
     warnings: list[str] = []
     _known = {"cve_enrich", "skills", "nettacker", "nettacker_findings",
-              "nettacker_scenario", "playbooks", "poc_verify", "primitives",
+              "nettacker_scenario", "playbooks", "max_playbooks", "provider", "poc_verify", "primitives",
+              "handoff",
               "target_memory", "techniques", "ai_review", "review_model",
               "skills_exclude", "skills_pin", "skills_max_chars",
               "safe_mode", "safe_mode_ack", "skills_max_files", "preset"}
@@ -171,9 +177,28 @@ def resolve(run_config=None) -> dict:
     review_model = (base.get("review_model")
                     or os.environ.get("ERLIK_REVIEW_MODEL", "").strip() or None)
 
+    # Which inference backend this run uses. Pinnable PER RUN because every
+    # recorded experiment ran on local Ollama: an arm compared against those
+    # rows must take the same inference path, while new work is free to use a
+    # hosted provider. None falls back to the process-wide ERLIK_LLM_PROVIDER.
+    provider = (base.get("provider")
+                or os.environ.get("ERLIK_RUN_PROVIDER", "").strip() or None)
+    if provider:
+        provider = str(provider).strip().lower()
+        if provider not in ("ollama", "openai"):
+            warnings.append(f"unknown provider {provider!r}; falling back to the default")
+            provider = None
+
     playbooks = base.get("playbooks")
     if playbooks is None:
         playbooks = os.environ.get("ERLIK_PLAYBOOKS", "") or None
+    # How many playbooks the router may inject. Was env-only and read once at
+    # import, so two runs labelled the same arm could differ in treatment with
+    # nothing in the record showing it.
+    max_playbooks = base.get("max_playbooks")
+    if max_playbooks is None:
+        max_playbooks = os.environ.get("ERLIK_MAX_PLAYBOOKS") or None
+    max_playbooks = int(max_playbooks) if max_playbooks not in (None, "") else None
 
     # Budget: clamped, not trusted. 0 does NOT mean "off" — the selector takes
     # the first file unconditionally — so a 0 here would be a knob whose label
@@ -262,7 +287,10 @@ def resolve(run_config=None) -> dict:
         "ai_review": tri("ai_review"),
         "review_model": review_model,
         "nettacker_scenario": scenario,
+        "provider": provider,
         "playbooks": playbooks,
+        "max_playbooks": max_playbooks,
+        "handoff": tri("handoff"),
     }
 
 

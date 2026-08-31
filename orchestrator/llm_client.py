@@ -1,4 +1,5 @@
 import asyncio
+import time
 import os
 import httpx
 import json
@@ -159,6 +160,49 @@ async def _ollama_health() -> dict:
 
 # ---------- OpenAI / OpenAI-compatible (remote inference) ----------
 
+# Requests-per-minute ceiling for a HOSTED provider. Hetzner's experimental
+# Inference API allows 10 requests per 60s per key, and one agent run makes up
+# to 30 LLM calls — so without pacing, every run dies partway through on 429.
+#
+# Enforced client-side rather than only reacting to 429s: a 429 costs a round
+# trip and the retry lands in the same window, so reacting alone converges on
+# spending the whole budget on rejected requests. 0 disables pacing, which is
+# right for local Ollama where the constraint is the GPU rather than a quota.
+LLM_RPM = int(os.environ.get("ERLIK_LLM_RPM", "0") or 0)
+
+_rate_lock = asyncio.Lock()
+_last_call_at = 0.0
+
+
+async def _pace() -> None:
+    """Space calls so a shared key cannot exceed its per-minute allowance.
+
+    Process-wide on purpose. Concurrent sessions share ONE key, so a
+    per-session limiter would multiply the effective rate by the number of
+    sessions and trip the ceiling this exists to respect.
+    """
+    global _last_call_at
+    if LLM_RPM <= 0:
+        return
+    interval = 60.0 / LLM_RPM
+    async with _rate_lock:
+        wait = _last_call_at + interval - time.monotonic()
+        if wait > 0:
+            await asyncio.sleep(wait)
+        _last_call_at = time.monotonic()
+
+
+def _retry_after(resp) -> float | None:
+    """Honour the server's own backoff instruction when it sends one."""
+    raw = resp.headers.get("retry-after") if resp is not None else None
+    if not raw:
+        return None
+    try:
+        return max(0.0, float(raw))
+    except (TypeError, ValueError):
+        return None
+
+
 async def _openai_chat(messages: list[dict], model: str, max_retries: int) -> str:
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
@@ -173,6 +217,7 @@ async def _openai_chat(messages: list[dict], model: str, max_retries: int) -> st
     last_error = None
     for attempt in range(max_retries):
         timeout = 120.0 + (attempt * 60.0)
+        await _pace()
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:
                 resp = await client.post(
@@ -182,9 +227,19 @@ async def _openai_chat(messages: list[dict], model: str, max_retries: int) -> st
                 data = resp.json()
                 return data["choices"][0]["message"]["content"] or ""
         except httpx.HTTPStatusError as e:
-            # Retry transient server errors (5xx); surface 4xx (incl. 401/429) immediately.
             last_error = e
-            if e.response.status_code >= 500 and attempt < max_retries - 1:
+            code = e.response.status_code
+            # 429 is the one 4xx that IS retryable: it says "later", not
+            # "never". Previously lumped in with 401 and surfaced immediately,
+            # which on a rate-limited hosted provider kills a run partway
+            # through rather than waiting out a window that reopens in seconds.
+            if code == 429 and attempt < max_retries - 1:
+                delay = _retry_after(e.response) or (60.0 / max(LLM_RPM, 1)) * (attempt + 1)
+                print(f"[llm] 429 rate-limited; waiting {delay:.1f}s "
+                      f"(attempt {attempt + 1}/{max_retries})", flush=True)
+                await asyncio.sleep(delay)
+                continue
+            if code >= 500 and attempt < max_retries - 1:
                 await asyncio.sleep(2 ** attempt)
                 continue
             raise
@@ -227,8 +282,30 @@ async def _openai_health() -> dict:
 
 # ---------- Public API (unchanged signatures) ----------
 
-async def list_models() -> list[str]:
-    if PROVIDER == "openai":
+# Provider is resolvable PER RUN, not only per process. Every recorded
+# experiment ran on local Ollama; comparing a new arm against those rows
+# requires the same inference path, while new work should be free to use a
+# hosted provider. A process-wide setting forces one or the other.
+def resolve_provider(provider: str | None = None) -> str:
+    return (provider or PROVIDER or "ollama").strip().lower()
+
+
+def default_model_for(provider: str | None = None) -> str:
+    """The default model of the RESOLVED provider.
+
+    Without this, pinning a run to ollama while ERLIK_LLM_PROVIDER=openai would
+    hand Ollama a hosted model id and fail at request time with a confusing
+    404 rather than an obvious configuration error.
+    """
+    p = resolve_provider(provider)
+    override = os.environ.get("ERLIK_LLM_MODEL")
+    if override:
+        return override
+    return OPENAI_DEFAULT_MODEL if p == "openai" else OLLAMA_DEFAULT_MODEL
+
+
+async def list_models(provider: str | None = None) -> list[str]:
+    if resolve_provider(provider) == "openai":
         return await _openai_list_models()
     return await _ollama_list_models()
 
@@ -237,7 +314,8 @@ class ModelUnavailable(RuntimeError):
     """The requested model is not installed, raised BEFORE a run starts."""
 
 
-async def ensure_model_available(model: str | None = None) -> str:
+async def ensure_model_available(model: str | None = None,
+                                 provider: str | None = None) -> str:
     """Check the model can be served, and return the tag that will be used.
 
     Deliberately raises instead of substituting a near neighbour. The model is an
@@ -249,8 +327,8 @@ async def ensure_model_available(model: str | None = None) -> str:
 
     Only meaningful for Ollama; a remote provider validates at request time.
     """
-    use_model = model or _default_model()
-    if PROVIDER != "ollama":
+    use_model = model or default_model_for(provider)
+    if resolve_provider(provider) != "ollama":
         return use_model
 
     installed = await _ollama_list_models()
@@ -270,20 +348,21 @@ async def ensure_model_available(model: str | None = None) -> str:
 
 
 async def chat(messages: list[dict], model: str | None = None, max_retries: int = 3,
-               num_ctx: int | None = None) -> str:
+               num_ctx: int | None = None, provider: str | None = None) -> str:
     """Send a conversation to the configured provider.
 
     `num_ctx` sizes the LOCAL model's context allocation. It is ignored by
     hosted providers, which size their own.
     """
-    use_model = model or _default_model()
-    if PROVIDER == "openai":
+    use_model = model or default_model_for(provider)
+    if resolve_provider(provider) == "openai":
         return await _openai_chat(messages, use_model, max_retries)
     return await _ollama_chat(messages, use_model, max_retries, num_ctx=num_ctx)
 
 
-async def chat_json(messages: list[dict], model: str | None = None) -> dict | None:
-    content = await chat(messages, model=model)
+async def chat_json(messages: list[dict], model: str | None = None,
+                    provider: str | None = None) -> dict | None:
+    content = await chat(messages, model=model, provider=provider)
     try:
         return json.loads(content)
     except json.JSONDecodeError:
@@ -297,7 +376,28 @@ async def chat_json(messages: list[dict], model: str | None = None) -> dict | No
     return None
 
 
-async def health_check() -> dict:
-    if PROVIDER == "openai":
+async def health_check(provider: str | None = None) -> dict:
+    if resolve_provider(provider) == "openai":
         return await _openai_health()
     return await _ollama_health()
+
+
+def provider_is_healthy(health: dict) -> tuple[bool, str]:
+    """(ok, why) for ANY provider's health payload.
+
+    The agent loop used to gate on `health.get("ollama") != "connected"`, which
+    is Ollama's key. Once a run could pin its own provider, a run pinned to
+    Ollama on a process defaulting to a hosted provider read a payload with no
+    "ollama" key at all and failed the gate — reporting "Ollama is not running"
+    while Ollama was running perfectly. A provider-blind gate does not merely
+    fail; it fails while naming the wrong cause.
+    """
+    prov = (health or {}).get("provider", "ollama")
+    if prov == "openai":
+        if health.get("status") == "configured":
+            return True, ""
+        return False, (f"Hosted provider is not usable: {health.get('status')}. "
+                       f"Check OPENAI_API_KEY and OPENAI_BASE_URL in .env.")
+    if health.get("ollama") == "connected":
+        return True, ""
+    return False, "Ollama is not running. Start it with: ollama serve"

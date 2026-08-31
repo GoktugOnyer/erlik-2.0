@@ -94,6 +94,62 @@ RUN ( pip3 install --no-cache-dir --break-system-packages nettacker \
       && echo "[erlik] nettacker installed" ) \
     || echo "[erlik] WARN: nettacker install failed — ERLIK_NETTACKER unavailable until fixed"
 
+# ===== ProjectDiscovery recon suite (MIT) — milestone C =====
+# subfinder  passive subdomain enumeration
+# dnsx       DNS resolution of candidate names
+# httpx      liveness probe + title + tech fingerprint
+# katana     crawler — endpoint and parameter discovery
+#
+# katana earns its place on evidence rather than convention: class-restricted
+# scoring across 28 recorded runs showed the agent lane's bottleneck is REACHING
+# an endpoint, not knowing what to do once there (SSRF was never found even when
+# the exact path was handed over). Crawling attacks that directly; more prompt
+# guidance does not.
+#
+# Installed as pinned release binaries, matching the dalfox/crlfuzz pattern
+# above. Best-effort per tool: recon degrades to "tool unavailable" at runtime,
+# and must never break an image that carries every other tool.
+RUN ARCH=$(dpkg --print-architecture) && \
+    for spec in "subfinder:2.16.0" "dnsx:1.3.0" "httpx:1.10.0" "katana:1.7.0"; do \
+        TOOL="${spec%%:*}"; VER="${spec##*:}"; \
+        URL="https://github.com/projectdiscovery/${TOOL}/releases/download/v${VER}/${TOOL}_${VER}_linux_${ARCH}.zip"; \
+        ( wget -q "$URL" -O "/tmp/${TOOL}.zip" \
+          && unzip -o -q "/tmp/${TOOL}.zip" -d /usr/local/bin "${TOOL}" \
+          && chmod +x "/usr/local/bin/${TOOL}" \
+          && rm -f "/tmp/${TOOL}.zip" \
+          && echo "[erlik] ${TOOL} v${VER} installed" ) \
+        || echo "[erlik] WARN: ${TOOL} install failed — recon degrades without it"; \
+    done
+
+# ===== Rekono-parity toolset =====
+# Nine tools erlik lacked that a working pentester expects, all in Kali's own
+# repositories. Chosen to close specific gaps rather than to lengthen a list:
+#
+#   theharvester  OSINT — emails and subdomains from public sources
+#   dirsearch     content discovery (alternative shape to ffuf/gobuster)
+#   sslscan       TLS cipher/protocol audit (sslyze's faster complement)
+#   gitleaks      exposed secrets in a repository or a dumped .git
+#   ssh-audit     SSH algorithm and key exchange audit
+#   smbmap        SMB share enumeration
+#   cmseek        CMS identification
+#   joomscan      Joomla-specific checks
+#   exploitdb     provides `searchsploit` — LOOKUP ONLY, never exploitation
+#
+# Metasploit is already present in the base image but is deliberately NOT
+# registered as an erlik tool: `searchsploit` answers "is there a known exploit"
+# without the agent being handed a working exploitation framework.
+#
+# Best-effort, matching every other tool step: a repository hiccup must not
+# break an image that carries everything else. A tool that fails to install
+# reports "not installed" at runtime rather than failing a scan silently.
+RUN apt-get update && \
+    ( apt-get install -y --no-install-recommends \
+        theharvester dirsearch sslscan gitleaks ssh-audit \
+        smbmap cmseek joomscan exploitdb \
+      && echo "[erlik] rekono-parity toolset installed" ) \
+    || echo "[erlik] WARN: part of the parity toolset failed to install" ; \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
 # ===== ZAP CLI helper script =====
 RUN echo '#!/bin/bash\n\
 # Wrapper to call ZAP API from kali container\n\

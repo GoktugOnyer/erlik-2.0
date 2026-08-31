@@ -1,0 +1,88 @@
+id: WSTG-INPV-11.2
+name: Injection — unclassified (interpreter error signatures)
+category: Input Validation
+attack_class: injection_generic
+severity: high
+references:
+  - https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/07-Input_Validation_Testing/
+
+# WSTG has no single id for a family-agnostic injection probe, so this uses an
+# erlik-local suffix, the same convention as WSTG-INPV-05.6 and WSTG-CLNT-07b.
+#
+# WHY THIS EXISTS AND WHY IT IS NARROW
+# The typed cases (SQLi, LDAP, NoSQL, SSTI, XXE, command) each know what they
+# are looking for. This one catches the case where a metacharacter reaches AN
+# interpreter that none of them cover — XPath, IMAP, SpEL, OGNL, a shell one
+# layer down — and the only honest evidence is the runtime naming itself.
+#
+# THE PRECISION RULE, because a generic detector is exactly where recall eats
+# precision: a pattern here must name a SPECIFIC runtime construct. "error",
+# "exception", "invalid", "syntax" are all forbidden — they occur constantly in
+# ordinary output and would report injection on every application with a
+# verbose 500 page.
+#
+# This deliberately overlaps WSTG-ERRH-01, which asks whether errors leak
+# internals. The difference is the trigger: ERRH-01 sends a malformed REQUEST,
+# this sends a well-formed request with an injection metacharacter in a
+# PARAMETER. A stack trace that appears only in the second case says the
+# parameter reaches an interpreter, which is a different claim.
+
+target_schema:
+  required: [url, parameter]
+  optional: [cookie, auth_header]
+
+steps:
+  # A lone quote is the classic probe: harmless to send, and it terminates a
+  # string literal in most interpreters.
+  - name: single_quote
+    tool: curl
+    command: >-
+      curl -s -b "{{cookie}}" -H "{{auth_header}}" -G "{{url}}" --data-urlencode "{{parameter}}=erlik'probe"
+    evaluators:
+      - type: regex
+        pattern: 'XPathException|javax\.xml\.xpath|SpelEvaluationException|ognl\.OgnlException|jakarta\.el|javax\.el\.ELException|Traceback \(most recent call last\)|PHP (Parse|Fatal) error|System\.Data\.\w+Exception|NoMethodError|Elixir\.\w+Error'
+        emit_finding:
+          vuln_type: Parameter reaches an interpreter (unclassified injection — quote)
+          severity: high
+        stop_after: true
+
+  - name: expression_metachars
+    tool: curl
+    when: no_finding_yet
+    command: >-
+      curl -s -b "{{cookie}}" -H "{{auth_header}}" -G "{{url}}" --data-urlencode "{{parameter}}=erlik\"|]}$(){}"
+    evaluators:
+      - type: regex
+        pattern: 'XPathException|javax\.xml\.xpath|SpelEvaluationException|ognl\.OgnlException|jakarta\.el|javax\.el\.ELException|Traceback \(most recent call last\)|PHP (Parse|Fatal) error|System\.Data\.\w+Exception|NoMethodError'
+        emit_finding:
+          vuln_type: Parameter reaches an interpreter (unclassified injection — metacharacters)
+          severity: high
+        stop_after: true
+
+  # XPath specifically: it has no dedicated case in this catalogue and its
+  # error text is unmistakable.
+  - name: xpath_probe
+    tool: curl
+    when: no_finding_yet
+    command: >-
+      curl -s -b "{{cookie}}" -H "{{auth_header}}" -G "{{url}}" --data-urlencode "{{parameter}}=' or '1'='1"
+    evaluators:
+      - type: regex
+        pattern: 'XPathException|XPathEvaluationException|Invalid XPath expression|xmlXPathEval|MSXML.*XPath'
+        emit_finding:
+          vuln_type: XPath Injection (interpreter error disclosed)
+          severity: critical
+        stop_after: true
+
+  # A CRLF in a parameter reaching a mail or header layer names the library.
+  - name: crlf_header_probe
+    tool: curl
+    when: no_finding_yet
+    command: >-
+      curl -s -b "{{cookie}}" -H "{{auth_header}}" -G "{{url}}" --data-urlencode "{{parameter}}=erlik%0d%0aX-Erlik-Probe: 1"
+    evaluators:
+      - type: regex
+        pattern: 'imaplib|smtplib|SMTPRecipientsRefused|javax\.mail|Net::SMTP|Swift_TransportException'
+        emit_finding:
+          vuln_type: Parameter reaches a mail/header layer (SMTP/IMAP injection surface)
+          severity: high

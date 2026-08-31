@@ -32,6 +32,39 @@ def load_test_case(path: Path | str) -> TestCase:
     return TestCase(**data)
 
 
+def chain_targets(tc: TestCase) -> list[str]:
+    """Every test case id this one can schedule after itself."""
+    ids: list[str] = []
+    for step in tc.steps:
+        for ev in step.evaluators:
+            ids += ev.chain_to or []
+    if tc.chain:
+        ids += tc.chain.on_finding + tc.chain.always
+    return ids
+
+
+def dangling_chain_refs(catalog: dict[str, TestCase]) -> dict[str, list[str]]:
+    """{case_id: [ids it chains to that do not exist]}.
+
+    A chain reference to a case nobody wrote is not a runtime error — the
+    walker simply never traverses it — so it survives indefinitely while the
+    catalogue LOOKS like it has a methodology. The whole catalogue held three
+    chain declarations and zero working edges: one pointed at
+    `WSTG-INPV-05-WAF-BYPASS`, which was never written, one at a case that
+    always skips for want of credentials, and one was an empty list.
+
+    Reported rather than raised: a dangling edge must not stop the other 21
+    cases from loading.
+    """
+    known = set(catalog)
+    out: dict[str, list[str]] = {}
+    for cid, tc in catalog.items():
+        missing = sorted({t for t in chain_targets(tc) if t not in known})
+        if missing:
+            out[cid] = missing
+    return out
+
+
 def load_catalog() -> dict[str, TestCase]:
     """Load every YAML test case under tests_catalog/, keyed by test case id."""
     out: dict[str, TestCase] = {}
@@ -45,6 +78,9 @@ def load_catalog() -> dict[str, TestCase]:
     if errors:
         for p, e in errors:
             print(f"[testcase.loader] failed to load {p}: {e}")
+    for cid, missing in dangling_chain_refs(out).items():
+        print(f"[testcase.loader] {cid} chains to unknown case(s): "
+              f"{', '.join(missing)}", flush=True)
     return out
 
 

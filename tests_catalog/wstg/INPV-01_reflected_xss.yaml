@@ -1,6 +1,7 @@
 id: WSTG-INPV-01
 name: Reflected Cross-Site Scripting
 category: Input Validation
+attack_class: xss
 severity: high
 references:
   - https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/07-Input_Validation_Testing/01-Testing_for_Reflected_Cross_Site_Scripting
@@ -15,7 +16,7 @@ steps:
     # Inject a unique marker with raw HTML tags. If it comes back UNENCODED the
     # parameter is reflected without output-encoding → reflected XSS.
     command: >-
-      curl -s "{{url}}?{{parameter}}=xss7331zzz<b>probe</b>"
+      curl -s -b "{{cookie}}" -H "{{auth_header}}" "{{url}}?{{parameter}}=xss7331zzz<b>probe</b>"
     evaluators:
       - type: regex
         pattern: 'xss7331zzz<b>probe</b>'
@@ -40,7 +41,7 @@ steps:
     when: no_finding_yet
     # If the marker comes back HTML-encoded, output encoding is working — safe.
     command: >-
-      curl -s "{{url}}?{{parameter}}=xss7331zzz<i>enc</i>"
+      curl -s -b "{{cookie}}" -H "{{auth_header}}" "{{url}}?{{parameter}}=xss7331zzz<i>enc</i>"
     evaluators:
       - type: llm
         instruction: >-

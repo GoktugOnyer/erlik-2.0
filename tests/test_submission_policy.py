@@ -66,12 +66,26 @@ LIVE_FIXTURES = {
 
 
 class TestCatalogueIntegrity:
-    def test_every_rule_has_a_live_fixture(self, rules):
+    def test_every_detector_rule_has_a_live_fixture(self, rules):
         """Meta-test: a rule with no real detector output behind it is a rule
-        nobody can prove works."""
-        assert {r.id for r in rules} == set(LIVE_FIXTURES), (
-            "every rule needs an entry in LIVE_FIXTURES driven by real "
-            "detection output")
+        nobody can prove works.
+
+        Scoped to source == "detector". Model-authored rules have no detector
+        output BY CONSTRUCTION — that is what makes them a separate class — and
+        they carry their own proof-of-fire instead: TestModelReportedRules
+        requires each one to match a real recorded finding. Both halves must
+        stay non-empty, asserted below, so the scoping cannot quietly exempt
+        the whole catalogue."""
+        det = {r.id for r in rules if r.source == "detector"}
+        assert det == set(LIVE_FIXTURES), (
+            "every detector rule needs an entry in LIVE_FIXTURES driven by "
+            "real detection output")
+
+    def test_the_two_rule_classes_are_both_populated(self, rules):
+        """Guard on the scoping: if every rule became model_reported, the
+        fixture and evidence-literal tests above would pass vacuously."""
+        assert [r for r in rules if r.source == "detector"]
+        assert [r for r in rules if r.source == "model_reported"]
 
     @pytest.mark.parametrize("rule_id", sorted(LIVE_FIXTURES))
     def test_rule_fires_on_real_detector_output(self, rule_id, rules):
@@ -86,13 +100,17 @@ class TestCatalogueIntegrity:
         deliverable said nothing was found."""
         assert all(r.action == SP.INFORMATIONAL for r in rules)
 
-    def test_every_rule_keys_on_a_code_controlled_string(self, rules):
-        """A rule matching on vuln_type alone would sweep up model-reported
-        findings whose text erlik does not control."""
+    def test_every_detector_rule_keys_on_a_code_controlled_string(self, rules):
+        """A DETECTOR rule matching on vuln_type alone, or on text erlik does
+        not control, passes a hand-authored fixture and dies in production.
+
+        Model-authored rules are exempt because no such literal exists for
+        them; their equivalent guarantee is the severity cap enforced by the
+        loader plus the corpus fire-check in TestModelReportedRules."""
         import pathlib
         src = (pathlib.Path(__file__).resolve().parents[1]
                / "orchestrator" / "detection.py").read_text()
-        for r in rules:
+        for r in [x for x in rules if x.source == "detector"]:
             keys = ([r.evidence_prefix] if r.evidence_prefix else []) + list(r.evidence_contains)
             assert keys, f"{r.id} matches on vuln_type alone"
             for k in keys:
@@ -304,3 +322,120 @@ class TestMeasurementNeutrality:
         after = M._match_finding_to_ground_truth_scored(demoted, M.JUICE_SHOP_GROUND_TRUTH)
         assert before == after
         assert before is not None, "robots.txt is GT #23 — fixture must match it"
+
+
+class TestModelReportedRules:
+    """Rules governing MODEL-AUTHORED findings, and the guard that replaces the
+    evidence-literal check.
+
+    Detector rules key on a string orchestrator/detection.py builds itself, and
+    the loader enforces that. Model-authored findings have no such anchor: they
+    carry detector = NULL and evidence written fresh each run, and the same CORS
+    issue appears under SIX different vuln_type strings in the corpus. So the
+    guarantee comes from two other places, both asserted here:
+
+      * the loader caps `max_severity` at medium for these rules, so none can
+        ever demote a high or critical finding; and
+      * every such rule must fire on at least one REAL recorded finding — the
+        corpus-backed equivalent of "this rule can actually fire".
+    """
+
+    CORPUS = (__import__("pathlib").Path(__file__).resolve().parents[1]
+              / "data" / "pentest.db")
+
+    def _corpus(self):
+        import sqlite3
+        if not self.CORPUS.exists():
+            pytest.skip("no recorded corpus in this checkout")
+        c = sqlite3.connect(f"file:{self.CORPUS}?mode=ro", uri=True)
+        c.row_factory = sqlite3.Row
+        rows = [dict(r) for r in c.execute(
+            "SELECT vuln_type, severity, COALESCE(evidence,'') AS evidence, "
+            "cve_id, detector FROM findings")]
+        if not rows:
+            pytest.skip("corpus present but empty")
+        return rows
+
+    def test_loader_rejects_a_model_rule_that_could_demote_high(self, tmp_path):
+        """The cap IS the safeguard. Without it, a broad vuln_type would
+        quietly demote real work."""
+        bad = tmp_path / "p.yaml"
+        bad.write_text(
+            "version: 1\nrules:\n  - id: x\n    source: model_reported\n"
+            "    vuln_types: ['SQL Injection']\n    max_severity: high\n"
+            "    action: informational\n")
+        with pytest.raises(SP.PolicyError, match="may not demote above"):
+            SP.load_rules(bad)
+
+    def test_detector_rules_still_require_an_evidence_literal(self, tmp_path):
+        """The original guard must survive: relaxing it for everything is how
+        a brittle rule gets in."""
+        bad = tmp_path / "p.yaml"
+        bad.write_text(
+            "version: 1\nrules:\n  - id: x\n    vuln_types: ['Whatever']\n"
+            "    max_severity: low\n    action: informational\n")
+        with pytest.raises(SP.PolicyError, match="vuln_type alone"):
+            SP.load_rules(bad)
+
+    def test_every_model_rule_fires_on_a_real_finding(self, rules):
+        """A rule that cannot fire is the defect this whole file guards."""
+        corpus = self._corpus()
+        model_rules = [r for r in rules if r.source == "model_reported"]
+        assert model_rules, "no model_reported rules — test would be vacuous"
+        for rule in model_rules:
+            fired = [f for f in corpus
+                     if SP.classify(f, [rule]).rule == rule.id]
+            assert fired, f"rule {rule.id!r} matches nothing in the corpus"
+
+    def test_no_high_or_critical_finding_is_ever_demoted(self, rules):
+        corpus = self._corpus()
+        for f in corpus:
+            if SP._rank(SP.current_severity(f)) >= SP._rank("high"):
+                d = SP.classify(f, rules)
+                assert not d.is_informational, (
+                    f"demoted a {f['severity']} finding: {f['vuln_type']!r} "
+                    f"by rule {d.rule!r}")
+
+    @pytest.mark.parametrize("vt", [
+        "SQL Injection", "Command Injection", "XSS", "Stored XSS",
+        "Reflected XSS", "Server-Side Request Forgery (SSRF)",
+        "Authentication Bypass", "Arbitrary File Upload", "Broken Authentication",
+        "Default Login Credentials", "Weak Credentials", "CRLF Injection",
+    ])
+    def test_real_vulnerability_classes_stay_submittable(self, rules, vt):
+        """The list a client actually pays for. If any of these is demoted the
+        policy has stopped being a noise filter and started hiding findings."""
+        corpus = [f for f in self._corpus() if f["vuln_type"] == vt]
+        if not corpus:
+            pytest.skip(f"no {vt} in corpus")
+        for f in corpus:
+            assert not SP.classify(f, rules).is_informational, f
+
+    def test_exploitable_cors_is_not_demoted(self, rules):
+        """`Allow-Origin: *` cannot be read with credentials — browsers refuse
+        the wildcard. The exploitable shape is a REFLECTED origin with
+        Allow-Credentials: true, and it must survive the rule."""
+        exploitable = {
+            "vuln_type": "CORS Misconfiguration", "severity": "medium",
+            "evidence": ("Access-Control-Allow-Origin: https://evil.example "
+                         "reflected, Access-Control-Allow-Credentials: true"),
+        }
+        assert not SP.classify(exploitable, rules).is_informational
+
+    def test_wildcard_cors_is_demoted(self, rules):
+        wildcard = {
+            "vuln_type": "CORS Misconfiguration", "severity": "medium",
+            "evidence": "Access-Control-Allow-Origin: * — allows any domain",
+        }
+        d = SP.classify(wildcard, rules)
+        assert d.is_informational and d.rule == "cors_wildcard_no_credentials"
+
+    def test_measured_effect_on_the_corpus(self, rules):
+        """Records what the policy actually does, so a future rule change that
+        doubles the demotion rate is visible rather than silent."""
+        corpus = self._corpus()
+        demoted = [f for f in corpus if SP.classify(f, rules).is_informational]
+        frac = len(demoted) / len(corpus)
+        assert 0.10 < frac < 0.45, (
+            f"policy demotes {frac:.0%} of the corpus ({len(demoted)}/{len(corpus)}) "
+            f"— outside the reviewed band; re-check the rules")
