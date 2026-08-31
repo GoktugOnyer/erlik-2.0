@@ -8,7 +8,8 @@ from datetime import datetime
 from contextlib import asynccontextmanager
 from pathlib import Path
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request, Body
-from fastapi.responses import HTMLResponse, FileResponse
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 import httpx
 
@@ -81,6 +82,34 @@ async def _api_token_guard(request: Request, call_next):
         if provided != token:
             return JSONResponse({"detail": "missing or invalid API token"}, status_code=401)
     return await call_next(request)
+
+
+@app.exception_handler(RequestValidationError)
+async def _validation_error_without_the_body(request: Request, exc):
+    """422 without echoing what the caller sent.
+
+    FastAPI's default handler puts the REQUEST BODY in `input` on every
+    validation error. Verified on this stack: POSTing
+    `[{"secret": "hunter2", "username": "admin"}]` to a `body: dict` route
+    returns
+
+        {"detail":[{"type":"dict_type","loc":["body"],
+                    "msg":"Input should be a valid dictionary",
+                    "input":[{"secret":"hunter2","username":"admin"}]}]}
+
+    A form-encoded body and a bare JSON string echo identically. So the moment
+    any route accepts a password, a slightly malformed request reflects it back
+    in an error — and that error is the kind of thing that gets pasted into a
+    ticket. This is app-wide rather than per-route because the leak is in the
+    default handler, so every existing endpoint had it too.
+
+    `type`, `loc` and `msg` are kept: they say WHICH field was wrong and why,
+    which is all a caller needs. `input` and `ctx` are dropped — `ctx` can
+    carry the offending value as well.
+    """
+    return JSONResponse(status_code=422, content={"detail": [
+        {k: v for k, v in err.items() if k in ("type", "loc", "msg")}
+        for err in exc.errors()]})
 
 
 # --- Toolset Presets (RQ3-b: action-space overload ablation) ---
@@ -5817,6 +5846,155 @@ async def v2_sweep_plan(body: dict):
                                "jwt", "cookie")),
     }
     return plan
+
+
+# ---------------------------------------------------------------------------
+# CREDENTIALS
+#
+# `credentials.py` and `login.py` were complete, proven, and reachable only by
+# running Python by hand. The engagement page rendered an auth badge over a
+# store nothing in the product could write to. Doing this by hand took the
+# DVWA sweep from 4 findings (all infrastructure) to 8 — including the SQL
+# injection, the reflected XSS and the file-upload flaw — so the missing last
+# mile was the difference between the deterministic lane working and not.
+#
+# THE SHAPE OF THE RISK, because it decides the whole design. Two things look
+# alike and are not:
+#
+#   STORE with a hostile login_url — the caller supplies the password, so they
+#       exfiltrate a secret they already hold. Near worthless to an attacker.
+#   EXECUTE an EXISTING credential against a URL the caller chooses — they
+#       obtain a password they do NOT hold, blind, without reading a response.
+#
+# So the login route takes NO URL AT ALL: both destinations are read from the
+# stored credential. There is deliberately no route that changes `login_url`
+# or `verify_url` without also re-supplying the secret, because that would
+# reintroduce exactly the primitive above.
+#
+# These are POST/DELETE, so `_api_token_guard` covers them when
+# ERLIK_API_TOKEN is set. The GET is masked BY CONSTRUCTION — `_view` and
+# `session_view` drop the encrypted columns rather than masking them — because
+# the guard never applies to GET.
+# ---------------------------------------------------------------------------
+
+@app.get("/api/v2/targets/credentials")
+async def v2_credentials_list(target: str | None = None):
+    """Credentials and their sessions. Never a secret, by construction."""
+    from orchestrator import credentials as _C
+    db = await get_db()
+    try:
+        creds = await _C.listing(db, target)
+        for c in creds:
+            c["sessions"] = await _C.sessions_for(db, c["id"])
+        state = await _C.auth_state(db, target) if target else None
+    finally:
+        await db.close()
+    return {"target": target, "credentials": creds, "auth": state,
+            "roles": list(_C.ROLES), "kinds": list(_C.KINDS)}
+
+
+@app.post("/api/v2/targets/credentials")
+async def v2_credentials_store(body: dict):
+    """Store a credential. The ONE route that accepts a plaintext secret.
+
+    It is never echoed: the response is the masked listing. A validation error
+    does not reflect it either — see `_validation_error_without_the_body`,
+    which had to be added because FastAPI's default 422 handler returns the
+    request body verbatim.
+    """
+    from orchestrator import credentials as _C
+    from orchestrator.secrets import SecretError
+    target = (body.get("target") or "").strip()
+    secret = body.get("secret") or ""
+    if not target:
+        raise HTTPException(status_code=400, detail="target required")
+    if not secret:
+        raise HTTPException(status_code=400, detail="secret required")
+    db = await get_db()
+    try:
+        cid = await _C.store(
+            db, target,
+            (body.get("label") or "").strip() or "default",
+            (body.get("username") or "").strip(), secret,
+            role=(body.get("role") or "user").strip(),
+            kind=(body.get("kind") or "form").strip(),
+            login_url=(body.get("login_url") or "").strip(),
+            verify_url=(body.get("verify_url") or "").strip(),
+            username_field=(body.get("username_field") or "username").strip(),
+            password_field=(body.get("password_field") or "password").strip(),
+            engagement_id=(body.get("engagement_id") or None))
+        await db.commit()
+        creds = await _C.listing(db, target)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except SecretError as e:
+        # The refusal is the feature: storing readable text when the key is
+        # unavailable looks identical from outside and is the exact failure
+        # encryption exists to prevent. Say what to fix.
+        raise HTTPException(status_code=503, detail=str(e))
+    finally:
+        secret = ""
+        await db.close()
+    return {"ok": True, "credential_id": cid, "credentials": creds}
+
+
+@app.post("/api/v2/targets/credentials/{credential_id}/login")
+async def v2_credentials_login(credential_id: str):
+    """Log in with a stored credential.
+
+    NO BODY, deliberately. Every destination comes from the stored row; a URL
+    parameter here would let a caller send a password they do not know to a
+    host they choose.
+    """
+    from orchestrator import credentials as _C
+    from orchestrator import login as _L
+    db = await get_db()
+    try:
+        try:
+            report = await _L.authenticate(db, credential_id)
+        except KeyError:
+            raise HTTPException(status_code=404, detail="credential not found")
+        row = await (await db.execute(
+            "SELECT target_key FROM engagement_credentials WHERE id = ?",
+            (credential_id,))).fetchone()
+        sessions = await _C.sessions_for(db, credential_id)
+        state = await _C.auth_state(db, row[0]) if row else None
+    finally:
+        await db.close()
+    return {**report, "sessions": sessions, "auth": state}
+
+
+@app.post("/api/v2/sessions/{session_id}/revoke")
+async def v2_session_revoke(session_id: str):
+    """Stop a session being usable. Keeps the row."""
+    from orchestrator import credentials as _C
+    db = await get_db()
+    try:
+        done = await _C.revoke_session(db, session_id)
+        await db.commit()
+    finally:
+        await db.close()
+    return {"ok": done}
+
+
+@app.delete("/api/v2/targets/credentials/{credential_id}")
+async def v2_credentials_destroy(credential_id: str, by: str = ""):
+    """Destroy a credential and every session it produced.
+
+    A real DELETE, unlike everything else in this codebase, because the row
+    holds a client's password and an operator must be able to honour a request
+    to destroy it. The identifier survives in `destroyed_credentials`.
+    """
+    from orchestrator import credentials as _C
+    db = await get_db()
+    try:
+        done = await _C.destroy(db, credential_id, by=by)
+        await db.commit()
+    finally:
+        await db.close()
+    if not done:
+        raise HTTPException(status_code=404, detail="credential not found")
+    return {"ok": True, "destroyed": credential_id}
 
 
 @app.get("/api/v2/targets/declared")
