@@ -246,3 +246,121 @@ class TestReportIsHonest:
         hosts, note = asyncio.run(R.enumerate_passive("acme.example"))
         assert hosts == ["app.acme.example", "b.acme.example"]
         assert "discarded" in note
+
+
+class TestTheOperatorCanSeeWhatWillTouchTheCustomer:
+    """`GET /api/engagements/recon/tools` existed with NO caller.
+
+    The handler's own docstring says "an operator authorising a scan should be
+    able to see that" — and the DISCOVER SUBDOMAINS button, which CONNECTS to
+    the customer's hosts, sat next to nothing that said which tools would run
+    or which of them make contact.
+
+    Two different questions are answered, and conflating them is the bug:
+
+      WHICH TOOLS TOUCH THE CUSTOMER — the authorisation question. A passive
+      lookup against a third-party dataset and a connection to the client's
+      host are not the same act, and only one of them needs permission.
+
+      WHICH ARE MISSING — the "why did this return nothing" question. An absent
+      subfinder makes enumeration return an empty list, and an empty list reads
+      as "this customer has no subdomains".
+    """
+
+    @staticmethod
+    def _html():
+        from pathlib import Path
+        return Path("dashboard/templates/index.html").read_text()
+
+    @classmethod
+    def _fn(cls):
+        """The body of engLoadReconTools, by brace matching."""
+        html = cls._html()
+        i = html.index("async function engLoadReconTools")
+        depth, start = 0, html.index("{", html.index(")", i))
+        for k in range(start, len(html)):
+            if html[k] == "{":
+                depth += 1
+            elif html[k] == "}":
+                depth -= 1
+                if depth == 0:
+                    return html[i:k + 1]
+        raise AssertionError("unbalanced braces")
+
+    def test_the_endpoint_reports_both_facts_per_tool(self):
+        import warnings
+        warnings.filterwarnings("ignore", category=DeprecationWarning)
+        from fastapi.testclient import TestClient
+        import orchestrator.main as M
+        tools = TestClient(M.app).get("/api/engagements/recon/tools").json()["tools"]
+        assert tools, "no tools reported"
+        for t in tools:
+            assert set(("tool", "active", "installed", "what")) <= set(t), t
+        assert any(t["active"] for t in tools), "nothing is marked as contacting the target"
+        assert any(not t["active"] for t in tools), "nothing is marked passive"
+
+    def test_the_dashboard_actually_calls_it(self):
+        """It had zero callers — the whole defect."""
+        html = self._html()
+        assert "/api/engagements/recon/tools" in html
+        assert "engLoadReconTools" in html
+        assert "engLoadReconTools();" in html, "defined but never invoked"
+
+    def test_it_renders_where_the_operator_authorises_contact(self):
+        """Next to the buttons, not on some other screen."""
+        html = self._html()
+        i = html.index('id="eng-recon-tools"')
+        j = html.index('onclick="engRecon(true)"')
+        assert i < j, "the inventory renders after the button that uses it"
+        assert j - i < 2000, "the inventory is not adjacent to the recon buttons"
+
+    def test_active_tools_are_marked_as_contacting_the_target(self):
+        block = self._html()
+        i = block.index("async function engLoadReconTools")
+        body = block[i:i + 2600]
+        assert "CONTACTS THE TARGET" in body
+        assert "passive" in body
+
+    # These two anchor on the CONDITIONAL, not on the words inside the branch.
+    # A first version asserted that "activeMissing" and the warning text merely
+    # appeared in the function — and both survive `if (activeMissing.length)`
+    # becoming `if (false)`, because the identifier is still declared above and
+    # the message still sits in the dead branch. The mutation passed. Same trap
+    # as a Dockerfile check satisfied by a comment.
+    #
+    # This is still source inspection: it proves the branch is reachable, not
+    # that it renders correctly. The rendering was verified in a browser
+    # against a fabricated degraded toolset.
+    def test_a_missing_active_tool_is_called_out(self):
+        """Otherwise DISCOVER SUBDOMAINS quietly does less than it says."""
+        blk = self._fn()
+        assert "if (activeMissing.length) {" in blk, \
+            "the warning branch is unreachable"
+        assert "will do less than it says" in blk
+
+    def test_a_missing_subfinder_is_called_out_specifically(self):
+        """An empty enumeration is not the same claim as "no subdomains"."""
+        blk = self._fn()
+        assert "if (missing.some(t => t.tool === 'subfinder')) {" in blk, \
+            "the subfinder branch is unreachable"
+        assert "no subdomains" in blk
+
+    def test_the_two_degraded_branches_are_derived_from_the_data(self):
+        """Guard on the guard: both conditions must be computed from the tool
+        list, not hardcoded."""
+        blk = self._fn()
+        assert "const activeMissing = active.filter(t => !t.installed);" in blk
+        assert "const missing = tools.filter(t => !t.installed);" in blk
+
+    def test_a_failure_to_read_the_toolset_is_not_silent(self):
+        """Rendering nothing would look like "no tools contact the target"."""
+        body = self._html()
+        i = body.index("async function engLoadReconTools")
+        blk = body[i:i + 1400]
+        assert "could not read the recon toolset" in blk
+
+    def test_tool_names_are_escaped(self):
+        body = self._html()
+        i = body.index("async function engLoadReconTools")
+        blk = body[i:i + 3000]
+        assert "tlEsc(t.tool)" in blk and "tlEsc(t.what)" in blk

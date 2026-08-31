@@ -2505,6 +2505,8 @@
                         <button onclick="engAddScope()" class="font-pixel px-3 py-1 rounded border"
                             style="font-size:0.55rem;">ADD RULE</button>
                     </div>
+                    <div id="eng-recon-tools" class="font-mono mb-2"
+                        style="font-size:0.58rem;"></div>
                     <div class="flex gap-2 mt-3 flex-wrap items-center"
                         style="border-top:1px solid #1e242c; padding-top:10px;">
                         <button onclick="engRecon(true)" class="font-pixel px-3 py-1 rounded border"
@@ -2642,6 +2644,7 @@
                 b.addEventListener('click', () => engToTestLab(b.dataset.engtestlab, engCurrent)));
             engFillRecord(e);
             engShowWindow(d);
+            engLoadReconTools();
             engLoadRevisions(engCurrent);
             det.classList.remove('hidden');
         }
@@ -2832,6 +2835,73 @@
 
         // Domain recon. `probe=false` returns the name list without connecting
         // to anything — the option an operator wants before a scan window opens.
+
+        // ===== RECON TOOLSET =====
+        // The operator presses DISCOVER SUBDOMAINS, which CONNECTS to the
+        // customer's hosts, and the page never said which tools would run or
+        // which of them make contact. The endpoint that answers exactly that
+        // existed and had no caller — the handler's own docstring says "an
+        // operator authorising a scan should be able to see that".
+        //
+        // Two questions are being answered here, and they are different:
+        //   * WHICH TOOLS TOUCH THE CUSTOMER — the authorisation question. A
+        //     passive lookup against a third-party dataset and a connection to
+        //     the client's host are not the same act.
+        //   * WHICH ARE MISSING — the "why did this return nothing" question.
+        //     An absent subfinder makes enumeration return an empty list, and
+        //     an empty list reads as "this customer has no subdomains".
+        let __reconTools = null;
+
+        async function engLoadReconTools() {
+            const el = document.getElementById('eng-recon-tools');
+            if (!el) return;
+            if (!__reconTools) {
+                try {
+                    __reconTools = (await (await fetch(
+                        '/api/engagements/recon/tools')).json()).tools || [];
+                } catch (e) {
+                    el.innerHTML = '<span style="color:var(--neon-yellow);">'
+                        + 'could not read the recon toolset &mdash; what runs is unknown</span>';
+                    return;
+                }
+            }
+            const tools = __reconTools;
+            const active = tools.filter(t => t.active);
+            const missing = tools.filter(t => !t.installed);
+            const activeMissing = active.filter(t => !t.installed);
+
+            const rows = tools.map(t => {
+                const dot = t.active ? '&#9679;' : '&#9675;';
+                const col = t.active ? 'var(--neon-yellow)' : '#6a6a8a';
+                const tag = t.active ? 'CONTACTS THE TARGET' : 'passive';
+                const state = t.installed
+                    ? ''
+                    : ' <span style="color:var(--neon-red);">NOT INSTALLED</span>';
+                return `<div style="padding:1px 0; color:#8a8aa0;">
+                    <span style="color:${col};">${dot}</span>
+                    <b style="color:#d8d8e8;">${tlEsc(t.tool)}</b>
+                    <span style="color:${col};"> ${tag}</span>
+                    &mdash; ${tlEsc(t.what)}${state}</div>`;
+            }).join('');
+
+            let note = `<div style="color:#6a6a8a; margin-top:3px;">
+                DISCOVER SUBDOMAINS runs ${active.length} tool(s) that connect to the
+                customer's hosts. NAMES ONLY runs none of them.</div>`;
+            if (activeMissing.length) {
+                note += `<div style="color:var(--neon-yellow);">
+                    ${activeMissing.length} of those is not installed, so DISCOVER
+                    SUBDOMAINS will do less than it says.</div>`;
+            }
+            if (missing.some(t => t.tool === 'subfinder')) {
+                note += `<div style="color:var(--neon-red);">
+                    subfinder is missing &mdash; enumeration returns an empty list, which
+                    is not the same as "this customer has no subdomains".</div>`;
+            }
+            el.innerHTML = `<div class="font-pixel" style="font-size:0.45rem; color:#6a6a8a;
+                margin-bottom:3px;">RECON TOOLSET &mdash; WHAT RUNS, AND WHAT TOUCHES THE
+                CUSTOMER</div>${rows}${note}`;
+        }
+
         async function engRecon(probe) {
             const out = document.getElementById('eng-recon-out');
             out.style.color = 'var(--neon-cyan)';
