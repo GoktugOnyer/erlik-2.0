@@ -2074,3 +2074,120 @@ class TestTheAuthorisationWindowIsEnforced:
         assert "Authorisation is valid" in scoped
         assert scoped.index("Authorisation is valid") < scoped.index("Scope is declared"), \
             "an expired engagement must block every rung below it"
+
+
+class TestTheDeterministicLaneBelongsToACustomer:
+    """`v2_runs.engagement_id` had NO writer. The INSERT omitted the column and
+    then read it back out of the row it had just written, so it was NULL by
+    construction on every run that has ever happened — while the comment beside
+    it explained why the asset inventory mattered.
+
+    The deterministic lane is the half erlik asks a client to trust, and it was
+    the half outside the customer boundary: `POST /api/v2/testcases/{id}/run`
+    passed the target straight to run_test_case with no scope check at all.
+    """
+
+    @staticmethod
+    def _client(tmp_path):
+        import asyncio
+        import warnings
+        warnings.filterwarnings("ignore", category=DeprecationWarning)
+        from fastapi.testclient import TestClient
+        import orchestrator.database as db_mod
+        import orchestrator.main as M
+        db_mod.DB_PATH = str(tmp_path / "v2.db")
+        asyncio.run(db_mod.init_db())
+        return TestClient(M.app)
+
+    CASE = "WSTG-INFO-02"
+
+    def _body(self, eid, host="app.acme.example", port=80):
+        return {"target": {"url": f"http://{host}",
+                           "scope": {"allow_hosts": [host], "allow_ports": [port]}},
+                "engagement_id": eid}
+
+    def test_the_run_records_its_customer(self, tmp_path):
+        import asyncio
+        import orchestrator.database as db_mod
+        old = db_mod.DB_PATH
+        try:
+            c = self._client(tmp_path)
+            eid = c.post("/api/engagements", json={
+                "client_name": "Acme", "root_domain": "acme.example"}
+                ).json()["engagement"]["id"]
+            r = c.post(f"/api/v2/testcases/{self.CASE}/run", json=self._body(eid))
+            assert r.status_code == 200, r.text
+            run_id = r.json()["run_id"]
+
+            async def read():
+                db = await db_mod.get_db()
+                row = await (await db.execute(
+                    "SELECT engagement_id FROM v2_runs WHERE id = ?", (run_id,))).fetchone()
+                await db.close()
+                return row[0]
+
+            assert asyncio.run(read()) == eid, "the run did not record its customer"
+        finally:
+            db_mod.DB_PATH = old
+
+    def test_the_lane_is_scope_gated(self, tmp_path):
+        """It had no gate at all — the target went straight to run_test_case."""
+        import orchestrator.database as db_mod
+        old = db_mod.DB_PATH
+        try:
+            c = self._client(tmp_path)
+            eid = c.post("/api/engagements", json={
+                "client_name": "Acme", "root_domain": "acme.example"}
+                ).json()["engagement"]["id"]
+            r = c.post(f"/api/v2/testcases/{self.CASE}/run",
+                       json=self._body(eid, host="not-acme.example"))
+            assert r.status_code == 403, r.text
+            assert "not in scope" in r.json()["detail"]
+        finally:
+            db_mod.DB_PATH = old
+
+    def test_an_expired_engagement_stops_the_deterministic_lane_too(self, tmp_path):
+        import orchestrator.database as db_mod
+        old = db_mod.DB_PATH
+        try:
+            c = self._client(tmp_path)
+            eid = c.post("/api/engagements", json={
+                "client_name": "Acme", "root_domain": "acme.example",
+                "authorised_until": "2020-01-01"}).json()["engagement"]["id"]
+            r = c.post(f"/api/v2/testcases/{self.CASE}/run", json=self._body(eid))
+            assert r.status_code == 403
+            assert "authorisation" in r.json()["detail"]
+        finally:
+            db_mod.DB_PATH = old
+
+    def test_a_run_with_no_engagement_still_works(self, tmp_path):
+        """Every recorded v2 run predates this and has no customer."""
+        import orchestrator.database as db_mod
+        old = db_mod.DB_PATH
+        try:
+            c = self._client(tmp_path)
+            body = self._body(None)
+            body.pop("engagement_id")
+            r = c.post(f"/api/v2/testcases/{self.CASE}/run", json=body)
+            assert r.status_code == 200, r.text
+        finally:
+            db_mod.DB_PATH = old
+
+    def test_save_run_writes_the_value_it_was_given(self):
+        """It read the column back from the row it had just inserted without
+        it — NULL by construction. The source must not do that again."""
+        import inspect
+        from orchestrator.testcase import persistence as P
+        src = inspect.getsource(P.save_run)
+        assert "engagement_id: str | None = None" in src
+        assert "engagement_id)" in src, "the column is not in the INSERT"
+        i = src.index("_eid = engagement_id")
+        assert "SELECT engagement_id FROM v2_runs WHERE id = ?", src[i:i + 400]
+        assert "WHERE id = ?\",\n                    (chain_root_run_id,)" in src, \
+            "the fallback must read the CHAIN ROOT, never the row just written"
+
+    def test_a_chained_run_inherits_the_customer(self):
+        import inspect
+        from orchestrator.testcase import persistence as P
+        src = inspect.getsource(P.save_chain)
+        assert "engagement_id=engagement_id" in src

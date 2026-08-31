@@ -218,8 +218,11 @@ class TestConsolidationDoesNotDestroyRows:
         raw, t, sev = asyncio.run(go())
         assert raw == 3, "consolidation deleted rows"
         ep = t[0]["children"][0]["children"][0]
+        # `lane` distinguishes a detector-proved finding from a model-asserted
+        # one — see the lane test below.
         assert ep["findings"] == [
-            {"vuln_type": "SQL Injection", "severity": "high", "count": 3}]
+            {"vuln_type": "SQL Injection", "severity": "high", "count": 3,
+             "lane": "agent"}]
         assert sev == {"high": 3}, "rollup lost the count"
 
     def test_rollup_climbs_the_whole_subtree(self, tmp_path, monkeypatch):
@@ -391,3 +394,100 @@ class TestTheModelIsReachableFromARealRun:
             assert r.status_code == 200, r.text
         finally:
             db_mod.DB_PATH = original
+
+
+class TestTheTreeShowsBothLanes:
+    """It read only `findings` — the agent lane. A host the DETERMINISTIC lane
+    found something on rendered with no findings at all, and `v2_findings` has
+    carried an asset_id since the v2 run learned its engagement.
+
+    `lane` is kept per row rather than merged away: "SQL Injection x3" means
+    something different when a detector proved it than when a model asserted
+    it, and a client table that flattens the two cannot be un-flattened later.
+    """
+
+    def test_a_deterministic_finding_appears_on_its_asset(self, tmp_path, monkeypatch):
+        db_mod = _fresh(tmp_path, monkeypatch)
+        from orchestrator import engagement as E
+
+        async def go():
+            await db_mod.init_db()
+            db = await db_mod.get_db()
+            eid = await E.create(db, "Acme", "acme.com")
+            leaf, _ = await A.path_for_url(db, eid, "https://app.acme.com/api")
+            await db.execute(
+                "INSERT INTO v2_runs (id, test_case_id, target_json, engagement_id) "
+                "VALUES ('r1','WSTG-INPV-05','{}',?)", (eid,))
+            await db.execute(
+                "INSERT INTO v2_findings (run_id, test_case_id, step, vuln_type, "
+                "severity, url, evidence, asset_id) VALUES ('r1','WSTG-INPV-05',"
+                "'s','SQL Injection','high','https://app.acme.com/api','e',?)", (leaf,))
+            await db.commit()
+            t = await A.tree(db, eid)
+            await db.close()
+            return t
+
+        t = asyncio.run(go())
+        ep = t[0]["children"][0]["children"][0]
+        assert ep["findings"], "a deterministic finding is invisible on its asset"
+        assert ep["findings"][0]["lane"] == "deterministic"
+
+    def test_the_two_lanes_stay_distinguishable(self, tmp_path, monkeypatch):
+        db_mod = _fresh(tmp_path, monkeypatch)
+        from orchestrator import engagement as E
+
+        async def go():
+            await db_mod.init_db()
+            db = await db_mod.get_db()
+            eid = await E.create(db, "Acme", "acme.com")
+            leaf, _ = await A.path_for_url(db, eid, "https://app.acme.com/api")
+            await db.execute(
+                "INSERT INTO sessions (id, target_url, scope_mode, system_prompt, "
+                "model, enabled_tools, status, engagement_id) "
+                "VALUES ('s1','https://app.acme.com','full','','m','','completed',?)",
+                (eid,))
+            await db.execute(
+                "INSERT INTO findings (session_id, vuln_type, severity, url, evidence, "
+                "asset_id) VALUES ('s1','SQL Injection','high','u','e',?)", (leaf,))
+            await db.execute(
+                "INSERT INTO v2_runs (id, test_case_id, target_json, engagement_id) "
+                "VALUES ('r1','WSTG-INPV-05','{}',?)", (eid,))
+            await db.execute(
+                "INSERT INTO v2_findings (run_id, test_case_id, step, vuln_type, "
+                "severity, url, evidence, asset_id) VALUES ('r1','WSTG-INPV-05','s',"
+                "'SQL Injection','high','u','e',?)", (leaf,))
+            await db.commit()
+            t = await A.tree(db, eid)
+            await db.close()
+            return t
+
+        ep = asyncio.run(go())[0]["children"][0]["children"][0]
+        lanes = sorted(f["lane"] for f in ep["findings"])
+        assert lanes == ["agent", "deterministic"], lanes
+        assert A.rollup([{"findings": ep["findings"], "children": []}]) == {"high": 2}
+
+    def test_severity_is_normalised_in_the_tree(self, tmp_path, monkeypatch):
+        """The corpus contains '** CRITICAL' beside 'critical'. A tree showing
+        both is not a summary."""
+        db_mod = _fresh(tmp_path, monkeypatch)
+        from orchestrator import engagement as E
+
+        async def go():
+            await db_mod.init_db()
+            db = await db_mod.get_db()
+            eid = await E.create(db, "Acme", "acme.com")
+            leaf, _ = await A.path_for_url(db, eid, "https://app.acme.com/api")
+            await db.execute(
+                "INSERT INTO v2_runs (id, test_case_id, target_json, engagement_id) "
+                "VALUES ('r1','X','{}',?)", (eid,))
+            await db.execute(
+                "INSERT INTO v2_findings (run_id, test_case_id, step, vuln_type, "
+                "severity, url, evidence, asset_id) VALUES ('r1','X','s','A',"
+                "'** CRITICAL','u','e',?)", (leaf,))
+            await db.commit()
+            t = await A.tree(db, eid)
+            await db.close()
+            return t
+
+        ep = asyncio.run(go())[0]["children"][0]["children"][0]
+        assert ep["findings"][0]["severity"] == "critical", ep["findings"]

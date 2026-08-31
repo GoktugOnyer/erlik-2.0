@@ -5617,6 +5617,13 @@ async def run_v2_test_case(test_case_id: str, body: dict):
     target = body.get("target") or {}
     provider = body.get("provider")
     model = body.get("model")
+    engagement_id = body.get("engagement_id")
+
+    # The deterministic lane had NO scope gate at all: the target went straight
+    # to run_test_case. The agent lane has been gated since the engagement
+    # spine landed, so the half erlik asks a client to trust was the half that
+    # could run anywhere. Same function, so the two cannot diverge.
+    await enforce_engagement_scope(engagement_id, target.get("url") or "")
 
     try:
         # db is passed so a step carrying an auth HANDLE can resolve it at
@@ -5626,7 +5633,8 @@ async def run_v2_test_case(test_case_id: str, body: dict):
                                      db=await get_db())
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    run_id = await save_v2_run(result, provider=provider, model=model)
+    run_id = await save_v2_run(result, provider=provider, model=model,
+                               engagement_id=engagement_id)
     out = result.model_dump()
     out["run_id"] = run_id
     return out
