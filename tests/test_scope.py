@@ -23,6 +23,8 @@ import pytest
 
 import orchestrator.tool_executor as te
 
+from tests import corpus  # noqa: E402
+
 
 TARGET = "http://juice-shop:3000"
 ALIASES = {"nc": "netcat", "ncat": "netcat", "zap-cli": "zap-cli",
@@ -184,6 +186,7 @@ class TestSegmentToolset:
         db = Path(__file__).resolve().parents[1] / "data" / "pentest.db"
         if not db.exists():
             pytest.skip("no recorded corpus in this checkout")
+        corpus.require("steps")
         # Replay each command against ITS OWN session's toolset, not a
         # hand-written one. The fixed TOOLSET above lists ten tools; production
         # grants ~30 (see the sessions.enabled_tools default in database.py,

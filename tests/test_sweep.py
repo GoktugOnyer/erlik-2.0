@@ -31,8 +31,24 @@ from orchestrator.testcase import sweep as S  # noqa: E402
 
 
 @pytest.fixture(scope="module")
-def client():
-    return TestClient(M.app)
+def client(tmp_path_factory):
+    """Against a TEMP database with the schema created.
+
+    The plan endpoint reads `target_endpoints` (discovered endpoints feed the
+    planner), so it needs a schema. Pointed at the operator's real DB_PATH it
+    passed locally and failed on a fresh clone with "no such table:
+    target_endpoints" — a test that only works on the machine that has already
+    been used.
+    """
+    import asyncio
+    import orchestrator.database as db_mod
+    original = db_mod.DB_PATH
+    db_mod.DB_PATH = str(tmp_path_factory.mktemp("sweep") / "s.db")
+    asyncio.run(db_mod.init_db())
+    try:
+        yield TestClient(M.app)
+    finally:
+        db_mod.DB_PATH = original
 
 
 BASE = "http://target.test:8080"

@@ -30,6 +30,8 @@ import yaml
 import orchestrator.tool_executor as T
 from orchestrator.detection import auto_detect_findings
 
+from tests import corpus  # noqa: E402
+
 
 @pytest.fixture(autouse=True)
 def _safe_on(monkeypatch):
@@ -176,6 +178,7 @@ class TestAgainstRealCommandCorpora:
         db = pathlib.Path(__file__).resolve().parents[1] / "data" / "pentest.db"
         if not db.exists():
             pytest.skip("no recorded corpus")
+        corpus.require("steps")
         rows = [r[0] for r in sqlite3.connect(f"file:{db}?mode=ro", uri=True).execute(
             "SELECT tool_input FROM steps WHERE tool_input IS NOT NULL AND tool_input != ''")]
         denied = [c for c in rows if T._safe_mode_violation(c)]

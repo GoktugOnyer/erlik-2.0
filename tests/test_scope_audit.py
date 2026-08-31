@@ -27,6 +27,8 @@ import pytest
 import orchestrator.main as M
 from orchestrator.tool_executor import extract_hosts
 
+from tests import corpus  # noqa: E402
+
 TARGET = "http://juice-shop:3000"
 
 
@@ -120,6 +122,7 @@ class TestAgainstTheRealCorpus:
         db = Path(__file__).resolve().parents[1] / "data" / "pentest.db"
         if not db.exists():
             pytest.skip("no recorded corpus")
+        corpus.require("findings")
         con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
         con.row_factory = sqlite3.Row
         rows = [dict(r) for r in con.execute(

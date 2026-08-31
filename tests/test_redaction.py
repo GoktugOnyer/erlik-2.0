@@ -23,6 +23,8 @@ from orchestrator import redaction as R
 from orchestrator.redaction import mask, census, mask_url, PLACEHOLDER_RX
 from orchestrator.primitives import _AUTH_FLAGS
 
+from tests import corpus  # noqa: E402
+
 JWT_A = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOjF9.AAAAAAAAAAAA"
 JWT_B = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOjJ9.BBBBBBBBBBBB"
 COOKIE = "session=abc123def456ghi789"
@@ -209,6 +211,7 @@ class TestAgainstTheRealCorpus:
         db = Path(__file__).resolve().parents[1] / "data" / "pentest.db"
         if not db.exists():
             pytest.skip("no recorded corpus")
+        corpus.require("findings")
         con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
         out = []
         for tbl, col in (("findings", "evidence"), ("findings", "url"),

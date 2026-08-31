@@ -40,7 +40,26 @@ PLACEHOLDER_RX = re.compile(r"<[a-z_]+:redacted:[0-9a-f]{4}>")
 
 @pytest.fixture(scope="module")
 def export():
-    return TestClient(M.app).get("/api/thesis/export").json()
+    """The recorded corpus, or a skip.
+
+    data/ is gitignored — it holds client findings — so a fresh clone has no
+    database. Without this guard these tests ERROR on the export endpoint and
+    read as product failures rather than as "there is nothing here to check".
+    """
+    import sqlite3
+    try:
+        r = TestClient(M.app).get("/api/thesis/export")
+    except sqlite3.OperationalError as e:
+        # TestClient re-raises server exceptions, so a schema-less database
+        # never reaches a status code — the request raises straight out of the
+        # fixture and nine tests ERROR rather than skip.
+        pytest.skip(f"no recorded corpus in this checkout ({e})")
+    if r.status_code != 200:
+        pytest.skip(f"no recorded corpus in this checkout (export -> {r.status_code})")
+    d = r.json()
+    if not (d.get("tables") or d.get("rows") or d.get("findings")):
+        pytest.skip("corpus present but empty")
+    return d
 
 
 class TestPolicyIsDefaultDeny:
