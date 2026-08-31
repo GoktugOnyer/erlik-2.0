@@ -197,6 +197,41 @@ def normalise_severity(value: str | None) -> str:
     return v if v in SEVERITIES else "info"
 
 
+# WITHHELD BY THE OPERATOR — the one definition of "a human looked at this
+# finding and said it is not real".
+#
+# There were four, and they disagreed. The five machine exports and the chain
+# report tested `== "rejected"`; the findings API and the engagement rollup
+# tested `IN ('rejected','false_positive')`; the markdown report tested
+# NOTHING. So a finding marked false_positive was hidden from the operator's
+# own findings view and excluded from the severity rollup, while still being
+# shipped to SARIF, DefectDojo and Jira — and a rejected finding was excluded
+# from all five exports while still appearing, with full evidence and counted
+# in the header, in the markdown report handed to the client.
+WITHHELD_TRIAGE = ("rejected", "false_positive")
+
+# SQL equivalent, for the two places that filter in the query. Same discipline
+# as SQL_NORMALISE above: a test compares the two across a matrix of values
+# rather than trusting they were written to match.
+# TRIM, like SQL_NORMALISE — `is_withheld` strips before comparing, and the
+# matrix test caught the pair disagreeing on ' Rejected ': withheld in Python,
+# shipped by SQL. Fail closed. Shipping a finding the operator rejected is the
+# worse error of the two.
+SQL_WITHHELD_TRIAGE = ("COALESCE(LOWER(TRIM({col})),'') IN ("
+                       + ",".join(f"'{v}'" for v in WITHHELD_TRIAGE) + ")")
+
+
+def is_withheld(finding: dict) -> bool:
+    """Did a human reject this finding?
+
+    DISTINCT from `classify`. The submission policy demotes on EVIDENCE and is
+    annotate-never-remove: the finding stays in the deliverable, marked. This
+    is an operator's explicit judgement that the finding is not real, and it
+    removes the row — so the count must say so rather than quietly shrink.
+    """
+    return (finding.get("triage_status") or "").strip().lower() in WITHHELD_TRIAGE
+
+
 def current_severity(finding: dict) -> str:
     """The severity a report would show, before policy.
 

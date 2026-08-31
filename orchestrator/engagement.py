@@ -347,7 +347,7 @@ async def summary(db, engagement_id: str) -> dict[str, Any]:
     # Both totals are returned: `findings_by_severity` is OPEN work, and
     # `findings_total` is everything ever recorded, so "3 of 14" is expressible
     # and nothing looks deleted.
-    from orchestrator.submission_policy import current_severity
+    from orchestrator.submission_policy import current_severity, is_withheld
     rows = await (await db.execute(
         "SELECT f.severity, f.calibrated_severity, f.severity_override, f.triage_status "
         "FROM findings f JOIN sessions s ON s.id = f.session_id "
@@ -356,7 +356,7 @@ async def summary(db, engagement_id: str) -> dict[str, Any]:
     rejected = 0
     for r in rows:
         d = dict(r)
-        if (d.get("triage_status") or "").lower() in ("rejected", "false_positive"):
+        if is_withheld(d):
             rejected += 1
             continue
         key = current_severity(d) or "unknown"

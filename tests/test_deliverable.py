@@ -94,10 +94,11 @@ class TestSplitIsSingleSourceOfTruth:
         assert "## Vulnerabilities Found (0)" in md
         assert "SQL Injection" not in md
 
-    def test_default_view_withholds_nothing(self):
-        """Until the submission policy lands, the split must be a pass-through —
-        so this commit provably moves no recorded number."""
-        rows = [{"vuln_type": "XSS"}, {"vuln_type": "SQLi"}]
+    def test_an_untriaged_finding_is_never_withheld(self):
+        """The default is to SHOW. Only an explicit operator verdict removes a
+        finding, so a session nobody has triaged reports exactly what it found."""
+        rows = [{"vuln_type": "XSS"}, {"vuln_type": "SQLi", "triage_status": None},
+                {"vuln_type": "SSRF", "triage_status": "accepted"}]
         included, withheld = M._deliverable_view(rows)
         assert included == rows
         assert withheld == []
@@ -122,6 +123,15 @@ class TestEveryReportRouteIsAccountedFor:
         }
         # The four that serve a pre-generated artifact rather than assembling
         # live; the boundary applies at GENERATION time for these.
+        #
+        # That sentence was FALSE for the two chain routes for as long as it
+        # was written. Their generator, _generate_chain_report, called neither
+        # _deliverable_view nor _policy_verdicts and carried its own second,
+        # unnormalised definition of effective severity — the same "permanent
+        # exemption dressed as a classification" this file condemns twenty
+        # lines below for `assembled_live`. It is true now, and
+        # TestTheChainReportIsAlsoADeliverable asserts it rather than
+        # asserting the claim.
         generated_at_write_time = {
             "/api/sessions/{session_id}/report",
             "/api/sessions/{session_id}/report/download",
@@ -372,3 +382,247 @@ class TestEveryExportPassesTheSubmissionPolicy:
             assert j["statistics"]["informational"] == 0
         finally:
             db_mod.DB_PATH = old
+
+
+class TestOperatorTriageIsOneDefinition:
+    """"The operator says this finding is not real" had FOUR spellings.
+
+        five machine exports   triage_status == "rejected"
+        chain report           triage_status == "rejected"
+        findings API (SQL)     IN ('rejected','false_positive')
+        engagement rollup      IN ('rejected','false_positive')
+        markdown report        (nothing at all)
+
+    So a `false_positive` was hidden from the operator's own findings view and
+    excluded from the engagement severity rollup while still being shipped to
+    SARIF, DefectDojo and Jira; and a `rejected` finding was excluded from all
+    five exports while still appearing in full — and counted in the header — in
+    the markdown report actually handed to the client.
+    """
+
+    def test_the_python_and_sql_predicates_agree(self):
+        """Same discipline as SQL_NORMALISE: compare them, do not trust that
+        they were written to match."""
+        import sqlite3
+        from orchestrator import submission_policy as SP
+        db = sqlite3.connect(":memory:")
+        db.execute("CREATE TABLE f (triage_status TEXT)")
+        matrix = ["rejected", "REJECTED", " Rejected ", "false_positive",
+                  "FALSE_POSITIVE", "accepted", "", None, "confirmed",
+                  "rejected_by_mistake"]
+        for v in matrix:
+            db.execute("DELETE FROM f")
+            db.execute("INSERT INTO f VALUES (?)", (v,))
+            sql = bool(db.execute(
+                "SELECT COUNT(*) FROM f WHERE "
+                + SP.SQL_WITHHELD_TRIAGE.format(col="triage_status")).fetchone()[0])
+            py = SP.is_withheld({"triage_status": v})
+            assert sql == py, f"{v!r}: SQL={sql} python={py}"
+
+    def test_both_verdicts_are_withheld(self):
+        from orchestrator import submission_policy as SP
+        assert SP.is_withheld({"triage_status": "rejected"})
+        assert SP.is_withheld({"triage_status": "false_positive"})
+        assert not SP.is_withheld({"triage_status": "accepted"})
+        assert not SP.is_withheld({})
+
+    def test_no_hand_rolled_predicate_survives(self):
+        """The four spellings are gone, and a fifth cannot be added quietly."""
+        import re
+        from pathlib import Path
+        pat = re.compile(r"""triage_status["']?\s*(\)\s*)?(or\s+["']{2}\s*\)\s*)?"""
+                         r"""(\.lower\(\)\s*)?(==|\bin\b)\s*[\("']""")
+        offenders = []
+        for f in (Path("orchestrator/main.py"), Path("orchestrator/engagement.py")):
+            for n, line in enumerate(f.read_text().splitlines(), 1):
+                if line.lstrip().startswith("#"):
+                    continue
+                if pat.search(line):
+                    offenders.append(f"{f}:{n}: {line.strip()}")
+        assert not offenders, (
+            "hand-rolled triage predicate — use submission_policy.is_withheld "
+            "or SQL_WITHHELD_TRIAGE:\n" + "\n".join(offenders))
+
+
+class TestTheMarkdownAgreesWithTheExports:
+    """The defect the whole boundary exists to prevent, still live in the one
+    artifact a client actually reads.
+
+    Measured before the fix: one session, one rejected finding — report.md said
+    2 findings and listed the rejected one with full evidence, while report.json
+    and report.sarif for that same session said 1. The dashboard meanwhile tells
+    the operator, at index.html, "rejected are excluded from the report +
+    exports".
+    """
+
+    @staticmethod
+    def _all_four(tmp_path):
+        import asyncio
+        import warnings
+        warnings.filterwarnings("ignore", category=DeprecationWarning)
+        from fastapi.testclient import TestClient
+        import orchestrator.database as db_mod
+        import orchestrator.main as M
+        old = db_mod.DB_PATH, db_mod.DB_DIR, M.REPORTS_DIR
+        db_mod.DB_DIR = tmp_path
+        db_mod.DB_PATH = tmp_path / "agree.db"
+        M.REPORTS_DIR = tmp_path / "reports"
+        try:
+            async def seed():
+                await db_mod.init_db()
+                db = await db_mod.get_db()
+                await db.execute(
+                    "INSERT INTO chains (id,target_url) VALUES ('c1','http://a')")
+                await db.execute(
+                    "INSERT INTO sessions (id,target_url,system_prompt,status,"
+                    "scope_mode,model,enabled_tools,chain_id,chain_phase,"
+                    "chain_position,total_steps,total_findings) VALUES "
+                    "('s1','http://a','p','completed','full','m','curl','c1',"
+                    "'recon',0,2,2)")
+                for vt, tri in (("Ghost XSS", "rejected"),
+                                ("SQL Injection", "accepted")):
+                    await db.execute(
+                        "INSERT INTO findings (session_id,vuln_type,severity,url,"
+                        "evidence,triage_status) VALUES ('s1',?,'high',"
+                        "'http://a/x','ev',?)", (vt, tri))
+                await db.commit()
+                await db.close()
+
+                async def fake_chat(*a, **k):
+                    return "stub"
+                M.llm_client.chat = fake_chat
+                md, _s, _ms = await M._generate_report(
+                    "s1", "m", "http://a", "cold", "general", 2, 2, 500)
+                await M._generate_chain_report("c1", "http://a")
+                return md, (M.REPORTS_DIR / "chain_c1.md").read_text()
+
+            md, chain = asyncio.run(seed())
+            c = TestClient(M.app)
+            return {
+                "markdown": md,
+                "json": c.get("/api/sessions/s1/report.json").json(),
+                "sarif": c.get("/api/sessions/s1/report.sarif").json(),
+                "chain": chain,
+            }
+        finally:
+            db_mod.DB_PATH, db_mod.DB_DIR, M.REPORTS_DIR = old
+
+    def test_every_deliverable_reports_the_same_number(self, tmp_path):
+        import re
+        d = self._all_four(tmp_path)
+        md_header = int(re.search(r"\| \*\*Findings\*\* \| (\d+) \|", d["markdown"]).group(1))
+        md_section = int(re.search(r"## Vulnerabilities Found \((\d+)\)", d["markdown"]).group(1))
+        counts = {
+            "report.md header": md_header,
+            "report.md section": md_section,
+            "report.json": d["json"]["statistics"]["total"],
+            "report.sarif": len(d["sarif"]["runs"][0]["results"]),
+            "chain report.md": int(
+                re.search(r"Unique findings:\*\* (\d+)", d["chain"]).group(1)),
+        }
+        assert set(counts.values()) == {1}, counts
+
+    def test_the_rejected_finding_is_in_none_of_them(self, tmp_path):
+        d = self._all_four(tmp_path)
+        assert "Ghost XSS" not in d["markdown"]
+        assert "Ghost XSS" not in str(d["json"])
+        assert "Ghost XSS" not in str(d["sarif"])
+        assert "Ghost XSS" not in d["chain"]
+
+    def test_the_markdown_states_what_it_withheld(self, tmp_path):
+        """Annotate, never silently shrink. A report that drops findings without
+        saying so is indistinguishable from a run that found fewer, and the
+        client has no way to know there is a question to ask."""
+        d = self._all_four(tmp_path)
+        assert "| **Withheld** | 1 (rejected in triage)" in d["markdown"]
+        assert "withheld from this report by operator triage" in d["markdown"]
+
+    def test_the_chain_report_states_it_too(self, tmp_path):
+        """It dropped them silently for its entire existence."""
+        d = self._all_four(tmp_path)
+        assert "withheld by operator triage" in d["chain"]
+        assert "1 rejected" in d["chain"]
+
+
+class TestTheChainReportIsAlsoADeliverable:
+    """The consolidated chain report is the MOST client-facing artifact erlik
+    produces, and it was the only findings table that had never seen the
+    submission policy or the shared severity function.
+
+    `test_no_unclassified_report_route` classified both chain routes as gated
+    "at GENERATION time". Their generator called neither gate.
+    """
+
+    @staticmethod
+    def _render(tmp_path, rows):
+        import asyncio
+        import orchestrator.database as db_mod
+        import orchestrator.main as M
+        old = db_mod.DB_PATH, db_mod.DB_DIR, M.REPORTS_DIR
+        db_mod.DB_DIR = tmp_path
+        db_mod.DB_PATH = tmp_path / "ch.db"
+        M.REPORTS_DIR = tmp_path / "reports"
+        try:
+            async def go():
+                await db_mod.init_db()
+                db = await db_mod.get_db()
+                await db.execute(
+                    "INSERT INTO chains (id,target_url) VALUES ('c1','http://a')")
+                await db.execute(
+                    "INSERT INTO sessions (id,target_url,system_prompt,chain_id,"
+                    "chain_phase,chain_position,total_steps,total_findings) "
+                    "VALUES ('s1','http://a','p','c1','recon',0,1,1)")
+                for vt, sev, cal, ev in rows:
+                    await db.execute(
+                        "INSERT INTO findings (session_id,vuln_type,severity,"
+                        "calibrated_severity,url,evidence) VALUES "
+                        "('s1',?,?,?,'http://a/'||?,?)", (vt, sev, cal, vt, ev))
+                await db.commit()
+                await db.close()
+                await M._generate_chain_report("c1", "http://a")
+                return (M.REPORTS_DIR / "chain_c1.md").read_text()
+            return asyncio.run(go())
+        finally:
+            db_mod.DB_PATH, db_mod.DB_DIR, M.REPORTS_DIR = old
+
+    # `calibrated_severity` really holds this. 11 rows in the recorded corpus
+    # carry a '** ' prefix, one of them '** CRITICAL'.
+    STARRED = ("Broken Access Control", "high", "** CRITICAL", "admin reachable")
+    PLAIN = ("Verbose Errors", "medium", None, "stack trace")
+
+    def test_a_starred_critical_is_counted_as_critical(self, tmp_path):
+        """It rendered as `** CRITICAL`, and the executive summary said
+        "1 critical" for a report holding two."""
+        md = self._render(tmp_path, [self.STARRED, self.PLAIN])
+        assert "** CRITICAL" not in md
+        assert "| CRITICAL |" in md
+        assert "1 critical" in md and "1 medium" in md
+
+    def test_a_starred_critical_sorts_above_a_medium(self, tmp_path):
+        """'** critical' was not a key in the order map, so it fell through to
+        the default and sorted BELOW info — the most severe finding in the
+        report appeared last."""
+        md = self._render(tmp_path, [self.PLAIN, self.STARRED])
+        body = md[md.index("## Consolidated Findings"):]
+        assert body.index("Broken Access Control") < body.index("Verbose Errors")
+
+    def test_the_submission_policy_reaches_the_chain_table(self, tmp_path):
+        """A finding the policy says must never be submitted appeared here as
+        an ordinary medium, while the same session's SARIF marked it."""
+        md = self._render(tmp_path, [
+            ("CORS Misconfiguration", "medium", None, "Access-Control-Allow-Origin: *"),
+            ("SQL Injection", "critical", None, "You have an error in your SQL syntax")])
+        assert "Submittable" in md
+        cors = next(l for l in md.splitlines() if "CORS" in l)
+        sqli = next(l for l in md.splitlines() if "SQL Injection" in l and l.startswith("|"))
+        assert cors.rstrip().endswith("|") and "no — " in cors, cors
+        assert "| yes |" in sqli, sqli
+
+    def test_it_uses_the_shared_severity_function(self, tmp_path):
+        """One definition. A local re-spelling is how the '**' bug got in."""
+        import inspect
+        import orchestrator.main as M
+        src = inspect.getsource(M._generate_chain_report)
+        assert "_sp.current_severity" in src
+        assert 'or f.get("calibrated_severity")' not in src, (
+            "a second effective-severity definition is back")

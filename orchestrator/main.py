@@ -1959,22 +1959,61 @@ def _deliverable_view(findings: list[dict]) -> tuple[list[dict], list[dict]]:
     render points each iterated `findings` independently — the session-info
     count, the `## Vulnerabilities Found (N)` heading and detail loop, the
     summary tables, and the text handed to the executive-summary model — so a
-    filter added to any one of them contradicted the other three inside the same
-    file.
+    filter added to any one of them contradicted the other three inside the
+    same file.
 
-    Nothing is withheld yet: the submission policy (C4), the export redactor
-    (C6) and the scope stamp (C7) are what will populate `withheld`. The seam
-    exists first and on purpose, so those three land in one place instead of
-    each hunting down four render points and missing some.
+    WHAT IT WITHHOLDS: findings an operator triaged away. Nothing else.
+
+    The docstring here used to promise that the submission policy (C4), the
+    export redactor (C6) and the scope stamp (C7) would populate `withheld`.
+    All three shipped, and every one of them deliberately landed elsewhere, for
+    reasons that still hold:
+
+      C4  went to `_policy_verdicts`, applied at the render points, because a
+          verdict computed here would rest on a severity the calibration pass
+          overwrites a few hundred lines later. It is also annotate-never-
+          remove, so it demotes rather than withholds — the wrong shape for
+          this return value.
+      C6  went to `_mask_export_rows`; it rewrites fields, it does not drop rows.
+      C7  went to `_scope_audit`, which is NON-BLOCKING by design: a recorded
+          corpus session has a finding whose URL host differs from the target,
+          and withholding on scope would have emptied every export for it.
+
+    So the promise was stale, and `withheld` stayed empty for as long as it
+    existed. Triage rejection is what belongs here, and it is the one filter
+    immune to the ordering objection above: a human's verdict does not change
+    when the calibration pass runs.
+
+    IT WAS THE MARKDOWN REPORT THAT WAS WRONG. The five machine exports and the
+    chain report already dropped rejected findings; the dashboard tells the
+    operator "rejected are excluded from the report + exports". The markdown —
+    the artifact actually handed to a client — filtered nothing, so a finding
+    the operator had explicitly rejected was still listed in full and still
+    counted in the header, while the SARIF for the same session showed one
+    fewer. Two answers about one engagement.
 
     IMPORTANT: filter HERE, at render — never in the SQL that loads findings.
     The calibration pass runs exactly once over whatever list it is given, so a
     finding filtered out of the query is never calibrated, and anything later
-    un-withheld comes back uncharacterised.
+    un-withheld comes back uncharacterised. Withholding it here has the same
+    effect, which is acceptable ONLY because a rejected finding is excluded
+    from every downstream consumer too — it is never the thing whose empty
+    calibration columns anyone reads.
+
+    THE COUNT MUST SAY SO. `withheld` is not a licence to quietly shrink the
+    total: the caller states how many were withheld and why. A number that
+    silently drops is how the chain report has been reporting for its whole
+    existence, and it is indistinguishable from erlik having found less.
 
     Returns (included, withheld).
     """
-    return list(findings), []
+    from orchestrator.submission_policy import is_withheld
+
+    included: list[dict] = []
+    withheld: list[dict] = []
+    for f in findings:
+        (withheld if is_withheld(f) else included).append(f)
+    return included, withheld
 
 
 def _discovery_filter(target_url: str, tool: str = "gobuster") -> str:
@@ -2163,7 +2202,11 @@ async def _generate_report(session_id: str, model: str, target_url: str,
         # Fetch findings — convert to dicts immediately
         cursor = await db.execute(
             "SELECT id, vuln_type, severity, url, parameter, evidence, "
-            "cve_id, cvss_score, cvss_vector, cwe "
+            # triage_status is SELECTED but not FILTERED ON, so the split below
+            # can state what it withheld. Filtering in SQL would leave the
+            # withheld rows uncalibrated AND uncounted, which is the silent
+            # shrink _deliverable_view exists to prevent.
+            "cve_id, cvss_score, cvss_vector, cwe, triage_status "
             "FROM findings WHERE session_id = ? ORDER BY id", (session_id,)
         )
         raw_findings = await cursor.fetchall()
@@ -2180,6 +2223,7 @@ async def _generate_report(session_id: str, model: str, target_url: str,
                 "cvss_score": row[7],
                 "cvss_vector": row[8],
                 "cwe": row[9],
+                "triage_status": row[10],
             })
     finally:
         await db.close()
@@ -2212,6 +2256,12 @@ async def _generate_report(session_id: str, model: str, target_url: str,
     # `nettacker_findings` enabled the header therefore disagreed with the
     # `## Vulnerabilities Found (N)` section beneath it, in the same file.
     report_lines.append(f"| **Findings** | {len(findings)} |")
+    # A withheld finding is STATED, never silently subtracted. Without this row
+    # a report that dropped three triaged-away findings is indistinguishable
+    # from a run that found three fewer, and the client has no way to ask.
+    if withheld:
+        report_lines.append(
+            f"| **Withheld** | {len(withheld)} (rejected in triage) |")
     report_lines.append(f"| **Date** | {timestamp} |")
     report_lines.append("")
 
@@ -2343,6 +2393,17 @@ async def _generate_report(session_id: str, model: str, target_url: str,
     # ─── Vulnerabilities Found (programmatic — exact evidence + discovery chain) ───
     report_lines.append(f"## Vulnerabilities Found ({len(findings)})")
     report_lines.append("")
+    if withheld:
+        _by = {}
+        for _f in withheld:
+            _k = (_f.get("triage_status") or "?").strip().lower()
+            _by[_k] = _by.get(_k, 0) + 1
+        _detail = ", ".join(f"{_n} {_k.replace('_', ' ')}" for _k, _n in sorted(_by.items()))
+        report_lines.append(
+            f"> {len(withheld)} further finding(s) were recorded and then "
+            f"withheld from this report by operator triage ({_detail}). They "
+            f"are retained in full in the session record.")
+        report_lines.append("")
 
     # Severity color map for inline HTML
     SEV_COLORS = {
@@ -2679,6 +2740,8 @@ async def _build_report_json(session_id: str) -> dict:
     calibrated) finding rows. Source of truth for GET /report.json and the
     on-disk artifact. Uses calibrated_severity when present, else the raw label.
     """
+    from orchestrator import submission_policy as _sp
+
     db = await get_db()
     try:
         srow = await (await db.execute(
@@ -2713,7 +2776,7 @@ async def _build_report_json(session_id: str) -> dict:
     for r in rows:
         # Operator triage: rejected findings are excluded from the deliverable;
         # a severity override wins over calibrated/raw.
-        if r.get("triage_status") == "rejected":
+        if _sp.is_withheld(r):
             continue
         i += 1
         # Normalised, not merely upper-cased. `calibrated_severity` is written
@@ -3367,6 +3430,8 @@ async def _generate_chain_report(chain_id: str, target_url: str) -> str | None:
     them, de-dupes by (vuln_type, URL-without-query), honours triage (rejected
     excluded, severity_override applied), and writes a single chain_<id>.md.
     """
+    from orchestrator import submission_policy as _sp
+
     db = await get_db()
     try:
         cur = await db.execute(
@@ -3378,7 +3443,7 @@ async def _generate_chain_report(chain_id: str, target_url: str) -> str | None:
         sids = [s["id"] for s in sessions]
         ph = ",".join("?" * len(sids))
         cur = await db.execute(
-            f"SELECT vuln_type, severity, url, parameter, evidence, cve_id, "
+            f"SELECT id, vuln_type, severity, url, parameter, evidence, cve_id, "
             f"calibrated_severity, severity_override, triage_status "
             f"FROM findings WHERE session_id IN ({ph}) ORDER BY id", sids)
         findings = [dict(r) for r in await cur.fetchall()]
@@ -3389,13 +3454,22 @@ async def _generate_chain_report(chain_id: str, target_url: str) -> str | None:
     finally:
         await db.close()
 
-    def eff_sev(f):
-        return (f.get("severity_override") or f.get("calibrated_severity")
-                or f.get("severity") or "info").lower()
+    # ONE definition of effective severity, shared with the session report, the
+    # asset tree and the engagement rollup. This was a second, local one, and
+    # it differed in the way that mattered: it lower-cased the raw column
+    # instead of normalising it. `calibrated_severity` really contains
+    # '** CRITICAL' (11 such rows in the recorded corpus, one of them
+    # CRITICAL), so a critical finding rendered as `** CRITICAL`, sorted BELOW
+    # info because '** critical' is not a key in `order`, and vanished from the
+    # executive summary's severity line entirely — a consolidated report said
+    # "1 critical" for two criticals.
+    eff_sev = _sp.current_severity
 
     seen: dict = {}
+    withheld: list[dict] = []
     for f in findings:
-        if (f.get("triage_status") or "") == "rejected":
+        if _sp.is_withheld(f):
+            withheld.append(f)
             continue
         url = (f.get("url") or "").split("?")[0].rstrip("/").lower()
         key = ((f.get("vuln_type") or "").lower(), url)
@@ -3435,14 +3509,34 @@ async def _generate_chain_report(chain_id: str, target_url: str) -> str | None:
     L.append("")
     L.append("## Consolidated Findings")
     L.append("")
+    # STATE the withholding. This dropped triaged-away findings silently for
+    # its whole existence, which is indistinguishable from erlik having found
+    # fewer — the session report states its own withholds for the same reason.
+    if withheld:
+        _wb: dict = {}
+        for _f in withheld:
+            _k = (_f.get("triage_status") or "?").strip().lower()
+            _wb[_k] = _wb.get(_k, 0) + 1
+        L.append(f"> {len(withheld)} finding(s) were withheld by operator triage "
+                 f"({', '.join(f'{n} {k.replace('_', ' ')}' for k, n in sorted(_wb.items()))}) "
+                 f"and are not counted above. They are retained in the session record.")
+        L.append("")
     if unique:
-        L.append("| # | Severity | Type | URL | Evidence |")
-        L.append("|---|---|---|---|---|")
+        # The same submission policy the five machine exports apply. A chain
+        # report is the MOST client-facing artifact erlik produces, and it was
+        # the only findings table that had never seen the policy — so a finding
+        # the policy says must never be submitted appeared here as an ordinary
+        # medium while the same session's SARIF marked it not submittable.
+        _verdicts = _policy_verdicts(unique)
+        L.append("| # | Severity | Type | URL | Evidence | Submittable |")
+        L.append("|---|---|---|---|---|---|")
         for i, f in enumerate(unique, 1):
             ev = (f.get("evidence") or "").replace("|", "/").replace("\n", " ").strip()[:130]
             cve = f" `{f['cve_id']}`" if f.get("cve_id") else ""
+            _rule = _verdicts.get(f.get("id"))
             L.append(f"| {i} | {eff_sev(f).upper()} | {f.get('vuln_type', '?')}{cve} "
-                     f"| {f.get('url', '') or '-'} | {ev} |")
+                     f"| {f.get('url', '') or '-'} | {ev} "
+                     f"| {'no — ' + _rule if _rule else 'yes'} |")
     else:
         L.append("_No findings recorded across the chain._")
     L.append("")
@@ -5352,6 +5446,8 @@ async def list_findings(engagement_id: str | None = None, severity: str | None =
     counted and reachable with status=all|rejected, so triage never looks like
     deletion.
     """
+    from orchestrator import submission_policy as _sp
+
     limit = max(1, min(int(limit or FINDINGS_PAGE_LIMIT), 2000))
     where, params = [], []
 
@@ -5365,9 +5461,9 @@ async def list_findings(engagement_id: str | None = None, severity: str | None =
             params.extend(wanted)
     st = (status or "open").lower()
     if st == "open":
-        where.append("COALESCE(LOWER(f.triage_status),'') NOT IN ('rejected','false_positive')")
+        where.append("NOT " + _sp.SQL_WITHHELD_TRIAGE.format(col="f.triage_status"))
     elif st == "rejected":
-        where.append("COALESCE(LOWER(f.triage_status),'') IN ('rejected','false_positive')")
+        where.append(_sp.SQL_WITHHELD_TRIAGE.format(col="f.triage_status"))
     if q:
         where.append("(LOWER(f.vuln_type) LIKE ? OR LOWER(f.url) LIKE ?)")
         params.extend([f"%{q.lower()}%"] * 2)
