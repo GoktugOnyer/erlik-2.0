@@ -3582,7 +3582,11 @@ async def engagement_rows_for_session(session_id: str):
         if not row or not row[0]:
             return None
         from orchestrator import engagement as _E
-        return await _E.scope_rows(db, row[0])
+        # The whole authorisation, not just the scope rows: the executor
+        # could not enforce the time window because it was never given the
+        # engagement record. An expired engagement must stop work in flight,
+        # not merely be refused at creation.
+        return await _E.authorisation(db, row[0])
     except Exception as e:  # noqa: BLE001
         # Fail LOUD but do not fail open silently: an unreadable scope must not
         # look like "no engagement".
@@ -6111,9 +6115,16 @@ async def enforce_engagement_scope(engagement_id: str | None, target_url: str) -
     finally:
         await db.close()
     if not ok:
-        raise HTTPException(
-            status_code=403,
-            detail=f"{target_url} is not in scope for this engagement — {why}")
+        # Two different refusals, and they need different sentences. Saying
+        # "TARGET is not in scope — authorisation ended 2020-01-01" sends the
+        # operator to edit scope rules that are already correct; the engagement
+        # is simply out of date. Naming the wrong cause is how someone fixes
+        # the wrong thing.
+        window = why.startswith("authorisation")
+        detail = (f"this engagement's authorisation is not currently valid — {why}"
+                  if window
+                  else f"{target_url} is not in scope for this engagement — {why}")
+        raise HTTPException(status_code=403, detail=detail)
 
 
 @app.post("/api/sessions", response_model=SessionResponse)

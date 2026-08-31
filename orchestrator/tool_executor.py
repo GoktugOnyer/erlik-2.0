@@ -567,7 +567,27 @@ def _engagement_violation(command: str, rows) -> str | None:
     """
     if not rows:
         return None
-    from orchestrator.engagement import evaluate_scope
+    from orchestrator.engagement import evaluate_authorisation, evaluate_scope
+
+    # `rows` is the authorisation bundle {engagement, rows} when a session
+    # names a customer. A bare list is still accepted so nothing that passes
+    # scope rows alone silently stops being checked.
+    bundle = rows if isinstance(rows, dict) else None
+    if bundle is not None and not (bundle.get("rows") or bundle.get("engagement")):
+        return None
+
+    if bundle is not None:
+        # The window is a property of the ENGAGEMENT, not of any one host, so
+        # it is checked once — before the per-host loop, and regardless of what
+        # the command touches. An expired engagement authorises nothing at all.
+        from orchestrator.engagement import window_status
+        open_, why = window_status(bundle.get("engagement") or {})
+        if not open_:
+            return (f"the engagement's authorisation window is closed — {why}. "
+                    "Testing outside the authorised period is what that window "
+                    "exists to prevent; extend it on the engagement record "
+                    "before running anything else.")
+
     for host in extract_hosts(command):
         h = (host or "").lower().rstrip(".")
         if not h:
@@ -576,7 +596,9 @@ def _engagement_violation(command: str, rows) -> str | None:
         # asset: blind SSRF/XXE detection is unusable without it.
         if _host_has_suffix(h, _OAST_DOMAINS):
             continue
-        allowed, why = evaluate_scope(rows, f"http://{h}")
+        allowed, why = (evaluate_authorisation(bundle, f"http://{h}")
+                        if bundle is not None
+                        else evaluate_scope(rows, f"http://{h}"))
         if not allowed:
             return (f"host {h!r} is outside the engagement's authorised scope — {why}. "
                     "Add it to the engagement (and approve it) before testing it.")

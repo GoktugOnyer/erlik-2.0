@@ -189,8 +189,93 @@ async def scope_rows(db, engagement_id: str) -> list[dict]:
     return [dict(r) for r in await cur.fetchall()]
 
 
+def window_status(engagement: dict, now=None) -> tuple[bool, str]:
+    """Is the engagement's authorisation window open right now?
+
+    `authorised_from` / `authorised_until` were stored, editable, and displayed
+    on the engagement page — and read by NO gate. An engagement whose window
+    closed last month still authorised runs today. That is the same shape as
+    the scope gate that could never fire, except this one is a date on a
+    contract: testing outside the authorised period is the thing the window
+    exists to prevent.
+
+    RULES, and the two that are easy to get wrong:
+
+      * `until` is INCLUSIVE to the end of that day. A date-only
+        "2026-08-31" means through 23:59:59 on the 31st, not midnight at its
+        start — otherwise the last authorised day is silently lost.
+      * An UNREADABLE date FAILS CLOSED. A legal boundary must not become
+        "unlimited" because someone typed the month wrong. Absent is unlimited;
+        unparseable is not the same thing as absent.
+
+    Both bounds are compared in UTC.
+    """
+    from datetime import datetime, timezone
+
+    now = now or datetime.now(timezone.utc)
+
+    def _parse(raw: str, end_of_day: bool):
+        text = (raw or "").strip()
+        if not text:
+            return None, None
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
+            try:
+                dt = datetime.strptime(text, fmt).replace(tzinfo=timezone.utc)
+            except ValueError:
+                continue
+            if fmt == "%Y-%m-%d" and end_of_day:
+                dt = dt.replace(hour=23, minute=59, second=59)
+            return dt, None
+        return None, text
+
+    start, bad_from = _parse(engagement.get("authorised_from"), end_of_day=False)
+    end, bad_until = _parse(engagement.get("authorised_until"), end_of_day=True)
+
+    if bad_from or bad_until:
+        return False, (f"authorisation window is unreadable "
+                       f"({'authorised_from=' + repr(bad_from) if bad_from else ''}"
+                       f"{' ' if bad_from and bad_until else ''}"
+                       f"{'authorised_until=' + repr(bad_until) if bad_until else ''})"
+                       " — expected YYYY-MM-DD")
+    if start and now < start:
+        return False, f"authorisation begins {start.date().isoformat()}"
+    if end and now > end:
+        return False, f"authorisation ended {end.date().isoformat()}"
+    return True, "within the authorised window"
+
+
+async def authorisation(db, engagement_id: str) -> dict:
+    """Everything a gate needs to authorise work: the record and its scope.
+
+    One loader, so the API gate and the tool executor decide on the same facts.
+    They previously took different inputs — the executor got scope rows alone,
+    which is why the window could not be enforced there at all.
+    """
+    row = await (await db.execute(
+        "SELECT * FROM engagements WHERE id = ?", (engagement_id,))).fetchone()
+    return {"engagement": dict(row) if row else None,
+            "rows": await scope_rows(db, engagement_id)}
+
+
+def evaluate_authorisation(auth: dict, target: str, now=None) -> tuple[bool, str]:
+    """The whole question: is this engagement live, and is the target in scope?
+
+    Window FIRST. An expired engagement authorises nothing, so reporting "in
+    scope via acme.com" for it would name the wrong reason for a decision the
+    operator is about to act on.
+    """
+    e = (auth or {}).get("engagement")
+    if not e:
+        return False, "engagement not found"
+    ok, why = window_status(e, now=now)
+    if not ok:
+        return False, why
+    return evaluate_scope((auth or {}).get("rows") or [], target)
+
+
 async def check(db, engagement_id: str, target: str) -> tuple[bool, str]:
-    return evaluate_scope(await scope_rows(db, engagement_id), target)
+    """Scope AND window. Delegates, so every caller gets both checks."""
+    return evaluate_authorisation(await authorisation(db, engagement_id), target)
 
 
 async def add_target(db, engagement_id: str, base_url: str, **kw) -> str:
@@ -293,6 +378,14 @@ async def summary(db, engagement_id: str) -> dict[str, Any]:
                      "pending_scope": len(out["pending_scope"])}
     # What the caller actually received, and the cap that produced it, so the
     # UI can say "showing 200 of 4,000" rather than implying it has them all.
+    # The window, as the UI must show it: whether it is open, why, and the
+    # bounds themselves. Computed by the same function the gates use, so the
+    # page cannot say "authorised" about an engagement a run would be refused
+    # for.
+    _open, _why = window_status(out["engagement"])
+    out["window"] = {"open": _open, "reason": _why,
+                     "from": out["engagement"].get("authorised_from"),
+                     "until": out["engagement"].get("authorised_until")}
     out["returned"] = {"sessions": len(out["sessions"]),
                        "v2_runs": len(out["v2_runs"]),
                        "row_limit": SUMMARY_ROW_LIMIT}

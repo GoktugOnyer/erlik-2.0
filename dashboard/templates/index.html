@@ -2560,6 +2560,7 @@
                             style="font-size:0.55rem; color:var(--neon-yellow); border-color:var(--neon-yellow);">ARCHIVE</button>
                         <span id="eng-save-out" class="font-mono" style="font-size:0.6rem;"></span>
                     </div>
+                    <div id="eng-window" class="font-mono mt-2" style="font-size:0.62rem;"></div>
                     <div id="eng-revisions" class="mt-3"></div>
                 </div>
 
@@ -2640,6 +2641,7 @@
             det.querySelectorAll('[data-engtestlab]').forEach(b =>
                 b.addEventListener('click', () => engToTestLab(b.dataset.engtestlab, engCurrent)));
             engFillRecord(e);
+            engShowWindow(d);
             engLoadRevisions(engCurrent);
             det.classList.remove('hidden');
         }
@@ -2671,6 +2673,23 @@
             set('eng-e-notes', e.notes);
             const btn = document.getElementById('eng-archive-btn');
             if (btn) btn.textContent = (e.status === 'archived') ? 'REOPEN' : 'ARCHIVE';
+        }
+
+        function engShowWindow(d) {
+            const el = document.getElementById('eng-window');
+            if (!el) return;
+            const w = d.window || {};
+            if (w.open === false) {
+                el.innerHTML = `<span style="color:var(--neon-red);">&#9888; NOT AUTHORISED</span>
+                    &mdash; ${tlEsc(w.reason || '')}. Runs against this customer are refused.`;
+            } else if (w.until || w.from) {
+                el.innerHTML = `<span style="color:var(--neon-green);">authorised</span>
+                    ${w.from ? '&nbsp;from ' + tlEsc(w.from) : ''}
+                    ${w.until ? '&nbsp;until ' + tlEsc(w.until) + ' (inclusive)' : ''}`;
+            } else {
+                el.innerHTML = `<span style="opacity:.6;">No authorisation window recorded &mdash;
+                    runs are not time-limited.</span>`;
+            }
         }
 
         async function engSave() {
@@ -6222,8 +6241,20 @@ ${htmlBody}
                 r => Number(r.in_scope) && ((r.source || 'declared') === 'declared'
                                             || r.approved_at));
             const runs = (c.sessions || 0) + (c.v2_runs || 0);
+            // The window is a rung, and it comes FIRST: an expired engagement
+            // authorises nothing, so every step below it is blocked no matter
+            // how the scope reads. It was previously stored, editable and
+            // displayed while gating nothing at all.
+            const w = d.window || {};
             ladder.innerHTML = ovLadder([
                 {label: 'A customer is selected', done: true},
+                {label: w.open === false
+                        ? `Authorisation is valid — ${tlEsc(w.reason || 'window closed')}`
+                        : (w.reason && w.reason !== 'within the authorised window'
+                            ? `Authorisation is valid — ${tlEsc(w.reason)}`
+                            : 'Authorisation is valid'),
+                 done: w.open !== false,
+                 action: {href: `#view=engagements${e}`, label: 'fix the window'}},
                 {label: `Scope is declared (${declared.length} rule(s)) — a run against an ` +
                         `unscoped target is refused`,
                  done: declared.length > 0,
