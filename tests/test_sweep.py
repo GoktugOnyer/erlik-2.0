@@ -389,3 +389,93 @@ class TestDiscoveryFeedsThePlanner:
         plan = S.plan_sweep(case, BASE, "", discovered=self.DISC)
         for e in plan["runnable"]:
             assert e["target"]["scope"]["allow_hosts"] == ["target.test"]
+
+
+class TestTheDvwaCaseCanActuallyReachDvwa:
+    """The sweep found four things on DVWA at security=low and the SAME four at
+    security=impossible — every one infrastructure (phpinfo, banner,
+    robots.txt), none affected by the security level. It was not finding
+    nothing; it was never reaching anything.
+
+    Targeting was only the first of three blockers. Measured against the live
+    container:
+
+      unauthenticated            302 -> /login.php, EMPTY body
+      authenticated, no Submit   0 SQL errors (DVWA gates on isset($_GET['Submit']))
+      authenticated + Submit     "You have an error in your SQL syntax"
+
+    and the third line is the exact string the case's own regex matches.
+    """
+
+    def test_the_profile_carries_the_submit_token(self):
+        """Same reason BUSL-09 needs Upload=Upload: without it the page renders
+        and the database is never touched, which reads as CLEAN."""
+        for case in ("WSTG-INPV-05", "WSTG-ERRH-01"):
+            assert S.PROFILES["dvwa"][case].get("submit") == "Submit=Submit", case
+
+    def test_the_case_declares_submit_as_optional(self):
+        import yaml
+        from pathlib import Path
+        d = yaml.safe_load(
+            Path("tests_catalog/wstg/INPV-05_sqli.yaml").read_text())
+        assert "submit" in d["target_schema"]["optional"]
+        assert "submit" not in d["target_schema"]["required"], (
+            "most targets need no submit token; requiring it would skip them")
+
+    def test_every_probing_step_carries_the_submit_token(self):
+        """A token on the baseline alone would prove reachability and then
+        probe an un-submitted page."""
+        import yaml
+        from pathlib import Path
+        d = yaml.safe_load(
+            Path("tests_catalog/wstg/INPV-05_sqli.yaml").read_text())
+        by = {s["name"]: s["command"] for s in d["steps"]}
+        for name in ("baseline", "error_based_probe", "sqlmap_scan"):
+            cmd = by[name]
+            # DECLARING `S="{{submit}}"` is not using it. An earlier version of
+            # this assertion checked only for the placeholder and passed on a
+            # command that set the variable and then never referenced it —
+            # which is exactly the shape of the bug it is meant to catch.
+            assert "{{submit}}" in cmd, f"{name} never reads the submit token"
+            # PER REQUEST, not per step. `error_based_probe` fires TWO curls,
+            # and a check for one `${S:+` anywhere in the step passed while the
+            # first of them had lost its token — a partial regression that
+            # still cannot reach the gated handler.
+            hits = [seg for seg in cmd.split("{{url}}")[1:]]
+            assert hits, f"{name} does not target the case URL"
+            for seg in hits:
+                assert "${S:+" in seg.split(";")[0], (
+                    f"{name} has a request to {{{{url}}}} with no submit token, "
+                    f"so it cannot reach a handler gated on isset($_GET['Submit'])")
+        for name in ("error_based_probe", "sqlmap_scan"):
+            cmd = by[name]
+            assert "{{cookie}}" in cmd, f"{name} runs unauthenticated"
+            assert "${C:+" in cmd, f"{name} declares the cookie but never sends it"
+
+    def test_the_baseline_refuses_to_treat_a_login_redirect_as_reachable(self):
+        """THE defect behind the clean verdicts. `^[23]\\d\\d$` matched the 302
+        to /login.php, so the gate passed and every later step probed an empty
+        redirect body and found nothing. A case that cannot reach its target
+        must stop, not return a verdict."""
+        import re
+        import yaml
+        from pathlib import Path
+        d = yaml.safe_load(
+            Path("tests_catalog/wstg/INPV-05_sqli.yaml").read_text())
+        base = next(s for s in d["steps"] if s["name"] == "baseline")
+        assert "redirect_url" in base["command"], (
+            "the gate cannot see where a redirect went")
+        # Selected by BEHAVIOUR, not by grepping the pattern's source: what
+        # matters is that some stop-evaluator fires on the real DVWA redirect.
+        stops = [e for e in base["evaluators"] if e.get("stop_after")]
+        real = "302 http://dvwa/login.php"
+        firing = [e for e in stops if re.search(e.get("pattern", ""), real)]
+        assert firing, (
+            f"nothing stops the case on {real!r} — the gate cannot tell "
+            f"'reachable' from 'bounced to a login form'")
+
+        rx = re.compile(firing[0]["pattern"])
+        assert rx.search("302 https://app.example/signin")
+        assert not rx.search("200 "), "a reachable endpoint must not stop"
+        assert not rx.search("302 http://dvwa/index.php"), (
+            "an ordinary redirect is not an auth wall")

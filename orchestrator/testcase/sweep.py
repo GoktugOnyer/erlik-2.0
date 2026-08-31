@@ -53,13 +53,18 @@ PROFILES: dict[str, dict[str, dict[str, str]]] = {
     # arrived at from the deterministic side: the cases were correct and the
     # targeting was not.
     "dvwa": {
-        "WSTG-INPV-05":   {"url": "{base}/vulnerabilities/sqli/", "parameter": "id"},
+        # `Submit` for the same reason `Upload` is on BUSL-09 below: DVWA runs
+        # the query only when isset($_GET['Submit']), so without it the page
+        # renders and the database is never touched — which reads as CLEAN.
+        "WSTG-INPV-05":   {"url": "{base}/vulnerabilities/sqli/", "parameter": "id",
+                           "submit": "Submit=Submit"},
         "WSTG-INPV-01":   {"url": "{base}/vulnerabilities/xss_r/", "parameter": "name"},
         "WSTG-INPV-11.2": {"url": "{base}/vulnerabilities/exec/", "parameter": "ip"},
         "WSTG-INPV-15":   {"url": "{base}/vulnerabilities/fi/", "parameter": "page"},
         "WSTG-CLNT-04":   {"url": "{base}/vulnerabilities/open_redirect/",
                            "parameter": "redirect"},
-        "WSTG-ERRH-01":   {"url": "{base}/vulnerabilities/sqli/", "parameter": "id"},
+        "WSTG-ERRH-01":   {"url": "{base}/vulnerabilities/sqli/", "parameter": "id",
+                           "submit": "Submit=Submit"},
         "WSTG-ATHN-01":   {"login_url": "{base}/login.php"},
         # `uploaded` and the `Upload` button are not decoration: DVWA gates the
         # whole handler on isset($_POST['Upload']), and a POST with the wrong
