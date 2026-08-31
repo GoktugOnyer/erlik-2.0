@@ -2600,7 +2600,7 @@
                         <div class="flex items-center gap-3 flex-wrap font-mono py-0.5" style="font-size:0.6rem;">
                             <span style="color:var(--neon-cyan); min-width:230px;">${tlEsc(t.base_url)}</span>
                             <span style="opacity:.6;">${tlEsc(t.title || '')}</span>
-                            <span style="opacity:.5;">auth: ${tlEsc(t.auth_state || 'none')}</span>
+                            ${engAuthBadge(t)}
                             <button data-engtestlab="${tlEsc(t.base_url)}"
                                 class="font-pixel px-2 py-0.5 rounded border" style="font-size:0.45rem;">TEST LAB &rarr;</button>
                         </div>`).join('') ||
@@ -2835,6 +2835,31 @@
 
         // Domain recon. `probe=false` returns the name list without connecting
         // to anything — the option an operator wants before a scan window opens.
+
+        // The auth state of a target, DERIVED from the credential store. The
+        // column of the same name is written by nothing, so this used to read
+        // "auth: none" on every target for ever — including ones erlik held a
+        // verified session for. The detail is shown because "none" and
+        // "credentials stored but none verified" send an operator to different
+        // places.
+        function engAuthBadge(t) {
+            const a = t.auth || {state: t.auth_state || 'none', detail: '', verified_roles: []};
+            const col = {authenticated: '#31d67a', 'credentials only': 'var(--neon-yellow)',
+                         none: '#6a6a8a', unknown: 'var(--neon-red)'}[a.state] || '#6a6a8a';
+            const both = (a.verified_roles || []).includes('low')
+                      && (a.verified_roles || []).includes('high');
+            // The badge and the detail must not say the same thing twice: when
+            // the access-control marker shows, the detail it came from is
+            // redundant.
+            return `<span style="color:${col};" title="${tlEsc(a.detail || '')}">
+                        auth: ${tlEsc(a.state)}</span>`
+                 + (both
+                     ? ` <span style="color:#31d67a;">&#10003; low + high verified &mdash;
+                          access-control testing possible</span>`
+                     : (a.detail
+                         ? ` <span style="opacity:.45;">&mdash; ${tlEsc(a.detail)}</span>`
+                         : ''));
+        }
 
         // ===== RECON TOOLSET =====
         // The operator presses DISCOVER SUBDOMAINS, which CONNECTS to the

@@ -309,6 +309,17 @@ async def summary(db, engagement_id: str) -> dict[str, Any]:
     out["targets"] = [dict(r) for r in await (await db.execute(
         "SELECT * FROM engagement_targets WHERE engagement_id = ? ORDER BY base_url",
         (engagement_id,))).fetchall()]
+    # `auth_state` is DERIVED from the credential store, overwriting the column
+    # of the same name — which nothing has ever written, so every target read
+    # "auth: none" on screen regardless of what erlik could authenticate as.
+    from orchestrator import credentials as _C
+    for t in out["targets"]:
+        try:
+            t["auth"] = await _C.auth_state(db, t.get("base_url") or "")
+        except Exception:  # noqa: BLE001 — a target row must still render
+            t["auth"] = {"state": "unknown", "detail": "could not read the credential store",
+                         "roles": [], "verified_roles": []}
+        t["auth_state"] = t["auth"]["state"]
     # duration and tool count come along so the workspace can show an
     # execution table rather than a bare list of ids.
     out["sessions"] = [dict(r) for r in await (await db.execute(

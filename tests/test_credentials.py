@@ -852,3 +852,115 @@ class _Headers2(_Headers):
     def get(self, name, default=None):
         vals = self.get_list(name)
         return vals[0] if vals else default
+
+
+class TestTargetAuthStateIsDerivedNotStored:
+    """`engagement_targets.auth_state` is a column written by NOTHING, and the
+    engagement page displayed it — so every target read "auth: none" for ever,
+    including ones erlik held a verified session for.
+
+    Storing it would have been the worse fix: a flag saying "session verified"
+    outlives the session that justified it, and a stale reassurance is exactly
+    what this project keeps removing. It is derived from the credential store
+    at read time instead.
+    """
+
+    @staticmethod
+    def _run(tmp_path, setup):
+        import asyncio
+        import orchestrator.database as db_mod
+        from orchestrator import credentials as C
+        old = db_mod.DB_PATH
+        db_mod.DB_PATH = str(tmp_path / "as.db")
+        try:
+            async def go():
+                await db_mod.init_db()
+                db = await db_mod.get_db()
+                await setup(db, C)
+                await db.commit()
+                out = await C.auth_state(db, "http://t.example")
+                await db.close()
+                return out
+            return asyncio.run(go())
+        finally:
+            db_mod.DB_PATH = old
+
+    def test_no_credential_reads_as_none(self, tmp_path):
+        async def setup(db, C):
+            pass
+        out = self._run(tmp_path, setup)
+        assert out["state"] == "none"
+        assert out["verified_roles"] == []
+
+    def test_a_credential_without_a_verified_session_is_not_authenticated(self, tmp_path):
+        """"credentials stored" and "we can log in" are different claims, and
+        sending an operator to the wrong one wastes a run."""
+        async def setup(db, C):
+            await C.store(db, "http://t.example", "u", "u", "p", role="low")
+        out = self._run(tmp_path, setup)
+        assert out["state"] == "credentials only"
+        assert out["verified_roles"] == []
+
+    def test_a_REJECTED_session_is_not_authenticated(self, tmp_path):
+        """The whole point of the differential check in login._verify."""
+        async def setup(db, C):
+            cid = await C.store(db, "http://t.example", "u", "u", "p", role="high")
+            await C.save_session(db, cid, C.target_key("http://t.example"),
+                                 token="t", status="rejected")
+        assert self._run(tmp_path, setup)["state"] == "credentials only"
+
+    def test_a_verified_session_is_authenticated(self, tmp_path):
+        async def setup(db, C):
+            cid = await C.store(db, "http://t.example", "u", "u", "p", role="high")
+            await C.save_session(db, cid, C.target_key("http://t.example"),
+                                 token="t", status="verified")
+        out = self._run(tmp_path, setup)
+        assert out["state"] == "authenticated"
+        assert out["verified_roles"] == ["high"]
+
+    def test_two_privilege_levels_are_called_out(self, tmp_path):
+        """WSTG-AUTHZ-04 needs a low AND a high session and has been a named
+        skip on every recorded run for want of them."""
+        async def setup(db, C):
+            for role in ("low", "high"):
+                cid = await C.store(db, "http://t.example", role, "u", "p", role=role)
+                await C.save_session(db, cid, C.target_key("http://t.example"),
+                                     token="t", status="verified")
+        out = self._run(tmp_path, setup)
+        assert out["verified_roles"] == ["high", "low"]
+        assert "access-control" in out["detail"]
+
+    def test_the_summary_attaches_it_to_every_target(self, tmp_path):
+        import asyncio
+        import orchestrator.database as db_mod
+        from orchestrator import engagement as E
+        old = db_mod.DB_PATH
+        db_mod.DB_PATH = str(tmp_path / "sum.db")
+        try:
+            async def go():
+                await db_mod.init_db()
+                db = await db_mod.get_db()
+                eid = await E.create(db, "Acme", "acme.example")
+                await E.add_target(db, eid, "http://app.acme.example")
+                await db.commit()
+                out = await E.summary(db, eid)
+                await db.close()
+                return out
+            out = asyncio.run(go())
+        finally:
+            db_mod.DB_PATH = old
+        t = out["targets"][0]
+        assert t["auth"]["state"] == "none"
+        # the legacy column is overwritten with the derived answer, so a reader
+        # of either field gets the same truth
+        assert t["auth_state"] == "none"
+
+    def test_the_ui_renders_the_derived_object_not_the_column(self):
+        from pathlib import Path
+        html = Path("dashboard/templates/index.html").read_text()
+        assert "function engAuthBadge" in html
+        assert "${engAuthBadge(t)}" in html
+        i = html.index("function engAuthBadge")
+        blk = html[i:i + 1400]
+        assert "t.auth ||" in blk, "the badge reads the stale column first"
+        assert "access-control testing possible" in blk

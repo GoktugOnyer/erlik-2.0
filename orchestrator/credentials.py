@@ -195,6 +195,50 @@ async def auth_inputs(db, target: str) -> dict[str, str]:
     return out
 
 
+async def auth_state(db, target: str) -> dict:
+    """What erlik can actually authenticate as against this target, right now.
+
+    DERIVED, never stored. `engagement_targets.auth_state` is a column that was
+    displayed on the engagement page and written by nothing, so every target
+    read "auth: none" for ever — including ones erlik held a verified session
+    for. Storing it would have been worse than leaving it empty: a flag saying
+    "session verified" outlives the session that justified it, and a stale
+    reassurance is the failure this project keeps removing.
+
+    "verified" means the session passed the DIFFERENTIAL check in login._verify
+    — it changed the server's answer — not merely that a login returned 200.
+    """
+    tk = target_key(target)
+    if not tk:
+        return {"state": "unknown", "detail": "no host could be parsed",
+                "roles": [], "verified_roles": []}
+    cur = await db.execute(
+        "SELECT c.role, c.label, s.status FROM engagement_credentials c "
+        "LEFT JOIN engagement_sessions s ON s.credential_id = c.id "
+        "WHERE c.target_key = ?", (tk,))
+    rows = [dict(r) for r in await cur.fetchall()]
+    if not rows:
+        return {"state": "none", "detail": "no credential stored for this target",
+                "roles": [], "verified_roles": []}
+
+    roles = sorted({r["role"] for r in rows if r.get("role")})
+    verified = sorted({r["role"] for r in rows
+                       if r.get("status") == "verified" and r.get("role")})
+    if not verified:
+        return {"state": "credentials only",
+                "detail": f"{len(rows)} credential(s) stored, none with a verified session",
+                "roles": roles, "verified_roles": []}
+    # Two privilege levels is what WSTG-AUTHZ-04 needs, and it has been a named
+    # skip on every recorded run for want of them — so it is worth saying out
+    # loud when a target finally has both.
+    both = {"low", "high"} <= set(verified)
+    return {"state": "authenticated",
+            "detail": ("low- and high-privilege sessions verified — access-control "
+                       "testing is possible" if both
+                       else f"verified session(s) as: {', '.join(verified)}"),
+            "roles": roles, "verified_roles": verified}
+
+
 async def _plaintext(db, session_id: str, field: str) -> str | None:
     """The one function that turns a handle back into a secret."""
     cur = await db.execute(
