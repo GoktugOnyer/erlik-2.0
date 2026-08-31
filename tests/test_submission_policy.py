@@ -349,9 +349,17 @@ class TestModelReportedRules:
             pytest.skip("no recorded corpus in this checkout")
         c = sqlite3.connect(f"file:{self.CORPUS}?mode=ro", uri=True)
         c.row_factory = sqlite3.Row
-        rows = [dict(r) for r in c.execute(
-            "SELECT vuln_type, severity, COALESCE(evidence,'') AS evidence, "
-            "cve_id, detector FROM findings")]
+        try:
+            rows = [dict(r) for r in c.execute(
+                "SELECT vuln_type, severity, COALESCE(evidence,'') AS evidence, "
+                "cve_id, detector FROM findings")]
+        except sqlite3.OperationalError:
+            # The file existing is not the corpus existing. Something in the
+            # suite creates an EMPTY data/pentest.db, so the exists() guard
+            # above passes on a fresh clone and the query then fails with
+            # "no such table: findings" — a corpus-dependent test reported as a
+            # product failure to anyone who has just cloned the repo.
+            pytest.skip("no recorded corpus in this checkout (schema absent)")
         if not rows:
             pytest.skip("corpus present but empty")
         return rows

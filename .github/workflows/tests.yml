@@ -1,0 +1,73 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+# A second push to the same branch cancels the first: the older run's verdict
+# is about code nobody is looking at any more.
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    strategy:
+      fail-fast: false
+      matrix:
+        # Exactly the versions the suite was actually run on before this
+        # workflow was committed — 3.12 and 3.14, both clean. Pinning a version
+        # nobody has executed is the same defect this project keeps finding:
+        # a confident green from a path that was never exercised.
+        python-version: ["3.12", "3.14"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pytest
+
+      # The runner has NO Docker container and NO data/pentest.db — data/ is
+      # gitignored because it holds real client findings. Every test that needs
+      # either must SKIP with a reason, not fail.
+      #
+      # That is not free: on a bare clone this suite reported 7 failures and 9
+      # errors, because several guards asked whether the database FILE existed
+      # rather than whether it had a schema, and something in the suite creates
+      # an empty one. See tests/corpus.py.
+      - name: Test
+        run: python -m pytest tests/ -q --junitxml=junit.xml
+
+      # A run where everything skipped is green and worthless. This is the
+      # check that CI is actually testing something — the same "confident
+      # output from a path that did nothing" the product guards against.
+      - name: Assert the suite actually ran
+        if: always()
+        run: |
+          python - <<'PY'
+          import sys, xml.etree.ElementTree as ET
+          r = ET.parse("junit.xml").getroot()
+          suite = r if r.tag == "testsuite" else r.find("testsuite")
+          total = int(suite.get("tests", 0))
+          skipped = int(suite.get("skipped", 0))
+          ran = total - skipped
+          print(f"{ran} ran, {skipped} skipped, {total} collected")
+          if ran < 1200:
+              sys.exit(f"only {ran} tests ran — the suite is not exercising the codebase")
+          PY
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: junit-${{ matrix.python-version }}
+          path: junit.xml

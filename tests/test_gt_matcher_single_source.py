@@ -29,6 +29,8 @@ from pathlib import Path
 
 import pytest
 
+from tests import corpus  # noqa: E402
+
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "recompute_gt_coverage.py"
 
@@ -94,6 +96,7 @@ class TestScriptAgreesWithTheCanonicalMatcher:
         db = ROOT / "data" / "pentest.db"
         if not db.exists():
             pytest.skip("no recorded corpus")
+        corpus.require("findings")
         con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
         con.row_factory = sqlite3.Row
         rows = [dict(r) for r in con.execute(
@@ -121,6 +124,7 @@ class TestScriptAgreesWithTheCanonicalMatcher:
         db = ROOT / "data" / "pentest.db"
         if not db.exists():
             pytest.skip("no recorded corpus")
+        corpus.require("findings")
         con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
         con.row_factory = sqlite3.Row
         rows = [dict(r) for r in con.execute(
