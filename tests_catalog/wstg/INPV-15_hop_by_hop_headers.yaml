@@ -1,7 +1,7 @@
 id: WSTG-INPV-15
 name: Hop-by-Hop Header Handling
 category: Input Validation
-attack_class: path
+attack_class: smuggling
 severity: medium
 references:
   - https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/07-Input_Validation_Testing/15-Testing_for_HTTP_Splitting_Smuggling

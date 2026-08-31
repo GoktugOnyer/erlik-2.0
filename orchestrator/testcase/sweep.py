@@ -71,6 +71,9 @@ PROFILES: dict[str, dict[str, dict[str, str]]] = {
         # full. Verified to track the security level: disclosed at low, medium
         # and high, blocked at impossible.
         "WSTG-INPV-19":   {"url": "{base}/vulnerabilities/fi/", "parameter": "page"},
+        # Same sink, different class. The parameter takes a local PATH as well
+        # as a remote URL, and the two need different fixes, so both cases run.
+        "WSTG-AUTHZ-01":  {"url": "{base}/vulnerabilities/fi/", "parameter": "page"},
         "WSTG-CLNT-04":   {"url": "{base}/vulnerabilities/open_redirect/",
                            "parameter": "redirect"},
         # No `submit` here, unlike INPV-05. ERRH-01 provokes errors with

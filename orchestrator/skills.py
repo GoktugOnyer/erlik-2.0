@@ -265,8 +265,24 @@ _CLASS_PATTERNS: list[tuple[str, str, tuple[str, ...]]] = [
     ("ssti",        r"\bssti\b|template injection", ("ssti",)),
     ("xxe",         r"\bxxe\b|xml external", ("xxe",)),
     ("ldap",        r"\bldap\b", ("ldap-injection",)),
+    # No `file-upload` token. It was the only one of the three that matched a
+    # real sheet, so a path-traversal mission was handed a file-upload
+    # cheat-sheet — plausible-looking and about a different bug. Measured:
+    #   "path traversal"                    ['hunt-file-upload'] -> []
+    #   "directory traversal on a php app"  ['hunt-file-upload'] -> ['web-app-logic-principles']
+    #   "lfi and file upload"               ['hunt-file-upload'] -> unchanged, correctly
+    # An empty list says "no sheet for this", which is true; the upload sheet
+    # said something false. Note `capabilities.skills_for("path")` still
+    # returns it, because that passes the class LABEL and "File Inclusion"
+    # reaches the keyword fallback — a separate path, not this one.
     ("path",        r"path traversal|\blfi\b|file inclusion|directory traversal",
-                    ("file-inclusion", "path-traversal", "file-upload")),
+                    ("file-inclusion", "path-traversal")),
+    # Hop-by-hop header handling and request splitting are the same family, and
+    # WSTG-INPV-15 was filed under `path` — a class labelled "Path Traversal /
+    # File Inclusion" — purely because nothing else claimed it. Two sheets
+    # already exist for this, so the routing has somewhere real to go.
+    ("smuggling",   r"request smuggl|http splitting|hop[- ]by[- ]hop|desync",
+                    ("http-smuggling", "http-request-smuggling")),
     ("upload",      r"file upload|unrestricted upload", ("file-upload",)),
     ("deserialize", r"deserializ", ("deserialization",)),
     ("ssrf",        r"\bssrf\b|server[- ]side request", ("ssrf", "server-side")),

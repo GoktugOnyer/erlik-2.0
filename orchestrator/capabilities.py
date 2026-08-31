@@ -72,9 +72,21 @@ CLASSES: list[dict] = [
      "wstg": ["WSTG-CLNT-07", "WSTG-CLNT-07b"], "detectors": ["curl:_curl_cors"]},
     {"key": "ssrf", "label": "Server-Side Request Forgery", "owasp": "A10:2021 SSRF",
      "wstg": ["WSTG-INPV-19"], "detectors": []},
+    # WSTG-AUTHZ-01, not WSTG-INPV-15. This class is labelled "Path Traversal
+    # / File Inclusion" and its only case was Hop-by-Hop Header Handling — so
+    # erlik advertised a path-traversal capability it did not have, and the
+    # catalogue had no case for the thing the label names. AUTHZ-01 is that
+    # case. INPV-15 moved to `smuggling`, which is what its own WSTG reference
+    # (15-Testing_for_HTTP_Splitting_Smuggling) actually points at.
     {"key": "path", "label": "Path Traversal / File Inclusion",
      "owasp": "A01:2021 Broken Access Control",
-     "wstg": ["WSTG-INPV-15"], "detectors": ["curl:_curl_null_byte"]},
+     "wstg": ["WSTG-AUTHZ-01"],
+     "detectors": ["curl:_curl_null_byte"]},
+    {"key": "smuggling", "label": "HTTP Splitting / Smuggling",
+     "owasp": "A05:2021 Security Misconfiguration",
+     "wstg": ["WSTG-INPV-15"],
+     "detectors": []},
+
     {"key": "upload", "label": "Unrestricted File Upload",
      "owasp": "A04:2021 Insecure Design", "wstg": ["WSTG-BUSL-09"], "detectors": []},
     {"key": "deserialize", "label": "Insecure Deserialization",
