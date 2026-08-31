@@ -578,6 +578,7 @@ async def init_db():
                 username TEXT,
                 secret_enc TEXT,
                 login_url TEXT,
+                verify_url TEXT,
                 username_field TEXT DEFAULT 'username',
                 password_field TEXT DEFAULT 'password',
                 extra TEXT,
@@ -600,6 +601,30 @@ async def init_db():
                 status TEXT DEFAULT 'unverified'
             )
         """)
+        # verify_url was a keyword argument used once and discarded, so no
+        # re-check could ever exist and the URL had to arrive per request —
+        # which is exactly the parameter that turns a login route into an
+        # exfiltration primitive. Stored at declaration time instead.
+        for _t, _c in (("engagement_credentials", "verify_url"),
+                       ("engagement_sessions", "verify_url")):
+            try:
+                await db.execute(f"ALTER TABLE {_t} ADD COLUMN {_c} TEXT")
+            except Exception:
+                pass  # column already exists
+
+        # The identifier survives a destroy; the secret material does not.
+        # NO column here may end in `_enc` — that is the whole point.
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS destroyed_credentials (
+                id TEXT PRIMARY KEY,
+                target_key TEXT,
+                label TEXT,
+                role TEXT,
+                destroyed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                destroyed_by TEXT
+            )
+        """)
+
         for idx, tbl, cols in (
             ("idx_creds_target", "engagement_credentials", "target_key"),
             ("idx_sessions_cred", "engagement_sessions", "credential_id"),
