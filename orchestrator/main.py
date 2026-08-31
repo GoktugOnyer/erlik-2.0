@@ -5841,9 +5841,12 @@ async def v2_sweep_plan(body: dict):
     plan["inputs"] = {
         "declared": sum(len(v) for v in _declared.values()),
         "discovered": {k: len(v) for k, v in discovered.items() if v},
+        # Any per-role material, whichever shape it is. A hardcoded list here
+        # silently omitted the cookie fields the access-control cases need.
         "auth_fields": sorted(k for k in extra if k in
-                              ("low_priv_token", "high_priv_token", "auth_header",
-                               "jwt", "cookie")),
+                              ("low_priv_token", "high_priv_token",
+                               "low_priv_cookie", "high_priv_cookie",
+                               "auth_header", "jwt", "cookie")),
     }
     return plan
 

@@ -72,7 +72,10 @@ from orchestrator.testcase.endpoints import target_key
 #                HANDLES from the credential store and resolve at execution.
 #                A plaintext secret must never sit in a plan row.
 DECLARABLE = (
-    "url", "login_url", "parameter", "submit", "method",
+    # `url_template` is what the access-control cases fetch. Without it
+    # WSTG-AUTHZ-04 falls back to the base URL, where no privileged object
+    # lives — it would run and conclude nothing.
+    "url", "url_template", "login_url", "parameter", "submit", "method",
     "username_field", "password_field", "object_ids", "client_id",
     "collaborator_host", "auth_header_name",
 )
@@ -80,7 +83,7 @@ DECLARABLE = (
 # Values for these are stored as a PATH and rendered under the operator's base
 # URL. A declaration therefore cannot name a host at all — structurally
 # stronger than comparing one afterwards.
-PATH_FIELDS = ("url", "login_url")
+PATH_FIELDS = ("url", "url_template", "login_url")
 
 MAX_VALUE = 512
 

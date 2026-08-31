@@ -6,36 +6,104 @@ severity: high
 references:
   - https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/05-Authorization_Testing/04-Testing_for_Insecure_Direct_Object_References
 
-# This test case requires two valid auth contexts so we can compare a
-# privileged response against a lower-privileged one. Without both, the
-# step is skipped at the target-validation gate.
+# Compares a privileged response against a lower-privileged one, and against
+# an ANONYMOUS one. This case had been a named skip on every recorded run, and
+# when it did run it could not have concluded anything:
+#
+#   * It required low_priv_token / high_priv_token and sent
+#     `-H "Authorization: Bearer ..."`, so it was BEARER-ONLY by construction.
+#     `auth_inputs` correctly withholds those handles for a cookie session, so
+#     on DVWA — and on most PHP/Rails/Django apps — no number of verified
+#     sessions could satisfy it. It now accepts either material, per role, via
+#     `required_any`.
+#
+#   * Its only finding path was an LLM judge shown ONLY the low-privilege
+#     response, with the instruction "you are given the response a
+#     low-privileged user got". It never saw the privileged response, so it
+#     could not tell a leak from a resource that is simply public — and with
+#     no model reachable it produced no verdict at all. The comparison is now
+#     deterministic and happens in the step itself.
+#
+#   * Its first step asserted `^[45]\d\d` against a body (the command had no
+#     `-w "%{http_code}"`) under `when: previous_failure` — on the FIRST step,
+#     where there is no previous step. It could never fire.
+#
+# THE THREE-WAY DIFFERENTIAL, and why two responses are not enough.
+# `low == high` alone is not a finding: a public asset is identical for
+# everyone. `low != high` alone is not a clean bill of health either: on any
+# app with a per-session CSRF token or a username in the chrome, EVERY page
+# differs. So the anonymous fetch is the control that separates them, exactly
+# as login._verify uses an anonymous probe to tell a real session from a
+# status code:
+#
+#   low == high AND low != anon   the low user sees the privileged response,
+#                                 and that is not merely the public view  -> FINDING
+#   low == anon                   the low user is being treated as anonymous;
+#                                 this says nothing about IDOR             -> no finding
+#   low != high                   something is discriminating              -> no finding
+#
+# Bodies are normalised before hashing (32-hex CSRF tokens and whitespace
+# removed) because otherwise the token alone makes every response unique and
+# the comparison is noise. That normalisation is deliberately narrow: it
+# cannot mask a difference in the DATA, which is what the test is about.
+#
+# VERIFIED against DVWA /vulnerabilities/authbypass/get_user_data.php, which
+# returns the full user table. The verdict tracks the security level, which is
+# what makes it a control rather than a demo:
+#
+#   security=low         admin and gordonb identical, anon differs  -> FINDING
+#   security=medium      identical                                  -> FINDING
+#   security=high        gordonb gets the anonymous response        -> no finding
+#   security=impossible  gordonb gets the anonymous response        -> no finding
+#
+# and /dvwa/css/main.css is identical for all three, so the `low != anon`
+# clause correctly refuses to call a public asset an IDOR.
+
 target_schema:
-  required: [url_template, low_priv_token, high_priv_token]
+  required: [url_template]
+  # Either material satisfies a role. They are NOT interchangeable — a cookie
+  # in a Bearer header authenticates nothing — so the step is written to send
+  # whichever it was actually given.
+  required_any:
+    - [high_priv_token, high_priv_cookie]
+    - [low_priv_token, low_priv_cookie]
   optional: [object_ids]
 
 steps:
-  - name: fetch_as_high_priv
+  - name: compare_privilege_levels
     tool: curl
+    # One step, because the comparison is the test. Three fetches, normalised
+    # and hashed, and the verdict is printed as a canary a regex can match —
+    # the same shape BUSL-09 uses for its upload canary, and deterministic, so
+    # it does not depend on a model being reachable.
     command: >-
-      curl -s -H "Authorization: Bearer {{high_priv_token}}" "{{url_template}}"
+      bash -c 'HT="{{high_priv_token}}"; HC="{{high_priv_cookie}}";
+      LT="{{low_priv_token}}"; LC="{{low_priv_cookie}}"; U="{{url_template}}";
+      norm() { sed -E "s/[0-9a-f]{32}//g" | tr -d "[:space:]" | md5sum | cut -c1-32; };
+      H=$(curl -s ${HT:+-H "Authorization: Bearer $HT"} ${HC:+-b "$HC"} "$U" | norm);
+      L=$(curl -s ${LT:+-H "Authorization: Bearer $LT"} ${LC:+-b "$LC"} "$U" | norm);
+      A=$(curl -s "$U" | norm);
+      echo "high=$H low=$L anon=$A";
+      if [ "$L" = "$A" ]; then
+        echo "ERLIK-AUTHZ-INCONCLUSIVE: the low-privilege session got the same
+        response as an anonymous request, so it was not authenticated here and
+        this says nothing about access control";
+      elif [ "$L" = "$H" ]; then
+        echo "ERLIK-AUTHZ-IDOR: the low-privilege session received the same
+        response as the high-privilege one, and a different response from an
+        anonymous request";
+      else
+        echo "ERLIK-AUTHZ-OK: the low-privilege session received a different
+        response from the high-privilege one";
+      fi'
     evaluators:
       - type: regex
-        pattern: '^[45]\d\d|Unauthorized|Forbidden'
-        when: previous_failure
-        stop_after: true
-
-  - name: fetch_as_low_priv
-    tool: curl
-    command: >-
-      curl -s -H "Authorization: Bearer {{low_priv_token}}" "{{url_template}}"
-    evaluators:
-      - type: llm
-        instruction: >-
-          You are given the response a low-privileged user got when
-          requesting an object identifier that should be visible only to a
-          higher-privileged user. Set matched=true if the response leaks
-          the object (200 with the object's data, sensitive fields, or
-          PII). Set matched=false for clear 401/403/empty/error responses.
+        pattern: 'ERLIK-AUTHZ-IDOR'
         emit_finding:
-          vuln_type: IDOR (cross-tenant access)
+          vuln_type: Broken Access Control (low-privilege session reads privileged data)
           severity: high
+
+chain:
+  on_finding:
+    # An object the wrong user can READ is often one they can also enumerate.
+    - WSTG-AUTHZ-05

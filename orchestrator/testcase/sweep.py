@@ -88,6 +88,13 @@ UNSUPPLIABLE: dict[str, str] = {
                       "(store low- and high-privilege credentials for this target)",
     "high_priv_token": "needs two authenticated accounts "
                        "(store low- and high-privilege credentials for this target)",
+    # Same requirement, different material. A case may accept either via
+    # `required_any`, and the operator-facing message must not change with
+    # which one happens to be missing.
+    "low_priv_cookie": "needs two authenticated accounts "
+                       "(store low- and high-privilege credentials for this target)",
+    "high_priv_cookie": "needs two authenticated accounts "
+                        "(store low- and high-privilege credentials for this target)",
     "request_template": "needs a hand-written request template",
     "success_marker": "needs a hand-written success marker",
     "jwt": "needs a captured JWT (log in with a stored credential first)",
@@ -105,6 +112,8 @@ def build_target(case: dict[str, Any], base: str,
     profile = profile or {}
     schema = case.get("target_schema") or {}
     req = schema.get("required") or []
+    # Each group is satisfied by ANY member — see TargetSchema.required_any.
+    req_any = [list(g) for g in (schema.get("required_any") or []) if g]
     for r in req:
         if r in UNSUPPLIABLE and not (extra or {}).get(r):
             return None, UNSUPPLIABLE[r]
@@ -146,6 +155,16 @@ def build_target(case: dict[str, Any], base: str,
     }
 
     tgt: dict[str, Any] = {}
+    # Alternation first, so a group that cannot be satisfied names ALL the
+    # fields that would have satisfied it rather than the first one tried.
+    for group in req_any:
+        chosen = next((f for f in group
+                       if (over.get(f) or derived.get(f)) not in (None, "")), None)
+        if chosen is None:
+            reasons = [UNSUPPLIABLE[f] for f in group if f in UNSUPPLIABLE]
+            return None, (reasons[0] if reasons else
+                          f"needs one of: {', '.join(group)}")
+        tgt[chosen] = over.get(chosen, derived.get(chosen))
     for r in req:
         if r in over:
             tgt[r] = over[r]
@@ -158,8 +177,14 @@ def build_target(case: dict[str, Any], base: str,
         if tgt[r] in (None, ""):
             return None, f"no value for required field {r!r}"
     for o in schema.get("optional") or []:
-        if o in over:
+        if o in over and o not in tgt:
             tgt[o] = over[o]
+    # Every OTHER member of a satisfied group is offered too when it exists, so
+    # a command written for both shapes can pick whichever it was given.
+    for group in req_any:
+        for f in group:
+            if f not in tgt and over.get(f) not in (None, ""):
+                tgt[f] = over[f]
     tgt.setdefault("host", host)
     # Every rendered value is checked, not just the host. The scope object below
     # constrains WHICH HOST may be contacted; it says nothing about the other

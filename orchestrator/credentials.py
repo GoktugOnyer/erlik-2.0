@@ -340,10 +340,18 @@ async def auth_inputs(db, target: str) -> dict[str, str]:
         by_role.setdefault(d["role"], d)
 
     out: dict[str, str] = {}
-    for role, field in (("low", "low_priv_token"), ("high", "high_priv_token")):
+    # A role's material is offered as whatever it ACTUALLY is. A cookie in a
+    # Bearer header authenticates nothing, so the two are never conflated —
+    # `low_priv_token` still means a token, and a case that needs one still
+    # skips out loud when only a cookie exists.
+    for role in ("low", "high"):
         row = by_role.get(role)
-        if row and row.get("token_enc"):
-            out[field] = handle(row["sid"], field)
+        if not row:
+            continue
+        if row.get("token_enc"):
+            out[f"{role}_priv_token"] = handle(row["sid"], f"{role}_priv_token")
+        if row.get("cookie_enc"):
+            out[f"{role}_priv_cookie"] = handle(row["sid"], f"{role}_priv_cookie")
 
     primary = (by_role.get("high") or by_role.get("user")
                or by_role.get("admin") or by_role.get("low"))
@@ -377,7 +385,8 @@ async def auth_state(db, target: str) -> dict:
                 "roles": [], "verified_roles": []}
     cur = await db.execute(
         "SELECT c.role, c.label, s.status, "
-        "       s.token_enc IS NOT NULL AS has_token "
+        "       s.token_enc IS NOT NULL AS has_token, "
+        "       s.cookie_enc IS NOT NULL AS has_cookie "
         "FROM engagement_credentials c "
         "LEFT JOIN engagement_sessions s ON s.credential_id = c.id "
         "WHERE c.target_key = ?", (tk,))
@@ -410,15 +419,15 @@ async def auth_state(db, target: str) -> dict:
     # names the gap when the sessions cannot carry what the case needs.
     tokened = sorted({r["role"] for r in rows
                       if r.get("status") == "verified" and r.get("role")
-                      and r.get("has_token")})
+                      and (r.get("has_token") or r.get("has_cookie"))})
     both_roles = {"low", "high"} <= set(verified)
     both_usable = {"low", "high"} <= set(tokened)
     if both_usable:
         detail = ("low- and high-privilege sessions verified — access-control "
                   "testing is possible")
     elif both_roles:
-        detail = ("low and high verified, but as COOKIE sessions — "
-                  "WSTG-AUTHZ-04 sends a bearer token, so it still skips")
+        detail = ("low and high verified, but neither carries usable material "
+                  "— access-control testing still skips")
     else:
         detail = f"verified session(s) as: {', '.join(verified)}"
     return {"state": "authenticated", "detail": detail,
@@ -444,8 +453,15 @@ async def _plaintext(db, session_id: str, field: str) -> str | None:
         return token or None
     if field == "auth_header":
         return f"{name}: Bearer {token}" if token else None
-    if field == "cookie":
+    # Per-role COOKIE material. WSTG-AUTHZ-04 compares a privileged response
+    # against a lower-privileged one, and it could only ever do that with
+    # bearer tokens — so on DVWA, and on most PHP/Rails/Django apps, it was a
+    # named skip no matter how many sessions were verified.
+    if field in ("cookie", "low_priv_cookie", "high_priv_cookie"):
         return cookie or None
+    # UNKNOWN FIELD -> None, which leaves the handle unresolved and makes the
+    # runner fail the step. Fail closed: the alternative is an unauthenticated
+    # request reported as an authenticated one.
     return None
 
 

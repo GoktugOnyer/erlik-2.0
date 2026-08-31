@@ -292,28 +292,36 @@ class TestRevokeAndDestroy:
 
 
 class TestTheBadgeDoesNotOverclaim:
-    """Two verified DVWA sessions, one low one high, badge reading
-    "access-control testing is possible" — and AUTHZ-04 STILL skipped with
-    "needs two authenticated accounts".
+    """The badge may claim access-control testing exactly when the planner can
+    actually run it — no earlier, no later.
 
-    The case sends `-H "Authorization: Bearer {{low_priv_token}}"`, so it is
-    bearer-only by construction, and `auth_inputs` correctly withholds those
-    handles for a cookie session. DVWA — and most PHP/Rails/Django apps —
-    authenticate by cookie. The badge was the thing that was wrong.
+    HISTORY, because this test changed once and the reason matters. It first
+    caught the badge saying "access-control testing is possible" for two
+    verified DVWA COOKIE sessions while AUTHZ-04 still skipped: the case sent
+    `-H "Authorization: Bearer {{low_priv_token}}"` and was bearer-only by
+    construction, so `auth_inputs` correctly withheld those handles and the
+    BADGE was wrong.
+
+    AUTHZ-04 now accepts either material per role, so a cookie session does
+    enable access-control testing and the badge saying so is TRUE. The
+    expectation moved because the capability moved. What did not move is the
+    invariant below, which is the thing actually worth pinning: the two must
+    never disagree, whichever way round they are.
     """
 
     @staticmethod
-    def _state(tmp_path, material):
+    def _state(tmp_path, material, roles=("low", "high")):
         import orchestrator.database as db_mod
         from orchestrator import credentials as C
         old = db_mod.DB_DIR, db_mod.DB_PATH
+        tmp_path.mkdir(parents=True, exist_ok=True)
         db_mod.DB_DIR = tmp_path
         db_mod.DB_PATH = tmp_path / "b.db"
         try:
             async def go():
                 await db_mod.init_db()
                 db = await db_mod.get_db()
-                for role in ("low", "high"):
+                for role in roles:
                     cid = await C.store(db, T, role, role, "p", role=role)
                     await C.save_session(db, cid, C.target_key(T),
                                          status="verified", **{material: "V"})
@@ -326,28 +334,62 @@ class TestTheBadgeDoesNotOverclaim:
         finally:
             db_mod.DB_DIR, db_mod.DB_PATH = old
 
-    def test_cookie_sessions_do_not_claim_access_control_testing(self, tmp_path):
+    def test_cookie_sessions_now_do_claim_it(self, tmp_path):
+        """They could not before, and the badge claiming it was the defect."""
         st, ai = self._state(tmp_path, "cookie")
         assert st["verified_roles"] == ["high", "low"]
-        assert st["access_control_ready"] is False
-        assert "low_priv_token" not in ai, "the premise of this test moved"
-        assert "COOKIE" in st["detail"] and "bearer" in st["detail"]
+        assert st["access_control_ready"] is True
+        assert {"low_priv_cookie", "high_priv_cookie"} <= set(ai)
+        assert "access-control testing is possible" in st["detail"]
 
-    def test_token_sessions_do(self, tmp_path):
-        """The control: with material AUTHZ-04 can actually use, the claim is
-        true and must still be made."""
+    def test_token_sessions_do_too(self, tmp_path):
         st, ai = self._state(tmp_path, "token")
         assert st["access_control_ready"] is True
-        assert "access-control testing is possible" in st["detail"]
-        assert "low_priv_token" in ai and "high_priv_token" in ai
+        assert {"low_priv_token", "high_priv_token"} <= set(ai)
+
+    def test_one_role_alone_is_not_enough(self, tmp_path):
+        """The claim needs BOTH — comparing a privileged response against
+        itself proves nothing."""
+        import orchestrator.database as db_mod
+        from orchestrator import credentials as C
+        old = db_mod.DB_DIR, db_mod.DB_PATH
+        db_mod.DB_DIR = tmp_path
+        db_mod.DB_PATH = tmp_path / "one.db"
+        try:
+            async def go():
+                await db_mod.init_db()
+                db = await db_mod.get_db()
+                cid = await C.store(db, T, "hi", "hi", "p", role="high")
+                await C.save_session(db, cid, C.target_key(T),
+                                     cookie="V", status="verified")
+                await db.commit()
+                out = await C.auth_state(db, T)
+                await db.close()
+                return out
+            st = asyncio.run(go())
+        finally:
+            db_mod.DB_DIR, db_mod.DB_PATH = old
+        assert st["access_control_ready"] is False
 
     def test_the_badge_and_the_planner_agree(self, tmp_path):
-        """The invariant behind both: the badge may claim access-control
-        testing exactly when auth_inputs supplies what the case requires."""
+        """THE INVARIANT, and the only thing here that must never change: the
+        badge claims access-control testing exactly when `auth_inputs` supplies
+        material for both roles — whichever shape that material takes.
+
+        Derived from auth_inputs rather than hardcoded, so this keeps holding
+        when a third material is added — and it covers the ASYMMETRIC cases,
+        because a check that only ever sees "both roles present" cannot tell a
+        correct badge from one hardcoded to True."""
         for material in ("cookie", "token"):
-            st, ai = self._state(tmp_path / material, material)
-            supplied = {"low_priv_token", "high_priv_token"} <= set(ai)
-            assert st["access_control_ready"] is supplied, material
+            for roles in (("low", "high"), ("high",), ()):
+                st, ai = self._state(tmp_path / f"{material}{len(roles)}",
+                                     material, roles=roles)
+                supplied = {r for r in ("low", "high")
+                            if any(k.startswith(f"{r}_priv_") for k in ai)}
+                assert st.get("access_control_ready", False) is (
+                    {"low", "high"} == supplied), (
+                    f"{material}/{roles}: badge="
+                    f"{st.get('access_control_ready')} supplied={supplied}")
 
 
 class TestTheUiIsWired:
