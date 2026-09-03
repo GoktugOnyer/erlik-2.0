@@ -64,7 +64,8 @@ python3 scripts/recompute_all_thesis_tables.py
 # GT coverage for the primary baseline-vs-fine-tuned comparison
 python3 scripts/recompute_gt_coverage.py
 
-# Significance tests for that comparison (requires scipy)
+# Significance tests for that comparison
+# (needs scipy: pip install -r requirements-analysis.txt)
 python3 scripts/recompute_statistical_tests.py --check   # verify, write nothing
 python3 scripts/recompute_statistical_tests.py           # regenerate
 
