@@ -248,7 +248,11 @@ async def _run_evaluator(
             step=step_result.step,
             vuln_type=f.get("vuln_type"),
             severity=f.get("severity", tc.severity),
-            url=target.get("url"),
+            # `url_template` is what the access-control cases name their
+            # endpoint. Without this a finding from one carried NO url at all,
+            # so it could not be attached to an asset, could not be
+            # scope-audited, and rendered as N/A in the client report.
+            url=target.get("url") or target.get("url_template"),
             parameter=target.get("parameter"),
             evidence=step_result.output[:1500],
         )

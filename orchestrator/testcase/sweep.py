@@ -53,12 +53,33 @@ PROFILES: dict[str, dict[str, dict[str, str]]] = {
     # arrived at from the deterministic side: the cases were correct and the
     # targeting was not.
     "dvwa": {
-        "WSTG-INPV-05":   {"url": "{base}/vulnerabilities/sqli/", "parameter": "id"},
+        # `Submit` for the same reason `Upload` is on BUSL-09 below: DVWA runs
+        # the query only when isset($_GET['Submit']), so without it the page
+        # renders and the database is never touched — which reads as CLEAN.
+        "WSTG-INPV-05":   {"url": "{base}/vulnerabilities/sqli/", "parameter": "id",
+                           "submit": "Submit=Submit"},
         "WSTG-INPV-01":   {"url": "{base}/vulnerabilities/xss_r/", "parameter": "name"},
         "WSTG-INPV-11.2": {"url": "{base}/vulnerabilities/exec/", "parameter": "ip"},
-        "WSTG-INPV-15":   {"url": "{base}/vulnerabilities/fi/", "parameter": "page"},
+        # INPV-15 is Hop-by-Hop Header Handling and its schema requires only
+        # `url` — it declares no optional fields, so the `parameter: "page"`
+        # that used to sit here was silently discarded. Dead knowledge in a
+        # profile reads as coverage and is not.
+        "WSTG-INPV-15":   {"url": "{base}/vulnerabilities/fi/"},
+        # The `page` parameter belongs to the case that can actually use it.
+        # DVWA's file-inclusion module runs with allow_url_include=On, so it
+        # fetches whatever URL it is given — `file:///etc/passwd` comes back in
+        # full. Verified to track the security level: disclosed at low, medium
+        # and high, blocked at impossible.
+        "WSTG-INPV-19":   {"url": "{base}/vulnerabilities/fi/", "parameter": "page"},
+        # Same sink, different class. The parameter takes a local PATH as well
+        # as a remote URL, and the two need different fixes, so both cases run.
+        "WSTG-AUTHZ-01":  {"url": "{base}/vulnerabilities/fi/", "parameter": "page"},
         "WSTG-CLNT-04":   {"url": "{base}/vulnerabilities/open_redirect/",
                            "parameter": "redirect"},
+        # No `submit` here, unlike INPV-05. ERRH-01 provokes errors with
+        # MALFORMED PATHS (`{url}/%ff%fe`), not with a query the SQLi handler
+        # gates on — so a submit token would be a field its schema discards.
+        # It was added here speculatively and the profile guard caught it.
         "WSTG-ERRH-01":   {"url": "{base}/vulnerabilities/sqli/", "parameter": "id"},
         "WSTG-ATHN-01":   {"login_url": "{base}/login.php"},
         # `uploaded` and the `Upload` button are not decoration: DVWA gates the
@@ -83,6 +104,13 @@ UNSUPPLIABLE: dict[str, str] = {
                       "(store low- and high-privilege credentials for this target)",
     "high_priv_token": "needs two authenticated accounts "
                        "(store low- and high-privilege credentials for this target)",
+    # Same requirement, different material. A case may accept either via
+    # `required_any`, and the operator-facing message must not change with
+    # which one happens to be missing.
+    "low_priv_cookie": "needs two authenticated accounts "
+                       "(store low- and high-privilege credentials for this target)",
+    "high_priv_cookie": "needs two authenticated accounts "
+                        "(store low- and high-privilege credentials for this target)",
     "request_template": "needs a hand-written request template",
     "success_marker": "needs a hand-written success marker",
     "jwt": "needs a captured JWT (log in with a stored credential first)",
@@ -100,6 +128,8 @@ def build_target(case: dict[str, Any], base: str,
     profile = profile or {}
     schema = case.get("target_schema") or {}
     req = schema.get("required") or []
+    # Each group is satisfied by ANY member — see TargetSchema.required_any.
+    req_any = [list(g) for g in (schema.get("required_any") or []) if g]
     for r in req:
         if r in UNSUPPLIABLE and not (extra or {}).get(r):
             return None, UNSUPPLIABLE[r]
@@ -141,6 +171,16 @@ def build_target(case: dict[str, Any], base: str,
     }
 
     tgt: dict[str, Any] = {}
+    # Alternation first, so a group that cannot be satisfied names ALL the
+    # fields that would have satisfied it rather than the first one tried.
+    for group in req_any:
+        chosen = next((f for f in group
+                       if (over.get(f) or derived.get(f)) not in (None, "")), None)
+        if chosen is None:
+            reasons = [UNSUPPLIABLE[f] for f in group if f in UNSUPPLIABLE]
+            return None, (reasons[0] if reasons else
+                          f"needs one of: {', '.join(group)}")
+        tgt[chosen] = over.get(chosen, derived.get(chosen))
     for r in req:
         if r in over:
             tgt[r] = over[r]
@@ -153,18 +193,35 @@ def build_target(case: dict[str, Any], base: str,
         if tgt[r] in (None, ""):
             return None, f"no value for required field {r!r}"
     for o in schema.get("optional") or []:
-        if o in over:
+        if o in over and o not in tgt:
             tgt[o] = over[o]
+    # Every OTHER member of a satisfied group is offered too when it exists, so
+    # a command written for both shapes can pick whichever it was given.
+    for group in req_any:
+        for f in group:
+            if f not in tgt and over.get(f) not in (None, ""):
+                tgt[f] = over[f]
     tgt.setdefault("host", host)
     # Every rendered value is checked, not just the host. The scope object below
     # constrains WHICH HOST may be contacted; it says nothing about the other
     # fields, and those are substituted into `bash -c '...'` command templates.
     from orchestrator.engagement import looks_injectable
     for k, v in tgt.items():
-        if isinstance(v, str):
-            bad = looks_injectable(v)
-            if bad:
-                return None, f"target field {k!r} {bad}"
+        # `if isinstance(v, str)` let EVERY non-string value past the gate
+        # untouched, and the runner stringifies whatever it is into the command
+        # template — so a list value carried its contents through verbatim.
+        # Harmless while profiles were Python source written by us; not
+        # harmless the moment this knowledge becomes data an operator types.
+        if isinstance(v, bool) or v is None:
+            return None, f"target field {k!r} must be text or a number"
+        if isinstance(v, (int, float)):
+            continue                       # port, parallel_n — no shell surface
+        if not isinstance(v, str):
+            return None, (f"target field {k!r} must be text, not "
+                          f"{type(v).__name__}")
+        bad = looks_injectable(v)
+        if bad:
+            return None, f"target field {k!r} {bad}"
     # Scope travels WITH the target. The runner enforces it, so a plan that
     # omitted it would hand the executor a case with no boundary.
     tgt["scope"] = {"allow_hosts": [host], "allow_ports": [port]}
@@ -188,7 +245,8 @@ def _entry(case: dict[str, Any]) -> dict[str, Any]:
 def plan_sweep(cases: list[dict[str, Any]], base: str, profile_name: str = "",
                only: list[str] | None = None,
                extra: dict[str, Any] | None = None,
-               discovered: dict[str, list[str]] | None = None) -> dict[str, Any]:
+               discovered: dict[str, list[str]] | None = None,
+               declared: dict[str, dict[str, str]] | None = None) -> dict[str, Any]:
     """What a sweep WOULD do. Pure — no network, no database, no execution.
 
     `discovered` is what earlier runs found for this target, shaped
@@ -200,7 +258,14 @@ def plan_sweep(cases: list[dict[str, Any]], base: str, profile_name: str = "",
 
     With nothing discovered the plan is byte-identical to before.
     """
-    profile = PROFILES.get(profile_name or "", {})
+    # PROFILES is the BUILT-IN layer, not the only layer. It stays a plain
+    # module-level dict: scripts/deterministic_sweep.py imports it, five tests
+    # subscript it synchronously with no event loop, and the benchmark depends
+    # on the two lab profiles resolving with no database at all. What an
+    # operator declares for their own customer is merged OVER it, per
+    # (case, field) — see orchestrator/testcase/declared.py.
+    from orchestrator.testcase.declared import merge
+    profile = merge(PROFILES.get(profile_name or "", {}), declared or {})
     wanted = set(only or [])
     discovered = {k: v for k, v in (discovered or {}).items() if v}
     runnable, skipped = [], []
@@ -208,8 +273,33 @@ def plan_sweep(cases: list[dict[str, Any]], base: str, profile_name: str = "",
         if wanted and case.get("id") not in wanted:
             continue
         req = (case.get("target_schema") or {}).get("required") or []
+        # A field something already BOUND for this case is not a candidate for
+        # fan-out. The fanned value was passed through `extra`, and `extra`
+        # beats the profile in build_target — so one discovered path DELETED
+        # the profile's declared endpoint from the plan:
+        #
+        #   dvwa / WSTG-INPV-05, declared {base}/vulnerabilities/sqli/
+        #   + any discovered path
+        #   -> ran at /, /robots.txt and /ftp, each with parameter=id, and the
+        #      declared SQLi endpoint appeared NOWHERE.
+        #
+        # Three confident "no SQLi" verdicts about pages with no `id`
+        # parameter, and zero runs against the one endpoint erlik knew was
+        # right. `endpoints.record` runs after every v2 run, so a target
+        # acquires discovered paths and then permanently stops being tested
+        # where it matters. The comment below says discovered values are
+        # "ADDITIONAL targets, not replacements" — that was only ever true of
+        # the no-profile path.
+        #
+        # A declaration binds case <-> field <-> value; a discovered row asserts
+        # only "this path exists on this host". The tighter binding wins.
+        bound = set((profile.get(case.get("id", "")) or {}))
+        bound |= {k for k, v in (extra or {}).items() if v not in (None, "")}
         fan_field = next(
-            (f for f in ("url", "parameter") if f in req and f in discovered), None)
+            (f for f in ("url", "parameter")
+             if f in req and f in discovered and f not in bound), None)
+        suppressed = sorted(f for f in ("url", "parameter")
+                            if f in req and f in discovered and f in bound)
         if fan_field:
             # The discovered values are ADDITIONAL targets, not replacements.
             # Fanning over them alone traded "test the site root" for "test
@@ -241,6 +331,10 @@ def plan_sweep(cases: list[dict[str, Any]], base: str, profile_name: str = "",
                 continue
         tgt, why = build_target(case, base, profile, extra)
         entry = _entry(case)
+        if suppressed:
+            # NAMED, not silent. An operator seeing three fewer rows cannot
+            # otherwise tell a declaration taking over from a regression.
+            entry["suppressed_discovered"] = suppressed
         if tgt is None:
             skipped.append({**entry, "reason": why})
         else:

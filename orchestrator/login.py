@@ -349,17 +349,40 @@ def login_form(html: str, page_url: str, password_field: str = "password"
     return {"url": url, "method": form["method"], "fields": _submittable(form)}
 
 
-async def authenticate(db, credential_id: str, *, verify_url: str = "",
+async def authenticate(db, credential_id: str, *,
                        timeout: float = 20.0) -> dict[str, Any]:
     """Log in with a stored credential and record the session.
 
     Returns a report with NO secret in it. `status` is 'verified' only when a
     probe with the captured session actually reached a protected resource.
+
+    NO URL PARAMETER. Both destinations come from the stored credential, and
+    that is the load-bearing control once this is reachable over HTTP.
+
+    Storing a credential with a hostile `login_url` is near-worthless to an
+    attacker: they must supply the password themselves, so they exfiltrate a
+    secret they already hold. EXECUTING an existing credential against a URL
+    they choose is the opposite — they obtain a password they do NOT hold,
+    blind, without ever reading a response. `verify_url` is the same shape
+    one step down: it carries the captured SESSION rather than the password.
+
+    So neither can be passed in. `verify_url` used to be a keyword argument
+    used once and never stored, which is precisely why it had to arrive per
+    request; it is now declared with the credential and read back here.
     """
     row, password = await C._secret_of(db, credential_id)
     login_url = row.get("login_url") or ""
+    verify_url = row.get("verify_url") or ""
     if not login_url:
         return {"ok": False, "reason": "credential has no login_url"}
+    # Re-checked on READ. The row was validated on write, but a database is a
+    # trust boundary and this one decides where a plaintext password is sent.
+    for _name, _url in (("login_url", login_url), ("verify_url", verify_url)):
+        if not _url:
+            continue
+        why = C.check_destination(_url)
+        if why:
+            return {"ok": False, "reason": f"{_name} {why}"}
 
     kind = (row.get("kind") or "form").lower()
     user_field = row.get("username_field") or "username"
@@ -425,10 +448,21 @@ async def authenticate(db, credential_id: str, *, verify_url: str = "",
                                              row.get("header_name") or "Authorization",
                                              timeout) else "rejected"
     sid = await C.save_session(db, credential_id, row["target_key"],
-                               token=token, cookie=cookie, status=status)
+                               token=token, cookie=cookie, status=status,
+                               verify_url=verify_url)
     await db.commit()
+    # `ok` says the login was not REJECTED. It is not a synonym for usable:
+    # without a verify_url the status is 'unverified', and an unverified
+    # session supplies nothing to a sweep (auth_inputs, auth_state and
+    # _plaintext all gate on 'verified'). Callers must render `status`, not
+    # `ok`, or they will show success for a session that does nothing.
     return {"ok": status != "rejected", "session_id": sid, "status": status,
-            "has_token": bool(token), "has_cookie": bool(cookie), "note": note}
+            "usable": status == "verified",
+            "has_token": bool(token), "has_cookie": bool(cookie), "note": note,
+            "note_unverified": ("" if verify_url else
+                                "no verify_url on this credential, so the session "
+                                "was captured but NOT verified — it supplies "
+                                "nothing to a sweep")}
 
 
 def _fingerprint(r: "httpx.Response") -> tuple:

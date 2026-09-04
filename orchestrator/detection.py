@@ -347,15 +347,20 @@ def _curl_cors(ctx: DetectContext) -> list[Finding]:
         }]
 
     if reflected or "evil" in origin.lower():
+        # Built outside the f-string: a multi-line expression with nested quotes
+        # inside an f-string is PEP 701 syntax and only parses on Python 3.12+,
+        # but the project supports 3.10+ (README, setup.sh).
+        if creds:
+            _impact = (" with Access-Control-Allow-Credentials: true — any "
+                       "site can read authenticated responses")
+        else:
+            _impact = (" but without credentials, so only anonymous "
+                       "data is exposed")
         return [{
             "vuln_type": "CORS Misconfiguration",
             "severity": "high" if creds else "low",
             "url": ctx.url, "parameter": "",
-            "evidence": (f"Server reflects arbitrary Origin: {origin}"
-                         f"{' with Access-Control-Allow-Credentials: true — any '
-                            'site can read authenticated responses' if creds
-                            else ' but without credentials, so only anonymous '
-                                 'data is exposed'}"),
+            "evidence": f"Server reflects arbitrary Origin: {origin}{_impact}",
         }]
     return []          # a specific, non-reflected origin is an allowlist
 

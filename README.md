@@ -49,7 +49,7 @@ dashboard/           Web UI
 docs/                Methodology + evaluation documentation
 ```
 
-## Test catalogue (WSTG coverage)
+## WSTG test-case catalogue
 
 | ID | Test |
 |----|------|
@@ -86,17 +86,50 @@ pip install -r requirements.txt
 docker compose up -d        # first run builds the Kali tools image (~10–20 min)
 
 # Start the orchestrator — dashboard at http://localhost:8002
-./run.sh                    # or: uvicorn orchestrator.main:app --host 0.0.0.0 --port 8002
+./run.sh                    # or: uvicorn orchestrator.main:app --host 127.0.0.1 --port 8002
 ```
+
+> **Binding:** `run.sh` listens on `127.0.0.1:8002` — the API launches attacks, so it
+> is not exposed on the network by default. Override the host and port with
+> `ERLIK_HOST` and `ERLIK_PORT`, and set `ERLIK_API_TOKEN` to require a token on
+> state-changing calls before binding anywhere but loopback. `ERLIK_RELOAD=1` enables
+> auto-reload for development.
 
 > **Note:** the first `docker compose up` builds the Kali tools container — it pulls
 > the Kali base image and installs the toolset (nmap, sqlmap, nuclei, dalfox,
 > jwt_tool, …). This needs internet and takes a while; later runs start instantly.
 
+## Tests
+
+`pytest` is **not** in `requirements.txt` — the runtime install stays lean. The test
+dependencies live in `requirements-dev.txt`, which also pulls in the runtime ones:
+
+```bash
+pip install -r requirements-dev.txt
+pytest                      # must be run from the repo root
+```
+
+The suite pins the behaviour of the functions every thesis metric derives from —
+the programmatic finding detector, the finding↔ground-truth matcher, and the
+scope guard — so a refactor that would move a number in the results turns a test
+red first. Neither Docker nor Ollama is needed to run it; it exercises the Python
+layer directly, in about a minute.
+
+Run it from the repository root: `conftest.py` anchors the working directory
+there, and `orchestrator.main` builds its Jinja2 template path relative to the
+CWD.
+
+A clean checkout currently reports **1674 passed, 31 skipped**. Every skip is
+`corpus present but empty` — those tests replay recorded session data from
+`runs/`, which is excluded by `.gitignore` (see `docs/REPRODUCIBILITY.md`), so
+they are structurally unrunnable from a fresh clone rather than broken.
+
+See `tests/README.md` for what each module covers and for the coverage command.
+
 ## Usage
 
 ```bash
-# List the test catalogue
+# List the WSTG test-case catalogue
 python -m orchestrator.testcase.cli list
 
 # Run a single test case against an authorised target
@@ -145,7 +178,7 @@ ollama pull qwen2.5-coder:7b      # also 14b / 32b
 export ERLIK_DOCKER_TARGET_HOST=juice-shop        # reproduces the lab wiring
 
 # 3. Launch the orchestrator
-uvicorn orchestrator.main:app --host 0.0.0.0 --port 8002
+uvicorn orchestrator.main:app --host 127.0.0.1 --port 8002
 ```
 
 - Targets: OWASP Juice Shop (ground truth = 35) and DVWA (ground truth = 19).

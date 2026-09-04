@@ -81,6 +81,17 @@ def check_command(command: str, scope: Scope, primary_url: str | None = None) ->
     # Extract bare hostnames only outside of already-matched URLs to avoid
     # double-counting the host portion of an http://… URL we just validated.
     masked = _URL_RX.sub(" ", command)
+    # A CREDENTIAL HANDLE is not a hostname. `ERLIK_SECRET.<session>.<field>`
+    # ends in a dotted word, and `_BARE_HOST_RX` read `3fd.cookie` as a host
+    # with a six-letter TLD — so every authenticated step died as
+    # "scope violation: host '3fd.cookie' is not in allow_hosts". Scope is
+    # checked BEFORE resolution, deliberately, so that the plaintext secret is
+    # never handed to this function; that makes masking the handle here the
+    # only place the two designs can be reconciled. Measured: with this line
+    # absent, no step carrying a session can run at all, which is why
+    # authenticated testing had never once worked end to end.
+    from orchestrator.credentials import HANDLE_RX
+    masked = HANDLE_RX.sub(" ", masked)
     for m in _BARE_HOST_RX.finditer(masked):
         try:
             check_url(m.group(0), scope)

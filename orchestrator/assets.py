@@ -124,6 +124,12 @@ async def record_observation(db, engagement_id: str, url: str, kind: str,
     return await _upsert(db, engagement_id, kind, value, parent, source)
 
 
+def _norm_sev(value: str | None) -> str:
+    """One definition of severity, shared with the report and the badges."""
+    from orchestrator.submission_policy import normalise_severity
+    return normalise_severity(value)
+
+
 async def tree(db, engagement_id: str) -> list[dict[str, Any]]:
     """The inventory, nested, with each asset's findings rolled up.
 
@@ -141,14 +147,29 @@ async def tree(db, engagement_id: str) -> list[dict[str, Any]]:
     if not rows:
         return []
 
-    cur = await db.execute(
-        "SELECT asset_id, vuln_type, severity, COUNT(*) n FROM findings "
-        "WHERE asset_id IN (SELECT id FROM engagement_assets WHERE engagement_id = ?) "
-        "GROUP BY asset_id, vuln_type, severity", (engagement_id,))
+    # BOTH lanes. This read only `findings` — the agent lane — so a host the
+    # DETERMINISTIC lane found something on rendered with no findings at all.
+    # v2_findings has carried an asset_id since the v2 run learned its
+    # engagement, and nothing consumed it.
+    #
+    # `lane` is kept on each row rather than merged away: "SQL Injection x3"
+    # means something different when a detector proved it than when a model
+    # asserted it, and a client table that flattens the two cannot be
+    # un-flattened later.
     by_asset: dict[str, list[dict]] = {}
-    for r in await cur.fetchall():
-        by_asset.setdefault(r[0], []).append(
-            {"vuln_type": r[1], "severity": r[2], "count": r[3]})
+    for table, lane in (("findings", "agent"), ("v2_findings", "deterministic")):
+        cur = await db.execute(
+            f"SELECT asset_id, vuln_type, severity, COUNT(*) n FROM {table} "
+            "WHERE asset_id IN (SELECT id FROM engagement_assets WHERE engagement_id = ?) "
+            "GROUP BY asset_id, vuln_type, severity", (engagement_id,))
+        for r in await cur.fetchall():
+            by_asset.setdefault(r[0], []).append(
+                {"vuln_type": r[1],
+                 # Normalised for the same reason the sidebar counts are: the
+                 # corpus contains '** CRITICAL' and 'CRITICAL' alongside
+                 # 'critical', and a tree that shows all three is not a summary.
+                 "severity": _norm_sev(r[2]),
+                 "count": r[3], "lane": lane})
 
     node = {r["id"]: {**r, "findings": by_asset.get(r["id"], []), "children": []}
             for r in rows}

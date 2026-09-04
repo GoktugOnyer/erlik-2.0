@@ -8,7 +8,8 @@ from datetime import datetime
 from contextlib import asynccontextmanager
 from pathlib import Path
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request, Body
-from fastapi.responses import HTMLResponse, FileResponse
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 import httpx
 
@@ -81,6 +82,34 @@ async def _api_token_guard(request: Request, call_next):
         if provided != token:
             return JSONResponse({"detail": "missing or invalid API token"}, status_code=401)
     return await call_next(request)
+
+
+@app.exception_handler(RequestValidationError)
+async def _validation_error_without_the_body(request: Request, exc):
+    """422 without echoing what the caller sent.
+
+    FastAPI's default handler puts the REQUEST BODY in `input` on every
+    validation error. Verified on this stack: POSTing
+    `[{"secret": "hunter2", "username": "admin"}]` to a `body: dict` route
+    returns
+
+        {"detail":[{"type":"dict_type","loc":["body"],
+                    "msg":"Input should be a valid dictionary",
+                    "input":[{"secret":"hunter2","username":"admin"}]}]}
+
+    A form-encoded body and a bare JSON string echo identically. So the moment
+    any route accepts a password, a slightly malformed request reflects it back
+    in an error — and that error is the kind of thing that gets pasted into a
+    ticket. This is app-wide rather than per-route because the leak is in the
+    default handler, so every existing endpoint had it too.
+
+    `type`, `loc` and `msg` are kept: they say WHICH field was wrong and why,
+    which is all a caller needs. `input` and `ctx` are dropped — `ctx` can
+    carry the offending value as well.
+    """
+    return JSONResponse(status_code=422, content={"detail": [
+        {k: v for k, v in err.items() if k in ("type", "loc", "msg")}
+        for err in exc.errors()]})
 
 
 # --- Toolset Presets (RQ3-b: action-space overload ablation) ---
@@ -1959,22 +1988,61 @@ def _deliverable_view(findings: list[dict]) -> tuple[list[dict], list[dict]]:
     render points each iterated `findings` independently — the session-info
     count, the `## Vulnerabilities Found (N)` heading and detail loop, the
     summary tables, and the text handed to the executive-summary model — so a
-    filter added to any one of them contradicted the other three inside the same
-    file.
+    filter added to any one of them contradicted the other three inside the
+    same file.
 
-    Nothing is withheld yet: the submission policy (C4), the export redactor
-    (C6) and the scope stamp (C7) are what will populate `withheld`. The seam
-    exists first and on purpose, so those three land in one place instead of
-    each hunting down four render points and missing some.
+    WHAT IT WITHHOLDS: findings an operator triaged away. Nothing else.
+
+    The docstring here used to promise that the submission policy (C4), the
+    export redactor (C6) and the scope stamp (C7) would populate `withheld`.
+    All three shipped, and every one of them deliberately landed elsewhere, for
+    reasons that still hold:
+
+      C4  went to `_policy_verdicts`, applied at the render points, because a
+          verdict computed here would rest on a severity the calibration pass
+          overwrites a few hundred lines later. It is also annotate-never-
+          remove, so it demotes rather than withholds — the wrong shape for
+          this return value.
+      C6  went to `_mask_export_rows`; it rewrites fields, it does not drop rows.
+      C7  went to `_scope_audit`, which is NON-BLOCKING by design: a recorded
+          corpus session has a finding whose URL host differs from the target,
+          and withholding on scope would have emptied every export for it.
+
+    So the promise was stale, and `withheld` stayed empty for as long as it
+    existed. Triage rejection is what belongs here, and it is the one filter
+    immune to the ordering objection above: a human's verdict does not change
+    when the calibration pass runs.
+
+    IT WAS THE MARKDOWN REPORT THAT WAS WRONG. The five machine exports and the
+    chain report already dropped rejected findings; the dashboard tells the
+    operator "rejected are excluded from the report + exports". The markdown —
+    the artifact actually handed to a client — filtered nothing, so a finding
+    the operator had explicitly rejected was still listed in full and still
+    counted in the header, while the SARIF for the same session showed one
+    fewer. Two answers about one engagement.
 
     IMPORTANT: filter HERE, at render — never in the SQL that loads findings.
     The calibration pass runs exactly once over whatever list it is given, so a
     finding filtered out of the query is never calibrated, and anything later
-    un-withheld comes back uncharacterised.
+    un-withheld comes back uncharacterised. Withholding it here has the same
+    effect, which is acceptable ONLY because a rejected finding is excluded
+    from every downstream consumer too — it is never the thing whose empty
+    calibration columns anyone reads.
+
+    THE COUNT MUST SAY SO. `withheld` is not a licence to quietly shrink the
+    total: the caller states how many were withheld and why. A number that
+    silently drops is how the chain report has been reporting for its whole
+    existence, and it is indistinguishable from erlik having found less.
 
     Returns (included, withheld).
     """
-    return list(findings), []
+    from orchestrator.submission_policy import is_withheld
+
+    included: list[dict] = []
+    withheld: list[dict] = []
+    for f in findings:
+        (withheld if is_withheld(f) else included).append(f)
+    return included, withheld
 
 
 def _discovery_filter(target_url: str, tool: str = "gobuster") -> str:
@@ -2139,6 +2207,7 @@ async def _generate_report(session_id: str, model: str, target_url: str,
                            total_steps: int, total_findings: int,
                            total_duration_ms: int):
     """Generate a hybrid pentest report: programmatic data sections + LLM analysis."""
+    from orchestrator.redaction import mask as _mask
     db = await get_db()
     try:
         # Fetch steps — convert to dicts immediately for safe key access
@@ -2162,7 +2231,11 @@ async def _generate_report(session_id: str, model: str, target_url: str,
         # Fetch findings — convert to dicts immediately
         cursor = await db.execute(
             "SELECT id, vuln_type, severity, url, parameter, evidence, "
-            "cve_id, cvss_score, cvss_vector, cwe "
+            # triage_status is SELECTED but not FILTERED ON, so the split below
+            # can state what it withheld. Filtering in SQL would leave the
+            # withheld rows uncalibrated AND uncounted, which is the silent
+            # shrink _deliverable_view exists to prevent.
+            "cve_id, cvss_score, cvss_vector, cwe, triage_status "
             "FROM findings WHERE session_id = ? ORDER BY id", (session_id,)
         )
         raw_findings = await cursor.fetchall()
@@ -2179,6 +2252,7 @@ async def _generate_report(session_id: str, model: str, target_url: str,
                 "cvss_score": row[7],
                 "cvss_vector": row[8],
                 "cwe": row[9],
+                "triage_status": row[10],
             })
     finally:
         await db.close()
@@ -2211,6 +2285,12 @@ async def _generate_report(session_id: str, model: str, target_url: str,
     # `nettacker_findings` enabled the header therefore disagreed with the
     # `## Vulnerabilities Found (N)` section beneath it, in the same file.
     report_lines.append(f"| **Findings** | {len(findings)} |")
+    # A withheld finding is STATED, never silently subtracted. Without this row
+    # a report that dropped three triaged-away findings is indistinguishable
+    # from a run that found three fewer, and the client has no way to ask.
+    if withheld:
+        report_lines.append(
+            f"| **Withheld** | {len(withheld)} (rejected in triage) |")
     report_lines.append(f"| **Date** | {timestamp} |")
     report_lines.append("")
 
@@ -2277,8 +2357,23 @@ async def _generate_report(session_id: str, model: str, target_url: str,
             sn = s["step_number"]
             tool = s["tool_called"]
             phase = s["phase"]
-            cmd = s["tool_input"]
-            output = s["tool_output"]
+            # MASK HERE, at the top of the loop, not at the append sites.
+            # `parsed`, `summary`, `cleaned_output` and the raw-output section
+            # all derive from these two names, so this is the single point
+            # where a secret can enter the rendered markdown — and this
+            # markdown is what /report and /report/download serve.
+            #
+            # It was rendered verbatim. `primitives.inject_credentials` writes
+            # real bearer tokens and session cookies into `tool_input`, and a
+            # session's JWT appeared twice and its cookie three times in the
+            # downloaded file — beneath that same file's own header declaring
+            # "Redaction — Applied: yes / Distinct secrets masked: 3". The
+            # bottom half (the untruncated step log) was masked and counted;
+            # the top half, this one, never called the redactor. A stated
+            # assurance that is false is worse than no assurance: it is
+            # exactly what stops someone reading the file before forwarding it.
+            cmd = _mask(s["tool_input"])
+            output = _mask(s["tool_output"])
             dur = s["duration_ms"]
             phases_seen.add(phase)
 
@@ -2327,6 +2422,17 @@ async def _generate_report(session_id: str, model: str, target_url: str,
     # ─── Vulnerabilities Found (programmatic — exact evidence + discovery chain) ───
     report_lines.append(f"## Vulnerabilities Found ({len(findings)})")
     report_lines.append("")
+    if withheld:
+        _by = {}
+        for _f in withheld:
+            _k = (_f.get("triage_status") or "?").strip().lower()
+            _by[_k] = _by.get(_k, 0) + 1
+        _detail = ", ".join(f"{_n} {_k.replace('_', ' ')}" for _k, _n in sorted(_by.items()))
+        report_lines.append(
+            f"> {len(withheld)} further finding(s) were recorded and then "
+            f"withheld from this report by operator triage ({_detail}). They "
+            f"are retained in full in the session record.")
+        report_lines.append("")
 
     # Severity color map for inline HTML
     SEV_COLORS = {
@@ -2457,7 +2563,13 @@ async def _generate_report(session_id: str, model: str, target_url: str,
         target_url=target_url,
         duration=duration_str,
         total_steps=total_steps,
-        total_findings=total_findings,
+        # From the SPLIT, not from the agent loop's counter. That counter by
+        # design excludes nettacker pre-scan findings while the report SELECT
+        # returns them, and it knows nothing about triage withholding — so the
+        # prompt stated a total that contradicted the FINDINGS block directly
+        # beneath it (measured: "TOTAL FINDINGS: 3" above a single listed
+        # finding). The model writes the client's executive summary from this.
+        total_findings=len(findings),
         findings_text=findings_text,
         phases_completed=phases_completed_str,
         phases_missed=phases_missed_str,
@@ -2663,13 +2775,17 @@ async def _build_report_json(session_id: str) -> dict:
     calibrated) finding rows. Source of truth for GET /report.json and the
     on-disk artifact. Uses calibrated_severity when present, else the raw label.
     """
+    from orchestrator import submission_policy as _sp
+
     db = await get_db()
     try:
         srow = await (await db.execute(
             "SELECT * FROM sessions WHERE id = ?", (session_id,))).fetchone()
         session = dict(srow) if srow else {}
         cur = await db.execute(
-            "SELECT vuln_type, severity, url, evidence, cve_id, cvss_score, cvss_vector, "
+            # `id` is selected because the policy verdict is keyed on it.
+            # Without it these five exports could not be gated at all.
+            "SELECT id, vuln_type, severity, url, evidence, cve_id, cvss_score, cvss_vector, "
             "cwe, calibrated_severity, owasp_category, mitre, impact, remediation, confidence, "
             "ref_links, triage_status, severity_override "
             "FROM findings WHERE session_id = ? ORDER BY id", (session_id,)
@@ -2680,16 +2796,30 @@ async def _build_report_json(session_id: str) -> dict:
 
     stats = {"total": 0, "critical": 0, "high": 0, "medium": 0, "low": 0,
              "informational": 0}
+    # THE GATE these five exports never had. /report.json, .html, .sarif,
+    # .defectdojo.json and .jira.csv all derive from this function, and none of
+    # them passed through the submission policy — so an operator clicking
+    # SARIF shipped a deliverable containing findings the policy says must
+    # never be submitted. The markdown report has applied it all along, which
+    # made the two disagree about the same session.
+    #
+    # Same semantics as the markdown path: ANNOTATE, never remove. The stored
+    # severity is unchanged and every finding is still listed.
+    verdicts = _policy_verdicts(rows)
     report_findings = []
     i = 0
     for r in rows:
         # Operator triage: rejected findings are excluded from the deliverable;
         # a severity override wins over calibrated/raw.
-        if r.get("triage_status") == "rejected":
+        if _sp.is_withheld(r):
             continue
         i += 1
-        sev = (r.get("severity_override") or r.get("calibrated_severity")
-               or r.get("severity") or "INFO").upper()
+        # Normalised, not merely upper-cased. `calibrated_severity` is written
+        # by an LLM pass and the corpus contains '** CRITICAL'; upper-casing
+        # that leaves it unmatched by _SEV_STAT_KEY, so a CRITICAL finding was
+        # counted as informational in the statistics of a client report.
+        from orchestrator.submission_policy import current_severity
+        sev = current_severity(r).upper()
         refs = [x.strip() for x in (r.get("ref_links") or "").split(",") if x.strip()]
         report_findings.append(ReportFinding(
             id=f"F-{i:03d}",
@@ -2706,9 +2836,13 @@ async def _build_report_json(session_id: str) -> dict:
             confidence=r.get("confidence"),
             remediation=r.get("remediation"),
             references=refs,
+            submittable=r.get("id") not in verdicts,
+            policy_rule=verdicts.get(r.get("id")),
         ))
         stats["total"] += 1
         stats[_SEV_STAT_KEY.get(sev, "informational")] += 1
+
+    stats["not_submittable"] = sum(1 for f in report_findings if not f.submittable)
 
     report = PentestReport(
         engagement={
@@ -3331,6 +3465,8 @@ async def _generate_chain_report(chain_id: str, target_url: str) -> str | None:
     them, de-dupes by (vuln_type, URL-without-query), honours triage (rejected
     excluded, severity_override applied), and writes a single chain_<id>.md.
     """
+    from orchestrator import submission_policy as _sp
+
     db = await get_db()
     try:
         cur = await db.execute(
@@ -3342,7 +3478,7 @@ async def _generate_chain_report(chain_id: str, target_url: str) -> str | None:
         sids = [s["id"] for s in sessions]
         ph = ",".join("?" * len(sids))
         cur = await db.execute(
-            f"SELECT vuln_type, severity, url, parameter, evidence, cve_id, "
+            f"SELECT id, vuln_type, severity, url, parameter, evidence, cve_id, "
             f"calibrated_severity, severity_override, triage_status "
             f"FROM findings WHERE session_id IN ({ph}) ORDER BY id", sids)
         findings = [dict(r) for r in await cur.fetchall()]
@@ -3353,13 +3489,22 @@ async def _generate_chain_report(chain_id: str, target_url: str) -> str | None:
     finally:
         await db.close()
 
-    def eff_sev(f):
-        return (f.get("severity_override") or f.get("calibrated_severity")
-                or f.get("severity") or "info").lower()
+    # ONE definition of effective severity, shared with the session report, the
+    # asset tree and the engagement rollup. This was a second, local one, and
+    # it differed in the way that mattered: it lower-cased the raw column
+    # instead of normalising it. `calibrated_severity` really contains
+    # '** CRITICAL' (11 such rows in the recorded corpus, one of them
+    # CRITICAL), so a critical finding rendered as `** CRITICAL`, sorted BELOW
+    # info because '** critical' is not a key in `order`, and vanished from the
+    # executive summary's severity line entirely — a consolidated report said
+    # "1 critical" for two criticals.
+    eff_sev = _sp.current_severity
 
     seen: dict = {}
+    withheld: list[dict] = []
     for f in findings:
-        if (f.get("triage_status") or "") == "rejected":
+        if _sp.is_withheld(f):
+            withheld.append(f)
             continue
         url = (f.get("url") or "").split("?")[0].rstrip("/").lower()
         key = ((f.get("vuln_type") or "").lower(), url)
@@ -3399,14 +3544,40 @@ async def _generate_chain_report(chain_id: str, target_url: str) -> str | None:
     L.append("")
     L.append("## Consolidated Findings")
     L.append("")
+    # STATE the withholding. This dropped triaged-away findings silently for
+    # its whole existence, which is indistinguishable from erlik having found
+    # fewer — the session report states its own withholds for the same reason.
+    if withheld:
+        _wb: dict = {}
+        for _f in withheld:
+            _k = (_f.get("triage_status") or "?").strip().lower()
+            _wb[_k] = _wb.get(_k, 0) + 1
+        # Built outside the f-string: nesting the same quote character inside an
+        # f-string expression is PEP 701 syntax and only parses on Python 3.12+,
+        # but the project supports 3.10+ (README, setup.sh).
+        _breakdown = ", ".join(
+            f"{n} {k.replace('_', ' ')}" for k, n in sorted(_wb.items())
+        )
+        L.append(f"> {len(withheld)} finding(s) were withheld by operator triage "
+                 f"({_breakdown}) "
+                 f"and are not counted above. They are retained in the session record.")
+        L.append("")
     if unique:
-        L.append("| # | Severity | Type | URL | Evidence |")
-        L.append("|---|---|---|---|---|")
+        # The same submission policy the five machine exports apply. A chain
+        # report is the MOST client-facing artifact erlik produces, and it was
+        # the only findings table that had never seen the policy — so a finding
+        # the policy says must never be submitted appeared here as an ordinary
+        # medium while the same session's SARIF marked it not submittable.
+        _verdicts = _policy_verdicts(unique)
+        L.append("| # | Severity | Type | URL | Evidence | Submittable |")
+        L.append("|---|---|---|---|---|---|")
         for i, f in enumerate(unique, 1):
             ev = (f.get("evidence") or "").replace("|", "/").replace("\n", " ").strip()[:130]
             cve = f" `{f['cve_id']}`" if f.get("cve_id") else ""
+            _rule = _verdicts.get(f.get("id"))
             L.append(f"| {i} | {eff_sev(f).upper()} | {f.get('vuln_type', '?')}{cve} "
-                     f"| {f.get('url', '') or '-'} | {ev} |")
+                     f"| {f.get('url', '') or '-'} | {ev} "
+                     f"| {'no — ' + _rule if _rule else 'yes'} |")
     else:
         L.append("_No findings recorded across the chain._")
     L.append("")
@@ -3582,7 +3753,11 @@ async def engagement_rows_for_session(session_id: str):
         if not row or not row[0]:
             return None
         from orchestrator import engagement as _E
-        return await _E.scope_rows(db, row[0])
+        # The whole authorisation, not just the scope rows: the executor
+        # could not enforce the time window because it was never given the
+        # engagement record. An expired engagement must stop work in flight,
+        # not merely be refused at creation.
+        return await _E.authorisation(db, row[0])
     except Exception as e:  # noqa: BLE001
         # Fail LOUD but do not fail open silently: an unreadable scope must not
         # look like "no engagement".
@@ -5312,6 +5487,8 @@ async def list_findings(engagement_id: str | None = None, severity: str | None =
     counted and reachable with status=all|rejected, so triage never looks like
     deletion.
     """
+    from orchestrator import submission_policy as _sp
+
     limit = max(1, min(int(limit or FINDINGS_PAGE_LIMIT), 2000))
     where, params = [], []
 
@@ -5325,9 +5502,9 @@ async def list_findings(engagement_id: str | None = None, severity: str | None =
             params.extend(wanted)
     st = (status or "open").lower()
     if st == "open":
-        where.append("COALESCE(LOWER(f.triage_status),'') NOT IN ('rejected','false_positive')")
+        where.append("NOT " + _sp.SQL_WITHHELD_TRIAGE.format(col="f.triage_status"))
     elif st == "rejected":
-        where.append("COALESCE(LOWER(f.triage_status),'') IN ('rejected','false_positive')")
+        where.append(_sp.SQL_WITHHELD_TRIAGE.format(col="f.triage_status"))
     if q:
         where.append("(LOWER(f.vuln_type) LIKE ? OR LOWER(f.url) LIKE ?)")
         params.extend([f"%{q.lower()}%"] * 2)
@@ -5593,6 +5770,13 @@ async def run_v2_test_case(test_case_id: str, body: dict):
     target = body.get("target") or {}
     provider = body.get("provider")
     model = body.get("model")
+    engagement_id = body.get("engagement_id")
+
+    # The deterministic lane had NO scope gate at all: the target went straight
+    # to run_test_case. The agent lane has been gated since the engagement
+    # spine landed, so the half erlik asks a client to trust was the half that
+    # could run anywhere. Same function, so the two cannot diverge.
+    await enforce_engagement_scope(engagement_id, target.get("url") or "")
 
     try:
         # db is passed so a step carrying an auth HANDLE can resolve it at
@@ -5602,7 +5786,8 @@ async def run_v2_test_case(test_case_id: str, body: dict):
                                      db=await get_db())
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    run_id = await save_v2_run(result, provider=provider, model=model)
+    run_id = await save_v2_run(result, provider=provider, model=model,
+                               engagement_id=engagement_id)
     out = result.model_dump()
     out["run_id"] = run_id
     return out
@@ -5645,15 +5830,237 @@ async def v2_sweep_plan(body: dict):
     # what erlik inferred, and should not be silently ignored.
     discovered = as_sweep_inputs(await known(db, target), target)
     extra = {**(await creds.auth_inputs(db, target)), **(body.get("extra") or {})}
+
+    # DECLARED per-case targeting, entered by the operator for THIS customer's
+    # application. Same shape and same precedence as a built-in profile, and
+    # merged over it per (case, field) — so correcting one stale parameter does
+    # not discard the rest of what the profile knows about that case.
+    #
+    # `refused` rows are surfaced rather than dropped. A declaration that stops
+    # applying looks exactly like one that was never saved.
+    from orchestrator.testcase import declared as _decl
+    _declared, _refused = await _decl.profile_for(db, target, target)
     plan = plan_sweep(cases, target, body.get("profile") or "",
-                      body.get("only"), extra, discovered=discovered)
+                      body.get("only"), extra, discovered=discovered,
+                      declared=_declared)
+    plan["declared_refused"] = _refused
     plan["inputs"] = {
+        "declared": sum(len(v) for v in _declared.values()),
         "discovered": {k: len(v) for k, v in discovered.items() if v},
+        # Any per-role material, whichever shape it is. A hardcoded list here
+        # silently omitted the cookie fields the access-control cases need.
         "auth_fields": sorted(k for k in extra if k in
-                              ("low_priv_token", "high_priv_token", "auth_header",
-                               "jwt", "cookie")),
+                              ("low_priv_token", "high_priv_token",
+                               "low_priv_cookie", "high_priv_cookie",
+                               "auth_header", "jwt", "cookie")),
     }
     return plan
+
+
+# ---------------------------------------------------------------------------
+# CREDENTIALS
+#
+# `credentials.py` and `login.py` were complete, proven, and reachable only by
+# running Python by hand. The engagement page rendered an auth badge over a
+# store nothing in the product could write to. Doing this by hand took the
+# DVWA sweep from 4 findings (all infrastructure) to 8 — including the SQL
+# injection, the reflected XSS and the file-upload flaw — so the missing last
+# mile was the difference between the deterministic lane working and not.
+#
+# THE SHAPE OF THE RISK, because it decides the whole design. Two things look
+# alike and are not:
+#
+#   STORE with a hostile login_url — the caller supplies the password, so they
+#       exfiltrate a secret they already hold. Near worthless to an attacker.
+#   EXECUTE an EXISTING credential against a URL the caller chooses — they
+#       obtain a password they do NOT hold, blind, without reading a response.
+#
+# So the login route takes NO URL AT ALL: both destinations are read from the
+# stored credential. There is deliberately no route that changes `login_url`
+# or `verify_url` without also re-supplying the secret, because that would
+# reintroduce exactly the primitive above.
+#
+# These are POST/DELETE, so `_api_token_guard` covers them when
+# ERLIK_API_TOKEN is set. The GET is masked BY CONSTRUCTION — `_view` and
+# `session_view` drop the encrypted columns rather than masking them — because
+# the guard never applies to GET.
+# ---------------------------------------------------------------------------
+
+@app.get("/api/v2/targets/credentials")
+async def v2_credentials_list(target: str | None = None):
+    """Credentials and their sessions. Never a secret, by construction."""
+    from orchestrator import credentials as _C
+    db = await get_db()
+    try:
+        creds = await _C.listing(db, target)
+        for c in creds:
+            c["sessions"] = await _C.sessions_for(db, c["id"])
+        state = await _C.auth_state(db, target) if target else None
+    finally:
+        await db.close()
+    return {"target": target, "credentials": creds, "auth": state,
+            "roles": list(_C.ROLES), "kinds": list(_C.KINDS)}
+
+
+@app.post("/api/v2/targets/credentials")
+async def v2_credentials_store(body: dict):
+    """Store a credential. The ONE route that accepts a plaintext secret.
+
+    It is never echoed: the response is the masked listing. A validation error
+    does not reflect it either — see `_validation_error_without_the_body`,
+    which had to be added because FastAPI's default 422 handler returns the
+    request body verbatim.
+    """
+    from orchestrator import credentials as _C
+    from orchestrator.secrets import SecretError
+    target = (body.get("target") or "").strip()
+    secret = body.get("secret") or ""
+    if not target:
+        raise HTTPException(status_code=400, detail="target required")
+    if not secret:
+        raise HTTPException(status_code=400, detail="secret required")
+    db = await get_db()
+    try:
+        cid = await _C.store(
+            db, target,
+            (body.get("label") or "").strip() or "default",
+            (body.get("username") or "").strip(), secret,
+            role=(body.get("role") or "user").strip(),
+            kind=(body.get("kind") or "form").strip(),
+            login_url=(body.get("login_url") or "").strip(),
+            verify_url=(body.get("verify_url") or "").strip(),
+            username_field=(body.get("username_field") or "username").strip(),
+            password_field=(body.get("password_field") or "password").strip(),
+            engagement_id=(body.get("engagement_id") or None))
+        await db.commit()
+        creds = await _C.listing(db, target)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except SecretError as e:
+        # The refusal is the feature: storing readable text when the key is
+        # unavailable looks identical from outside and is the exact failure
+        # encryption exists to prevent. Say what to fix.
+        raise HTTPException(status_code=503, detail=str(e))
+    finally:
+        secret = ""
+        await db.close()
+    return {"ok": True, "credential_id": cid, "credentials": creds}
+
+
+@app.post("/api/v2/targets/credentials/{credential_id}/login")
+async def v2_credentials_login(credential_id: str):
+    """Log in with a stored credential.
+
+    NO BODY, deliberately. Every destination comes from the stored row; a URL
+    parameter here would let a caller send a password they do not know to a
+    host they choose.
+    """
+    from orchestrator import credentials as _C
+    from orchestrator import login as _L
+    db = await get_db()
+    try:
+        try:
+            report = await _L.authenticate(db, credential_id)
+        except KeyError:
+            raise HTTPException(status_code=404, detail="credential not found")
+        row = await (await db.execute(
+            "SELECT target_key FROM engagement_credentials WHERE id = ?",
+            (credential_id,))).fetchone()
+        sessions = await _C.sessions_for(db, credential_id)
+        state = await _C.auth_state(db, row[0]) if row else None
+    finally:
+        await db.close()
+    return {**report, "sessions": sessions, "auth": state}
+
+
+@app.post("/api/v2/sessions/{session_id}/revoke")
+async def v2_session_revoke(session_id: str):
+    """Stop a session being usable. Keeps the row."""
+    from orchestrator import credentials as _C
+    db = await get_db()
+    try:
+        done = await _C.revoke_session(db, session_id)
+        await db.commit()
+    finally:
+        await db.close()
+    return {"ok": done}
+
+
+@app.delete("/api/v2/targets/credentials/{credential_id}")
+async def v2_credentials_destroy(credential_id: str, by: str = ""):
+    """Destroy a credential and every session it produced.
+
+    A real DELETE, unlike everything else in this codebase, because the row
+    holds a client's password and an operator must be able to honour a request
+    to destroy it. The identifier survives in `destroyed_credentials`.
+    """
+    from orchestrator import credentials as _C
+    db = await get_db()
+    try:
+        done = await _C.destroy(db, credential_id, by=by)
+        await db.commit()
+    finally:
+        await db.close()
+    if not done:
+        raise HTTPException(status_code=404, detail="credential not found")
+    return {"ok": True, "destroyed": credential_id}
+
+
+@app.get("/api/v2/targets/declared")
+async def v2_declared_list(target: str):
+    """What an operator has declared about this target's endpoints."""
+    from orchestrator.testcase import declared as _decl
+    db = await get_db()
+    try:
+        rows = await _decl.rows_for(db, target)
+        _, refused = await _decl.profile_for(db, target, target)
+    finally:
+        await db.close()
+    return {"target": target, "declared": rows, "refused": refused,
+            "declarable": list(_decl.DECLARABLE),
+            "path_fields": list(_decl.PATH_FIELDS)}
+
+
+@app.post("/api/v2/targets/declared")
+async def v2_declared_set(body: dict):
+    """Declare "for this target, case X's field F is V".
+
+    Refuses with a NAMED reason rather than storing something the planner will
+    later drop in silence — these values are rendered into command templates.
+    """
+    from orchestrator.testcase import declared as _decl
+    target = (body.get("target") or "").strip()
+    if not target:
+        raise HTTPException(status_code=400, detail="target required")
+    db = await get_db()
+    try:
+        ok, why = await _decl.declare(
+            db, target, (body.get("test_case_id") or "").strip(),
+            (body.get("field") or "").strip(), body.get("value") or "",
+            engagement_target_id=(body.get("engagement_target_id") or ""),
+            declared_by=(body.get("declared_by") or ""),
+            notes=(body.get("notes") or ""))
+        if not ok:
+            raise HTTPException(status_code=400, detail=why)
+        await db.commit()
+        rows = await _decl.rows_for(db, target)
+    finally:
+        await db.close()
+    return {"ok": True, "declared": rows}
+
+
+@app.delete("/api/v2/targets/declared")
+async def v2_declared_retire(target: str, test_case_id: str, field: str):
+    """Stop applying a declaration. RETIRES it — the row is kept."""
+    from orchestrator.testcase import declared as _decl
+    db = await get_db()
+    try:
+        done = await _decl.retire(db, target, test_case_id, field)
+        await db.commit()
+        rows = await _decl.rows_for(db, target)
+    finally:
+        await db.close()
+    return {"ok": done, "declared": rows}
 
 
 @app.get("/api/v2/sweep/profiles")
@@ -6111,9 +6518,16 @@ async def enforce_engagement_scope(engagement_id: str | None, target_url: str) -
     finally:
         await db.close()
     if not ok:
-        raise HTTPException(
-            status_code=403,
-            detail=f"{target_url} is not in scope for this engagement — {why}")
+        # Two different refusals, and they need different sentences. Saying
+        # "TARGET is not in scope — authorisation ended 2020-01-01" sends the
+        # operator to edit scope rules that are already correct; the engagement
+        # is simply out of date. Naming the wrong cause is how someone fixes
+        # the wrong thing.
+        window = why.startswith("authorisation")
+        detail = (f"this engagement's authorisation is not currently valid — {why}"
+                  if window
+                  else f"{target_url} is not in scope for this engagement — {why}")
+        raise HTTPException(status_code=403, detail=detail)
 
 
 @app.post("/api/sessions", response_model=SessionResponse)

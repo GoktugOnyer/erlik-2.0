@@ -6,21 +6,42 @@ severity: high
 references:
   - https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/07-Input_Validation_Testing/05-Testing_for_SQL_Injection
 
+# `submit` is not decoration. DVWA runs its query only when
+# `isset($_GET['Submit'])`, so a request without that token renders the page
+# and touches the database not at all — which reads as CLEAN. Same reason
+# BUSL-09 needs `Upload=Upload` and the login form needed `Login`. Optional,
+# and omitted entirely when unset, so a target that needs nothing is unchanged.
 target_schema:
   required: [url, parameter]
-  optional: [method, auth_header, cookie]
+  optional: [method, auth_header, cookie, submit]
 
 steps:
   - name: baseline
     tool: curl
+    # `%{redirect_url}` is carried so the gate below can tell "the endpoint
+    # answered" from "the endpoint bounced me to a login form".
     command: >-
-      curl -s -b "{{cookie}}" -H "{{auth_header}}" -o /dev/null -w "%{http_code}" "{{url}}?{{parameter}}=1"
+      bash -c 'S="{{submit}}"; curl -s -b "{{cookie}}" -H "{{auth_header}}"
+      -o /dev/null -w "%{http_code} %{redirect_url}"
+      "{{url}}?{{parameter}}=1${S:+&$S}"'
     evaluators:
+      # STOP if this is a redirect to a login page. A 302 to /login.php means
+      # "you are not authenticated", and it matched the reachability gate
+      # below — so every later step probed an empty redirect body, found
+      # nothing, and the case reported CLEAN on a page it never reached.
+      # Measured on DVWA: baseline 302, error probe output "", sqlmap nothing,
+      # 0 findings, while the same URL with a session cookie and Submit
+      # returns "You have an error in your SQL syntax" — the exact string the
+      # probe below matches. A case that cannot reach its target must say so,
+      # not return a verdict.
       - type: regex
-        pattern: '^[23]\d\d$'
+        pattern: '^3\d\d\s+\S*(log[-_]?in|signin|sign-in|auth|session|sso)'
+        stop_after: true
+      - type: regex
+        pattern: '^[23]\d\d\s'
         # Baseline check only — no finding emitted, just gates next steps.
       - type: regex
-        pattern: '^[45]\d\d$'
+        pattern: '^[45]\d\d\s'
         when: previous_failure
         stop_after: true
 
@@ -30,7 +51,9 @@ steps:
     # provoke a parse error (q=1' often returns empty data because '1' just
     # doesn't match any row). The follow-on probes broaden the payload set.
     command: >-
-      bash -c "curl -s \"{{url}}?{{parameter}}=apple%27\"; echo; curl -s \"{{url}}?{{parameter}}=%27%20OR%20%271%27%3D%271\""
+      bash -c 'S="{{submit}}"; C="{{cookie}}";
+      curl -s ${C:+-b "$C"} "{{url}}?{{parameter}}=apple%27${S:+&$S}"; echo;
+      curl -s ${C:+-b "$C"} "{{url}}?{{parameter}}=%27%20OR%20%271%27%3D%271${S:+&$S}"'
     evaluators:
       - type: regex
         # Broad SQL-error signatures across MySQL, PG, Oracle, MSSQL, SQLite,
@@ -47,8 +70,10 @@ steps:
     tool: sqlmap
     when: no_finding_yet
     command: >-
-      sqlmap -u "{{url}}?{{parameter}}=1" -p {{parameter}} --batch --level 3 --risk 2
-      --random-agent --technique BEUST --timeout 10 --retries 1
+      bash -c 'S="{{submit}}"; C="{{cookie}}";
+      sqlmap -u "{{url}}?{{parameter}}=1${S:+&$S}" -p {{parameter}} ${C:+--cookie "$C"}
+      --batch --level 3 --risk 2 --random-agent --technique BEUST
+      --timeout 10 --retries 1'
     evaluators:
       - type: regex
         pattern: 'parameter .* is .* vulnerable|appears to be .* injectable'

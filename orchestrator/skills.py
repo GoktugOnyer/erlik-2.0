@@ -276,6 +276,12 @@ _CLASS_PATTERNS: list[tuple[str, str, tuple[str, ...]]] = [
     # winning. test_every_class_token_names_a_real_sheet holds the line.
     ("path",        r"path traversal|\blfi\b|file inclusion|directory traversal",
                     ("lfi",)),
+    # Hop-by-hop header handling and request splitting are the same family, and
+    # WSTG-INPV-15 was filed under `path` — a class labelled "Path Traversal /
+    # File Inclusion" — purely because nothing else claimed it. Two sheets
+    # already exist for this, so the routing has somewhere real to go.
+    ("smuggling",   r"request smuggl|http splitting|hop[- ]by[- ]hop|desync",
+                    ("http-smuggling", "http-request-smuggling")),
     ("upload",      r"file upload|unrestricted upload", ("file-upload",)),
     ("deserialize", r"deserializ", ("deserialization",)),
     ("ssrf",        r"\bssrf\b|server[- ]side request", ("ssrf", "server-side")),

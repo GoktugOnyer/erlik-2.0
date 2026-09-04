@@ -1936,10 +1936,87 @@
                     <span id="tl-progress" class="font-mono" style="font-size:0.6rem; opacity:.8;"></span>
                 </div>
                 <div class="font-mono mt-2" style="font-size:0.55rem; opacity:.55;">
-                    A profile supplies this application's real endpoints. Without one, cases needing
-                    a specific parameter get the base URL &mdash; which is how the SSRF case came to
-                    be aimed at a search box and report a finding there.
+                    A profile supplies this application's real endpoints. Without one, a case that
+                    needs a specific parameter is SKIPPED rather than aimed at the base URL &mdash;
+                    guessing is how the SSRF case came to be pointed at a search box and report a
+                    finding there. The two built-in profiles cover the lab targets; for a real
+                    customer, declare the endpoints below.
                 </div>
+            </div>
+
+            <div class="panel rounded p-4">
+                <div class="flex items-baseline justify-between flex-wrap gap-2">
+                    <h3 class="font-pixel" style="font-size:0.62rem;">CREDENTIALS
+                        &mdash; THIS TARGET</h3>
+                    <span id="tl-cred-auth" class="font-mono"
+                          style="font-size:0.58rem; opacity:.75;"></span>
+                </div>
+                <div class="font-mono mt-1" style="font-size:0.55rem; opacity:.55;">
+                    Cases that need a session are SKIPPED until one is verified &mdash; on DVWA,
+                    logging in took the sweep from 4 findings to 8. Verification is DIFFERENTIAL:
+                    a session counts only when it changes the server's answer, so
+                    &ldquo;captured&rdquo; is not &ldquo;works&rdquo;. The password is encrypted at
+                    rest and is never returned by this page.
+                    <br>LOGIN URL is where the password is POSTed &mdash; check it. It may differ
+                    from the target: tools run inside the container and address
+                    <span class="font-mono">http://dvwa</span>, while the login runs on the host
+                    (<span class="font-mono">http://127.0.0.1:8081</span>). VERIFY URL is a
+                    protected page; without one the session is captured but never verified, and
+                    supplies nothing to a sweep.
+                </div>
+                <div class="flex gap-2 mt-3 flex-wrap items-center">
+                    <input id="tl-cred-label" class="input-field font-mono px-2 py-1 rounded"
+                        style="font-size:0.6rem; width:110px;" placeholder="label">
+                    <select id="tl-cred-role" class="input-field font-mono px-2 py-1 rounded"
+                        style="font-size:0.6rem;"></select>
+                    <input id="tl-cred-user" class="input-field font-mono px-2 py-1 rounded"
+                        style="font-size:0.6rem; width:110px;" placeholder="username"
+                        autocomplete="off">
+                    <input id="tl-cred-pass" type="password"
+                        class="input-field font-mono px-2 py-1 rounded"
+                        style="font-size:0.6rem; width:120px;" placeholder="password"
+                        autocomplete="new-password">
+                    <input id="tl-cred-login" class="input-field font-mono px-2 py-1 rounded"
+                        style="font-size:0.6rem; min-width:190px;"
+                        placeholder="login URL (where the password goes)">
+                    <input id="tl-cred-verify" class="input-field font-mono px-2 py-1 rounded"
+                        style="font-size:0.6rem; min-width:190px;"
+                        placeholder="verify URL (a protected page)">
+                    <button id="tl-cred-add" class="font-pixel px-3 py-1 rounded border"
+                        style="font-size:0.55rem; color:var(--neon-green);
+                               border-color:var(--neon-green);">+ STORE</button>
+                    <span id="tl-cred-msg" class="font-mono" style="font-size:0.58rem;"></span>
+                </div>
+                <div id="tl-cred-rows" class="mt-3 space-y-1"></div>
+            </div>
+
+            <div class="panel rounded p-4">
+                <div class="flex items-baseline justify-between flex-wrap gap-2">
+                    <h3 class="font-pixel" style="font-size:0.62rem;">DECLARED ENDPOINTS
+                        &mdash; THIS TARGET</h3>
+                    <span id="tl-decl-count" class="font-mono"
+                          style="font-size:0.58rem; opacity:.75;"></span>
+                </div>
+                <div class="font-mono mt-1" style="font-size:0.55rem; opacity:.55;">
+                    What a built-in profile knows about a lab app, for your customer's app instead
+                    &mdash; no code change. Paths only: the base URL above is prepended, so a
+                    declaration cannot point a case at another host. A declared field also stops
+                    that case fanning out over discovered paths, because a human vouched for this
+                    one.
+                </div>
+                <div class="flex gap-2 mt-3 flex-wrap items-center">
+                    <input id="tl-decl-case" class="input-field font-mono px-2 py-1 rounded"
+                        style="font-size:0.6rem; min-width:150px;" placeholder="WSTG-INPV-05">
+                    <select id="tl-decl-field" class="input-field font-mono px-2 py-1 rounded"
+                        style="font-size:0.6rem;"></select>
+                    <input id="tl-decl-value" class="input-field font-mono px-2 py-1 rounded"
+                        style="font-size:0.6rem; min-width:220px;" placeholder="/search">
+                    <button id="tl-decl-add" class="font-pixel px-3 py-1 rounded border"
+                        style="font-size:0.55rem; color:var(--neon-green);
+                               border-color:var(--neon-green);">+ DECLARE</button>
+                    <span id="tl-decl-msg" class="font-mono" style="font-size:0.58rem;"></span>
+                </div>
+                <div id="tl-decl-rows" class="mt-3 space-y-1"></div>
             </div>
 
             <div id="tl-skipped-panel" class="panel rounded p-4 hidden">
@@ -2512,6 +2589,8 @@
                         <button onclick="engAddScope()" class="font-pixel px-3 py-1 rounded border"
                             style="font-size:0.55rem;">ADD RULE</button>
                     </div>
+                    <div id="eng-recon-tools" class="font-mono mb-2"
+                        style="font-size:0.58rem;"></div>
                     <div class="flex gap-2 mt-3 flex-wrap items-center"
                         style="border-top:1px solid #1e242c; padding-top:10px;">
                         <button onclick="engRecon(true)" class="font-pixel px-3 py-1 rounded border"
@@ -2567,6 +2646,7 @@
                             style="font-size:0.55rem; color:var(--neon-yellow); border-color:var(--neon-yellow);">ARCHIVE</button>
                         <span id="eng-save-out" class="font-mono" style="font-size:0.6rem;"></span>
                     </div>
+                    <div id="eng-window" class="font-mono mt-2" style="font-size:0.62rem;"></div>
                     <div id="eng-revisions" class="mt-3"></div>
                 </div>
 
@@ -2604,7 +2684,7 @@
                         <div class="flex items-center gap-3 flex-wrap font-mono py-0.5" style="font-size:0.6rem;">
                             <span style="color:var(--neon-cyan); min-width:230px;">${tlEsc(t.base_url)}</span>
                             <span style="opacity:.6;">${tlEsc(t.title || '')}</span>
-                            <span style="opacity:.5;">auth: ${tlEsc(t.auth_state || 'none')}</span>
+                            ${engAuthBadge(t)}
                             <button data-engtestlab="${tlEsc(t.base_url)}"
                                 class="font-pixel px-2 py-0.5 rounded border" style="font-size:0.45rem;">TEST LAB &rarr;</button>
                         </div>`).join('') ||
@@ -2647,6 +2727,8 @@
             det.querySelectorAll('[data-engtestlab]').forEach(b =>
                 b.addEventListener('click', () => engToTestLab(b.dataset.engtestlab, engCurrent)));
             engFillRecord(e);
+            engShowWindow(d);
+            engLoadReconTools();
             engLoadRevisions(engCurrent);
             det.classList.remove('hidden');
         }
@@ -2678,6 +2760,23 @@
             set('eng-e-notes', e.notes);
             const btn = document.getElementById('eng-archive-btn');
             if (btn) btn.textContent = (e.status === 'archived') ? 'REOPEN' : 'ARCHIVE';
+        }
+
+        function engShowWindow(d) {
+            const el = document.getElementById('eng-window');
+            if (!el) return;
+            const w = d.window || {};
+            if (w.open === false) {
+                el.innerHTML = `<span style="color:var(--neon-red);">&#9888; NOT AUTHORISED</span>
+                    &mdash; ${tlEsc(w.reason || '')}. Runs against this customer are refused.`;
+            } else if (w.until || w.from) {
+                el.innerHTML = `<span style="color:var(--neon-green);">authorised</span>
+                    ${w.from ? '&nbsp;from ' + tlEsc(w.from) : ''}
+                    ${w.until ? '&nbsp;until ' + tlEsc(w.until) + ' (inclusive)' : ''}`;
+            } else {
+                el.innerHTML = `<span style="opacity:.6;">No authorisation window recorded &mdash;
+                    runs are not time-limited.</span>`;
+            }
         }
 
         async function engSave() {
@@ -2820,6 +2919,98 @@
 
         // Domain recon. `probe=false` returns the name list without connecting
         // to anything — the option an operator wants before a scan window opens.
+
+        // The auth state of a target, DERIVED from the credential store. The
+        // column of the same name is written by nothing, so this used to read
+        // "auth: none" on every target for ever — including ones erlik held a
+        // verified session for. The detail is shown because "none" and
+        // "credentials stored but none verified" send an operator to different
+        // places.
+        function engAuthBadge(t) {
+            const a = t.auth || {state: t.auth_state || 'none', detail: '', verified_roles: []};
+            const col = {authenticated: '#31d67a', 'credentials only': 'var(--neon-yellow)',
+                         none: '#6a6a8a', unknown: 'var(--neon-red)'}[a.state] || '#6a6a8a';
+            const both = (a.verified_roles || []).includes('low')
+                      && (a.verified_roles || []).includes('high');
+            // The badge and the detail must not say the same thing twice: when
+            // the access-control marker shows, the detail it came from is
+            // redundant.
+            return `<span style="color:${col};" title="${tlEsc(a.detail || '')}">
+                        auth: ${tlEsc(a.state)}</span>`
+                 + (both
+                     ? ` <span style="color:#31d67a;">&#10003; low + high verified &mdash;
+                          access-control testing possible</span>`
+                     : (a.detail
+                         ? ` <span style="opacity:.45;">&mdash; ${tlEsc(a.detail)}</span>`
+                         : ''));
+        }
+
+        // ===== RECON TOOLSET =====
+        // The operator presses DISCOVER SUBDOMAINS, which CONNECTS to the
+        // customer's hosts, and the page never said which tools would run or
+        // which of them make contact. The endpoint that answers exactly that
+        // existed and had no caller — the handler's own docstring says "an
+        // operator authorising a scan should be able to see that".
+        //
+        // Two questions are being answered here, and they are different:
+        //   * WHICH TOOLS TOUCH THE CUSTOMER — the authorisation question. A
+        //     passive lookup against a third-party dataset and a connection to
+        //     the client's host are not the same act.
+        //   * WHICH ARE MISSING — the "why did this return nothing" question.
+        //     An absent subfinder makes enumeration return an empty list, and
+        //     an empty list reads as "this customer has no subdomains".
+        let __reconTools = null;
+
+        async function engLoadReconTools() {
+            const el = document.getElementById('eng-recon-tools');
+            if (!el) return;
+            if (!__reconTools) {
+                try {
+                    __reconTools = (await (await fetch(
+                        '/api/engagements/recon/tools')).json()).tools || [];
+                } catch (e) {
+                    el.innerHTML = '<span style="color:var(--neon-yellow);">'
+                        + 'could not read the recon toolset &mdash; what runs is unknown</span>';
+                    return;
+                }
+            }
+            const tools = __reconTools;
+            const active = tools.filter(t => t.active);
+            const missing = tools.filter(t => !t.installed);
+            const activeMissing = active.filter(t => !t.installed);
+
+            const rows = tools.map(t => {
+                const dot = t.active ? '&#9679;' : '&#9675;';
+                const col = t.active ? 'var(--neon-yellow)' : '#6a6a8a';
+                const tag = t.active ? 'CONTACTS THE TARGET' : 'passive';
+                const state = t.installed
+                    ? ''
+                    : ' <span style="color:var(--neon-red);">NOT INSTALLED</span>';
+                return `<div style="padding:1px 0; color:#8a8aa0;">
+                    <span style="color:${col};">${dot}</span>
+                    <b style="color:#d8d8e8;">${tlEsc(t.tool)}</b>
+                    <span style="color:${col};"> ${tag}</span>
+                    &mdash; ${tlEsc(t.what)}${state}</div>`;
+            }).join('');
+
+            let note = `<div style="color:#6a6a8a; margin-top:3px;">
+                DISCOVER SUBDOMAINS runs ${active.length} tool(s) that connect to the
+                customer's hosts. NAMES ONLY runs none of them.</div>`;
+            if (activeMissing.length) {
+                note += `<div style="color:var(--neon-yellow);">
+                    ${activeMissing.length} of those is not installed, so DISCOVER
+                    SUBDOMAINS will do less than it says.</div>`;
+            }
+            if (missing.some(t => t.tool === 'subfinder')) {
+                note += `<div style="color:var(--neon-red);">
+                    subfinder is missing &mdash; enumeration returns an empty list, which
+                    is not the same as "this customer has no subdomains".</div>`;
+            }
+            el.innerHTML = `<div class="font-pixel" style="font-size:0.45rem; color:#6a6a8a;
+                margin-bottom:3px;">RECON TOOLSET &mdash; WHAT RUNS, AND WHAT TOUCHES THE
+                CUSTOMER</div>${rows}${note}`;
+        }
+
         async function engRecon(probe) {
             const out = document.getElementById('eng-recon-out');
             out.style.color = 'var(--neon-cyan)';
@@ -2930,6 +3121,12 @@
             } catch (e) {
                 document.getElementById('tl-meta').textContent = 'catalogue unavailable: ' + e;
             }
+            const addBtn = document.getElementById('tl-decl-add');
+            if (addBtn) addBtn.addEventListener('click', tlDeclSet);
+            const credBtn = document.getElementById('tl-cred-add');
+            if (credBtn) credBtn.addEventListener('click', tlCredStore);
+            await tlDeclLoad();
+            await tlCredLoad();
             tlPlan();
         }
 
@@ -2948,6 +3145,233 @@
             }
             tlPlanData = await r.json();
             tlRender();
+            tlDeclRender(tlPlanData.declared_refused || []);
+        }
+
+        // ---- credentials --------------------------------------------------
+        // The password field is write-only from this page's point of view: it
+        // is cleared on success and never re-populated, because the API cannot
+        // return it and rendering a placeholder that LOOKS like a stored
+        // secret would invite an operator to trust it.
+        async function tlCredLoad() {
+            const target = document.getElementById('tl-target').value.trim();
+            if (!target) return;
+            try {
+                const d = await (await fetch('/api/v2/targets/credentials?target='
+                    + encodeURIComponent(target))).json();
+                const sel = document.getElementById('tl-cred-role');
+                if (sel && !sel.options.length) {
+                    sel.innerHTML = (d.roles || []).map(r =>
+                        `<option value="${tlEsc(r)}">${tlEsc(r)}</option>`).join('');
+                    sel.value = 'user';
+                }
+                tlCredRender(d);
+            } catch (e) { /* additive panel; a failure must not break PLAN */ }
+        }
+
+        function tlCredRender(d) {
+            const box = document.getElementById('tl-cred-rows');
+            if (!box) return;
+            const a = d.auth || {};
+            const col = {authenticated: '#31d67a', 'credentials only': 'var(--neon-yellow)',
+                         none: 'var(--neon-red)'}[a.state] || '#8b949e';
+            document.getElementById('tl-cred-auth').innerHTML =
+                `<span style="color:${col};">${tlEsc(a.state || 'none')}</span>`
+                + (a.detail ? ` <span style="opacity:.55;">&mdash; ${tlEsc(a.detail)}</span>` : '');
+            const rows = d.credentials || [];
+            box.innerHTML = rows.map(c => {
+                const live = (c.sessions || []).filter(s => s.status === 'verified');
+                const last = (c.sessions || [])[0];
+                // STATUS, not "ok". A captured-but-unverified session supplies
+                // nothing to a sweep, and calling that success is the exact
+                // false reassurance this project keeps removing.
+                const st = live.length ? `<span style="color:#31d67a;">verified</span>`
+                    : last ? `<span style="color:var(--neon-yellow);">${tlEsc(last.status)}
+                              &mdash; supplies nothing to a sweep</span>`
+                    : `<span style="opacity:.5;">never logged in</span>`;
+                return `<div style="border-bottom:1px solid #1e242c; padding:4px 0;">
+                  <div class="flex items-center gap-2 font-mono" style="font-size:0.6rem;">
+                    <span style="color:var(--neon-cyan); min-width:104px;">${tlEsc(c.label)}</span>
+                    <span style="opacity:.7; min-width:48px;">${tlEsc(c.role)}</span>
+                    <span style="opacity:.7; min-width:96px;">${tlEsc(c.username || '')}</span>
+                    <span style="flex:1;">${st}</span>
+                    <button data-cred-login="${tlEsc(c.id)}"
+                            style="border:1px solid var(--neon-green); color:var(--neon-green);
+                                   padding:0 6px; border-radius:3px;">log in</button>
+                    ${last ? `<button data-cred-revoke="${tlEsc(last.id)}"
+                            style="border:1px solid #2a3038; opacity:.7; padding:0 6px;
+                                   border-radius:3px;">revoke</button>` : ''}
+                    <button data-cred-destroy="${tlEsc(c.id)}"
+                            style="border:1px solid var(--neon-red); color:var(--neon-red);
+                                   padding:0 6px; border-radius:3px;">destroy</button>
+                  </div>
+                  <div class="font-mono" style="font-size:0.54rem; opacity:.45; padding-left:4px;">
+                    password &rarr; ${tlEsc(c.login_url || '(none — cannot log in)')}
+                    ${c.verify_url ? ` &middot; verified against ${tlEsc(c.verify_url)}`
+                                   : ' &middot; no verify URL — a session can never be verified'}
+                  </div>
+                </div>`;
+            }).join('') || '<div class="font-mono" style="font-size:0.58rem; opacity:.45;">'
+                + 'No credential for this target. Cases needing a session will be skipped, '
+                + 'and will say so.</div>';
+            box.querySelectorAll('[data-cred-login]').forEach(b =>
+                b.addEventListener('click', () => tlCredLogin(b.dataset.credLogin)));
+            box.querySelectorAll('[data-cred-revoke]').forEach(b =>
+                b.addEventListener('click', () => tlCredRevoke(b.dataset.credRevoke)));
+            box.querySelectorAll('[data-cred-destroy]').forEach(b =>
+                b.addEventListener('click', () => tlCredDestroy(b.dataset.credDestroy)));
+        }
+
+        async function tlCredStore() {
+            const msg = document.getElementById('tl-cred-msg');
+            const pass = document.getElementById('tl-cred-pass');
+            const body = {
+                target: document.getElementById('tl-target').value.trim(),
+                label: document.getElementById('tl-cred-label').value.trim(),
+                username: document.getElementById('tl-cred-user').value.trim(),
+                secret: pass.value,
+                role: document.getElementById('tl-cred-role').value,
+                login_url: document.getElementById('tl-cred-login').value.trim(),
+                verify_url: document.getElementById('tl-cred-verify').value.trim(),
+            };
+            const r = await fetch('/api/v2/targets/credentials', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(body)});
+            const j = await r.json().catch(() => ({}));
+            if (!r.ok) {
+                msg.style.color = 'var(--neon-red)';
+                msg.textContent = j.detail || 'refused';
+                return;
+            }
+            pass.value = '';                       // never held longer than the request
+            msg.style.color = 'var(--neon-green)';
+            msg.textContent = 'stored — not logged in yet';
+            await tlCredLoad();
+        }
+
+        async function tlCredLogin(id) {
+            const msg = document.getElementById('tl-cred-msg');
+            msg.style.color = '#8b949e';
+            msg.textContent = 'logging in…';
+            const r = await fetch(`/api/v2/targets/credentials/${encodeURIComponent(id)}/login`,
+                                  {method: 'POST'});
+            const j = await r.json().catch(() => ({}));
+            // `usable`, not `ok`: authenticate returns ok=true for a session it
+            // never verified, and that session contributes nothing to a sweep.
+            msg.style.color = j.usable ? 'var(--neon-green)' : 'var(--neon-yellow)';
+            msg.textContent = j.usable ? 'verified'
+                : (j.note_unverified || j.reason || `${j.status || 'failed'}`);
+            await tlCredLoad();
+            tlPlan();
+        }
+
+        async function tlCredRevoke(sessionId) {
+            await fetch(`/api/v2/sessions/${encodeURIComponent(sessionId)}/revoke`,
+                        {method: 'POST'});
+            await tlCredLoad();
+            tlPlan();
+        }
+
+        async function tlCredDestroy(id) {
+            if (!confirm('Destroy this credential and every session it produced? '
+                       + 'The secret is deleted; the identifier is kept for audit.')) return;
+            await fetch(`/api/v2/targets/credentials/${encodeURIComponent(id)}`,
+                        {method: 'DELETE'});
+            await tlCredLoad();
+            tlPlan();
+        }
+
+        // ---- declared endpoints -------------------------------------------
+        // The operator's own per-case targeting, for an application no built-in
+        // profile describes. Bound with addEventListener after innerHTML rather
+        // than inline onclick, like the rest of this page, so a value that came
+        // from the server is never re-parsed as markup.
+        let tlDeclFields = [];
+
+        async function tlDeclLoad() {
+            const target = document.getElementById('tl-target').value.trim();
+            if (!target) return;
+            try {
+                const d = await (await fetch('/api/v2/targets/declared?target='
+                    + encodeURIComponent(target))).json();
+                tlDeclFields = d.declarable || [];
+                const sel = document.getElementById('tl-decl-field');
+                if (sel && !sel.options.length) {
+                    sel.innerHTML = tlDeclFields.map(f =>
+                        `<option value="${tlEsc(f)}">${tlEsc(f)}</option>`).join('');
+                }
+                tlDeclRender(d.refused || [], d.declared || []);
+            } catch (e) { /* the panel is additive; a failure must not break PLAN */ }
+        }
+
+        function tlDeclRender(refused, rows) {
+            const box = document.getElementById('tl-decl-rows');
+            if (!box) return;
+            if (rows) box._rows = rows;
+            rows = rows || box._rows || [];
+            document.getElementById('tl-decl-count').textContent =
+                rows.length ? `${rows.length} declaration(s)` : 'none for this target';
+            const bad = {};
+            for (const r of (refused || [])) bad[`${r.test_case_id}|${r.field}`] = r.reason;
+            box.innerHTML = rows.map(r => {
+                const key = `${r.test_case_id}|${r.field}`;
+                const why = bad[key];
+                return `<div class="flex items-center gap-2 font-mono"
+                             style="font-size:0.6rem; border-bottom:1px solid #1e242c;
+                                    padding:3px 0;">
+                    <span style="color:var(--neon-cyan); min-width:130px;">${tlEsc(r.test_case_id)}</span>
+                    <span style="opacity:.7; min-width:96px;">${tlEsc(r.field)}</span>
+                    <span style="flex:1;">${tlEsc(r.value)}</span>
+                    ${why ? `<span style="color:var(--neon-red);">refused &mdash; ${tlEsc(why)}</span>` : ''}
+                    <button data-decl-retire="1" data-case="${tlEsc(r.test_case_id)}"
+                            data-field="${tlEsc(r.field)}"
+                            style="opacity:.6; border:1px solid #2a3038; padding:0 6px;
+                                   border-radius:3px;">retire</button>
+                </div>`;
+            }).join('') || '<div class="font-mono" style="font-size:0.58rem; opacity:.45;">'
+                + 'Nothing declared. A case needing a parameter this target has not '
+                + 'described will be skipped, and say so.</div>';
+            box.querySelectorAll('[data-decl-retire]').forEach(b =>
+                b.addEventListener('click', () =>
+                    tlDeclRetire(b.dataset.case, b.dataset.field)));
+        }
+
+        async function tlDeclSet() {
+            const target = document.getElementById('tl-target').value.trim();
+            const msg = document.getElementById('tl-decl-msg');
+            const body = {
+                target,
+                test_case_id: document.getElementById('tl-decl-case').value.trim(),
+                field: document.getElementById('tl-decl-field').value,
+                value: document.getElementById('tl-decl-value').value.trim(),
+            };
+            const r = await fetch('/api/v2/targets/declared', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(body)});
+            const j = await r.json().catch(() => ({}));
+            if (!r.ok) {
+                // A refusal is shown verbatim. It names the field and the
+                // reason, which is the whole point of refusing on write.
+                msg.style.color = 'var(--neon-red)';
+                msg.textContent = j.detail || 'refused';
+                return;
+            }
+            msg.style.color = 'var(--neon-green)';
+            msg.textContent = 'declared';
+            document.getElementById('tl-decl-value').value = '';
+            tlDeclRender([], j.declared || []);
+            tlPlan();
+        }
+
+        async function tlDeclRetire(caseId, field) {
+            const target = document.getElementById('tl-target').value.trim();
+            const q = `target=${encodeURIComponent(target)}`
+                + `&test_case_id=${encodeURIComponent(caseId)}`
+                + `&field=${encodeURIComponent(field)}`;
+            const r = await fetch('/api/v2/targets/declared?' + q, {method: 'DELETE'});
+            const j = await r.json().catch(() => ({}));
+            tlDeclRender([], j.declared || []);
+            tlPlan();
         }
 
         function tlRender() {
@@ -6236,8 +6660,20 @@ ${htmlBody}
                 r => Number(r.in_scope) && ((r.source || 'declared') === 'declared'
                                             || r.approved_at));
             const runs = (c.sessions || 0) + (c.v2_runs || 0);
+            // The window is a rung, and it comes FIRST: an expired engagement
+            // authorises nothing, so every step below it is blocked no matter
+            // how the scope reads. It was previously stored, editable and
+            // displayed while gating nothing at all.
+            const w = d.window || {};
             ladder.innerHTML = ovLadder([
                 {label: 'A customer is selected', done: true},
+                {label: w.open === false
+                        ? `Authorisation is valid — ${tlEsc(w.reason || 'window closed')}`
+                        : (w.reason && w.reason !== 'within the authorised window'
+                            ? `Authorisation is valid — ${tlEsc(w.reason)}`
+                            : 'Authorisation is valid'),
+                 done: w.open !== false,
+                 action: {href: `#view=engagements${e}`, label: 'fix the window'}},
                 {label: `Scope is declared (${declared.length} rule(s)) — a run against an ` +
                         `unscoped target is refused`,
                  done: declared.length > 0,

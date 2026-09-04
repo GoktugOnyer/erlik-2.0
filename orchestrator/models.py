@@ -143,6 +143,13 @@ class ReportFinding(BaseModel):
     confidence: Optional[str] = None
     remediation: Optional[str] = None
     references: list[str] = []
+    # Submission-policy verdict, carried into EVERY export format. The five
+    # machine-readable exports (json/html/sarif/defectdojo/jira) all derive
+    # from this object, and none of them had ever seen the policy — clicking
+    # SARIF shipped an ungated deliverable. Annotated, never removed: the same
+    # rule the markdown report follows.
+    submittable: bool = True
+    policy_rule: Optional[str] = None
 
 
 class PentestReport(BaseModel):

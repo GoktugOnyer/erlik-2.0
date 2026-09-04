@@ -1892,3 +1892,302 @@ class TestTheTestHelperItself:
         import pytest
         with pytest.raises(AssertionError):
             js_body("function f() { }", "function f()")
+
+
+class TestTheAuthorisationWindowIsEnforced:
+    """`authorised_from` / `authorised_until` were stored, editable, displayed
+    on the engagement page — and read by NO gate. An engagement whose window
+    closed last month still authorised runs today.
+
+    Same shape as the scope gate that could never fire, except this one is a
+    date on a contract: testing outside the authorised period is precisely what
+    the window exists to prevent.
+    """
+
+    NOW = None  # set in setup_class
+
+    @classmethod
+    def setup_class(cls):
+        from datetime import datetime, timezone
+        cls.NOW = datetime(2026, 8, 31, 12, 0, tzinfo=timezone.utc)
+
+    def _w(self, **fields):
+        from orchestrator.engagement import window_status
+        return window_status(fields, now=self.NOW)
+
+    def test_no_window_means_unlimited(self):
+        """110 sessions predate engagements and most will never set a window."""
+        assert self._w()[0] is True
+        assert self._w(authorised_from="", authorised_until="")[0] is True
+        assert self._w(authorised_from=None, authorised_until=None)[0] is True
+
+    def test_the_last_authorised_day_is_included(self):
+        """A date-only `until` means through 23:59:59 of that day. Treating it
+        as midnight at the START silently loses the final authorised day — the
+        day someone is most likely to be working."""
+        assert self._w(authorised_until="2026-08-31")[0] is True, "lost the last day"
+        assert self._w(authorised_until="2026-08-30")[0] is False
+
+    def test_a_window_that_has_not_opened_refuses(self):
+        ok, why = self._w(authorised_from="2026-09-01")
+        assert ok is False and "begins" in why
+
+    def test_an_unreadable_date_FAILS_CLOSED(self):
+        """A legal boundary must not become "unlimited" because someone typed
+        the month wrong. Absent is unlimited; unparseable is not the same
+        thing."""
+        for bad in ("31/08/2026", "Aug 31 2026", "soon", "2026-13-45"):
+            ok, why = self._w(authorised_until=bad)
+            assert ok is False, f"{bad!r} was treated as no limit"
+            assert "unreadable" in why
+
+    def test_timestamps_are_accepted_too(self):
+        assert self._w(authorised_until="2026-09-01 00:00:00")[0] is True
+        assert self._w(authorised_until="2026-08-30T23:00:00")[0] is False
+
+    # ---- the gates ----
+
+    @staticmethod
+    def _client(tmp_path):
+        import asyncio
+        import warnings
+        warnings.filterwarnings("ignore", category=DeprecationWarning)
+        from fastapi.testclient import TestClient
+        import orchestrator.database as db_mod
+        import orchestrator.main as M
+        db_mod.DB_PATH = str(tmp_path / "win.db")
+        asyncio.run(db_mod.init_db())
+        return TestClient(M.app)
+
+    SESSION = {"scope_mode": "full", "model": "m", "enabled_tools": ["curl"],
+               "max_turns": 1}
+
+    def test_an_expired_engagement_cannot_start_a_run(self, tmp_path):
+        import orchestrator.database as db_mod
+        old = db_mod.DB_PATH
+        try:
+            c = self._client(tmp_path)
+            eid = c.post("/api/engagements", json={
+                "client_name": "Acme", "root_domain": "acme.example",
+                "authorised_until": "2020-01-01"}).json()["engagement"]["id"]
+            r = c.post("/api/sessions", json={
+                **self.SESSION, "target_url": "http://app.acme.example",
+                "engagement_id": eid})
+            assert r.status_code == 403, r.text
+            assert "authorisation" in r.json()["detail"]
+        finally:
+            db_mod.DB_PATH = old
+
+    def test_the_refusal_names_the_window_not_the_scope(self, tmp_path):
+        """"TARGET is not in scope — authorisation ended" sends the operator to
+        edit scope rules that are already correct."""
+        import orchestrator.database as db_mod
+        old = db_mod.DB_PATH
+        try:
+            c = self._client(tmp_path)
+            eid = c.post("/api/engagements", json={
+                "client_name": "Acme", "root_domain": "acme.example",
+                "authorised_until": "2020-01-01"}).json()["engagement"]["id"]
+            detail = c.post("/api/sessions", json={
+                **self.SESSION, "target_url": "http://app.acme.example",
+                "engagement_id": eid}).json()["detail"]
+            assert "not in scope" not in detail, detail
+            assert "authorisation is not currently valid" in detail
+        finally:
+            db_mod.DB_PATH = old
+
+    def test_a_live_engagement_still_runs(self, tmp_path):
+        """Positive control — without it every test above passes if the window
+        simply refused everything."""
+        import orchestrator.database as db_mod
+        old = db_mod.DB_PATH
+        try:
+            c = self._client(tmp_path)
+            eid = c.post("/api/engagements", json={
+                "client_name": "Acme", "root_domain": "acme.example",
+                "authorised_until": "2099-12-31"}).json()["engagement"]["id"]
+            r = c.post("/api/sessions", json={
+                **self.SESSION, "target_url": "http://app.acme.example",
+                "engagement_id": eid})
+            assert r.status_code == 200, r.text
+        finally:
+            db_mod.DB_PATH = old
+
+    def test_the_executor_stops_work_already_in_flight(self, tmp_path):
+        """A session created inside the window keeps running after it closes.
+        The executor is the only gate that can stop that, and it could not:
+        it was handed scope rows alone and never saw the engagement record."""
+        import asyncio
+        import orchestrator.database as db_mod
+        from orchestrator import engagement as E
+        from orchestrator.tool_executor import _scope_violation
+
+        old = db_mod.DB_PATH
+        db_mod.DB_PATH = str(tmp_path / "flight.db")
+        try:
+            async def go(until):
+                await db_mod.init_db()
+                db = await db_mod.get_db()
+                eid = await E.create(db, "Acme", "acme.example", authorised_until=until)
+                await db.commit()
+                auth = await E.authorisation(db, eid)
+                await db.close()
+                return auth
+
+            expired = asyncio.run(go("2020-01-01"))
+            why = _scope_violation("curl http://app.acme.example/",
+                                   "http://app.acme.example", expired)
+            assert why and "authorisation window is closed" in why
+
+            db_mod.DB_PATH = str(tmp_path / "flight2.db")
+            live = asyncio.run(go("2099-12-31"))
+            assert _scope_violation("curl http://app.acme.example/",
+                                    "http://app.acme.example", live) is None
+        finally:
+            db_mod.DB_PATH = old
+
+    def test_a_run_with_no_engagement_is_unaffected(self):
+        from orchestrator.tool_executor import _scope_violation
+        assert _scope_violation("curl http://anything.example/",
+                                "http://anything.example", None) is None
+
+    def test_one_definition_feeds_every_gate(self):
+        """The API gate, the executor and the UI must not disagree about
+        whether a customer is authorised."""
+        import inspect
+        from orchestrator import engagement as E
+        from orchestrator import tool_executor as T
+        assert "window_status" in inspect.getsource(E.evaluate_authorisation)
+        assert "evaluate_authorisation" in inspect.getsource(E.check)
+        assert "window_status" in inspect.getsource(T._engagement_violation)
+        assert "window_status" in inspect.getsource(E.summary), \
+            "the page could say 'authorised' about a run that would be refused"
+
+    def test_the_ui_shows_the_window_and_blocks_the_ladder(self):
+        from pathlib import Path
+        html = Path("dashboard/templates/index.html").read_text()
+        assert "function engShowWindow" in html
+        assert "NOT AUTHORISED" in html
+        ladders = js_body(html, "async function loadOverview() {")
+        i = ladders.rindex("ovLadder([")
+        scoped = ladders[i:ladders.index("]);", i)]
+        assert "Authorisation is valid" in scoped
+        assert scoped.index("Authorisation is valid") < scoped.index("Scope is declared"), \
+            "an expired engagement must block every rung below it"
+
+
+class TestTheDeterministicLaneBelongsToACustomer:
+    """`v2_runs.engagement_id` had NO writer. The INSERT omitted the column and
+    then read it back out of the row it had just written, so it was NULL by
+    construction on every run that has ever happened — while the comment beside
+    it explained why the asset inventory mattered.
+
+    The deterministic lane is the half erlik asks a client to trust, and it was
+    the half outside the customer boundary: `POST /api/v2/testcases/{id}/run`
+    passed the target straight to run_test_case with no scope check at all.
+    """
+
+    @staticmethod
+    def _client(tmp_path):
+        import asyncio
+        import warnings
+        warnings.filterwarnings("ignore", category=DeprecationWarning)
+        from fastapi.testclient import TestClient
+        import orchestrator.database as db_mod
+        import orchestrator.main as M
+        db_mod.DB_PATH = str(tmp_path / "v2.db")
+        asyncio.run(db_mod.init_db())
+        return TestClient(M.app)
+
+    CASE = "WSTG-INFO-02"
+
+    def _body(self, eid, host="app.acme.example", port=80):
+        return {"target": {"url": f"http://{host}",
+                           "scope": {"allow_hosts": [host], "allow_ports": [port]}},
+                "engagement_id": eid}
+
+    def test_the_run_records_its_customer(self, tmp_path):
+        import asyncio
+        import orchestrator.database as db_mod
+        old = db_mod.DB_PATH
+        try:
+            c = self._client(tmp_path)
+            eid = c.post("/api/engagements", json={
+                "client_name": "Acme", "root_domain": "acme.example"}
+                ).json()["engagement"]["id"]
+            r = c.post(f"/api/v2/testcases/{self.CASE}/run", json=self._body(eid))
+            assert r.status_code == 200, r.text
+            run_id = r.json()["run_id"]
+
+            async def read():
+                db = await db_mod.get_db()
+                row = await (await db.execute(
+                    "SELECT engagement_id FROM v2_runs WHERE id = ?", (run_id,))).fetchone()
+                await db.close()
+                return row[0]
+
+            assert asyncio.run(read()) == eid, "the run did not record its customer"
+        finally:
+            db_mod.DB_PATH = old
+
+    def test_the_lane_is_scope_gated(self, tmp_path):
+        """It had no gate at all — the target went straight to run_test_case."""
+        import orchestrator.database as db_mod
+        old = db_mod.DB_PATH
+        try:
+            c = self._client(tmp_path)
+            eid = c.post("/api/engagements", json={
+                "client_name": "Acme", "root_domain": "acme.example"}
+                ).json()["engagement"]["id"]
+            r = c.post(f"/api/v2/testcases/{self.CASE}/run",
+                       json=self._body(eid, host="not-acme.example"))
+            assert r.status_code == 403, r.text
+            assert "not in scope" in r.json()["detail"]
+        finally:
+            db_mod.DB_PATH = old
+
+    def test_an_expired_engagement_stops_the_deterministic_lane_too(self, tmp_path):
+        import orchestrator.database as db_mod
+        old = db_mod.DB_PATH
+        try:
+            c = self._client(tmp_path)
+            eid = c.post("/api/engagements", json={
+                "client_name": "Acme", "root_domain": "acme.example",
+                "authorised_until": "2020-01-01"}).json()["engagement"]["id"]
+            r = c.post(f"/api/v2/testcases/{self.CASE}/run", json=self._body(eid))
+            assert r.status_code == 403
+            assert "authorisation" in r.json()["detail"]
+        finally:
+            db_mod.DB_PATH = old
+
+    def test_a_run_with_no_engagement_still_works(self, tmp_path):
+        """Every recorded v2 run predates this and has no customer."""
+        import orchestrator.database as db_mod
+        old = db_mod.DB_PATH
+        try:
+            c = self._client(tmp_path)
+            body = self._body(None)
+            body.pop("engagement_id")
+            r = c.post(f"/api/v2/testcases/{self.CASE}/run", json=body)
+            assert r.status_code == 200, r.text
+        finally:
+            db_mod.DB_PATH = old
+
+    def test_save_run_writes_the_value_it_was_given(self):
+        """It read the column back from the row it had just inserted without
+        it — NULL by construction. The source must not do that again."""
+        import inspect
+        from orchestrator.testcase import persistence as P
+        src = inspect.getsource(P.save_run)
+        assert "engagement_id: str | None = None" in src
+        assert "engagement_id)" in src, "the column is not in the INSERT"
+        i = src.index("_eid = engagement_id")
+        assert "SELECT engagement_id FROM v2_runs WHERE id = ?", src[i:i + 400]
+        assert "WHERE id = ?\",\n                    (chain_root_run_id,)" in src, \
+            "the fallback must read the CHAIN ROOT, never the row just written"
+
+    def test_a_chained_run_inherits_the_customer(self):
+        import inspect
+        from orchestrator.testcase import persistence as P
+        src = inspect.getsource(P.save_chain)
+        assert "engagement_id=engagement_id" in src

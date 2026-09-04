@@ -5,8 +5,22 @@ from pydantic import BaseModel, Field, field_validator
 
 
 class TargetSchema(BaseModel):
-    """Declares what the caller must supply to run this test case."""
+    """Declares what the caller must supply to run this test case.
+
+    `required_any` is a list of GROUPS, each satisfied by any one member. It
+    exists because a credential's material is not interchangeable: a bearer
+    token and a session cookie both authenticate, but a cookie in a Bearer
+    header authenticates nothing, so they cannot share one field name. Before
+    it, WSTG-AUTHZ-04 required `low_priv_token`/`high_priv_token` and was
+    therefore bearer-only by construction — a named skip on every recorded run
+    against DVWA and against any other cookie-authenticated application.
+
+    Alternation rather than a neutral `low_priv_auth` field, because the step
+    still has to know WHICH it got: the command sends `-H "Authorization:
+    Bearer ..."` for one and `-b ...` for the other.
+    """
     required: list[str] = Field(default_factory=list)
+    required_any: list[list[str]] = Field(default_factory=list)
     optional: list[str] = Field(default_factory=list)
 
 
