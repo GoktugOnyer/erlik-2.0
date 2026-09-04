@@ -93,6 +93,33 @@ docker compose up -d        # first run builds the Kali tools image (~10–20 mi
 > the Kali base image and installs the toolset (nmap, sqlmap, nuclei, dalfox,
 > jwt_tool, …). This needs internet and takes a while; later runs start instantly.
 
+## Tests
+
+`pytest` is **not** in `requirements.txt` — the runtime install stays lean. The test
+dependencies live in `requirements-dev.txt`, which also pulls in the runtime ones:
+
+```bash
+pip install -r requirements-dev.txt
+pytest                      # must be run from the repo root
+```
+
+The suite pins the behaviour of the functions every thesis metric derives from —
+the programmatic finding detector, the finding↔ground-truth matcher, and the
+scope guard — so a refactor that would move a number in the results turns a test
+red first. Neither Docker nor Ollama is needed to run it; it exercises the Python
+layer directly, in about a minute.
+
+Run it from the repository root: `conftest.py` anchors the working directory
+there, and `orchestrator.main` builds its Jinja2 template path relative to the
+CWD.
+
+A clean checkout currently reports **1674 passed, 31 skipped**. Every skip is
+`corpus present but empty` — those tests replay recorded session data from
+`runs/`, which is excluded by `.gitignore` (see `docs/REPRODUCIBILITY.md`), so
+they are structurally unrunnable from a fresh clone rather than broken.
+
+See `tests/README.md` for what each module covers and for the coverage command.
+
 ## Usage
 
 ```bash
