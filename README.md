@@ -49,7 +49,7 @@ dashboard/           Web UI
 docs/                Methodology + evaluation documentation
 ```
 
-## Test catalogue (WSTG coverage)
+## WSTG test-case catalogue
 
 | ID | Test |
 |----|------|
@@ -129,7 +129,7 @@ See `tests/README.md` for what each module covers and for the coverage command.
 ## Usage
 
 ```bash
-# List the test catalogue
+# List the WSTG test-case catalogue
 python -m orchestrator.testcase.cli list
 
 # Run a single test case against an authorised target
