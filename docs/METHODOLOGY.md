@@ -14,7 +14,7 @@
 
 ## 3.1 Research Design Overview
 
-This thesis employs a controlled factorial experimental design to evaluate whether large language models (LLMs) can autonomously orchestrate penetration testing tools through an agentic framework. The experimental artifact, Erlik 2.0, is a purpose-built AI pentest orchestrator that wraps industry-standard Kali Linux tools behind a Model Context Protocol (MCP) interface, enabling LLMs to select, invoke, and chain tools based on their output.
+This thesis employs a controlled factorial experimental design to evaluate whether large language models (LLMs) can autonomously orchestrate penetration testing tools through an agentic framework. The experimental artifact, Erlik 2.0, is a purpose-built AI pentest orchestrator that exposes industry-standard Kali Linux tools through a single coarse-grained command interface, enabling LLMs to select, invoke, and chain tools based on their output. Section 3.10 describes that interface and how it is implemented.
 
 The evaluation follows a factorial experimental matrix spanning three independent variables:
 
@@ -1511,23 +1511,106 @@ Fine-tuning as applied here therefore redistributes which vulnerability classes 
 
 ---
 
-## 3.10 MCP Architecture Justification
+## 3.10 Tool Interface Architecture
 
 ### 3.10.1 Design Decision
 
-Two MCP architectural options were evaluated:
+Two architectures for exposing the Kali toolset to the model were evaluated:
 
-**Option A (rejected)**: One MCP server per tool (30 servers), each with typed input/output schemas. Provides maximum type safety but introduces 30x coordination overhead and transforms the LLM's tool selection problem into a server-selection problem without simplification.
+**Option A (rejected)**: One server per tool (30 servers), each with a typed
+input/output schema. Provides maximum type safety, but introduces 30x
+coordination overhead and converts the model's tool-selection problem into a
+server-selection problem without simplifying it.
 
-**Option B (adopted)**: One coarse-grained MCP server wrapping the unified Kali environment. All 30 tools are accessible through a single interface accepting tool name and command string.
+**Option B (adopted)**: A single coarse-grained interface over the unified Kali
+environment. All tools in the active tier are reachable through one action that
+accepts a command string.
 
-Rationale: Penetration testing is inherently command-line driven. The LLM already understands command-line syntax from pre-training. A single server simplifies deployment and the experimental setup. The toolset tier system controls action space at the configuration level.
+Rationale: penetration testing is inherently command-line driven, and the model
+already understands command-line syntax from pre-training. A single interface
+simplifies deployment and the experimental setup, and the toolset tier system
+(Section 3.5.2) controls the action space at the configuration level rather
+than at the protocol level.
 
-### 3.10.2 Novelty Claim
+### 3.10.2 How the adopted interface is implemented
 
-The use of MCP for penetration testing tool orchestration is, to the best of the author's knowledge, novel. Existing LLM-driven security testing work uses either hardcoded pipelines (no LLM agency in tool selection) or provider-specific function-calling interfaces. MCP provides a vendor-neutral, standardised protocol that decouples the tool layer from the LLM layer, enabling tool set modification without retraining and model swapping without integration changes.
+Option B is implemented as a **JSON action protocol carried over the model's
+ordinary text channel**, not as a Model Context Protocol (MCP) server and not
+through provider-specific function-calling. The distinction matters for
+interpreting the results, so it is stated explicitly.
 
----
+The system prompt (`TOOL_USE_SYSTEM_PROMPT`, `orchestrator/main.py`) presents
+the available tools as a natural-language manifest grouped into four testing
+phases, with usage examples, and requires the model to reply with exactly one
+JSON object per turn:
+
+```json
+{"action": "run_tool", "command": "nmap -sV <host> -p <port>", "reason": "..."}
+```
+
+The orchestrator parses that object and applies four checks in this order
+(`execute_tool`, `orchestrator/tool_executor.py`) before anything executes:
+
+1. **Blocklist**, against the raw command as emitted: `_validate_command`
+   rejects it if it matches any entry in `BLOCKED_PATTERNS`.
+2. **Tier gate**: the invoked tool must appear in the `enabled_tools` list for
+   the active toolset tier.
+3. **Segment gate**: `_segment_violation` extracts every program named in the
+   command — not only the first — so each stage of a pipeline must itself be an
+   enabled tool or a member of `_SAFE_FILTERS` (`grep`, `awk`, `jq`, `head` and
+   similar). This is what stops an allowed tool being used as a prefix to reach
+   a disallowed one.
+4. **Sanitisation, then scope**: `_sanitize_command` rewrites hostname
+   references to the session target — the fine-tuned 7B and 14B models
+   frequently emit a hostname carried over from training data — and
+   `_scope_violation` then runs against the *rewritten* command, refusing one
+   that names an unrelated public host. The guard and its deliberate limits are
+   documented in `SECURITY.md`.
+
+Only then is the command dispatched to the Kali container as a subprocess. Note
+the ordering: the blocklist and both gates see the model's text verbatim, while
+scope enforcement sees the rewritten form, so a rewrite can never move a command
+from out-of-scope to in-scope without the scope check re-examining it.
+
+The model therefore selects and composes commands, while admission control stays
+with the orchestrator.
+
+**Where MCP is used.** The repository does implement MCP, but for enrichment
+rather than for tool orchestration: `mcp_servers/cve/server.py` is a stdio MCP
+server exposing four NVD CVE-enrichment tools (`enrich_cve`,
+`bulk_enrich_cves`, `get_cached_cve`, `cache_stats`) to any MCP-capable client.
+It is deliberately isolated from the orchestrator — its dependency lives in
+`requirements-mcp.txt`, outside the core install, and no module under
+`orchestrator/` imports it. None of the experiments in this thesis run through
+it, and no result reported here depends on it.
+
+### 3.10.3 Properties of the adopted design
+
+The four properties this architecture was chosen for follow from the
+coarse-grained interface itself, and hold independently of which protocol
+carries it:
+
+| Property | How the implementation delivers it |
+|---|---|
+| Vendor neutrality | The interface is prompt text plus parsed JSON, so it requires no function-calling support from the provider. Both implemented providers (`ollama`, `openai`, selected by `ERLIK_LLM_PROVIDER` in `orchestrator/llm_client.py`) are driven identically. |
+| Tool layer decoupled from model layer | Tools are named in a prompt manifest and dispatched by the orchestrator; the model never holds a handle to a tool, only emits a command string. |
+| Tool-set modification without retraining | Changing the active tier changes the manifest the model is shown. No weights are touched — this is what makes the toolset tier usable as an independent variable (Section 3.5.2). |
+| Model swapping without integration changes | `resolve_provider()` and `default_model_for()` select provider and model per run; every model evaluated in Chapter 4 ran against an unmodified tool layer. |
+
+### 3.10.4 Relation to prior work
+
+Existing LLM-driven security testing work generally uses either hardcoded
+pipelines, in which the model has no agency over tool selection, or
+provider-specific function-calling interfaces, which bind the tool layer to one
+vendor's API. The approach taken here differs from both: the model has genuine
+selection agency over a coarse-grained command interface, and that interface is
+provider-independent because it rides the plain text channel.
+
+No claim of novelty is made for the use of MCP in penetration-testing tool
+orchestration, because the Kali lane does not use MCP. What is offered instead
+is an empirical result: the measurement, reported in Chapter 4, of how far a
+locally-hosted open-weight model can drive such an interface unaided, and of
+which of the design's assumed benefits actually materialise at 7B, 14B and 32B.
 
 ## 3.11 Ethical Considerations
 
