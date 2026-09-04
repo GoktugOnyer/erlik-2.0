@@ -791,8 +791,8 @@
             <h1 class="neon-text-cyan font-pixel" style="font-size: 1.1rem; letter-spacing: 3px;">
                 ERLIK PENTEST AGENT
             </h1>
-            <span class="font-pixel text-purple-400" style="font-size: 0.55rem; opacity: 0.7;">
-                v0.1 // qwen2.5-coder-7b
+            <span id="header-model" class="font-pixel text-purple-400" style="font-size: 0.55rem; opacity: 0.7;">
+                v0.1
             </span>
         </div>
         <div class="flex items-center gap-2">
@@ -966,7 +966,7 @@
                 </div>
                 <div>
                     <label class="block font-pixel mb-2" style="font-size:0.55rem; color:#6a6a8a;">AI MODEL</label>
-                    <select id="model-select" class="cyber-input cyber-select rounded">
+                    <select id="model-select" class="cyber-input cyber-select rounded" onchange="syncHeaderModel()">
                         <option value="qwen2.5-coder:7b">Loading models...</option>
                     </select>
                 </div>
@@ -1048,6 +1048,9 @@
                             class="cyber-input rounded px-2 py-1" style="width:130px; font-size:0.8rem;">
                     </div>
                     <div class="font-mono" style="font-size:0.55rem; color:#5a5a6a; margin-top:3px;">blank = per-tool defaults · type to override all</div>
+                    <div id="chain-unsupported-note" class="font-mono hidden" style="font-size:0.55rem; color:var(--neon-orange); margin-top:3px;">
+                        not applied in Chain Mode &mdash; chains do not carry a vuln category or tool timeout
+                    </div>
                 </div>
             </div>
 
@@ -4695,6 +4698,9 @@
                         warn.selected = true;
                         select.insertBefore(warn, select.firstChild);
                     }
+                    // The list arrives asynchronously, so the header has to be told
+                    // again once a model is actually selected.
+                    if (typeof syncHeaderModel === 'function') syncHeaderModel();
                 } else {
                     const opt = document.createElement('option');
                     opt.value = data.default;
@@ -4852,6 +4858,16 @@
         }
 
         // ===== Session Type & Parent Session =====
+        // The header used to hard-code "v0.1 // qwen2.5-coder-7b", which stayed put no
+        // matter which model was selected — so a 32B run was labelled as a 7B one.
+        function syncHeaderModel() {
+            const el = document.getElementById('header-model');
+            const sel = document.getElementById('model-select');
+            if (!el) return;
+            const m = sel && sel.value ? sel.value : '';
+            el.textContent = m ? `v0.1 // ${m}` : 'v0.1';
+        }
+
         function updateMaxTurnsLabel() {
             const slider = document.getElementById('max-turns-slider');
             const label = document.getElementById('max-turns-label');
@@ -4876,6 +4892,11 @@
             } else if (type === 'chain') {
                 wrapper.classList.add('hidden');
                 chainProgress.classList.remove('hidden');
+                // VULN CATEGORY and TOOL TIMEOUT are not sent by the chain path and the
+                // `chains` table has no column for either, so a chain silently ignored
+                // whatever was set here. Disable and say so rather than accept input
+                // that goes nowhere.
+                setChainOnlyFieldState(true);
                 // Reset chain phase indicators
                 document.querySelectorAll('.chain-phase').forEach(el => {
                     el.className = 'chain-phase pending';
@@ -4885,7 +4906,29 @@
             } else {
                 wrapper.classList.add('hidden');
                 chainProgress.classList.add('hidden');
+                setChainOnlyFieldState(false);
             }
+            if (type === 'warm') setChainOnlyFieldState(false);
+        }
+
+        // Chain runs drop these two fields, so present them as unavailable rather than
+        // letting the operator set a value the run will not honour.
+        function setChainOnlyFieldState(isChain) {
+            const vc = document.getElementById('vuln-category');
+            const tt = document.getElementById('tool-timeout-input');
+            const noTimeout = document.getElementById('no-timeout-toggle');
+            const note = document.getElementById('chain-unsupported-note');
+            if (vc) {
+                vc.disabled = isChain;
+                vc.style.opacity = isChain ? '0.45' : '';
+            }
+            if (tt) {
+                // NO TIMEOUT also disables this input; don't re-enable it here if that
+                // is what is holding it down.
+                tt.disabled = isChain || (noTimeout && noTimeout.checked);
+                tt.style.opacity = isChain ? '0.45' : '';
+            }
+            if (note) note.classList.toggle('hidden', !isChain);
         }
 
         async function loadParentSessions() {
@@ -7203,6 +7246,13 @@ ${htmlBody}
                 }, 0);
             }
             switchView(st.view || 'overview');
+            // Bring the Scanner form's labels into line with its actual values. MAX TURNS
+            // was static markup reading 15 beside a slider whose value is 30, and
+            // updateMaxTurnsLabel() was bound only to oninput, so until the operator
+            // dragged the slider the page showed a turn budget the run would not use.
+            if (typeof updateMaxTurnsLabel === 'function') updateMaxTurnsLabel();
+            if (typeof syncHeaderModel === 'function') syncHeaderModel();
+            if (typeof onSessionTypeChange === 'function') onSessionTypeChange();
         })();
 
         loadEngagementOptions();
