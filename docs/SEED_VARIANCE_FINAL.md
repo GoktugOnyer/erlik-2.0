@@ -169,6 +169,32 @@ Apply in this order:
 7. [ ] Cite `docs/seed_variance_results.json` and `docs/SEED_VARIANCE_FINAL.md`
        in the Reproducibility Statement
 
+### Unrelated to seed variance, but the same class of defect
+
+8. [ ] Check whether the thesis states a "22x code-pretraining gap"
+       (Coder-32B vs Instruct-32B). The figure came from the now-deleted
+       `docs/THESIS_FINAL_DATA.md`, which mixed matchers, and does not survive
+       the canonical one. That document paired Coder-32B at 321 TP against
+       Instruct-32B at 15 TP on the Apr 9 cloud, but no such pairing exists in
+       `docs/recomputed_all_experiments.json`: the only `qwen2.5:32b` Instruct
+       run is `runs/dvwa_2026-04-11/32B-Instruct` at 52 TP, whose
+       same-environment Coder comparator is 93 TP. That is ~1.8x on true
+       positives, and **4/35 versus 4/35 on unique ground-truth coverage —
+       no difference at all on the headline metric**. If the thesis calls code
+       pretraining "the only robust positive finding" on the strength of 22x,
+       that claim needs restating or withdrawing.
+
+9. [ ] Check whether the thesis states a ground truth of 41 entries. The
+       catalogue holds 35 (`JUICE_SHOP_GROUND_TRUTH`, plus 19 for DVWA); 41 was
+       the denominator for every coverage percentage in the restored
+       methodology chapter before correction.
+
+10. [ ] Check the infrastructure claim. Earlier working notes recorded the
+       thesis as saying "RunPod, NVIDIA A100 80 GB" while the evaluation
+       actually ran on SimplePod RTX 4090 (24 GB), 32 cores, Ubuntu 22.04,
+       ERLIK_NATIVE mode. `docs/METHODOLOGY.md` §3.8.3 now carries the correct
+       hardware.
+
 ---
 
 ## Files produced by this experiment
