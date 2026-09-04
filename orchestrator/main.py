@@ -6289,10 +6289,18 @@ async def library_detectors():
 
 @app.get("/api/library/testcases")
 async def library_testcases():
-    """Deterministic WSTG cases, including any that failed to parse.
+    """Deterministic WSTG cases, including any that failed to load.
 
     `load_catalog()` swallows parse errors, so a malformed case silently
     vanishes from the engine. Surfacing it here is the only place it is visible.
+
+    Two things this got wrong. It read `doc.get("title")`, and no case has a
+    `title`: all 29 use `name`, which is also what the loader and runner call it
+    (`tc.name`). Every case reported an empty string. And it treated "parses as
+    YAML" as "loads": a file that parses to a dict with no `id` is just as
+    broken for the engine, but appeared here as a valid case with a null id --
+    invisible in exactly the view whose job is to make broken cases visible.
+    Both are now load errors.
     """
     import yaml
     from orchestrator import capabilities as C
@@ -6300,11 +6308,23 @@ async def library_testcases():
     for p in sorted(C.WSTG_DIR.glob("*.yaml")):
         try:
             doc = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
-            cases.append({"id": doc.get("id"), "title": doc.get("title", ""),
-                          "file": p.name,
-                          "steps": len(doc.get("steps") or [])})
         except Exception as e:  # noqa: BLE001
-            errors.append({"file": p.name, "error": str(e)[:200]})
+            errors.append({"file": p.name, "error": f"YAML parse failed: {str(e)[:200]}"})
+            continue
+        if not isinstance(doc, dict):
+            errors.append({"file": p.name,
+                           "error": f"top level is {type(doc).__name__}, expected a mapping"})
+            continue
+        missing = [k for k in ("id", "name", "steps") if not doc.get(k)]
+        if missing:
+            errors.append({"file": p.name,
+                           "error": f"missing or empty required key(s): {', '.join(missing)}"})
+            continue
+        cases.append({"id": doc["id"], "name": doc["name"],
+                      "category": doc.get("category", ""),
+                      "severity": doc.get("severity", ""),
+                      "file": p.name,
+                      "steps": len(doc["steps"])})
     return {"count": len(cases), "cases": cases, "load_errors": errors}
 
 
