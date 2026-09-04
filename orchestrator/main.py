@@ -5118,12 +5118,24 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
 
         # Re-run PoCs for high/critical findings (driven by run config; default off).
         try:
+            # The dashboard has always had a VERIFY stage in its kill chain and a
+            # .log-verify style, and setPhase() already orders 'verify' between test
+            # and report — but nothing ever emitted the phase, so the bar could not
+            # light and this stage ran invisibly. Announced only when it will
+            # actually run: showing VERIFY for a stage that is switched off would be
+            # the same overclaim in the other direction. Mirrors the enable check in
+            # poc_reverify_session so the bar cannot disagree with the work.
+            _pocv_on = (runcfg["poc_verify"] if runcfg["poc_verify"] is not None else
+                        os.environ.get("ERLIK_POC_VERIFY", "").strip().lower()
+                        in ("1", "true", "yes", "on"))
+            if _pocv_on and "curl" in (enabled_tools or []):
+                await manager.broadcast(session_id, {"type": "phase", "active": "verify"})
             n_pocv = await poc_reverify_session(session_id, target_url, enabled_tools,
                                                 force=runcfg["poc_verify"],
                                                 safe_mode=runcfg.get("safe_mode", True))
             if n_pocv:
                 await manager.broadcast(session_id, {
-                    "type": "log", "phase": "report",
+                    "type": "log", "phase": "verify",
                     "message": f"PoC re-verification: {n_pocv} high/critical finding(s) confirmed",
                 })
         except Exception as _pv_err:  # noqa: BLE001
