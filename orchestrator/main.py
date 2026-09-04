@@ -3552,8 +3552,14 @@ async def _generate_chain_report(chain_id: str, target_url: str) -> str | None:
         for _f in withheld:
             _k = (_f.get("triage_status") or "?").strip().lower()
             _wb[_k] = _wb.get(_k, 0) + 1
+        # Built outside the f-string: nesting the same quote character inside an
+        # f-string expression is PEP 701 syntax and only parses on Python 3.12+,
+        # but the project supports 3.10+ (README, setup.sh).
+        _breakdown = ", ".join(
+            f"{n} {k.replace('_', ' ')}" for k, n in sorted(_wb.items())
+        )
         L.append(f"> {len(withheld)} finding(s) were withheld by operator triage "
-                 f"({', '.join(f'{n} {k.replace('_', ' ')}' for k, n in sorted(_wb.items()))}) "
+                 f"({_breakdown}) "
                  f"and are not counted above. They are retained in the session record.")
         L.append("")
     if unique:
