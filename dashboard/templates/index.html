@@ -2196,6 +2196,15 @@
                 </div>
             </div>
 
+            <div id="tl-case-panel" class="panel rounded p-4 hidden">
+                <div class="flex items-baseline justify-between flex-wrap gap-2">
+                    <h3 class="font-pixel" style="font-size:0.62rem;">CASE DEFINITION</h3>
+                    <button onclick="document.getElementById('tl-case-panel').classList.add('hidden')"
+                        class="font-pixel px-2 py-1 rounded border" style="font-size:0.5rem;">CLOSE</button>
+                </div>
+                <div id="tl-case-body" class="mt-3"></div>
+            </div>
+
             <div id="tl-detail" class="panel rounded p-4 hidden">
                 <div class="flex items-baseline justify-between flex-wrap gap-2">
                     <h3 class="font-pixel" style="font-size:0.62rem;">RUN DETAIL</h3>
@@ -3597,10 +3606,76 @@
                         title="${tlEsc(c.where)}">${tlEsc(c.where)}</td>
                     <td class="py-1 pr-3" id="tlst-${tlEsc(c.id)}" style="opacity:.55;">ready</td>
                     <td class="py-1" id="tlfd-${tlEsc(c.id)}">
-                        <button onclick="tlRunOne('${tlEsc(c.id)}')" class="font-pixel px-2 py-0.5 rounded border"
+                        <button data-tlview="${tlEsc(c.id)}" class="font-pixel px-2 py-0.5 rounded border mr-1"
+                            style="font-size:0.45rem; opacity:.75;">VIEW</button>
+                        <button data-tlrun-case="${tlEsc(c.id)}" class="font-pixel px-2 py-0.5 rounded border"
                             style="font-size:0.45rem;">RUN</button>
                     </td>
                 </tr>`).join('');
+            // data-* plus addEventListener, per the idiom recorded above tlRunOne. The
+            // RUN button was an interpolated inline onclick; case ids come from the
+            // catalogue rather than the target, so it was not exploitable, but the
+            // exception is not worth keeping next to a new button.
+            const rowsEl = document.getElementById('tl-rows');
+            rowsEl.querySelectorAll('[data-tlview]').forEach(b =>
+                b.addEventListener('click', () => tlCaseView(b.dataset.tlview)));
+            rowsEl.querySelectorAll('[data-tlrun-case]').forEach(b =>
+                b.addEventListener('click', () => tlRunOne(b.dataset.tlrunCase)));
+        }
+
+        // A case could be run without being readable: GET /api/v2/testcases/{id} returns
+        // the whole definition and nothing called it, so the operator chose whether to
+        // fire a probe at a customer's application from an id and a severity chip alone.
+        async function tlCaseView(id) {
+            const panel = document.getElementById('tl-case-panel');
+            const body = document.getElementById('tl-case-body');
+            if (!panel || !body) return;
+            panel.classList.remove('hidden');
+            body.textContent = 'loading…';
+            panel.scrollIntoView({block: 'center'});
+            try {
+                const r = await fetch(`/api/v2/testcases/${encodeURIComponent(id)}`);
+                if (!r.ok) throw new Error((await r.text()).slice(0, 140));
+                const c = await r.json();
+                const ts = c.target_schema || {};
+                const need = (ts.required || []).join(', ') || 'none';
+                const opt = (ts.optional || []).join(', ') || 'none';
+                const refs = (c.references || []).map(u =>
+                    `<div style="opacity:.7;">${tlEsc(u)}</div>`).join('') || '<div style="opacity:.5;">none</div>';
+                const steps = (c.steps || []).map((st, i) => {
+                    const ev = (st.evaluators || []).map(e => {
+                        const what = e.type === 'regex' ? `regex ${e.pattern || ''}`
+                                   : e.type === 'status_code' ? `status in ${(e.expect || []).join('/')}`
+                                   : 'model-judged';
+                        const emits = e.emit_finding ? ` → ${e.emit_finding.vuln_type || 'finding'}` : '';
+                        return `<div style="opacity:.65;">· ${tlEsc(what)}${tlEsc(emits)}</div>`;
+                    }).join('') || '<div style="opacity:.45;">· no evaluator — output is recorded, nothing is asserted</div>';
+                    return `
+                    <div class="mt-2" style="border-left:2px solid #2a3038; padding-left:8px;">
+                        <div class="font-mono" style="font-size:0.58rem; color:var(--neon-cyan);">
+                            ${i + 1}. ${tlEsc(st.name || '')} <span style="opacity:.5;">· ${tlEsc(st.tool || '')}</span>
+                        </div>
+                        <pre class="font-mono mt-1" style="font-size:0.55rem; opacity:.75; white-space:pre-wrap; word-break:break-all;">${tlEsc(st.command || '')}</pre>
+                        ${ev}
+                    </div>`;
+                }).join('') || '<div style="opacity:.5;">no steps</div>';
+                body.innerHTML = `
+                    <div class="font-mono" style="font-size:0.62rem;">
+                        <span style="color:var(--neon-cyan);">${tlEsc(c.id || id)}</span>
+                        <span style="opacity:.8;"> ${tlEsc(c.name || '')}</span>
+                        <span style="opacity:.6;"> · ${tlEsc(c.category || '')} · </span>${tlSev(c.severity)}
+                    </div>
+                    <div class="font-mono mt-2" style="font-size:0.58rem;">
+                        <div>requires: <span style="opacity:.75;">${tlEsc(need)}</span></div>
+                        <div>optional: <span style="opacity:.75;">${tlEsc(opt)}</span></div>
+                    </div>
+                    <div class="font-pixel mt-3" style="font-size:0.5rem; color:#6a6a8a;">STEPS &mdash; WHAT THIS WILL RUN</div>
+                    ${steps}
+                    <div class="font-pixel mt-3" style="font-size:0.5rem; color:#6a6a8a;">REFERENCES</div>
+                    <div class="font-mono mt-1" style="font-size:0.55rem;">${refs}</div>`;
+            } catch (e) {
+                body.textContent = 'could not load case: ' + e;
+            }
         }
 
         function tlSev(s) {
