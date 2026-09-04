@@ -1928,6 +1928,8 @@
                     </span>
                     <span class="font-mono" style="font-size:0.65rem; color:#5a5a6a;">latest 25, newest first</span>
                 </div>
+                <div id="mon-sessions-note" class="font-mono mb-2"
+                    style="font-size:0.62rem; color:#6a6a8a;"></div>
                 <div class="overflow-auto">
                     <table class="w-full font-mono" style="font-size:0.75rem;">
                         <thead>
@@ -6446,8 +6448,11 @@ ${htmlBody}
             // Identify the CURRENT matrix run by walking back from the newest
             // session and stopping at the first gap > 30 minutes between
             // consecutive created_at timestamps. Anything older than that gap
-            // belongs to a previous matrix run and shouldn't be counted in the
-            // KPI (the recent-sessions table still shows everything).
+            // belongs to a previous matrix run and shouldn't be counted in the KPI.
+            // The recent-sessions table below deliberately reads matrixAll, NOT this
+            // narrowed set — this comment used to claim that and the code did the
+            // opposite, so a session from an earlier run was invisible in the one
+            // place that says "recent sessions".
             // sessions arrive sorted DESC by created_at from /api/sessions.
             const sortedDesc = matrixAll.slice().sort((a, b) =>
                 new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
@@ -6554,11 +6559,29 @@ ${htmlBody}
                     : '';
             }
 
-            // Sessions table — the latest MONITOR_ROWS with toolset_preset
-            const recent = matrix.slice(0, MONITOR_ROWS);
+            // Sessions table — every tier-tagged session, newest first, not just the
+            // current matrix run. The KPIs above are scoped to one run on purpose; this
+            // table is not, because "recent sessions" that hides the previous run is
+            // answering a different question than the one its heading asks.
+            const recent = matrixAll.slice(0, MONITOR_ROWS);
             const tbody = document.getElementById('mon-sessions-tbody');
+            const tnote = document.getElementById('mon-sessions-note');
+            if (tnote) {
+                // Say which of the three states this is, rather than showing an empty
+                // table that reads as "nothing has run".
+                tnote.textContent = recent.length
+                    ? (matrixAll.length > recent.length
+                        ? `newest ${recent.length} of ${matrixAll.length} tier-tagged sessions`
+                        : `${recent.length} tier-tagged session(s)`)
+                    : (all.length
+                        ? `${all.length} session(s) in this sample carry no toolset tier, so none is a matrix row`
+                        : '');
+            }
             if (recent.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="9" class="text-center py-4" style="color:#5a5a6a;">no matrix sessions yet</td></tr>';
+                tbody.innerHTML = all.length
+                    ? '<tr><td colspan="9" class="text-center py-4" style="color:#5a5a6a;">'
+                      + 'sessions exist, but none carries a toolset tier &mdash; a Custom toolset is not a named experiment arm</td></tr>'
+                    : '<tr><td colspan="9" class="text-center py-4" style="color:#5a5a6a;">no sessions yet</td></tr>';
             } else {
                 tbody.innerHTML = recent.map(s => {
                     const dur = s.total_duration_ms ? _monDur(Math.floor(s.total_duration_ms / 1000)) : '—';
