@@ -169,6 +169,61 @@ Apply in this order:
 7. [ ] Cite `docs/seed_variance_results.json` and `docs/SEED_VARIANCE_FINAL.md`
        in the Reproducibility Statement
 
+### Unrelated to seed variance: three other claims that do not reconcile
+
+8. [ ] Check whether the thesis states a "22x code-pretraining gap"
+       (Coder-32B vs Instruct-32B). The figure came from the now-deleted
+       `docs/THESIS_FINAL_DATA.md`, which paired Coder-32B at 321 TP against
+       Instruct-32B at 15 TP on the Apr 9 Juice Shop cloud (321/15 = 21.4x,
+       itself rounded up to "22x") and billed it as "the only robust positive
+       finding".
+
+       **That pairing is unrecomputable, not refuted.** The Apr 9 Instruct arm
+       was excluded from the canonical recomputation for data loss, not for
+       any result: the `EXPERIMENTS` list in
+       `scripts/recompute_all_thesis_tables.py` skips it with the comment
+       `# 32B-Instruct dir's IDs don't exist in the DB — skip (data loss)`,
+       while its Coder-32B sibling was recomputed at 334 TP. So the canonical
+       matcher never scored the 22x comparison and cannot be cited either for
+       or against it.
+
+       The nearest surviving same-environment pair is a **different target on
+       a different date** — DVWA, Apr 11 — and is a substitute, not a
+       restatement: `runs/dvwa_2026-04-11/32B-Instruct` at 52 TP against
+       `runs/dvwa_2026-04-11/32B` at 93 TP, same DB and same target. That is
+       1.8x on raw true positives (1.5x per session — 31 vs 36 sessions), and
+       **4/19 versus 4/19 on unique ground-truth coverage, with byte-identical
+       hit sets (D3, D10, D11, D17) — no difference at all on the headline
+       metric**. Note the denominator is DVWA's 19, not Juice Shop's 35.
+
+       So the honest position is that 22x rests on data that no longer exists,
+       and the one comparison that can still be run shows no coverage gap at
+       all. If the thesis calls code pretraining "the only robust positive
+       finding" on the strength of 22x, that claim needs restating or
+       withdrawing — but do not claim recomputation *disproved* it.
+
+9. [ ] Check whether the thesis states a ground truth of 41 entries. The
+       catalogue holds 35 (`JUICE_SHOP_GROUND_TRUTH` in
+       `orchestrator/main.py`, plus 19 for DVWA in `DVWA_GROUND_TRUTH`), and
+       no revision of the source ever held 41.
+
+       Scope this precisely when writing it up: 41 was a stated *catalogue
+       size*, never a denominator. The pre-truncation chapter (`79c823c`)
+       called the catalogue 41 entries in seven places; one stale reference
+       survived the restore (`f2b4327`, line 1089, describing the
+       `ground_truth.json` run artifact) and was corrected in `61125e5`.
+       But no version of `METHODOLOGY.md` before that correction contained a
+       coverage fraction or percentage at all — the per-experiment `n/35`
+       figures were introduced later and were 35-based from the outset. If the
+       thesis carries `n/41` fractions, they came from somewhere other than
+       this chapter and need tracing separately.
+
+10. [ ] Check the infrastructure claim. Earlier working notes recorded the
+       thesis as saying "RunPod, NVIDIA A100 80 GB" while the evaluation
+       actually ran on SimplePod RTX 4090 (24 GB), 32 cores, Ubuntu 22.04,
+       ERLIK_NATIVE mode. `docs/METHODOLOGY.md` §3.8.3 now carries the correct
+       hardware.
+
 ---
 
 ## Files produced by this experiment
