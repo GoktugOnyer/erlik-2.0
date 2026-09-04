@@ -3486,6 +3486,27 @@
                     tlDeclRetire(b.dataset.case, b.dataset.field)));
         }
 
+        // Pre-fills the declaration form from a skipped case, so clearing a skip is one
+        // click plus the value, rather than retyping the case id and hunting the field.
+        // The field select is populated from the API's `declarable` list; if this case
+        // needs something outside that list, the case id is still filled in and the
+        // operator picks a field manually rather than being handed a broken selection.
+        function tlDeclPrefill(caseId, field) {
+            const c = document.getElementById('tl-decl-case');
+            const f = document.getElementById('tl-decl-field');
+            const v = document.getElementById('tl-decl-value');
+            const msg = document.getElementById('tl-decl-msg');
+            if (c) c.value = caseId;
+            if (f && field && [...f.options].some(o => o.value === field)) f.value = field;
+            if (msg) {
+                msg.style.color = 'var(--neon-cyan)';
+                msg.textContent = (field && f && f.value === field)
+                    ? `${caseId}: set a value for ${field}`
+                    : `${caseId}: pick the field to declare`;
+            }
+            if (v) { v.focus(); v.scrollIntoView({block: 'center'}); }
+        }
+
         async function tlDeclSet() {
             const target = document.getElementById('tl-target').value.trim();
             const msg = document.getElementById('tl-decl-msg');
@@ -3532,11 +3553,37 @@
             const skipPanel = document.getElementById('tl-skipped-panel');
             if (d.skipped.length) {
                 skipPanel.classList.remove('hidden');
-                document.getElementById('tl-skipped').innerHTML = d.skipped.map(sc => `
-                    <div class="font-mono flex gap-3" style="font-size:0.6rem;">
+                // A skip used to end at "supply one", leaving the operator to retype the
+                // case id into the declaration form below and pick the field by hand —
+                // so on a target with no profile, 13 of 29 cases were a dead end.
+                //
+                // The field is only pre-selected when the case requires exactly ONE, in
+                // which case there is no doubt which is missing. With several required
+                // fields the plan does not say which one is unsatisfied (the reason
+                // prose is deliberately stable — sweep.py:108), and `url` is usually
+                // derived from the base URL while the real gap is `parameter`. Guessing
+                // required[0] there would name the wrong field, so those cases fill in
+                // the case id and let the operator choose.
+                const box = document.getElementById('tl-skipped');
+                box.innerHTML = d.skipped.map(sc => {
+                    const req = sc.required || [];
+                    const one = req.length === 1 ? req[0] : '';
+                    const label = one ? `DECLARE ${tlEsc(one)}` : 'DECLARE';
+                    const title = req.length
+                        ? `requires: ${tlEsc(req.join(', '))}`
+                        : 'no declarable requirement';
+                    return `
+                    <div class="font-mono flex gap-3 items-center" style="font-size:0.6rem;">
                         <span style="color:var(--neon-yellow); min-width:130px;">${tlEsc(sc.id)}</span>
-                        <span style="opacity:.75;">${tlEsc(sc.reason)}</span>
-                    </div>`).join('');
+                        <span style="opacity:.75; flex:1;">${tlEsc(sc.reason)}</span>
+                        <button data-tldecl="${tlEsc(sc.id)}" data-tlfield="${tlEsc(one)}"
+                            title="${title}"
+                            class="font-pixel px-2 py-0.5 rounded border" style="font-size:0.45rem;
+                            color:var(--neon-green); border-color:var(--neon-green);">${label}</button>
+                    </div>`;
+                }).join('');
+                box.querySelectorAll('[data-tldecl]').forEach(b =>
+                    b.addEventListener('click', () => tlDeclPrefill(b.dataset.tldecl, b.dataset.tlfield)));
             } else {
                 skipPanel.classList.add('hidden');
             }
