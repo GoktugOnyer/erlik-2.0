@@ -3601,15 +3601,23 @@
 
             document.getElementById('tl-rows').innerHTML = d.runnable.map(c => `
                 <tr id="tlrow-${tlEsc(c.id)}" style="border-bottom:1px solid #1e242c;">
-                    <td class="py-1 pr-3" style="color:var(--neon-cyan); white-space:nowrap;">${tlEsc(c.id)}</td>
+                    <td class="py-1 pr-3" style="color:var(--neon-cyan); white-space:nowrap;">
+                        ${tlEsc(c.id)}
+                        <!-- VIEW lives in the CASE cell, not the findings cell: tlRunOne
+                             replaces the tlfd- cell's innerHTML with the run's findings,
+                             so a button placed there disappears the moment the case is
+                             run — from every row after a sweep, which is exactly when
+                             the operator wants to ask what produced a verdict. It also
+                             belongs here semantically: it describes the case, not the run. -->
+                        <button data-tlview="${tlEsc(c.id)}" class="font-pixel px-1 rounded border ml-1"
+                            style="font-size:0.4rem; opacity:.6;">VIEW</button>
+                    </td>
                     <td class="py-1 pr-3" style="opacity:.8;">${tlEsc(c.category || '')}</td>
                     <td class="py-1 pr-3">${tlSev(c.severity)}</td>
                     <td class="py-1 pr-3" style="opacity:.7; max-width:290px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;"
                         title="${tlEsc(c.where)}">${tlEsc(c.where)}</td>
                     <td class="py-1 pr-3" id="tlst-${tlEsc(c.id)}" style="opacity:.55;">ready</td>
                     <td class="py-1" id="tlfd-${tlEsc(c.id)}">
-                        <button data-tlview="${tlEsc(c.id)}" class="font-pixel px-2 py-0.5 rounded border mr-1"
-                            style="font-size:0.45rem; opacity:.75;">VIEW</button>
                         <button data-tlrun-case="${tlEsc(c.id)}" class="font-pixel px-2 py-0.5 rounded border"
                             style="font-size:0.45rem;">RUN</button>
                     </td>
