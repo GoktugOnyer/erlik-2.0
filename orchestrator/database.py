@@ -122,6 +122,20 @@ async def init_db():
                 created_at TEXT NOT NULL DEFAULT (datetime('now'))
             );
 
+            -- NOTHING WRITES THIS TABLE. There is no INSERT into benchmark_results
+            -- anywhere in the codebase; per-session benchmark metrics are computed on
+            -- demand by _compute_benchmark_metrics() in orchestrator/main.py and
+            -- returned straight to the caller, never persisted.
+            --
+            -- Left declared rather than dropped: dropping it is a destructive migration
+            -- against every existing database to reclaim a table that is empty in all
+            -- of them, which is a worse trade than a comment. Recorded here because an
+            -- empty table with an index and a migration block reads exactly like a
+            -- feature that works, and this project's recurring defect is precisely
+            -- that — a producer nothing consumes, or here a store nothing fills.
+            --
+            -- If benchmark results ever do need persisting, this is the shape to use;
+            -- until then, treat a query against it as returning nothing by design.
             CREATE TABLE IF NOT EXISTS benchmark_results (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 benchmark_id TEXT NOT NULL REFERENCES benchmark_runs(id),
@@ -275,7 +289,9 @@ async def init_db():
             except Exception:
                 pass  # column already exists
 
-        # Migrations for benchmark_results table
+        # Migrations for benchmark_results table. Kept in step with the declaration
+        # above even though nothing writes the table, so that the schema does not
+        # silently diverge if it is ever put to use — see the note on the CREATE.
         bench_result_migrations = [
             ("toolset_preset", "TEXT DEFAULT NULL"),
         ]
