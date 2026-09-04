@@ -2147,6 +2147,13 @@
                     <input id="rc-skills-pin" class="input-field font-mono px-2 py-1 rounded"
                         style="font-size:0.58rem;" placeholder="hunt-ssrf.md, hunt-idor.md"
                         oninput="previewTuning()">
+                    <div class="font-mono" style="grid-column:1/-1; font-size:0.55rem;
+                        opacity:.72; max-width:78ch; color:#ffb545;">
+                        Single sessions only — a <b>chain</b> drops pins from every phase, the
+                        first included. A pin is guaranteed injection, so inheriting one would
+                        force the same sheet into recon, exploit and report alike, whatever
+                        that phase is for. Budget and exclusions do carry down a chain.
+                    </div>
                     <label class="font-mono" style="font-size:0.58rem;">exclude</label>
                     <input id="rc-skills-exclude" class="input-field font-mono px-2 py-1 rounded"
                         style="font-size:0.58rem;" placeholder="sql-injection-advanced.md"
@@ -6383,7 +6390,14 @@ ${htmlBody}
         function buildRunConfig() {
             const presetSel = document.getElementById('rc-preset');
             if (!presetSel || !presetSel.options.length) return null;  // load failed → env fallback
-            return {
+            // The TUNING panel's knobs ride along, read through the SAME
+            // builder the preview posts. Reading the controls again here would
+            // be a second copy free to drift; the failure that caused is an
+            // operator pinning a sheet, watching the preview change to prove
+            // it took, and starting a run that never received the pin.
+            // Untouched controls yield null, which resolve() skips, so a blank
+            // panel still cannot overwrite what the preset chose.
+            return Object.assign({
                 preset: presetSel.value,
                 cve_enrich: document.getElementById('rc-cve').checked,
                 skills: document.getElementById('rc-skills').checked,
@@ -6395,7 +6409,7 @@ ${htmlBody}
                 techniques: document.getElementById('rc-techniques').checked,
                 ai_review: document.getElementById('rc-aireview').checked,
                 target_memory: document.getElementById('rc-targetmem').checked,
-            };
+            }, tuningConfig());
         }
 
         async function renderRunConfigBadges(sid) {

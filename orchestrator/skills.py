@@ -265,18 +265,17 @@ _CLASS_PATTERNS: list[tuple[str, str, tuple[str, ...]]] = [
     ("ssti",        r"\bssti\b|template injection", ("ssti",)),
     ("xxe",         r"\bxxe\b|xml external", ("xxe",)),
     ("ldap",        r"\bldap\b", ("ldap-injection",)),
-    # No `file-upload` token. It was the only one of the three that matched a
-    # real sheet, so a path-traversal mission was handed a file-upload
-    # cheat-sheet — plausible-looking and about a different bug. Measured:
-    #   "path traversal"                    ['hunt-file-upload'] -> []
-    #   "directory traversal on a php app"  ['hunt-file-upload'] -> ['web-app-logic-principles']
-    #   "lfi and file upload"               ['hunt-file-upload'] -> unchanged, correctly
-    # An empty list says "no sheet for this", which is true; the upload sheet
-    # said something false. Note `capabilities.skills_for("path")` still
-    # returns it, because that passes the class LABEL and "File Inclusion"
-    # reaches the keyword fallback — a separate path, not this one.
+    # Tokens must name sheets that EXIST. "file-inclusion" and "path-traversal"
+    # named nothing in the corpus, so the only token that ever matched was
+    # "file-upload" — borrowed from the class below — and every LFI / traversal
+    # mission was answered with hunt-file-upload.md while hunt-lfi.md (16 KB, the
+    # canonical sheet: filter-chain RCE, log poisoning, wrappers, RFI) could not
+    # be selected by any mission. _class_candidates ranks on (boost, path), NOT on
+    # token order, so an aspirational token cannot sit in front of a live one as a
+    # preference: hunt-file-upload.md sorts before hunt-lfi.md and would keep
+    # winning. test_every_class_token_names_a_real_sheet holds the line.
     ("path",        r"path traversal|\blfi\b|file inclusion|directory traversal",
-                    ("file-inclusion", "path-traversal")),
+                    ("lfi",)),
     # Hop-by-hop header handling and request splitting are the same family, and
     # WSTG-INPV-15 was filed under `path` — a class labelled "Path Traversal /
     # File Inclusion" — purely because nothing else claimed it. Two sheets
@@ -449,7 +448,7 @@ def select_skill_files(hint: str, max_files: int = DEFAULT_SKILLS_FILES,
                 cands, key=lambda p: min(p.stat().st_size, MAX_FILE_EXCERPT)))
 
     # 2. Fill any remaining budget by keyword overlap, as before.
-    scored: list[tuple[int, int, Path]] = []
+    scored: list[tuple[int, int, int, Path]] = []
     for path, toks in catalog:
         overlap = len(q & toks)
         if overlap == 0:
@@ -458,13 +457,25 @@ def select_skill_files(hint: str, max_files: int = DEFAULT_SKILLS_FILES,
             continue          # navigation, not technique content
         name = path.name.lower()
         boost = sum(b for kw, b in _BOOST if kw in name)
-        scored.append((overlap, boost, path))
+        # Tokens the mission did NOT ask for. A sheet named exactly for the
+        # subject carries none; a sub-module of that subject carries one per
+        # extra name segment, and is a looser answer to the question asked.
+        scored.append((overlap, boost, len(toks) - overlap, path))
     # Rank on topical overlap first; the action-oriented boost only orders files
     # that are equally relevant. Sorting on a combined sum let a +3 filename
     # bonus beat a genuinely better match.
-    scored.sort(key=lambda x: (-x[0], -x[1], str(x[2])))
+    #
+    # Specificity breaks the remaining ties, ahead of the alphabet. It has to:
+    # a parent sheet and its sub-modules all match the same tokens with the same
+    # boost, and "-" sorts before "." — so every "<subject>-<module>.md" sorted
+    # in front of "<subject>.md" and the parent could never be reached. That made
+    # bughunter/offensive-osint.md (34 KB, the arsenal itself) rank 17 of 100 for
+    # its OWN subject, behind all 16 of its sub-modules, and therefore dead at
+    # every realistic file cap. Same defect class as the LFI mis-route above:
+    # a sheet in the catalogue that no mission can select.
+    scored.sort(key=lambda x: (-x[0], -x[1], x[2], str(x[3])))
 
-    for _overlap, _boost, path in scored:
+    for _overlap, _boost, _extra, path in scored:
         if len(chosen) >= max_files:
             break
         _take(path)
