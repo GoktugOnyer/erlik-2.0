@@ -1163,7 +1163,7 @@
                     <div onclick="toggleSection('tool-config')" class="section-toggle flex items-center gap-2 font-pixel" style="font-size:0.55rem; color:#6a6a8a;">
                         <span id="tool-config-arrow" style="font-size:0.65rem;">&#9654;</span>
                         <span>TOOLS</span>
-                        <span id="tool-count-badge" class="neon-badge ml-2">26/26 enabled</span>
+                        <span id="tool-count-badge" class="neon-badge ml-2">counting…</span>
                         <span id="active-toolset-badge" class="neon-badge ml-2" style="color:var(--neon-pink); border-color:var(--neon-pink);">Full-30</span>
                     </div>
                     <button onclick="testAllTools()" id="test-tools-btn" class="font-pixel px-3 py-1 rounded border text-xs" style="font-size:0.45rem; color:var(--neon-yellow); border-color:var(--neon-yellow); background:transparent; cursor:pointer;">TEST ALL</button>
@@ -1401,6 +1401,86 @@
                                 <input type="checkbox" class="tool-toggle" data-tool="interactive-pw" checked onchange="updateToolCount()">
                                 <span class="font-mono text-gray-300 group-hover:text-cyan-400 transition" style="font-size:0.95rem;">interactive-pw</span>
                                 <span class="font-mono" style="color:#4a4a5a; font-size:0.8rem;">scriptable browser</span>
+                            </label>
+                        </div>
+                    </div>
+
+                    <!-- ============================================== -->
+                    <!-- ║ OUTSIDE THE NAMED PRESETS                   ║ -->
+                    <!-- ============================================== -->
+                    <!-- These nine are installed, timed, and advertised to the model in
+                         TOOL_USE_SYSTEM_PROMPT, but had no checkbox — so getEnabledTools()
+                         could never include them and the executor's allowlist refused every
+                         attempt. The model was being told to use tools it was then prevented
+                         from using.
+
+                         They are deliberately NOT added to core_10 / standard_20 / full_30.
+                         Those are fixed-size experiment arms whose sizes are the independent
+                         variable in the RQ3-b action-space measurements; growing one would
+                         invalidate every recorded comparison, and
+                         test_the_fixed_size_presets_were_not_grown enforces that. They start
+                         unchecked because boot applies full_30, and ticking one correctly
+                         moves the badge to Custom: a run with these is not full_30. -->
+                    <div class="tier-block" style="border-left:3px solid var(--neon-orange); padding-left:0.75rem;">
+                        <div class="flex items-baseline gap-3 mb-2">
+                            <div class="font-pixel" style="font-size:0.55rem; color:var(--neon-orange); letter-spacing:0.05em;">&#9613; OUTSIDE THE PRESETS &middot; +9</div>
+                            <span class="font-mono" style="font-size:0.7rem; color:#5a5a6a;">enabling any of these makes the toolset Custom, not a named experiment arm</span>
+                        </div>
+
+                        <div class="font-pixel mb-1" style="font-size:0.45rem; color:#6a6a8a;">&middot;&middot; OSINT / discovery &middot;&middot;</div>
+                        <div class="flex flex-wrap gap-x-5 gap-y-2 mb-2">
+                            <label class="flex items-center gap-2 cursor-pointer group">
+                                <input type="checkbox" class="tool-toggle" data-tool="theHarvester" onchange="updateToolCount()">
+                                <span class="font-mono text-gray-300 group-hover:text-cyan-400 transition" style="font-size:0.95rem;">theHarvester</span>
+                                <span class="font-mono" style="color:#4a4a5a; font-size:0.8rem;">passive OSINT</span>
+                            </label>
+                            <label class="flex items-center gap-2 cursor-pointer group">
+                                <input type="checkbox" class="tool-toggle" data-tool="dirsearch" onchange="updateToolCount()">
+                                <span class="font-mono text-gray-300 group-hover:text-cyan-400 transition" style="font-size:0.95rem;">dirsearch</span>
+                                <span class="font-mono" style="color:#4a4a5a; font-size:0.8rem;">content discovery</span>
+                            </label>
+                        </div>
+
+                        <div class="font-pixel mb-1" style="font-size:0.45rem; color:#6a6a8a;">&middot;&middot; TLS / SSH / SMB &middot;&middot;</div>
+                        <div class="flex flex-wrap gap-x-5 gap-y-2 mb-2">
+                            <label class="flex items-center gap-2 cursor-pointer group">
+                                <input type="checkbox" class="tool-toggle" data-tool="sslscan" onchange="updateToolCount()">
+                                <span class="font-mono text-gray-300 group-hover:text-cyan-400 transition" style="font-size:0.95rem;">sslscan</span>
+                                <span class="font-mono" style="color:#4a4a5a; font-size:0.8rem;">TLS ciphers</span>
+                            </label>
+                            <label class="flex items-center gap-2 cursor-pointer group">
+                                <input type="checkbox" class="tool-toggle" data-tool="ssh-audit" onchange="updateToolCount()">
+                                <span class="font-mono text-gray-300 group-hover:text-cyan-400 transition" style="font-size:0.95rem;">ssh-audit</span>
+                                <span class="font-mono" style="color:#4a4a5a; font-size:0.8rem;">SSH config</span>
+                            </label>
+                            <label class="flex items-center gap-2 cursor-pointer group">
+                                <input type="checkbox" class="tool-toggle" data-tool="smbmap" onchange="updateToolCount()">
+                                <span class="font-mono text-gray-300 group-hover:text-cyan-400 transition" style="font-size:0.95rem;">smbmap</span>
+                                <span class="font-mono" style="color:#4a4a5a; font-size:0.8rem;">SMB shares</span>
+                            </label>
+                        </div>
+
+                        <div class="font-pixel mb-1" style="font-size:0.45rem; color:#6a6a8a;">&middot;&middot; secrets / CMS / exploit lookup &middot;&middot;</div>
+                        <div class="flex flex-wrap gap-x-5 gap-y-2">
+                            <label class="flex items-center gap-2 cursor-pointer group">
+                                <input type="checkbox" class="tool-toggle" data-tool="gitleaks" onchange="updateToolCount()">
+                                <span class="font-mono text-gray-300 group-hover:text-cyan-400 transition" style="font-size:0.95rem;">gitleaks</span>
+                                <span class="font-mono" style="color:#4a4a5a; font-size:0.8rem;">secret scanning</span>
+                            </label>
+                            <label class="flex items-center gap-2 cursor-pointer group">
+                                <input type="checkbox" class="tool-toggle" data-tool="cmseek" onchange="updateToolCount()">
+                                <span class="font-mono text-gray-300 group-hover:text-cyan-400 transition" style="font-size:0.95rem;">cmseek</span>
+                                <span class="font-mono" style="color:#4a4a5a; font-size:0.8rem;">CMS detection</span>
+                            </label>
+                            <label class="flex items-center gap-2 cursor-pointer group">
+                                <input type="checkbox" class="tool-toggle" data-tool="joomscan" onchange="updateToolCount()">
+                                <span class="font-mono text-gray-300 group-hover:text-cyan-400 transition" style="font-size:0.95rem;">joomscan</span>
+                                <span class="font-mono" style="color:#4a4a5a; font-size:0.8rem;">Joomla scanner</span>
+                            </label>
+                            <label class="flex items-center gap-2 cursor-pointer group">
+                                <input type="checkbox" class="tool-toggle" data-tool="searchsploit" onchange="updateToolCount()">
+                                <span class="font-mono text-gray-300 group-hover:text-cyan-400 transition" style="font-size:0.95rem;">searchsploit</span>
+                                <span class="font-mono" style="color:#4a4a5a; font-size:0.8rem;">exploit lookup (local DB)</span>
                             </label>
                         </div>
                     </div>
@@ -3520,7 +3600,9 @@
             if (!meta || !body) return;
             try {
                 const RUNS_CAP = 50;
-                const d = await (await fetch(`/api/v2/runs?limit=${RUNS_CAP}`)).json();
+                const resp = await fetch(`/api/v2/runs?limit=${RUNS_CAP}`);
+                if (!resp.ok) throw new Error((await resp.text()).slice(0, 140));
+                const d = await resp.json();
                 const runs = d.runs || [];
                 // Say when the list is capped. A full page that silently stops at the
                 // limit reads as "this is everything", which is the one thing it is not.
@@ -3533,20 +3615,16 @@
                 // probed host, the same source that motivated the escaping in
                 // tlRunOne() further down.
                 body.innerHTML = runs.map(r => {
-                    // Trim the ISO separator and any fractional seconds. Deliberately
-                    // not .slice(0, N): a bare numeric cap on a rendered list is the
-                    // pattern TestTruncationIsAlwaysStated exists to keep out, and a
-                    // regex says what it drops instead of hiding it behind a length.
-                    const when = tlEsc((r.created_at || '').replace('T', ' ').replace(/\.\d+.*$/, ''));
+                    const when = tlEsc(fmtWhen(r.created_at));
                     const url = tlEsc(((r.target || {}).url) || '');
-                    const took = r.duration_ms == null ? '—' : Math.round(r.duration_ms / 1000) + 's';
+                    const took = tlEsc(fmtDuration(r.duration_ms));
                     const early = r.stopped_early ? ' · stopped early' : '';
                     return `<tr style="border-top:1px solid var(--panel-border);">
                         <td class="py-1" style="white-space:nowrap;">${when}</td>
                         <td class="py-1">${tlEsc(r.test_case_id || '')}</td>
                         <td class="py-1" style="max-width:22rem; overflow:hidden; text-overflow:ellipsis;">${url}</td>
                         <td class="py-1">${tlEsc(r.model || r.provider || '—')}</td>
-                        <td class="py-1" style="white-space:nowrap;">${tlEsc(took)}${tlEsc(early)}</td>
+                        <td class="py-1" style="white-space:nowrap;">${took}${tlEsc(early)}</td>
                         <td class="py-1"><button onclick="tlRunOpen('${tlEsc(r.id)}')"
                             class="font-pixel px-2 py-0.5 rounded border" style="font-size:0.45rem;">OPEN</button></td>
                     </tr>`;
@@ -3557,18 +3635,20 @@
             }
         }
 
-        // Reuses the existing detail panel so a historical run reads exactly like
-        // one just executed.
+        // Renders through tlDetail(), the same function a just-executed run uses, so
+        // a historical run reads identically instead of as a JSON dump. tlDetail
+        // unhides the panel itself and applies STEP_OUTPUT_CAP to step output, which
+        // a raw dump would have bypassed — step output is raw tool stdout from the
+        // probed host.
         async function tlRunOpen(runId) {
-            const panel = document.getElementById('tl-detail');
             const out = document.getElementById('tl-detail-body');
-            if (!panel || !out) return;
-            panel.classList.remove('hidden');
+            if (!out) return;
             out.textContent = 'loading…';
+            document.getElementById('tl-detail').classList.remove('hidden');
             try {
-                const d = await (await fetch(`/api/v2/runs/${encodeURIComponent(runId)}`)).json();
-                out.innerHTML = `<pre style="white-space:pre-wrap; word-break:break-word; font-size:0.7rem;">`
-                    + tlEsc(JSON.stringify(d, null, 2)) + `</pre>`;
+                const r = await fetch(`/api/v2/runs/${encodeURIComponent(runId)}`);
+                if (!r.ok) throw new Error((await r.text()).slice(0, 140));
+                tlDetail(await r.json());
             } catch (e) {
                 out.textContent = 'could not load run: ' + e;
             }
@@ -3614,6 +3694,11 @@
                 // real `"` after HTML decoding, closed the JSON string literal
                 // and executed arbitrary JS in the operator's dashboard.
                 tlRuns[id] = d;
+                // The run was just persisted server-side, so refresh the history
+                // rather than leaving it stale until the operator navigates away
+                // and back. Fire-and-forget: a history refresh failing must not
+                // change the verdict already shown for this case.
+                tlRunsLoad();
                 fd.innerHTML = n
                     ? (d.findings.map(f =>
                         `<div style="color:var(--neon-red);">${tlEsc(f.vuln_type)} <span style="opacity:.6;">[${tlEsc(f.severity)}]</span></div>`

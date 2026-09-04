@@ -811,7 +811,12 @@ async def execute_tool(command: str, enabled_tools: list[str], no_timeout: bool 
 
     # Check if tool is enabled
     # Map some tool names (e.g. ncat -> netcat, nc -> netcat)
-    tool_aliases = {"nc": "netcat", "ncat": "netcat", "zap-cli": "zap-cli", "jwt_tool.py": "jwt_tool"}
+    # theharvester is the apt package name and the spelling a model is most likely
+    # to emit, but the registered tool (models._DEFAULT_TOOLS, TOOL_TIMEOUTS) is
+    # theHarvester. Without this the allowlist refuses the lowercase form, which
+    # reads to the operator as the tool being disabled rather than misspelled.
+    tool_aliases = {"nc": "netcat", "ncat": "netcat", "zap-cli": "zap-cli",
+                    "jwt_tool.py": "jwt_tool", "theharvester": "theHarvester"}
     check_name = tool_aliases.get(tool_name, tool_name)
     if check_name not in enabled_tools and tool_name not in enabled_tools:
         return {"success": False, "output": "", "tool": tool_name, "duration_ms": 0,
