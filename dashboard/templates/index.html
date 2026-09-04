@@ -2092,6 +2092,27 @@
                 </div>
             </div>
 
+            <div class="panel rounded p-4">
+                <div class="flex items-baseline justify-between flex-wrap gap-2">
+                    <h3 class="font-pixel" style="font-size:0.62rem;">RUN HISTORY</h3>
+                    <button onclick="tlRunsLoad()" class="font-pixel px-2 py-1 rounded border"
+                        style="font-size:0.5rem;">REFRESH</button>
+                </div>
+                <div id="tl-runs-meta" class="mt-1" style="font-size:0.7rem; color:#6a6a8a;">loading…</div>
+                <div class="mt-3" style="overflow-x:auto;">
+                    <table class="w-full" style="font-size:0.72rem;">
+                        <thead>
+                            <tr style="color:#6a6a8a; text-align:left;">
+                                <th class="py-1">WHEN</th><th class="py-1">CASE</th>
+                                <th class="py-1">TARGET</th><th class="py-1">MODEL</th>
+                                <th class="py-1">TOOK</th><th class="py-1"></th>
+                            </tr>
+                        </thead>
+                        <tbody id="tl-runs-rows"></tbody>
+                    </table>
+                </div>
+            </div>
+
             <div id="tl-detail" class="panel rounded p-4 hidden">
                 <div class="flex items-baseline justify-between flex-wrap gap-2">
                     <h3 class="font-pixel" style="font-size:0.62rem;">RUN DETAIL</h3>
@@ -2316,7 +2337,7 @@
             if (view === 'reports') loadReportsList();
             if (view === 'benchmark') loadBenchmarkHistory();
             if (view === 'engagements') engLoad();
-            if (view === 'testlab') tlInit();
+            if (view === 'testlab') { tlInit(); tlRunsLoad(); }
             if (view === 'skills') loadSkills();
             if (view === 'arsenal') { loadArsenal(); loadAuthoring(); }
 
@@ -3489,6 +3510,70 @@
             return {kind: 'nofinding', label: 'no finding', color: 'var(--neon-green)'};
         }
 
+        // Every deterministic run is persisted by save_v2_run(), but until now
+        // nothing read them back, so a run vanished from the operator's view the
+        // moment the page was reloaded. Loaded on each switch to Test Lab rather
+        // than from tlInit(), which returns early once tlPlanData is cached.
+        async function tlRunsLoad() {
+            const meta = document.getElementById('tl-runs-meta');
+            const body = document.getElementById('tl-runs-rows');
+            if (!meta || !body) return;
+            try {
+                const RUNS_CAP = 50;
+                const d = await (await fetch(`/api/v2/runs?limit=${RUNS_CAP}`)).json();
+                const runs = d.runs || [];
+                // Say when the list is capped. A full page that silently stops at the
+                // limit reads as "this is everything", which is the one thing it is not.
+                meta.textContent = !runs.length
+                    ? 'no deterministic runs recorded yet'
+                    : runs.length >= RUNS_CAP
+                        ? `${runs.length} most recent runs shown — capped at ${RUNS_CAP}, older runs not listed`
+                        : `${runs.length} deterministic run(s)`;
+                // Every field below is escaped: target_json is echoed from the
+                // probed host, the same source that motivated the escaping in
+                // tlRunOne() further down.
+                body.innerHTML = runs.map(r => {
+                    // Trim the ISO separator and any fractional seconds. Deliberately
+                    // not .slice(0, N): a bare numeric cap on a rendered list is the
+                    // pattern TestTruncationIsAlwaysStated exists to keep out, and a
+                    // regex says what it drops instead of hiding it behind a length.
+                    const when = tlEsc((r.created_at || '').replace('T', ' ').replace(/\.\d+.*$/, ''));
+                    const url = tlEsc(((r.target || {}).url) || '');
+                    const took = r.duration_ms == null ? '—' : Math.round(r.duration_ms / 1000) + 's';
+                    const early = r.stopped_early ? ' · stopped early' : '';
+                    return `<tr style="border-top:1px solid var(--panel-border);">
+                        <td class="py-1" style="white-space:nowrap;">${when}</td>
+                        <td class="py-1">${tlEsc(r.test_case_id || '')}</td>
+                        <td class="py-1" style="max-width:22rem; overflow:hidden; text-overflow:ellipsis;">${url}</td>
+                        <td class="py-1">${tlEsc(r.model || r.provider || '—')}</td>
+                        <td class="py-1" style="white-space:nowrap;">${tlEsc(took)}${tlEsc(early)}</td>
+                        <td class="py-1"><button onclick="tlRunOpen('${tlEsc(r.id)}')"
+                            class="font-pixel px-2 py-0.5 rounded border" style="font-size:0.45rem;">OPEN</button></td>
+                    </tr>`;
+                }).join('');
+            } catch (e) {
+                meta.textContent = 'run history unavailable: ' + e;
+                body.innerHTML = '';
+            }
+        }
+
+        // Reuses the existing detail panel so a historical run reads exactly like
+        // one just executed.
+        async function tlRunOpen(runId) {
+            const panel = document.getElementById('tl-detail');
+            const out = document.getElementById('tl-detail-body');
+            if (!panel || !out) return;
+            panel.classList.remove('hidden');
+            out.textContent = 'loading…';
+            try {
+                const d = await (await fetch(`/api/v2/runs/${encodeURIComponent(runId)}`)).json();
+                out.innerHTML = `<pre style="white-space:pre-wrap; word-break:break-word; font-size:0.7rem;">`
+                    + tlEsc(JSON.stringify(d, null, 2)) + `</pre>`;
+            } catch (e) {
+                out.textContent = 'could not load run: ' + e;
+            }
+        }
+
         async function tlRunOne(id) {
             const c = tlCase(id);
             if (!c) return;
@@ -3501,7 +3586,15 @@
             try {
                 const r = await fetch(`/api/v2/testcases/${encodeURIComponent(id)}/run`, {
                     method: 'POST', headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({target: c.target})
+                    // The endpoint already reads engagement_id and calls
+                    // enforce_engagement_scope(); it was simply never given one from
+                    // here, so a run against a customer's target went unscoped even
+                    // with that customer selected. Null when none is selected, which
+                    // the gate treats as the pre-engagement behaviour by design.
+                    body: JSON.stringify({
+                        target: c.target,
+                        engagement_id: (document.getElementById('side-engagement') || {}).value || null,
+                    })
                 });
                 if (!r.ok) throw new Error((await r.text()).slice(0, 140));
                 const d = await r.json();
