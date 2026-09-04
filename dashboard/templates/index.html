@@ -3625,10 +3625,17 @@
                         <td class="py-1" style="max-width:22rem; overflow:hidden; text-overflow:ellipsis;">${url}</td>
                         <td class="py-1">${tlEsc(r.model || r.provider || '—')}</td>
                         <td class="py-1" style="white-space:nowrap;">${took}${tlEsc(early)}</td>
-                        <td class="py-1"><button onclick="tlRunOpen('${tlEsc(r.id)}')"
+                        <td class="py-1"><button data-tlopen="${tlEsc(r.id)}"
                             class="font-pixel px-2 py-0.5 rounded border" style="font-size:0.45rem;">OPEN</button></td>
                     </tr>`;
                 }).join('');
+                // data-attribute + addEventListener, not an interpolated inline
+                // onclick. The comment above tlRunOne records why: interpolating a
+                // value into an attribute is a round-trip, not an escape. Run ids
+                // are server-generated UUIDs rather than target-controlled, but the
+                // idiom exists so nobody has to re-establish that per call site.
+                body.querySelectorAll('[data-tlopen]').forEach(btn =>
+                    btn.addEventListener('click', () => tlRunOpen(btn.dataset.tlopen)));
             } catch (e) {
                 meta.textContent = 'run history unavailable: ' + e;
                 body.innerHTML = '';
@@ -3648,7 +3655,12 @@
             try {
                 const r = await fetch(`/api/v2/runs/${encodeURIComponent(runId)}`);
                 if (!r.ok) throw new Error((await r.text()).slice(0, 140));
-                tlDetail(await r.json());
+                const d = await r.json();
+                // tlDetail prints d.run_id, but persistence.get_run() SELECTs * off
+                // v2_runs where the primary key column is `id` — so without this the
+                // header renders "run " with nothing after it.
+                if (!d.run_id && d.id) d.run_id = d.id;
+                tlDetail(d);
             } catch (e) {
                 out.textContent = 'could not load run: ' + e;
             }
