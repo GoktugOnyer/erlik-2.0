@@ -1122,8 +1122,8 @@ SEVERITY LEVELS: critical, high, medium, low, info
 TOOL USAGE EXAMPLES (use the target URL {target_url} — NEVER use any other hostname):
 - nmap -sV {target_host} -p {target_port}
 - whatweb {target_url}
-- gobuster dir -u {target_url} -w /usr/share/dirb/wordlists/common.txt {_discovery_filter(target_url)}
-- ffuf -u {target_url}/FUZZ -w /usr/share/dirb/wordlists/common.txt {_discovery_filter(target_url, 'ffuf')}
+- gobuster dir -u {target_url} -w /usr/share/dirb/wordlists/common.txt {discovery_filter}
+- ffuf -u {target_url}/FUZZ -w /usr/share/dirb/wordlists/common.txt {discovery_filter_ffuf}
 - sqlmap -u "{target_url}/endpoint?param=test" --batch --level=3
 - curl -s {target_url}/api/
 - curl -sI {target_url}  (check response headers)
@@ -2058,6 +2058,37 @@ def _discovery_filter(target_url: str, tool: str = "gobuster") -> str:
     """
     from orchestrator import soft404
     return soft404.filter_flag(soft404.recall(target_url), tool)
+
+
+def render_system_prompt(target_url: str) -> str:
+    """TOOL_USE_SYSTEM_PROMPT with every placeholder resolved for this target.
+
+    Extracted from the agent loop so the substitution can be tested. It was
+    inline, and one class of bug survived there unseen for months: the gobuster
+    and ffuf examples read `{_discovery_filter(target_url)}` inside a plain
+    (non-f) string. `.replace("{target_url}", ...)` does not touch that -- the
+    literal `{target_url}` is not a substring of `(target_url)` -- so the model
+    was shown a raw Python expression where the size-filter flag belongs, in
+    the two primary DISCOVERY-phase tools. A test that re-implemented this
+    chain would have passed anyway; only a test of the real function catches it.
+
+    Introduced 2026-08-16 (bd7b08b) and so absent from every April 2026
+    campaign, whose prompts carried the hardcoded flag this replaced.
+    """
+    from urllib.parse import urlparse
+
+    pu = urlparse(target_url)
+    host = pu.hostname or "target"
+    port = str(pu.port) if pu.port else ("443" if pu.scheme == "https" else "80")
+    return (TOOL_USE_SYSTEM_PROMPT
+            .replace("{target_url}", target_url)
+            .replace("{target_host}", host)
+            .replace("{target_port}", port)
+            .replace("{discovery_filter}", _discovery_filter(target_url))
+            .replace("{discovery_filter_ffuf}", _discovery_filter(target_url, "ffuf"))
+            # Residual literals from the era when the prompt was Juice-Shop-specific.
+            .replace("http://juice-shop:3000", target_url)
+            .replace("juice-shop", host))
 
 
 def current_scope_extra() -> list[str]:
@@ -3928,17 +3959,8 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
         # ===== Phase 2: SCAN — build initial prompt & start agent loop =====
         await manager.broadcast(session_id, {"type": "phase", "active": "scan"})
 
-        # Build message history. Extract host+port for template substitution.
-        from urllib.parse import urlparse
-        _pu = urlparse(target_url)
-        _target_host = _pu.hostname or "target"
-        _target_port = str(_pu.port) if _pu.port else ("443" if _pu.scheme == "https" else "80")
-        combined_system = (TOOL_USE_SYSTEM_PROMPT
-                           .replace("{target_url}", target_url)
-                           .replace("{target_host}", _target_host)
-                           .replace("{target_port}", _target_port)
-                           .replace("http://juice-shop:3000", target_url)
-                           .replace("juice-shop", _target_host))
+        # Build message history.
+        combined_system = render_system_prompt(target_url)
         guided_mode = system_prompt and system_prompt.startswith("MISSION:")
         if system_prompt:
             combined_system += f"\n\nADDITIONAL INSTRUCTIONS:\n{system_prompt}"
