@@ -3660,12 +3660,22 @@ async def _chain_auto_progress(session_id: str):
                 (chain_id,)
             )
             await db.commit()
-            # Broadcast that chain is paused, waiting for manual continue
+            # Broadcast that chain is paused, waiting for manual continue.
+            # The message names the endpoint rather than a CONTINUE button: the
+            # dashboard has never had one, and never calls /continue. It also
+            # only ever creates chains with auto_progress=true, so this state is
+            # reachable only for a chain created through the API and then
+            # watched from the dashboard -- exactly the operator who cannot
+            # guess how to resume it.
             await manager.broadcast(session_id, {
                 "type": "chain_ready",
                 "chain_id": chain_id,
                 "completed_phase": current_phase,
-                "message": "Chain paused. Click CONTINUE to proceed to next phase.",
+                "message": (
+                    f"Chain paused after {current_phase} (auto_progress is off). "
+                    f"Resume with: POST /api/chains/{chain_id}/continue "
+                    f"— the dashboard has no CONTINUE control."
+                ),
             })
             return
 
