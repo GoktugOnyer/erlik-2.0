@@ -137,6 +137,20 @@
             color: var(--neon-magenta);
             text-shadow: 0 0 7px rgba(255,0,255,0.8), 0 0 20px rgba(255,0,255,0.4);
         }
+        /* Referenced by the markup but previously never defined, so the elements
+           using them fell back to browser defaults. Same shape as their siblings above. */
+        .neon-text-green {
+            color: var(--neon-green);
+            text-shadow: 0 0 7px rgba(0,255,100,0.8), 0 0 20px rgba(0,255,100,0.4);
+        }
+        .neon-text-purple {
+            color: var(--neon-purple);
+            text-shadow: 0 0 7px rgba(191,0,255,0.8), 0 0 20px rgba(191,0,255,0.4);
+        }
+        .neon-border-green {
+            border: 1px solid var(--neon-green);
+            box-shadow: 0 0 8px rgba(0,255,100,0.3), 0 0 20px rgba(0,255,100,0.1);
+        }
 
         /* ===== Cyber Panel ===== */
         .cyber-panel {
@@ -163,6 +177,23 @@
         }
         .cyber-panel-magenta::before { background: var(--neon-magenta); box-shadow: 0 0 4px var(--neon-magenta); }
         .cyber-panel-magenta::after { background: var(--neon-magenta); box-shadow: 0 0 4px var(--neon-magenta); }
+        .cyber-panel-cyan::before { background: var(--neon-cyan); box-shadow: 0 0 4px var(--neon-cyan); }
+        .cyber-panel-cyan::after { background: var(--neon-cyan); box-shadow: 0 0 4px var(--neon-cyan); }
+
+        /* `.panel` is the container class of the Overview, Engagements, Test Lab and
+           Arsenal views (49 usages) and had no rule at all, so those four views rendered
+           as transparent borderless boxes. Quieter than .cyber-panel deliberately: at this
+           usage count the corner ticks would be noise rather than accent. */
+        .panel {
+            background: var(--panel-bg);
+            border: 1px solid var(--panel-border);
+        }
+        .cyber-border {
+            border: 1px solid var(--panel-border);
+        }
+        .tier-block {
+            background: rgba(0, 255, 245, 0.02);
+        }
 
         /* ===== Inputs ===== */
         .cyber-input {
@@ -175,6 +206,21 @@
             transition: border-color 0.2s, box-shadow 0.2s;
         }
         .cyber-input:focus {
+            outline: none;
+            border-color: var(--neon-cyan);
+            box-shadow: 0 0 8px rgba(0,255,245,0.3);
+        }
+        /* `.input-field` is the input class of the three newest views (26 usages) and had
+           no rule, so those inputs rendered as browser defaults on a dark ground. Padding
+           is intentionally omitted: every usage supplies Tailwind padding utilities. */
+        .input-field {
+            background: rgba(10, 10, 15, 0.8);
+            border: 1px solid var(--panel-border);
+            color: #e0e0e0;
+            font-family: var(--font-mono);
+            transition: border-color 0.2s, box-shadow 0.2s;
+        }
+        .input-field:focus {
             outline: none;
             border-color: var(--neon-cyan);
             box-shadow: 0 0 8px rgba(0,255,245,0.3);
