@@ -230,3 +230,60 @@ class TestDetectionIsUnchanged:
                     assert e.emit_finding is None, (
                         "a producing evaluator also reports a finding — it would "
                         "double-count what the detector already reports")
+
+
+class TestAPausedChainTellsTheOperatorHowToResume:
+    """The pause broadcast said "Click CONTINUE to proceed to next phase."
+
+    There is no CONTINUE control. `grep -c CONTINUE` over the dashboard returned
+    zero, and nothing in it calls `/api/chains/{id}/continue`. The dashboard also
+    only ever creates chains with `auto_progress: true`, so this state is
+    reachable only for a chain created through the API and then watched from the
+    dashboard -- precisely the operator with no way to guess the answer. They saw
+    a PAUSED badge and an instruction naming a button that does not exist.
+
+    The message now names the endpoint. These tests keep the two in step: if a
+    CONTINUE control is ever added, the message may name it again, but not before.
+    """
+
+    import pathlib as _pathlib
+    ROOT = _pathlib.Path(__file__).resolve().parents[1]
+
+    def _main(self):
+        return (self.ROOT / "orchestrator" / "main.py").read_text()
+
+    def _ui(self):
+        return (self.ROOT / "dashboard" / "templates" / "index.html").read_text()
+
+    def test_the_continue_endpoint_exists(self):
+        """The premise. If this route is ever removed the message must change
+        with it, rather than pointing at a 404."""
+        assert '@app.post("/api/chains/{chain_id}/continue")' in self._main()
+
+    def test_the_pause_message_names_that_endpoint(self):
+        src = self._main()
+        i = src.index('"type": "chain_ready"')
+        block = src[i:i + 700]
+        assert "/api/chains/" in block and "/continue" in block, block[:400]
+
+    def test_the_message_does_not_name_a_control_that_does_not_exist(self):
+        """The regression itself, stated as an invariant rather than a string
+        match: the broadcast may only tell the operator to click CONTINUE if the
+        dashboard actually has one."""
+        src = self._main()
+        i = src.index('"type": "chain_ready"')
+        block = src[i:i + 700]
+        # Match the literal uppercase token, the way a button label reads.
+        # `self._ui().upper()` would be satisfied by JavaScript `continue;`
+        # statements -- 30 of them -- and the guard would never fire.
+        if "CONTINUE" in block and "no CONTINUE control" not in block:
+            assert "CONTINUE" in self._ui(), (
+                "the pause message tells the operator to use a CONTINUE control "
+                "that the dashboard does not have"
+            )
+
+    def test_the_dashboard_still_renders_the_pause(self):
+        """Whatever the message says, the operator must see the paused state."""
+        ui = self._ui()
+        assert "data.type === 'chain_ready'" in ui
+        assert "PAUSED" in ui

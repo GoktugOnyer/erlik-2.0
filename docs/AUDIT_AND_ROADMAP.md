@@ -86,12 +86,26 @@ To cross from *capable research instrument* to *credible pentest tool*, the prio
 ### E. Coverage
 - **Whole classes untooled**: GraphQL/API, SSRF (no OAST/collaborator), deserialization/SSTI/XXE (labels
   only), cloud/container, non-HTTP network services, AD/Kerberos, mobile.
-- **WSTG deterministic coverage ~10%** (9 of ~90+ cases); whole categories absent.
+- **WSTG deterministic coverage** — 29 cases are committed under `tests_catalog/wstg/`,
+  not the 9 this line reported. Coverage of the full WSTG corpus is still partial and
+  whole categories remain absent, so the gap is real; the number was not.
 
-### F. Reporting & deliverables
-- Output is **markdown + `pentest-report.json`**; **no HTML/PDF/SARIF** for client-ready deliverables.
-- **No tracker export** (DefectDojo/Jira/HackerOne) despite the structured JSON being ready.
-- **Findings lifecycle is fire-and-forget** — no triage/accept/reject/verify workflow in the UI.
+### F. Reporting & deliverables — DONE, this section was stale
+
+Every gap listed here has since been closed. Recorded rather than deleted so the
+roadmap does not silently drop work that was actually delivered:
+
+- **HTML and SARIF ship**: `GET /api/sessions/{id}/report.html` and
+  `report.sarif` (`orchestrator/main.py`). PDF is still absent, deliberately —
+  the HTML deliverable prints.
+- **Tracker export ships**: `report.defectdojo.json` and `report.jira.csv`.
+  HackerOne is still absent.
+- **Findings lifecycle is no longer fire-and-forget**: `POST
+  /api/findings/{id}/triage` backs an accept / reject / override workflow that
+  the dashboard renders, dimming triaged-out findings and filtering on
+  `triage_status`.
+
+Remaining in this area: no PDF, no HackerOne export.
 
 ### G. Engineering, scale & reliability
 - **SQLite has no WAL and no `busy_timeout`** (`database.py`) — single-writer + 0 ms timeout → concurrent

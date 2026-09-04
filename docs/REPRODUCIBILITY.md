@@ -183,6 +183,38 @@ present in the repository were re-hashed and every one matches the pinned value
 above, and `scripts/recompute_statistical_tests.py --check` reported
 `OK: regenerated output is byte-identical to the committed file`.
 
+## Exporting the recorded corpus
+
+`GET /api/thesis/export` returns every measurement table this repository
+records, as one JSON document:
+
+```bash
+# with the orchestrator running (see README):
+curl -s http://localhost:8000/api/thesis/export > thesis_export.json
+```
+
+Nine tables: `sessions`, `findings`, `steps`, `reports`, `recon_context`,
+`chains`, `ground_truth`, `v2_runs`, `v2_findings` — both lanes, the agent loop
+and the deterministic WSTG engine.
+
+Two blocks in the response make it self-describing, rather than requiring this
+document to stay in step with it:
+
+- **`scope`** lists the tables included and, for each excluded one, why. The
+  engagement and credential tables are excluded at every redaction level: they
+  are customer records, not measurement data.
+- **`redaction`** reports whether masking ran, how many values were masked and
+  of what kind. The policy is default-deny — every string column is masked
+  unless declared structural — so a column added later is redacted until
+  someone declares otherwise, rather than leaking until someone notices.
+
+**On a clean clone this export is nearly empty**, which is the same fact the
+table above records: `ground_truth` returns its 54 rows and every other table
+returns none, because the corpus those rows describe is not in the repository.
+The endpoint earns its keep on a machine that holds `runs/` and a populated
+`data/pentest.db`, where it is the single command that dumps everything the
+thesis measured.
+
 ## Seeds used
 
 All dataset-side operations use **`seed=42`** across Python and PyTorch/TRL.
