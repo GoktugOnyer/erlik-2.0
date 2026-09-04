@@ -2,8 +2,7 @@
 
 > **Scope of this chapter.** Chapter 3 documents the *LLM agent-loop* architecture and the
 > factorial evaluation built on it — the experiment that produces the results reported in
-> `docs/THESIS_UNIFIED_RESULTS.md` (the authoritative results document; note that
-> `docs/THESIS_FINAL_DATA.md` is superseded and marked deprecated).
+> `docs/THESIS_UNIFIED_RESULTS.md`, the authoritative results document.
 >
 > The repository has since gained a second, **deterministic WSTG test-case engine**
 > (`orchestrator/testcase/`, catalogue in `tests_catalog/wstg/`, exposed under `/api/v2/*`),
