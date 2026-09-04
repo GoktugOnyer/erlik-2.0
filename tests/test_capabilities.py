@@ -262,6 +262,38 @@ class TestProducedOutputIsActuallyRead:
         assert "/api/v2/sweep/plan" in src
         assert "view-testlab" in src
 
+    def test_the_provider_selector_is_wired_end_to_end(self):
+        """`/api/v2/providers` was the only endpoint in the repo with no caller
+        of any kind, while the run endpoint had always read `provider` from the
+        body and persisted it to v2_runs.provider. Both ends existed; only the
+        wire was missing, so the column was NULL for every run ever recorded.
+
+        Three links, all of which have to hold for the value to arrive."""
+        src = self.UI.read_text()
+        assert "/api/v2/providers" in src, "the endpoint is fetched by nothing"
+        assert 'id="tl-provider"' in src, "no control for the operator to choose with"
+        # Anchor on the JSON.stringify block itself, not a character window.
+        # A 900-char window failed the moment an explanatory comment was added
+        # above the new line -- the same trap that bit bootFromUrl's proximity
+        # test in an earlier change.
+        i = src.index("/api/v2/testcases/${encodeURIComponent(id)}/run")
+        j = src.index("body: JSON.stringify(", i)
+        # Close on the terminator at this indentation. Searching for a bare
+        # "})" stops early on `|| {}).value` inside the engagement_id line.
+        body = src[j:src.index("\n                    })", j)]
+        assert "provider:" in body, f"the run body still omits the chosen provider: {body}"
+        assert "engagement_id:" in body, "wrong block located"
+
+    def test_the_providers_endpoint_agrees_with_the_client(self, client):
+        """The list is a literal in the route. If a provider is added to
+        llm_client and not here, the UI silently cannot select it."""
+        from orchestrator import llm_client
+
+        d = client.get("/api/v2/providers").json()
+        assert d["current"] == llm_client.PROVIDER
+        assert d["default_model"] == llm_client.DEFAULT_MODEL
+        assert set(d["providers"]) == {"ollama", "openai"}, d["providers"]
+
     def test_not_assessed_is_distinguishable_from_clean(self):
         """WSTG-CLNT-09 against a host that 302s emits
         ERLIK_FRAMING_NOT_ASSESSED_REDIRECT — it declined to assess. Rendering

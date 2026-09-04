@@ -172,20 +172,6 @@ class ReportResponse(BaseModel):
     created_at: Optional[str] = None
 
 
-class SessionMetrics(BaseModel):
-    """Per-session thesis data for warm vs cold comparison."""
-    session_id: str
-    target_url: str
-    session_type: str
-    vuln_category: Optional[str] = None
-    parent_session_id: Optional[str] = None
-    total_steps: int = 0
-    total_findings: int = 0
-    total_duration_ms: Optional[int] = None
-    findings_by_severity: dict = {}
-    findings_by_type: dict = {}
-    status: str = ""
-    created_at: str = ""
 
 
 # --- Chain Mode Models ---
