@@ -15,7 +15,7 @@ import httpx
 
 from orchestrator.database import init_db, get_db
 from orchestrator.models import (
-    SessionCreate, SessionResponse, ReportResponse, SessionMetrics,
+    SessionCreate, SessionResponse, ReportResponse,
     ChainCreate, ChainResponse, ChainSessionSummary,
     BenchmarkCreate, BenchmarkSessionResult, BenchmarkResponse,
     ReportFinding, PentestReport,
@@ -6919,95 +6919,6 @@ async def download_report_file(session_id: str):
     )
 
 
-@app.get("/api/thesis/comparison")
-async def thesis_comparison(vuln_category: str = None):
-    """Compare warm vs cold session metrics for thesis analysis."""
-    db = await get_db()
-    try:
-        query = """
-            SELECT s.id, s.target_url, s.session_type, s.vuln_category, s.status,
-                   s.total_steps, s.total_findings, s.total_duration_ms, s.created_at,
-                   s.parent_session_id
-            FROM sessions s
-            WHERE s.status = 'completed'
-        """
-        params = []
-        if vuln_category:
-            query += " AND s.vuln_category = ?"
-            params.append(vuln_category)
-        query += " ORDER BY s.created_at"
-
-        cursor = await db.execute(query, params)
-        sessions = await cursor.fetchall()
-
-        results = {"cold": [], "warm": []}
-        for s in sessions:
-            sid = s["id"]
-            # Get findings breakdown
-            fc = await db.execute(
-                "SELECT severity, COUNT(*) as cnt FROM findings WHERE session_id = ? GROUP BY severity",
-                (sid,)
-            )
-            sev_rows = await fc.fetchall()
-            by_severity = {r["severity"]: r["cnt"] for r in sev_rows}
-
-            fc2 = await db.execute(
-                "SELECT vuln_type, COUNT(*) as cnt FROM findings WHERE session_id = ? GROUP BY vuln_type",
-                (sid,)
-            )
-            type_rows = await fc2.fetchall()
-            by_type = {r["vuln_type"]: r["cnt"] for r in type_rows}
-
-            entry = {
-                "session_id": sid,
-                "target_url": s["target_url"],
-                "session_type": s["session_type"] or "cold",
-                "vuln_category": s["vuln_category"],
-                "total_steps": s["total_steps"] or 0,
-                "total_findings": s["total_findings"] or 0,
-                "total_duration_ms": s["total_duration_ms"],
-                "findings_by_severity": by_severity,
-                "findings_by_type": by_type,
-                "created_at": s["created_at"],
-            }
-
-            stype = s["session_type"] or "cold"
-            results.setdefault(stype, []).append(entry)
-
-        # Compute aggregates
-        summary = {}
-        for stype in ("cold", "warm"):
-            sessions_list = results.get(stype, [])
-            if sessions_list:
-                avg_findings = sum(s["total_findings"] for s in sessions_list) / len(sessions_list)
-                avg_steps = sum(s["total_steps"] for s in sessions_list) / len(sessions_list)
-                durations = [s["total_duration_ms"] for s in sessions_list if s["total_duration_ms"]]
-                avg_duration = sum(durations) / len(durations) if durations else 0
-                summary[stype] = {
-                    "count": len(sessions_list),
-                    "avg_findings": round(avg_findings, 2),
-                    "avg_steps": round(avg_steps, 2),
-                    "avg_duration_ms": round(avg_duration, 0),
-                }
-            else:
-                summary[stype] = {"count": 0, "avg_findings": 0, "avg_steps": 0, "avg_duration_ms": 0}
-
-        # Detection rate improvement
-        cold_avg = summary["cold"]["avg_findings"]
-        warm_avg = summary["warm"]["avg_findings"]
-        if cold_avg > 0:
-            improvement_pct = round(((warm_avg - cold_avg) / cold_avg) * 100, 1)
-        else:
-            improvement_pct = None
-
-        return {
-            "filter": {"vuln_category": vuln_category},
-            "summary": summary,
-            "detection_rate_improvement_pct": improvement_pct,
-            "sessions": results,
-        }
-    finally:
-        await db.close()
 
 
 # Columns that are ids, enums, timestamps, counts or controlled vocabulary —
@@ -8788,33 +8699,6 @@ async def get_session_metrics(session_id: str, target_name: str = "OWASP Juice S
     return metrics
 
 
-@app.get("/api/benchmark/compare")
-async def compare_sessions(session_ids: str, target_name: str = "OWASP Juice Shop"):
-    """Compare multiple sessions. Pass comma-separated session IDs."""
-    await _seed_ground_truth()
-    ids = [s.strip() for s in session_ids.split(",") if s.strip()]
-    if not ids:
-        raise HTTPException(400, "No session IDs provided")
-
-    db = await get_db()
-    try:
-        cursor = await db.execute(
-            "SELECT * FROM ground_truth WHERE target_name = ?", (target_name,)
-        )
-        ground_truths = [dict(r) for r in await cursor.fetchall()]
-    finally:
-        await db.close()
-
-    results = []
-    for sid in ids:
-        metrics = await _compute_benchmark_metrics(sid, ground_truths)
-        if metrics:
-            results.append(metrics)
-
-    return {
-        "ground_truth_count": len(ground_truths),
-        "sessions": results,
-    }
 
 
 @app.get("/api/benchmarks")

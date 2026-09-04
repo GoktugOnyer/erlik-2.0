@@ -2057,6 +2057,9 @@
                         placeholder="http://target:port" value="http://juice-shop:3000">
                     <select id="tl-profile" class="input-field font-mono px-2 py-1 rounded"
                         style="font-size:0.65rem;"></select>
+                    <select id="tl-provider" class="input-field font-mono px-2 py-1 rounded"
+                        style="font-size:0.65rem;"
+                        title="Which LLM backend evaluates each step. Recorded per run in v2_runs.provider."></select>
                     <button onclick="tlPlan()" class="font-pixel px-3 py-1 rounded border"
                         style="font-size:0.55rem;">PLAN</button>
                     <button id="tl-sweep-btn" onclick="tlSweep()" class="font-pixel px-3 py-1 rounded border"
@@ -3293,9 +3296,20 @@
                 sel.innerHTML = '<option value="">no profile (generic)</option>' +
                     (p.profiles || []).map(x => `<option value="${tlEsc(x)}">profile: ${tlEsc(x)}</option>`).join('');
                 if ((p.profiles || []).includes('juiceshop')) sel.value = 'juiceshop';
+                // The run endpoint has always read `provider` from the body and
+                // persisted it to v2_runs.provider; nothing ever sent one, so the
+                // column was NULL for every run and /api/v2/providers had no
+                // caller at all. Both ends existed; only the wire was missing.
+                const pv = await (await fetch('/api/v2/providers')).json();
+                const psel = document.getElementById('tl-provider');
+                psel.innerHTML = (pv.providers || []).map(x =>
+                    `<option value="${tlEsc(x)}">provider: ${tlEsc(x)}</option>`).join('');
+                if (pv.current) psel.value = pv.current;
+
                 const c = await (await fetch('/api/v2/testcases')).json();
                 document.getElementById('tl-meta').textContent =
-                    `${c.count} committed cases · ${tlEsc(c.catalog_root || '')}`;
+                    `${c.count} committed cases · ${tlEsc(c.catalog_root || '')}` +
+                    (pv.default_model ? ` · default model ${tlEsc(pv.default_model)}` : '');
             } catch (e) {
                 document.getElementById('tl-meta').textContent = 'catalogue unavailable: ' + e;
             }
@@ -3838,6 +3852,10 @@
                     body: JSON.stringify({
                         target: c.target,
                         engagement_id: (document.getElementById('side-engagement') || {}).value || null,
+                        // Null when the select has not loaded; the endpoint then
+                        // falls back to the server default, which is the old
+                        // behaviour rather than a new failure mode.
+                        provider: (document.getElementById('tl-provider') || {}).value || null,
                     })
                 });
                 if (!r.ok) throw new Error((await r.text()).slice(0, 140));
