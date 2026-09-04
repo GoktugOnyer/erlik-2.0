@@ -21,6 +21,7 @@ So the properties under test are:
 """
 
 import asyncio
+import pathlib
 
 import pytest
 
@@ -80,6 +81,32 @@ class TestToolClassification:
         assert R.TOOLS["dnsx"]["active"] is False
         assert R.TOOLS["httpx"]["active"] is True
         assert R.TOOLS["katana"]["active"] is True
+
+    def test_every_tool_declares_whether_recon_invokes_it(self):
+        for name, spec in R.TOOLS.items():
+            assert "invoked" in spec, name
+            assert isinstance(spec["invoked"], bool), name
+
+    def test_invoked_matches_the_tools_recon_actually_runs(self):
+        """The flag has to track the code, not the intention.
+
+        The recon panel counts `active and invoked` to tell an operator how
+        many tools will touch the customer's hosts. When it counted `active`
+        alone it announced two -- httpx and katana -- while katana has no call
+        site at all, so the panel promised a crawl that never runs. If someone
+        later wires katana up, or drops httpx's call, this fails rather than
+        letting the count drift back out of step with the module.
+        """
+        import re
+        src = (pathlib.Path(R.__file__)).read_text()
+        called = set(re.findall(r'tool_hint\s*=\s*"([a-z0-9_-]+)"', src))
+        assert called, "no execute_tool call sites found -- the parse is wrong"
+
+        declared = {n for n, sp in R.TOOLS.items() if sp["invoked"]}
+        assert declared == called, (
+            f"TOOLS marks {sorted(declared)} as invoked, but recon.py only calls "
+            f"{sorted(called)}"
+        )
 
 
 def _fresh(tmp_path, monkeypatch):

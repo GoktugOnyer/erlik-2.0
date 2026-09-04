@@ -3790,12 +3790,14 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
         await manager.broadcast(session_id, {
             "type": "error", "phase": "recon", "message": str(_mu),
         })
-        db = await get_db()
-        try:
-            await db.execute("UPDATE sessions SET status = 'failed' WHERE id = ?", (session_id,))
-            await db.commit()
-        finally:
-            await db.close()
+        # Finish through the same path as every other failure. This branch used
+        # to write status='failed' inline and return: 'failed' is a value no
+        # other session path produces and nothing reads, and returning early
+        # skipped the status broadcast entirely. Between that and a "type":
+        # "error" frame the dashboard had no handler for, the single most
+        # likely misconfiguration -- selecting a model that is not pulled --
+        # left the UI sitting at "running" with an empty log indefinitely.
+        await _finish_session(session_id, "error")
         return
 
     db = None
@@ -5689,6 +5691,7 @@ async def engagement_recon_tools():
     out = []
     for name, spec in _R.TOOLS.items():
         out.append({"tool": name, "active": spec["active"], "what": spec["what"],
+                    "invoked": spec["invoked"],
                     "installed": await _R.tool_available(name)})
     return {"tools": out}
 
@@ -6163,8 +6166,10 @@ async def get_run_presets():
 @app.get("/api/nettacker-scenarios")
 async def get_nettacker_scenarios():
     """Available Nettacker run modes (name → description) for the UI dropdown."""
-    from orchestrator.integrations.nettacker import list_scenarios, DEFAULT_SCENARIO
-    return {"scenarios": list_scenarios(), "default": DEFAULT_SCENARIO}
+    from orchestrator.integrations.nettacker import (DEFAULT_SCENARIO, list_scenarios,
+                                                      unavailable_scenarios)
+    return {"scenarios": list_scenarios(), "default": DEFAULT_SCENARIO,
+            "unavailable": unavailable_scenarios()}
 
 
 # ── Skills library (browse in the SKILLS tab) ──────────────────────────────
