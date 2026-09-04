@@ -95,3 +95,22 @@ HackTricks technique cite the page in their `references:` field. Their probe
 logic is erlik's own expression of a publicly documented technique; the
 underlying techniques (a header name, a protocol behaviour, a well-known payload
 string) are facts, not the licensed text.
+
+## Rekono (design influence, no code)
+
+- Source: https://github.com/pablosnt/rekono — Pablo Santiago
+- License: **GPL-3.0**
+
+erlik is MIT and GPL-3.0 is copyleft, so no Rekono source is vendored, adapted or
+redistributed here. Two things were nonetheless taken from it, and neither
+carries a copyright obligation:
+
+| What was taken | Where it shows up | Why no obligation arises |
+|---|---|---|
+| The asset-tree idea — attach every finding to the host, port or technology it was found on, rather than to a flat URL list | `orchestrator/assets.py`, `orchestrator/database.py` | An architectural idea, not expression. The implementation is erlik's own and was written from the description, not from Rekono's source. Both files already say so inline. |
+| A tool list, matched for capability parity: theHarvester, dirsearch, sslscan, ssh-audit, smbmap, gitleaks, cmseek, joomscan, searchsploit | `Dockerfile.kali`, `orchestrator/models.py`, `orchestrator/tool_executor.py` | A list of third-party program names is not copyrightable expression. Each tool is installed from its own distribution package under its own licence, exactly as the runtime tools above. |
+
+Recorded here for completeness rather than compliance: this file otherwise
+documents every upstream erlik draws on, and Rekono's absence from it was the
+only gap. If GPL-licensed Rekono code is ever adapted into erlik, that is a
+different situation and this entry does not cover it.
