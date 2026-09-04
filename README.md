@@ -86,8 +86,14 @@ pip install -r requirements.txt
 docker compose up -d        # first run builds the Kali tools image (~10–20 min)
 
 # Start the orchestrator — dashboard at http://localhost:8002
-./run.sh                    # or: uvicorn orchestrator.main:app --host 0.0.0.0 --port 8002
+./run.sh                    # or: uvicorn orchestrator.main:app --host 127.0.0.1 --port 8002
 ```
+
+> **Binding:** `run.sh` listens on `127.0.0.1:8002` — the API launches attacks, so it
+> is not exposed on the network by default. Override the host and port with
+> `ERLIK_HOST` and `ERLIK_PORT`, and set `ERLIK_API_TOKEN` to require a token on
+> state-changing calls before binding anywhere but loopback. `ERLIK_RELOAD=1` enables
+> auto-reload for development.
 
 > **Note:** the first `docker compose up` builds the Kali tools container — it pulls
 > the Kali base image and installs the toolset (nmap, sqlmap, nuclei, dalfox,
@@ -172,7 +178,7 @@ ollama pull qwen2.5-coder:7b      # also 14b / 32b
 export ERLIK_DOCKER_TARGET_HOST=juice-shop        # reproduces the lab wiring
 
 # 3. Launch the orchestrator
-uvicorn orchestrator.main:app --host 0.0.0.0 --port 8002
+uvicorn orchestrator.main:app --host 127.0.0.1 --port 8002
 ```
 
 - Targets: OWASP Juice Shop (ground truth = 35) and DVWA (ground truth = 19).
