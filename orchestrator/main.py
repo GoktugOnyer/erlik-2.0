@@ -5118,12 +5118,24 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
 
         # Re-run PoCs for high/critical findings (driven by run config; default off).
         try:
+            # The dashboard has always had a VERIFY stage in its kill chain and a
+            # .log-verify style, and setPhase() already orders 'verify' between test
+            # and report — but nothing ever emitted the phase, so the bar could not
+            # light and this stage ran invisibly. Announced only when it will
+            # actually run: showing VERIFY for a stage that is switched off would be
+            # the same overclaim in the other direction. Mirrors the enable check in
+            # poc_reverify_session so the bar cannot disagree with the work.
+            _pocv_on = (runcfg["poc_verify"] if runcfg["poc_verify"] is not None else
+                        os.environ.get("ERLIK_POC_VERIFY", "").strip().lower()
+                        in ("1", "true", "yes", "on"))
+            if _pocv_on and "curl" in (enabled_tools or []):
+                await manager.broadcast(session_id, {"type": "phase", "active": "verify"})
             n_pocv = await poc_reverify_session(session_id, target_url, enabled_tools,
                                                 force=runcfg["poc_verify"],
                                                 safe_mode=runcfg.get("safe_mode", True))
             if n_pocv:
                 await manager.broadcast(session_id, {
-                    "type": "log", "phase": "report",
+                    "type": "log", "phase": "verify",
                     "message": f"PoC re-verification: {n_pocv} high/critical finding(s) confirmed",
                 })
         except Exception as _pv_err:  # noqa: BLE001
@@ -7011,11 +7023,24 @@ def _mask_export_rows(rows: list[dict], counts: dict) -> list[dict]:
 
 @app.get("/api/thesis/export")
 async def thesis_export():
-    """Export all thesis data as JSON for analysis in pandas/R/Excel.
+    """Export the measurement tables as JSON for analysis in pandas/R/Excel.
 
-    Redacted. Every table is fetched with SELECT *, so a new column reaches
+    Redacted. Most tables are fetched with SELECT *, so a new column reaches
     this export the moment it exists — which is why masking is default-deny
     against a structural allowlist rather than a list of fields to scrub.
+
+    NOT everything in the database. The payload carries a `scope` block naming
+    exactly what is included and what is deliberately left out, because an
+    export that calls itself complete is the kind of overclaim this project
+    keeps having to correct. Two categories are excluded on purpose:
+
+      * engagement_* and destroyed_credentials — customer and credential
+        records. These are not measurement data and must not leave the host
+        in an analysis export, redacted or otherwise.
+      * the raw-output blobs on v2_runs (steps_json, chain_next_json) and the
+        per-run target_json — tool stdout from the probed host, which would
+        dominate the payload. The v2 step detail is available per run through
+        /api/v2/runs/{run_id}.
     """
     db = await get_db()
     try:
@@ -7039,6 +7064,28 @@ async def thesis_export():
         c5 = await db.execute("SELECT * FROM recon_context ORDER BY session_id, context_type")
         recon = [dict(r) for r in await c5.fetchall()]
 
+        # Chains. Sessions already carry chain_id, but the chain row holds the
+        # phase position and per-chain settings that a session does not.
+        c6 = await db.execute("SELECT * FROM chains ORDER BY created_at")
+        chains = [dict(r) for r in await c6.fetchall()]
+
+        # The ground truth as SEEDED for these runs, which is what coverage was
+        # actually scored against — not whatever the catalogue says today.
+        c7 = await db.execute("SELECT * FROM ground_truth ORDER BY id")
+        ground_truth = [dict(r) for r in await c7.fetchall()]
+
+        # The deterministic lane. Absent from this export until now, so an
+        # analysis of "what erlik ran" silently covered only the agent lane.
+        # Columns are named rather than SELECT *: steps_json and chain_next_json
+        # are raw tool stdout and would dominate the payload.
+        c8 = await db.execute(
+            "SELECT id, test_case_id, provider, model, duration_ms, stopped_early, "
+            "chain_root_run_id, created_at FROM v2_runs ORDER BY created_at")
+        v2_runs = [dict(r) for r in await c8.fetchall()]
+
+        c9 = await db.execute("SELECT * FROM v2_findings ORDER BY run_id, id")
+        v2_findings = [dict(r) for r in await c9.fetchall()]
+
         counts: dict = {}
         payload = {
             "exported_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -7047,6 +7094,28 @@ async def thesis_export():
             "steps": _mask_export_rows(steps, counts),
             "reports": _mask_export_rows(reports, counts),
             "recon_context": _mask_export_rows(recon, counts),
+            "chains": _mask_export_rows(chains, counts),
+            "ground_truth": _mask_export_rows(ground_truth, counts),
+            "v2_runs": _mask_export_rows(v2_runs, counts),
+            "v2_findings": _mask_export_rows(v2_findings, counts),
+        }
+        # Say what this is and is not, in the payload rather than only in a
+        # docstring the consumer never sees.
+        payload["scope"] = {
+            "included": ["sessions", "findings", "steps", "reports", "recon_context",
+                         "chains", "ground_truth", "v2_runs", "v2_findings"],
+            "excluded": {
+                "engagement_assets, engagement_credentials, engagement_revisions, "
+                "engagement_scope, engagement_sessions, engagement_targets, "
+                "engagements, destroyed_credentials":
+                    "customer and credential records — not measurement data, and "
+                    "not exported at any redaction level",
+                "v2_runs.steps_json, v2_runs.chain_next_json, v2_runs.target_json":
+                    "raw tool output from the probed host; fetch per run via "
+                    "/api/v2/runs/{run_id}",
+                "benchmark_results":
+                    "declared but never written; metrics are recomputed on demand",
+            },
         }
         # `applied` and `total` are SEPARATE facts: applied=true with total=0
         # means the pass ran and found nothing, which a reader cannot otherwise

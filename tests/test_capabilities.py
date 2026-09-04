@@ -226,6 +226,48 @@ class TestProducedOutputIsActuallyRead:
         assert "tlVerdict" in src
 
 
+class TestControlsSurviveTheRunTheyDescribe:
+    """A control rendered into a cell that a run REPLACES is a control the
+    operator loses precisely when they need it.
+
+    `tlRunOne` sets `fd.innerHTML` on the `tlfd-` cell -- on both the success
+    and the error path -- so anything placed there is gone the moment the case
+    is run, and gone from every row after a sweep. VIEW opens the case
+    DEFINITION, which does not change when the case runs; it must therefore
+    live in a cell the run does not touch.
+    """
+
+    UI = (__import__("pathlib").Path(__file__).resolve().parents[1]
+          / "dashboard" / "templates" / "index.html")
+
+    @staticmethod
+    def _findings_cell(src):
+        """The `tlfd-` <td> of the row template, from its opening tag to the
+        matching </td>."""
+        start = src.index('id="tlfd-')
+        start = src.rindex("<td", 0, start)
+        return src[start:src.index("</td>", start)]
+
+    def test_the_premise_still_holds(self):
+        """If tlRunOne stops overwriting the cell, this whole class is vacuous
+        and should be reconsidered rather than left as a green no-op."""
+        src = self.UI.read_text()
+        body = src[src.index("async function tlRunOne"):]
+        body = body[:body.index("async function tlSweep")]
+        assert "fd.innerHTML" in body
+
+    def test_view_is_offered_at_all(self):
+        assert "data-tlview" in self.UI.read_text()
+
+    def test_view_is_not_in_the_cell_the_run_overwrites(self):
+        cell = self._findings_cell(self.UI.read_text())
+        assert "data-tlrun-case" in cell, "wrong cell located -- RUN lives here"
+        assert "data-tlview" not in cell, (
+            "VIEW is rendered into the cell tlRunOne replaces, so it vanishes "
+            "from every case that has been run"
+        )
+
+
 class TestHostedProviderRateLimit:
     """A hosted provider has a request QUOTA; local Ollama has a GPU.
 

@@ -791,8 +791,8 @@
             <h1 class="neon-text-cyan font-pixel" style="font-size: 1.1rem; letter-spacing: 3px;">
                 ERLIK PENTEST AGENT
             </h1>
-            <span class="font-pixel text-purple-400" style="font-size: 0.55rem; opacity: 0.7;">
-                v0.1 // qwen2.5-coder-7b
+            <span id="header-model" class="font-pixel text-purple-400" style="font-size: 0.55rem; opacity: 0.7;">
+                v0.1
             </span>
         </div>
         <div class="flex items-center gap-2">
@@ -966,7 +966,7 @@
                 </div>
                 <div>
                     <label class="block font-pixel mb-2" style="font-size:0.55rem; color:#6a6a8a;">AI MODEL</label>
-                    <select id="model-select" class="cyber-input cyber-select rounded">
+                    <select id="model-select" class="cyber-input cyber-select rounded" onchange="syncHeaderModel()">
                         <option value="qwen2.5-coder:7b">Loading models...</option>
                     </select>
                 </div>
@@ -1048,6 +1048,9 @@
                             class="cyber-input rounded px-2 py-1" style="width:130px; font-size:0.8rem;">
                     </div>
                     <div class="font-mono" style="font-size:0.55rem; color:#5a5a6a; margin-top:3px;">blank = per-tool defaults · type to override all</div>
+                    <div id="chain-unsupported-note" class="font-mono hidden" style="font-size:0.55rem; color:var(--neon-orange); margin-top:3px;">
+                        not applied in Chain Mode &mdash; chains do not carry a vuln category or tool timeout
+                    </div>
                 </div>
             </div>
 
@@ -1925,6 +1928,8 @@
                     </span>
                     <span class="font-mono" style="font-size:0.65rem; color:#5a5a6a;">latest 25, newest first</span>
                 </div>
+                <div id="mon-sessions-note" class="font-mono mb-2"
+                    style="font-size:0.62rem; color:#6a6a8a;"></div>
                 <div class="overflow-auto">
                     <table class="w-full font-mono" style="font-size:0.75rem;">
                         <thead>
@@ -2191,6 +2196,15 @@
                         <tbody id="tl-runs-rows"></tbody>
                     </table>
                 </div>
+            </div>
+
+            <div id="tl-case-panel" class="panel rounded p-4 hidden">
+                <div class="flex items-baseline justify-between flex-wrap gap-2">
+                    <h3 class="font-pixel" style="font-size:0.62rem;">CASE DEFINITION</h3>
+                    <button onclick="document.getElementById('tl-case-panel').classList.add('hidden')"
+                        class="font-pixel px-2 py-1 rounded border" style="font-size:0.5rem;">CLOSE</button>
+                </div>
+                <div id="tl-case-body" class="mt-3"></div>
             </div>
 
             <div id="tl-detail" class="panel rounded p-4 hidden">
@@ -3483,6 +3497,27 @@
                     tlDeclRetire(b.dataset.case, b.dataset.field)));
         }
 
+        // Pre-fills the declaration form from a skipped case, so clearing a skip is one
+        // click plus the value, rather than retyping the case id and hunting the field.
+        // The field select is populated from the API's `declarable` list; if this case
+        // needs something outside that list, the case id is still filled in and the
+        // operator picks a field manually rather than being handed a broken selection.
+        function tlDeclPrefill(caseId, field) {
+            const c = document.getElementById('tl-decl-case');
+            const f = document.getElementById('tl-decl-field');
+            const v = document.getElementById('tl-decl-value');
+            const msg = document.getElementById('tl-decl-msg');
+            if (c) c.value = caseId;
+            if (f && field && [...f.options].some(o => o.value === field)) f.value = field;
+            if (msg) {
+                msg.style.color = 'var(--neon-cyan)';
+                msg.textContent = (field && f && f.value === field)
+                    ? `${caseId}: set a value for ${field}`
+                    : `${caseId}: pick the field to declare`;
+            }
+            if (v) { v.focus(); v.scrollIntoView({block: 'center'}); }
+        }
+
         async function tlDeclSet() {
             const target = document.getElementById('tl-target').value.trim();
             const msg = document.getElementById('tl-decl-msg');
@@ -3529,28 +3564,128 @@
             const skipPanel = document.getElementById('tl-skipped-panel');
             if (d.skipped.length) {
                 skipPanel.classList.remove('hidden');
-                document.getElementById('tl-skipped').innerHTML = d.skipped.map(sc => `
-                    <div class="font-mono flex gap-3" style="font-size:0.6rem;">
+                // A skip used to end at "supply one", leaving the operator to retype the
+                // case id into the declaration form below and pick the field by hand —
+                // so on a target with no profile, 13 of 29 cases were a dead end.
+                //
+                // The field is only pre-selected when the case requires exactly ONE, in
+                // which case there is no doubt which is missing. With several required
+                // fields the plan does not say which one is unsatisfied (the reason
+                // prose is deliberately stable — sweep.py:108), and `url` is usually
+                // derived from the base URL while the real gap is `parameter`. Guessing
+                // required[0] there would name the wrong field, so those cases fill in
+                // the case id and let the operator choose.
+                const box = document.getElementById('tl-skipped');
+                box.innerHTML = d.skipped.map(sc => {
+                    const req = sc.required || [];
+                    const one = req.length === 1 ? req[0] : '';
+                    const label = one ? `DECLARE ${tlEsc(one)}` : 'DECLARE';
+                    const title = req.length
+                        ? `requires: ${tlEsc(req.join(', '))}`
+                        : 'no declarable requirement';
+                    return `
+                    <div class="font-mono flex gap-3 items-center" style="font-size:0.6rem;">
                         <span style="color:var(--neon-yellow); min-width:130px;">${tlEsc(sc.id)}</span>
-                        <span style="opacity:.75;">${tlEsc(sc.reason)}</span>
-                    </div>`).join('');
+                        <span style="opacity:.75; flex:1;">${tlEsc(sc.reason)}</span>
+                        <button data-tldecl="${tlEsc(sc.id)}" data-tlfield="${tlEsc(one)}"
+                            title="${title}"
+                            class="font-pixel px-2 py-0.5 rounded border" style="font-size:0.45rem;
+                            color:var(--neon-green); border-color:var(--neon-green);">${label}</button>
+                    </div>`;
+                }).join('');
+                box.querySelectorAll('[data-tldecl]').forEach(b =>
+                    b.addEventListener('click', () => tlDeclPrefill(b.dataset.tldecl, b.dataset.tlfield)));
             } else {
                 skipPanel.classList.add('hidden');
             }
 
             document.getElementById('tl-rows').innerHTML = d.runnable.map(c => `
                 <tr id="tlrow-${tlEsc(c.id)}" style="border-bottom:1px solid #1e242c;">
-                    <td class="py-1 pr-3" style="color:var(--neon-cyan); white-space:nowrap;">${tlEsc(c.id)}</td>
+                    <td class="py-1 pr-3" style="color:var(--neon-cyan); white-space:nowrap;">
+                        ${tlEsc(c.id)}
+                        <!-- VIEW lives in the CASE cell, not the findings cell: tlRunOne
+                             replaces the tlfd- cell's innerHTML with the run's findings,
+                             so a button placed there disappears the moment the case is
+                             run — from every row after a sweep, which is exactly when
+                             the operator wants to ask what produced a verdict. It also
+                             belongs here semantically: it describes the case, not the run. -->
+                        <button data-tlview="${tlEsc(c.id)}" class="font-pixel px-1 rounded border ml-1"
+                            style="font-size:0.4rem; opacity:.6;">VIEW</button>
+                    </td>
                     <td class="py-1 pr-3" style="opacity:.8;">${tlEsc(c.category || '')}</td>
                     <td class="py-1 pr-3">${tlSev(c.severity)}</td>
                     <td class="py-1 pr-3" style="opacity:.7; max-width:290px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;"
                         title="${tlEsc(c.where)}">${tlEsc(c.where)}</td>
                     <td class="py-1 pr-3" id="tlst-${tlEsc(c.id)}" style="opacity:.55;">ready</td>
                     <td class="py-1" id="tlfd-${tlEsc(c.id)}">
-                        <button onclick="tlRunOne('${tlEsc(c.id)}')" class="font-pixel px-2 py-0.5 rounded border"
+                        <button data-tlrun-case="${tlEsc(c.id)}" class="font-pixel px-2 py-0.5 rounded border"
                             style="font-size:0.45rem;">RUN</button>
                     </td>
                 </tr>`).join('');
+            // data-* plus addEventListener, per the idiom recorded above tlRunOne. The
+            // RUN button was an interpolated inline onclick; case ids come from the
+            // catalogue rather than the target, so it was not exploitable, but the
+            // exception is not worth keeping next to a new button.
+            const rowsEl = document.getElementById('tl-rows');
+            rowsEl.querySelectorAll('[data-tlview]').forEach(b =>
+                b.addEventListener('click', () => tlCaseView(b.dataset.tlview)));
+            rowsEl.querySelectorAll('[data-tlrun-case]').forEach(b =>
+                b.addEventListener('click', () => tlRunOne(b.dataset.tlrunCase)));
+        }
+
+        // A case could be run without being readable: GET /api/v2/testcases/{id} returns
+        // the whole definition and nothing called it, so the operator chose whether to
+        // fire a probe at a customer's application from an id and a severity chip alone.
+        async function tlCaseView(id) {
+            const panel = document.getElementById('tl-case-panel');
+            const body = document.getElementById('tl-case-body');
+            if (!panel || !body) return;
+            panel.classList.remove('hidden');
+            body.textContent = 'loading…';
+            panel.scrollIntoView({block: 'center'});
+            try {
+                const r = await fetch(`/api/v2/testcases/${encodeURIComponent(id)}`);
+                if (!r.ok) throw new Error((await r.text()).slice(0, 140));
+                const c = await r.json();
+                const ts = c.target_schema || {};
+                const need = (ts.required || []).join(', ') || 'none';
+                const opt = (ts.optional || []).join(', ') || 'none';
+                const refs = (c.references || []).map(u =>
+                    `<div style="opacity:.7;">${tlEsc(u)}</div>`).join('') || '<div style="opacity:.5;">none</div>';
+                const steps = (c.steps || []).map((st, i) => {
+                    const ev = (st.evaluators || []).map(e => {
+                        const what = e.type === 'regex' ? `regex ${e.pattern || ''}`
+                                   : e.type === 'status_code' ? `status in ${(e.expect || []).join('/')}`
+                                   : 'model-judged';
+                        const emits = e.emit_finding ? ` → ${e.emit_finding.vuln_type || 'finding'}` : '';
+                        return `<div style="opacity:.65;">· ${tlEsc(what)}${tlEsc(emits)}</div>`;
+                    }).join('') || '<div style="opacity:.45;">· no evaluator — output is recorded, nothing is asserted</div>';
+                    return `
+                    <div class="mt-2" style="border-left:2px solid #2a3038; padding-left:8px;">
+                        <div class="font-mono" style="font-size:0.58rem; color:var(--neon-cyan);">
+                            ${i + 1}. ${tlEsc(st.name || '')} <span style="opacity:.5;">· ${tlEsc(st.tool || '')}</span>
+                        </div>
+                        <pre class="font-mono mt-1" style="font-size:0.55rem; opacity:.75; white-space:pre-wrap; word-break:break-all;">${tlEsc(st.command || '')}</pre>
+                        ${ev}
+                    </div>`;
+                }).join('') || '<div style="opacity:.5;">no steps</div>';
+                body.innerHTML = `
+                    <div class="font-mono" style="font-size:0.62rem;">
+                        <span style="color:var(--neon-cyan);">${tlEsc(c.id || id)}</span>
+                        <span style="opacity:.8;"> ${tlEsc(c.name || '')}</span>
+                        <span style="opacity:.6;"> · ${tlEsc(c.category || '')} · </span>${tlSev(c.severity)}
+                    </div>
+                    <div class="font-mono mt-2" style="font-size:0.58rem;">
+                        <div>requires: <span style="opacity:.75;">${tlEsc(need)}</span></div>
+                        <div>optional: <span style="opacity:.75;">${tlEsc(opt)}</span></div>
+                    </div>
+                    <div class="font-pixel mt-3" style="font-size:0.5rem; color:#6a6a8a;">STEPS &mdash; WHAT THIS WILL RUN</div>
+                    ${steps}
+                    <div class="font-pixel mt-3" style="font-size:0.5rem; color:#6a6a8a;">REFERENCES</div>
+                    <div class="font-mono mt-1" style="font-size:0.55rem;">${refs}</div>`;
+            } catch (e) {
+                body.textContent = 'could not load case: ' + e;
+            }
         }
 
         function tlSev(s) {
@@ -4695,6 +4830,9 @@
                         warn.selected = true;
                         select.insertBefore(warn, select.firstChild);
                     }
+                    // The list arrives asynchronously, so the header has to be told
+                    // again once a model is actually selected.
+                    if (typeof syncHeaderModel === 'function') syncHeaderModel();
                 } else {
                     const opt = document.createElement('option');
                     opt.value = data.default;
@@ -4852,6 +4990,16 @@
         }
 
         // ===== Session Type & Parent Session =====
+        // The header used to hard-code "v0.1 // qwen2.5-coder-7b", which stayed put no
+        // matter which model was selected — so a 32B run was labelled as a 7B one.
+        function syncHeaderModel() {
+            const el = document.getElementById('header-model');
+            const sel = document.getElementById('model-select');
+            if (!el) return;
+            const m = sel && sel.value ? sel.value : '';
+            el.textContent = m ? `v0.1 // ${m}` : 'v0.1';
+        }
+
         function updateMaxTurnsLabel() {
             const slider = document.getElementById('max-turns-slider');
             const label = document.getElementById('max-turns-label');
@@ -4876,6 +5024,11 @@
             } else if (type === 'chain') {
                 wrapper.classList.add('hidden');
                 chainProgress.classList.remove('hidden');
+                // VULN CATEGORY and TOOL TIMEOUT are not sent by the chain path and the
+                // `chains` table has no column for either, so a chain silently ignored
+                // whatever was set here. Disable and say so rather than accept input
+                // that goes nowhere.
+                setChainOnlyFieldState(true);
                 // Reset chain phase indicators
                 document.querySelectorAll('.chain-phase').forEach(el => {
                     el.className = 'chain-phase pending';
@@ -4885,7 +5038,29 @@
             } else {
                 wrapper.classList.add('hidden');
                 chainProgress.classList.add('hidden');
+                setChainOnlyFieldState(false);
             }
+            if (type === 'warm') setChainOnlyFieldState(false);
+        }
+
+        // Chain runs drop these two fields, so present them as unavailable rather than
+        // letting the operator set a value the run will not honour.
+        function setChainOnlyFieldState(isChain) {
+            const vc = document.getElementById('vuln-category');
+            const tt = document.getElementById('tool-timeout-input');
+            const noTimeout = document.getElementById('no-timeout-toggle');
+            const note = document.getElementById('chain-unsupported-note');
+            if (vc) {
+                vc.disabled = isChain;
+                vc.style.opacity = isChain ? '0.45' : '';
+            }
+            if (tt) {
+                // NO TIMEOUT also disables this input; don't re-enable it here if that
+                // is what is holding it down.
+                tt.disabled = isChain || (noTimeout && noTimeout.checked);
+                tt.style.opacity = isChain ? '0.45' : '';
+            }
+            if (note) note.classList.toggle('hidden', !isChain);
         }
 
         async function loadParentSessions() {
@@ -6281,8 +6456,11 @@ ${htmlBody}
             // Identify the CURRENT matrix run by walking back from the newest
             // session and stopping at the first gap > 30 minutes between
             // consecutive created_at timestamps. Anything older than that gap
-            // belongs to a previous matrix run and shouldn't be counted in the
-            // KPI (the recent-sessions table still shows everything).
+            // belongs to a previous matrix run and shouldn't be counted in the KPI.
+            // The recent-sessions table below deliberately reads matrixAll, NOT this
+            // narrowed set — this comment used to claim that and the code did the
+            // opposite, so a session from an earlier run was invisible in the one
+            // place that says "recent sessions".
             // sessions arrive sorted DESC by created_at from /api/sessions.
             const sortedDesc = matrixAll.slice().sort((a, b) =>
                 new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
@@ -6389,11 +6567,29 @@ ${htmlBody}
                     : '';
             }
 
-            // Sessions table — the latest MONITOR_ROWS with toolset_preset
-            const recent = matrix.slice(0, MONITOR_ROWS);
+            // Sessions table — every tier-tagged session, newest first, not just the
+            // current matrix run. The KPIs above are scoped to one run on purpose; this
+            // table is not, because "recent sessions" that hides the previous run is
+            // answering a different question than the one its heading asks.
+            const recent = matrixAll.slice(0, MONITOR_ROWS);
             const tbody = document.getElementById('mon-sessions-tbody');
+            const tnote = document.getElementById('mon-sessions-note');
+            if (tnote) {
+                // Say which of the three states this is, rather than showing an empty
+                // table that reads as "nothing has run".
+                tnote.textContent = recent.length
+                    ? (matrixAll.length > recent.length
+                        ? `newest ${recent.length} of ${matrixAll.length} tier-tagged sessions`
+                        : `${recent.length} tier-tagged session(s)`)
+                    : (all.length
+                        ? `${all.length} session(s) in this sample carry no toolset tier, so none is a matrix row`
+                        : '');
+            }
             if (recent.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="9" class="text-center py-4" style="color:#5a5a6a;">no matrix sessions yet</td></tr>';
+                tbody.innerHTML = all.length
+                    ? '<tr><td colspan="9" class="text-center py-4" style="color:#5a5a6a;">'
+                      + 'sessions exist, but none carries a toolset tier &mdash; a Custom toolset is not a named experiment arm</td></tr>'
+                    : '<tr><td colspan="9" class="text-center py-4" style="color:#5a5a6a;">no sessions yet</td></tr>';
             } else {
                 tbody.innerHTML = recent.map(s => {
                     const dur = s.total_duration_ms ? _monDur(Math.floor(s.total_duration_ms / 1000)) : '—';
@@ -7203,6 +7399,13 @@ ${htmlBody}
                 }, 0);
             }
             switchView(st.view || 'overview');
+            // Bring the Scanner form's labels into line with its actual values. MAX TURNS
+            // was static markup reading 15 beside a slider whose value is 30, and
+            // updateMaxTurnsLabel() was bound only to oninput, so until the operator
+            // dragged the slider the page showed a turn budget the run would not use.
+            if (typeof updateMaxTurnsLabel === 'function') updateMaxTurnsLabel();
+            if (typeof syncHeaderModel === 'function') syncHeaderModel();
+            if (typeof onSessionTypeChange === 'function') onSessionTypeChange();
         })();
 
         loadEngagementOptions();
