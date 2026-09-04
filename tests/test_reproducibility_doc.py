@@ -27,6 +27,14 @@ METHODOLOGY = ROOT / "docs" / "METHODOLOGY.md"
 # Files the table pins that live outside the repository (gitignored corpora).
 NOT_IN_REPO = {"training_data/juicy3_train.jsonl", "training_data/juicy3_val.jsonl"}
 
+# Paths the document names that are gitignored by design, so they exist in a
+# working checkout and not in a clean clone. Exempt from the path-resolution
+# test — but the exemption is not free: `test_exempt_paths_are_really_ignored`
+# asserts each one is genuinely gitignored, so this cannot become a place to
+# park a typo. CI caught the original omission here: the document claimed a
+# "tracked data/pentest.db" when nothing under data/ is tracked at all.
+GITIGNORED_BY_DESIGN = {"data/pentest.db"}
+
 
 def _doc() -> str:
     return DOC.read_text()
@@ -117,9 +125,11 @@ class TestRegenerationClaims:
         assert re.search(r"^runs/\s*$", (ROOT / ".gitignore").read_text(), re.M)
 
     def test_the_corpus_really_is_empty(self):
-        """The document's headline claim: data/pentest.db holds ground truth
-        and nothing else. If a corpus is ever restored, the framing above it
-        ('the raw evidence is not in this repository') stops being true."""
+        """The document's headline claim: where a database exists at all, it
+        holds ground truth and nothing else. `data/` is gitignored, so CI has
+        no database and skips; this fires in a working checkout, where a
+        restored corpus would falsify the framing above it ('the raw evidence
+        is not in this repository')."""
         import sqlite3
 
         db = ROOT / "data" / "pentest.db"
@@ -193,9 +203,27 @@ class TestCrossReferences:
         for path in re.findall(r"`((?:docs|scripts|orchestrator|tests|data)/[\w./{}-]+)`", _doc()):
             if "{" in path or "*" in path:  # brace/glob patterns are illustrative
                 continue
+            if path in GITIGNORED_BY_DESIGN:
+                continue
             if not (ROOT / path).exists():
                 missing.append(path)
         assert not missing, missing
+
+    def test_exempt_paths_are_really_ignored(self):
+        """The exemption above must cost something. Each path skipped by the
+        resolution test has to be gitignored for real, so a mistyped path
+        cannot be waved through by adding it to the set."""
+        ignore = (ROOT / ".gitignore").read_text().splitlines()
+        patterns = {ln.strip() for ln in ignore if ln.strip() and not ln.startswith("#")}
+        for path in GITIGNORED_BY_DESIGN:
+            covered = any(
+                p.rstrip("/") == path.split("/")[0] or p == f"*{Path(path).suffix}"
+                for p in patterns
+            )
+            assert covered, (
+                f"{path} is exempted from path resolution but nothing in "
+                ".gitignore covers it — it is just missing"
+            )
 
     def test_methodology_sections_named_here_exist(self):
         meth = METHODOLOGY.read_text()

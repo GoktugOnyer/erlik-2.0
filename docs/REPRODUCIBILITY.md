@@ -5,11 +5,15 @@ regeneration scripts, and states for each one whether a reader can actually
 regenerate it or is taking a committed number on trust.
 
 **The raw evidence is not in this repository.** The campaigns wrote to
-`runs/<timestamp>/` and to per-run `pentest.db` files; `runs/` is gitignored,
-and the tracked `data/pentest.db` contains only the 54-entry ground-truth
-catalogue — `findings`, `sessions`, `steps`, `chains`, `v2_runs` and every
-other table are empty. So a clean clone holds the *derived* results, not the
-evidence they were derived from.
+`runs/<timestamp>/` and to per-run `pentest.db` files. Both `runs/` and `data/`
+are gitignored (as is `*.db`), so a clean clone contains **no run directories
+and no database at all** — the orchestrator creates `data/pentest.db` on first
+start, empty. In the working checkout these figures were audited from, that
+database held only the 54-entry ground-truth catalogue: `findings`, `sessions`,
+`steps`, `chains`, `v2_runs` and every other table were empty.
+
+So a clone holds the *derived* results, not the evidence they were derived
+from.
 
 What a reader can therefore check is narrower than "every claim traces to raw
 data", and the table below says exactly how much narrower. One recompute runs
