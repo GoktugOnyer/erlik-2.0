@@ -45,12 +45,23 @@ from typing import Any
 from orchestrator import engagement as E
 from orchestrator import assets as A
 
-# Each tool, and whether running it CONTACTS the target.
+# Each tool, whether running it CONTACTS the target, and whether this module
+# actually invokes it.
+#
+# `invoked` is not decoration. Only subfinder (enumerate_subdomains) and httpx
+# (probe_hosts) reach execute_tool; dnsx and katana are declared here and never
+# called. Without the flag the UI counted `active` and told the operator that
+# DISCOVER SUBDOMAINS "runs 2 tool(s) that connect to the customer's hosts",
+# which promised a katana crawl that never happens.
 TOOLS: dict[str, dict[str, Any]] = {
-    "subfinder": {"active": False, "what": "passive subdomain enumeration"},
-    "dnsx":      {"active": False, "what": "DNS resolution"},
-    "httpx":     {"active": True,  "what": "liveness probe — connects to the host"},
-    "katana":    {"active": True,  "what": "crawl — connects to the host"},
+    "subfinder": {"active": False, "invoked": True,
+                  "what": "passive subdomain enumeration"},
+    "dnsx":      {"active": False, "invoked": False,
+                  "what": "DNS resolution"},
+    "httpx":     {"active": True,  "invoked": True,
+                  "what": "liveness probe — connects to the host"},
+    "katana":    {"active": True,  "invoked": False,
+                  "what": "crawl — connects to the host"},
 }
 
 # A dot is NOT required. Single-label names — `intranet`, `jira`, `vpn` — are

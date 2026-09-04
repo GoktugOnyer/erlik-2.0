@@ -3136,17 +3136,29 @@
                 }
             }
             const tools = __reconTools;
-            const active = tools.filter(t => t.active);
+            // Count what recon INVOKES, not what it declares. dnsx and katana sit
+            // in the table and are never executed, so counting `active` alone told
+            // the operator two tools would connect when only httpx does -- and
+            // implied a katana crawl that never runs.
+            const active = tools.filter(t => t.active && t.invoked !== false);
+            const declaredOnly = tools.filter(t => t.invoked === false);
             const missing = tools.filter(t => !t.installed);
             const activeMissing = active.filter(t => !t.installed);
 
             const rows = tools.map(t => {
-                const dot = t.active ? '&#9679;' : '&#9675;';
-                const col = t.active ? 'var(--neon-yellow)' : '#6a6a8a';
-                const tag = t.active ? 'CONTACTS THE TARGET' : 'passive';
-                const state = t.installed
-                    ? ''
-                    : ' <span style="color:var(--neon-red);">NOT INSTALLED</span>';
+                const wired = t.invoked !== false;
+                const dot = (t.active && wired) ? '&#9679;' : '&#9675;';
+                const col = (t.active && wired) ? 'var(--neon-yellow)' : '#6a6a8a';
+                // The qualifier sits with the TAG, not after `what`. Appending it
+                // produced "katana NOT WIRED - crawl - connects to the host
+                // declared, never invoked by recon", which reads as though it
+                // does connect.
+                const tag = !wired
+                    ? 'NOT WIRED (declared, never invoked by recon)'
+                    : (t.active ? 'CONTACTS THE TARGET' : 'passive');
+                const state = (wired && !t.installed)
+                    ? ' <span style="color:var(--neon-red);">NOT INSTALLED</span>'
+                    : '';
                 return `<div style="padding:1px 0; color:#8a8aa0;">
                     <span style="color:${col};">${dot}</span>
                     <b style="color:#d8d8e8;">${tlEsc(t.tool)}</b>
@@ -3157,6 +3169,11 @@
             let note = `<div style="color:#6a6a8a; margin-top:3px;">
                 DISCOVER SUBDOMAINS runs ${active.length} tool(s) that connect to the
                 customer's hosts. NAMES ONLY runs none of them.</div>`;
+            if (declaredOnly.length) {
+                note += `<div style="color:#6a6a8a;">
+                    ${declaredOnly.length} tool(s) above are listed but not wired into
+                    recon, so nothing runs them: ${declaredOnly.map(t => tlEsc(t.tool)).join(', ')}.</div>`;
+            }
             if (activeMissing.length) {
                 note += `<div style="color:var(--neon-yellow);">
                     ${activeMissing.length} of those is not installed, so DISCOVER
@@ -5593,6 +5610,13 @@ ${htmlBody}
                         statusEl.classList.remove('hidden');
                     }
                 }
+            } else if (data.type === 'error') {
+                // A pre-flight failure the run never recovers from -- currently
+                // only "model is not installed", which carries the exact
+                // `ollama pull` command to fix it. Nothing handled this type, so
+                // that message was dropped and the operator saw an empty log.
+                addLog(`[error] ${data.message}`, 'log-error');
+                if (!currentChainId) setStoppedUI();
             } else if (data.type === 'phase') {
                 setPhase(data.active);
             } else if (data.type === 'finding') {
@@ -6759,9 +6783,18 @@ ${htmlBody}
                 const sData = await sResp.json();
                 const scenSel = document.getElementById('rc-nettacker-scenario');
                 scenSel.innerHTML = '';
+                // A scenario erlik cannot launch is shown disabled with the
+                // reason, not silently dropped. `brute` was selectable and would
+                // have run a credential brute-force with no credential list.
+                const scenBlocked = sData.unavailable || {};
                 Object.entries(sData.scenarios || {}).forEach(([name, desc]) => {
                     const o = document.createElement('option');
-                    o.value = name; o.textContent = name; o.title = desc; scenSel.appendChild(o);
+                    o.value = name;
+                    const why = scenBlocked[name];
+                    o.textContent = why ? `${name} — unavailable` : name;
+                    o.title = why ? `${desc}\n\nUnavailable: ${why}` : desc;
+                    if (why) o.disabled = true;
+                    scenSel.appendChild(o);
                 });
                 scenSel.value = sData.default || 'recon';
 
