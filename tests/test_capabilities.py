@@ -151,6 +151,53 @@ class TestReadApi:
         assert d["count"] == len(C.wstg_ids())
         assert d["load_errors"] == []
 
+    def test_every_case_reports_a_real_name(self, client):
+        """The route read `doc.get("title")` and no case has a `title`: all 29
+        use `name`, which is also what the loader and runner call it (`tc.name`).
+        Every case reported an empty string, and nothing noticed because the
+        only assertions were on count and load_errors."""
+        d = client.get("/api/library/testcases").json()
+        assert d["cases"], "no cases — the assertion below would be vacuous"
+        blank = [c["file"] for c in d["cases"] if not c.get("name")]
+        assert not blank, f"cases with no name: {blank}"
+
+    def test_the_names_are_the_ones_on_disk(self, client):
+        """Not just non-empty — the value must come from the YAML, so a default
+        or a placeholder cannot satisfy the test above."""
+        import yaml
+
+        d = client.get("/api/library/testcases").json()
+        served = {c["file"]: c["name"] for c in d["cases"]}
+        for f, name in served.items():
+            doc = yaml.safe_load((C.WSTG_DIR / f).read_text(encoding="utf-8"))
+            assert name == doc["name"], f
+
+    def test_a_case_missing_required_keys_is_an_error_not_a_case(self, client, tmp_path,
+                                                                 monkeypatch):
+        """"Parses as YAML" is not "loads". A file that parses to a mapping with
+        no id is just as broken for the engine, and used to appear here as a
+        valid case with a null id — invisible in the one view whose job is to
+        make broken cases visible."""
+        import shutil
+
+        stage = tmp_path / "wstg"
+        stage.mkdir()
+        real = sorted(C.WSTG_DIR.glob("*.yaml"))[0]
+        shutil.copy(real, stage / real.name)
+        (stage / "broken_no_id.yaml").write_text("name: has a name but no id\nsteps: []\n")
+        (stage / "broken_scalar.yaml").write_text("just a string\n")
+        (stage / "broken_syntax.yaml").write_text("id: x\n  bad: [indent\n")
+
+        monkeypatch.setattr(C, "WSTG_DIR", stage)
+        d = client.get("/api/library/testcases").json()
+
+        assert d["count"] == 1, d["cases"]
+        bad = {e["file"] for e in d["load_errors"]}
+        assert bad == {"broken_no_id.yaml", "broken_scalar.yaml", "broken_syntax.yaml"}, bad
+        # Each error has to say what is wrong, or the view only reports a count.
+        for e in d["load_errors"]:
+            assert e["error"].strip(), e
+
     def test_routing_explain_uses_the_real_selector(self, client):
         """The explainer must not reimplement ranking — a second implementation
         drifts, and then the UI confidently shows what runs do not do."""
