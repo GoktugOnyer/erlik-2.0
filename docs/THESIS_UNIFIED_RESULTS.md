@@ -246,8 +246,9 @@ sessions. This is true for every model in this study and is not SFT-specific.
 
 | File | Purpose |
 |---|---|
-| `scripts/recompute_gt_coverage.py` | Canonical matcher (single source of truth) |
-| `docs/recomputed_gt_coverage_all.json` | Per-experiment computed outputs |
+| `scripts/recompute_gt_coverage.py` | Canonical matcher (single source of truth). Writes `docs/recomputed_gt_coverage.json`, not the `_all` file below |
+| `docs/recomputed_gt_coverage_all.json` | Per-experiment computed outputs. **No script in the repository writes this file** — see `docs/REPRODUCIBILITY.md`. Where a figure can be sourced to `docs/recomputed_all_experiments.json` instead, prefer that |
+| — | *Every `runs/…` path below is gitignored and absent from a clone; the derived JSON in `docs/` is the only surviving record* |
 | `runs/clean_2026-04-09/` | Apr 9 baselines (with local `pentest.db`) |
 | `runs/cloud_2026-04-15_balanced/` | Apr 15 FT-v1 experiments |
 | `runs/2026-04-17_00-07-23/` | Apr 17 baseline 7B (the controlled comparison) |

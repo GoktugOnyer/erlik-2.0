@@ -1585,7 +1585,10 @@ No personal data is collected or processed. Juice Shop contains only synthetic u
 
 ## 3.13 Reproducibility
 
-All components are open-source and version-controlled:
+All components are open-source and version-controlled, with one exception noted
+in the table. `docs/REPRODUCIBILITY.md` states, per data file, which reported
+figures a clean clone can regenerate and which are carried forward from run
+data that is not in the repository:
 
 | Component | Version / Location |
 |-----------|-------------------|
@@ -1596,7 +1599,7 @@ All components are open-source and version-controlled:
 | Sprint matrix | `scripts/sprint_matrix.py` (target via `ERLIK_TARGET`, model via `ERLIK_MATRIX_MODEL`) |
 | Multi-model wrapper | `scripts/overnight_pipeline.sh` |
 | Canonical metric recomputation | `scripts/recompute_gt_coverage.py`, `scripts/recompute_all_thesis_tables.py` |
-| Raw data | CSV, JSONL, and logs preserved per run |
+| Raw data | CSV, JSONL and logs preserved per run in `runs/<timestamp>/` — **not version-controlled**; `runs/` is gitignored, so both recomputation scripts above require it to be restored before they will run |
 
 To reproduce (Juice Shop):
 1. Clone the repository, run `docker compose up -d` — this starts `juice-shop` on host port 3000, `zap` on host port 8090, and `kali-tools`
