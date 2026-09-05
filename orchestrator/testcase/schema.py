@@ -144,6 +144,37 @@ class TestCase(BaseModel):
     # same trust already placed in the step's command itself.
     payload_hosts: list[str] = Field(default_factory=list)
 
+    # What the TARGET must look like for this case to be worth planning.
+    #
+    # Only `scheme` today, and it earns its place: WSTG-CONF-07 was planned
+    # against every base URL including plain http, where `plan_sweep` builds a
+    # scope of allow_ports=[80] and the case's own HSTS probe -- which must
+    # reach 443 -- is refused by the scope guard by construction. Measured
+    # 2026-09-05:
+    #
+    #   base http://app.example.test
+    #   tls_scan     ALLOWED   (90s of testssl against a port not in scope)
+    #   hsts_header  REFUSED   port 443 not in allow_ports [80]
+    #
+    # So the expensive half ran against a service the operator did not declare
+    # and the cheap half could not run at all. A case that cannot complete is
+    # better named in `skipped` with the reason than planned and half-run.
+    #
+    # This is a PLANNING hint, not a security control. Nothing here relaxes the
+    # scope guard; a case whose precondition passes is still bound by it.
+    preconditions: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("preconditions")
+    @classmethod
+    def _known_preconditions(cls, v: dict[str, str]) -> dict[str, str]:
+        for k in v:
+            if k != "scheme":
+                raise ValueError(
+                    f"unknown precondition {k!r}; only 'scheme' is understood, "
+                    "and a precondition nothing evaluates would silently never "
+                    "hold")
+        return v
+
     @field_validator("payload_hosts")
     @classmethod
     def _payload_hosts_are_plain_exact_hosts(cls, v: list[str]) -> list[str]:

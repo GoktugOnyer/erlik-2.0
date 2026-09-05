@@ -6,6 +6,14 @@ severity: high
 references:
   - https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/02-Configuration_and_Deployment_Management_Testing/07-Test_HTTP_Strict_Transport_Security
 
+# Planned only for a TLS target. Against an http base `plan_sweep` builds a
+# scope of allow_ports=[80], and this case's HSTS probe must reach 443 -- so it
+# was refused by the scope guard while `tls_scan` still spent 90 seconds of
+# testssl against a port the operator never declared. Half the case could not
+# run and the other half should not have.
+preconditions:
+  scheme: https
+
 target_schema:
   required: [host]
   optional: [port]
