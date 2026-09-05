@@ -29,6 +29,20 @@ steps:
         pattern: '^(?:Disallow|Allow):[ \t]*(/\S*)'
         produces:
           url: 1
+      # PRODUCER — the parameter NAMES inside those same lines. `Disallow:
+      # /search?q=` is an ordinary robots.txt entry, and a site asking
+      # crawlers to stay out of its search endpoint has just named an input
+      # that reaches a backend. No extra request: this reads output the step
+      # already fetched.
+      #
+      # Until `_retarget` preferred the field a child is MISSING, harvesting
+      # this was pointless -- a parent producing both `url` and `parameter`
+      # fanned over `url` and discarded every parameter, so the child still
+      # failed validation on the field that had just been found.
+      - type: regex
+        pattern: '^(?:Disallow|Allow):[ \t]*/\S*[?&]([A-Za-z_][A-Za-z0-9_.-]*)='
+        produces:
+          parameter: 1
 
   - name: sitemap
     tool: curl
@@ -99,3 +113,9 @@ chain:
   # once against the site root.
   on_finding:
     - WSTG-CONF-04
+    # A parameter named in robots.txt is an input the site's own operators
+    # know about. WSTG-INPV-01 needs `url` AND `parameter`, and `_retarget`
+    # now fans over the one the parent target lacks -- so this edge carries
+    # the harvested parameter instead of re-fanning a URL the child already
+    # had and then failing validation on the parameter.
+    - WSTG-INPV-01

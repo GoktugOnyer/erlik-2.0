@@ -4075,6 +4075,15 @@ def _format_case_result_for_agent(case_id: str, tc, result) -> str:
     else:
         lines.append("No finding.")
 
+    # What the case DISCOVERED. `produced` only ever reached chained children
+    # via _retarget, so a harvest was invisible to the agent that asked for the
+    # case -- it would go on to rediscover the same parameters with its own
+    # turns. These are already injection-gated and same-host restricted by
+    # _harvest, so they are safe to name.
+    produced = getattr(result, "produced", None) or {}
+    for field, values in produced.items():
+        shown = ", ".join(str(v) for v in values[:8])
+        lines.append(f"  DISCOVERED {field}: {shown}")
     for na in not_assessed[:5]:
         lines.append(f"  NOT ASSESSED — {na.step}: {na.reason}")
     for st in refused[:5]:
