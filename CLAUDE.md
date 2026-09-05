@@ -82,8 +82,11 @@ caught. Follow them.
   ~90+ cases). Authentication has moved: the token covers reads, an
   unconfigured instance fails closed off-loopback, and `orchestrator/operators.py`
   gives each operator their own token so sessions, v2 runs and engagement
-  revisions record who did them. Still missing there: no login, no admin role
-  (any authenticated caller can mint an operator), and no multi-tenancy.
+  revisions record who did them, and only an `admin` operator may mint, revoke
+  or promote. Still missing there: no login, no sessions, no rotation policy,
+  and no multi-tenancy. Anyone holding `ERLIK_API_TOKEN` has admin by
+  construction -- it is the bootstrap credential, and the way to close that is
+  to create an admin operator and unset it.
 - **Licensing matters more now.** `THIRD_PARTY_LICENSES.md` tracks vendored
   corpora — MIT and CC BY 4.0 sheets with different attribution obligations,
   plus GPL tooling in the Kali image. Shipping commercially makes these

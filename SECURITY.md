@@ -103,13 +103,27 @@ publicly. There is no bug bounty.
   `opr_unauthenticated`. Both are real rows named for what they are, flagged
   `attributable: false`, so nothing renders them as a person.
 
+  **Minting is privileged.** Only an `admin` operator may create, revoke or
+  promote another — before that, a stolen operator token was enough to mint a
+  second identity and attribute work to a name nobody recognises. `created_by`
+  and `role_changed_by` record which admin did it. New operators are
+  `operator` by default, and rows that existed before the role column stay
+  `operator`, so an upgrade never hands out privileges nobody granted.
+
+  `opr_shared_token` is admin, because `ERLIK_API_TOKEN` is the deployment's
+  root secret and has to be able to mint the *first* admin — once one exists
+  the variable can be unset and that bootstrap path closes. It does **not**
+  count toward the admin quorum: the last human admin cannot demote or revoke
+  themselves even while the shared secret is still set, because a guard that
+  relaxed there would be weakest exactly where a deployment has locked itself
+  down most. `opr_unauthenticated` is admin too, and only exists on the
+  loopback path where no token is configured and nothing is enforced anyway.
+
   What this is **not**: there is no login, no password, no session and no
   rotation policy. A token is bearer material — whoever holds it is that
-  operator. And **any authenticated caller can mint an operator**, so
-  possession of the shared token is enough to create a name; `created_by`
-  records which identity did it, which makes that traceable but not
-  prevented. An admin role is the next piece of work, not something this
-  already has.
+  operator, with that operator's role. Anyone holding `ERLIK_API_TOKEN` still
+  has admin, which is inherent to it being the root secret; the way to close
+  that is to create an admin operator and unset the variable.
 
   Rows written before this existed have a NULL `operator_id` and read as
   unattributed, which is the truth about them.

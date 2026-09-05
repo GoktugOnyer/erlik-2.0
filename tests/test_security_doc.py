@@ -275,31 +275,40 @@ class TestOperatorClaims:
         src = inspect.getsource(O.revoke)
         assert "DELETE" not in src.upper().replace("DELETING", "")
 
-    def test_there_is_no_admin_role_as_documented(self):
-        """The doc says any authenticated caller can mint an operator. If an
-        admin check is ever added, that paragraph must come out.
-
-        Checked against the CODE with the docstring stripped -- the endpoint's
-        own docstring explains that there is no admin role, so asserting over
-        the whole source matches the explanation and fails on the honest
-        version. Same trap as the constant-time check above.
-        """
-        import ast
+    def test_minting_is_admin_only_as_documented(self):
+        """The doc says only an admin may mint, revoke or promote. This
+        replaces an earlier test asserting the opposite -- that one failed the
+        moment the role landed, which is the drift guard working."""
         import inspect
-        import textwrap
 
         import orchestrator.main as M
-        tree = ast.parse(textwrap.dedent(inspect.getsource(M.create_operator)))
-        fn = tree.body[0]
-        if (fn.body and isinstance(fn.body[0], ast.Expr)
-                and isinstance(fn.body[0].value, ast.Constant)):
-            fn.body = fn.body[1:]
-        code = ast.unparse(fn)
-        for word in ("is_admin", "require_admin", "_role"):
-            assert word not in code, (
-                f"create_operator now checks {word!r}; SECURITY.md still says "
-                "any authenticated caller can mint an operator"
+        for fn in (M.create_operator, M.revoke_operator, M.set_operator_role):
+            assert "_require_admin(request)" in inspect.getsource(fn), (
+                f"{fn.__name__} does not require admin; SECURITY.md says it does"
             )
+
+    def test_new_operators_are_not_admin_by_default_as_documented(self):
+        import inspect
+
+        from orchestrator import operators as O
+        sig = inspect.signature(O.create)
+        assert sig.parameters["role"].default == O.ROLE_OPERATOR
+
+    def test_the_shared_token_is_admin_but_not_counted_as_documented(self):
+        """Both halves of the load-bearing sentence: it can bootstrap, and it
+        does not keep the last human admin removable."""
+        import inspect
+
+        from orchestrator import operators as O
+        src = inspect.getsource(O._real_admins)
+        assert "SHARED_TOKEN_OPERATOR" in src and "NOT IN" in src
+
+    def test_the_last_admin_is_protected_as_documented(self):
+        import inspect
+
+        from orchestrator import operators as O
+        assert "LastAdminError" in inspect.getsource(O.revoke)
+        assert "LastAdminError" in inspect.getsource(O.set_role)
 
     def test_provenance_is_recorded_as_documented(self):
         import inspect
