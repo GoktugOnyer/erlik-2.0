@@ -2180,7 +2180,14 @@ class TestTheDeterministicLaneBelongsToACustomer:
         from orchestrator.testcase import persistence as P
         src = inspect.getsource(P.save_run)
         assert "engagement_id: str | None = None" in src
-        assert "engagement_id)" in src, "the column is not in the INSERT"
+        # Parse the INSERT's column list rather than matching "engagement_id)".
+        # That literal assumed the column was last, so appending a later column
+        # (not_assessed_json) broke a guard whose subject had not changed.
+        import re as _re
+        cols = _re.search(r"INSERT INTO v2_runs\s*\((.*?)\)", src, _re.S)
+        assert cols, "could not parse the INSERT column list"
+        names = {c.strip() for c in cols.group(1).replace("\n", " ").split(",")}
+        assert "engagement_id" in names, f"the column is not in the INSERT: {sorted(names)}"
         i = src.index("_eid = engagement_id")
         assert "SELECT engagement_id FROM v2_runs WHERE id = ?", src[i:i + 400]
         assert "WHERE id = ?\",\n                    (chain_root_run_id,)" in src, \

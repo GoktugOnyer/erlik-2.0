@@ -33,6 +33,22 @@ class StepResult(BaseModel):
     error: str | None = None
 
 
+class NotAssessed(BaseModel):
+    """An evaluator that could not reach a verdict, as opposed to one that
+    reached "no".
+
+    `matched = False` means both "checked, target is fine" and "could not
+    check" unless they are kept apart. They were not: the llm branch caught its
+    exception, set matched = False and printed to stderr, so a run with an
+    unreachable LLM returned findings: [], success: true, error: null. On a
+    client engagement that reports a control as sound when it was never tested.
+    """
+
+    step: str
+    evaluator: str
+    reason: str
+
+
 class RunResult(BaseModel):
     test_case_id: str
     target: dict[str, Any]
@@ -45,6 +61,9 @@ class RunResult(BaseModel):
     # A case that finds three parameters can retarget three children; without
     # this the chain walker hands every child the same target it started with.
     produced: dict[str, list[str]] = Field(default_factory=dict)
+    # Evaluators that could not run. Empty is the only honest way to read a
+    # findings-free result as "nothing found here".
+    not_assessed: list[NotAssessed] = Field(default_factory=list)
 
 
 _TOOLS_ALL = [
@@ -190,10 +209,16 @@ async def _run_evaluator(
     target: dict[str, Any],
     provider: str | None,
     model: str | None,
-) -> tuple[Finding | None, list[str], bool, dict[str, list[str]]]:
-    """Apply one evaluator. Returns (finding_or_none, chain_to, stop, produced)."""
+) -> tuple[Finding | None, list[str], bool, dict[str, list[str]], NotAssessed | None]:
+    """Apply one evaluator.
+
+    Returns (finding, chain_to, stop, produced, not_assessed). The last element
+    is set when the evaluator could not reach a verdict at all; the caller must
+    surface it rather than letting it read as a clean result.
+    """
     matched = False
     produced: dict[str, list[str]] = {}
+    unassessed: NotAssessed | None = None
 
     if ev.type == "regex" and ev.pattern:
         # MULTILINE so anchors (^ $) work line-by-line — tool output is almost
@@ -236,9 +261,25 @@ async def _run_evaluator(
         except Exception as e:
             matched = False
             print(f"[runner] llm evaluator error: {e}", file=sys.stderr)
+            unassessed = NotAssessed(
+                step=step_result.step, evaluator="llm",
+                reason=f"LLM evaluator could not run: {str(e)[:160]}")
+
+    elif ev.type == "llm":
+        # Declared llm with no instruction: nothing to ask, so nothing was
+        # judged. Silently false would read as clean.
+        unassessed = NotAssessed(step=step_result.step, evaluator="llm",
+                                 reason="llm evaluator has no instruction")
+    else:
+        # An evaluator type no branch above handles -- a typo in a case, or a
+        # type added to the schema before the runner learned it. It asserted
+        # nothing, and must not be counted as having asserted "no".
+        unassessed = NotAssessed(
+            step=step_result.step, evaluator=str(ev.type),
+            reason=f"unsupported evaluator type {ev.type!r}")
 
     if not matched:
-        return None, [], False, produced
+        return None, [], False, produced, unassessed
 
     finding = None
     if ev.emit_finding:
@@ -256,7 +297,7 @@ async def _run_evaluator(
             parameter=target.get("parameter"),
             evidence=step_result.output[:1500],
         )
-    return finding, ev.chain_to or [], ev.stop_after, produced
+    return finding, ev.chain_to or [], ev.stop_after, produced, None
 
 
 async def run_test_case(
@@ -378,9 +419,11 @@ async def run_test_case(
             for ev in step.evaluators:
                 if not _eval_when(ev.when, result.findings, sr):
                     continue
-                finding, chain_to, stop_after, produced = await _run_evaluator(
+                finding, chain_to, stop_after, produced, unassessed = await _run_evaluator(
                     ev, sr, tc, target, provider, model
                 )
+                if unassessed:
+                    result.not_assessed.append(unassessed)
                 for field, values in produced.items():
                     bucket = result.produced.setdefault(field, [])
                     for v in values:

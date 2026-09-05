@@ -406,6 +406,18 @@ async def init_db():
                 except Exception:
                     pass  # column already exists
 
+        # Evaluators that could not reach a verdict on this run. Additive.
+        #
+        # Without it a stored run cannot answer "was this actually checked?".
+        # An LLM evaluator whose backend is unreachable used to set
+        # matched=False -- the same value as a clean verdict -- so the run was
+        # persisted as findings-free and read back later as a pass.
+        try:
+            await db.execute(
+                "ALTER TABLE v2_runs ADD COLUMN not_assessed_json TEXT DEFAULT NULL")
+        except Exception:
+            pass  # column already exists
+
         # Whether the command in this step was REFUSED before it ran (scope,
         # toolset, safe mode, blocked pattern, container down). Additive.
         #
