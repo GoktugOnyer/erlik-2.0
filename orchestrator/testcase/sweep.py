@@ -29,6 +29,9 @@ from urllib.parse import urlparse
 # a specific application live in a named profile and are never inferred from a
 # URL. Milestone B moves these into engagement_targets so an operator can enter
 # them for their own customer instead of editing Python.
+# What a step costs when its tool has no declared timeout.
+DEFAULT_STEP_COST_S = 30
+
 PROFILES: dict[str, dict[str, dict[str, str]]] = {
     "juiceshop": {
         "WSTG-CLNT-04":   {"url": "{base}/redirect", "parameter": "to"},
@@ -234,12 +237,83 @@ def build_target(case: dict[str, Any], base: str,
 MAX_FAN_OUT = 25
 
 
-def _entry(case: dict[str, Any]) -> dict[str, Any]:
+def catalog_tools() -> dict[str, set[str]]:
+    """{case id: tools its steps name}, from ONE catalogue load.
+
+    `load_catalog` re-reads and re-parses all 29 YAML files on every call and
+    is deliberately not cached -- editing a case on disk and re-running has to
+    take effect, which is how every guard in this repo is mutation-tested. So
+    the cost model must not call it per case: doing that turned one plan into
+    29 full catalogue parses and made the sweep tests time out.
+    """
+    try:
+        from orchestrator.testcase.loader import load_catalog
+        return {tid: {st.tool for st in tc.steps if st.tool}
+                for tid, tc in load_catalog().items()}
+    except Exception:
+        return {}
+
+
+def case_cost_s(case: dict[str, Any],
+                tools_by_id: dict[str, set[str]] | None = None) -> int:
+    """Worst-case seconds this case may spend, from the tools its steps name.
+
+    A planning estimate, not a measurement: it sums each distinct tool's
+    execute_tool timeout, which is the ceiling rather than the typical cost.
+    That is the right bias for ordering -- what matters is which cases COULD
+    dominate a budget, and 24 of the 29 are curl-only while five pull in an
+    external scanner (sqlmap 180s, dalfox 120s, testssl 90s, jwt_tool 60s,
+    whatweb/wafw00f 30s each).
+    """
+    from orchestrator.tool_executor import TOOL_TIMEOUTS
+
+    # The tools come from the CATALOGUE, looked up by id, not from the dict
+    # passed in. `/api/v2/testcases` lists `steps` as step NAMES -- a list of
+    # strings carrying no tool at all -- and that listing is exactly what the
+    # dashboard and the sweep scripts hand to plan_sweep. Reading `steps` off
+    # the argument crashed on every one of them.
+    if tools_by_id is None:
+        tools_by_id = catalog_tools()
+    tools: set[str] = set(tools_by_id.get(case.get("id") or "") or ())
+    if not tools:
+        # A case built inline by a caller or a test, with dict-shaped steps.
+        for st in (case.get("steps") or []):
+            if isinstance(st, dict) and st.get("tool"):
+                tools.add(st["tool"])
+    if not tools:
+        return DEFAULT_STEP_COST_S
+    return sum(TOOL_TIMEOUTS.get(t, DEFAULT_STEP_COST_S) for t in sorted(tools))
+
+
+def precondition_unmet(case: dict[str, Any], base: str) -> str | None:
+    """Why this case should not be planned against `base`, or None.
+
+    Planning only. Nothing here relaxes the scope guard -- a case whose
+    precondition holds is still bound by it.
+    """
+    pre = case.get("preconditions") or {}
+    want = (pre.get("scheme") or "").lower()
+    if not want:
+        return None
+    from urllib.parse import urlparse
+    got = (urlparse(base or "").scheme or "").lower()
+    if got and got != want:
+        return (f"needs a {want} target; the base URL is {got}. Planning it "
+                f"would spend the scan half against a port the scope does not "
+                f"allow and refuse the other half outright.")
+    return None
+
+
+def _entry(case: dict[str, Any],
+           tools_by_id: dict[str, set[str]] | None = None) -> dict[str, Any]:
     """The shape a plan row shares whether or not it was fanned out."""
     return {"id": case.get("id"), "name": case.get("name"),
             "category": case.get("category"), "severity": case.get("severity"),
             "required": (case.get("target_schema") or {}).get("required") or [],
-            "optional": (case.get("target_schema") or {}).get("optional") or []}
+            "optional": (case.get("target_schema") or {}).get("optional") or [],
+            # Surfaced so an operator can see WHY the order is what it is,
+            # rather than the plan silently rearranging itself.
+            "cost_s": case_cost_s(case, tools_by_id)}
 
 
 def plan_sweep(cases: list[dict[str, Any]], base: str, profile_name: str = "",
@@ -268,9 +342,16 @@ def plan_sweep(cases: list[dict[str, Any]], base: str, profile_name: str = "",
     profile = merge(PROFILES.get(profile_name or "", {}), declared or {})
     wanted = set(only or [])
     discovered = {k: v for k, v in (discovered or {}).items() if v}
+    tools_by_id = catalog_tools()
     runnable, skipped = [], []
     for case in cases:
         if wanted and case.get("id") not in wanted:
+            continue
+        unmet = precondition_unmet(case, base)
+        if unmet:
+            # NAMED, not dropped. An operator seeing one fewer row must be able
+            # to tell a precondition from a bug.
+            skipped.append({**_entry(case, tools_by_id), "reason": unmet})
             continue
         req = (case.get("target_schema") or {}).get("required") or []
         # A field something already BOUND for this case is not a candidate for
@@ -321,16 +402,16 @@ def plan_sweep(cases: list[dict[str, Any]], base: str, profile_name: str = "",
                 entries.append((t, value))
             if entries:
                 for t, value in entries:
-                    runnable.append({**_entry(case), "target": t,
+                    runnable.append({**_entry(case, tools_by_id), "target": t,
                                      "where": t.get("url") or t.get("login_url")
                                               or t.get("host"),
                                      "discovered": {fan_field: value}})
                 continue
             if reason:
-                skipped.append({**_entry(case), "reason": reason})
+                skipped.append({**_entry(case, tools_by_id), "reason": reason})
                 continue
         tgt, why = build_target(case, base, profile, extra)
-        entry = _entry(case)
+        entry = _entry(case, tools_by_id)
         if suppressed:
             # NAMED, not silent. An operator seeing three fewer rows cannot
             # otherwise tell a declaration taking over from a regression.
@@ -341,6 +422,18 @@ def plan_sweep(cases: list[dict[str, Any]], base: str, profile_name: str = "",
             runnable.append({**entry, "target": tgt,
                              "where": tgt.get("url") or tgt.get("login_url")
                                       or tgt.get("host")})
+    # CHEAP FIRST, stable within a tier.
+    #
+    # A sweep that is interrupted, capped or run against a large fan-out spends
+    # its budget in whatever order the catalogue happened to load. Ordering by
+    # the ceiling each case could consume means the 24 curl-only cases -- which
+    # between them cover most of the catalogue -- all complete before the first
+    # external scanner starts, and anything they DISCOVER is available to the
+    # cases that follow.
+    #
+    # `sorted` is stable, so cases of equal cost keep catalogue order and a
+    # plan for an all-curl target is byte-identical to before.
+    runnable.sort(key=lambda r: r.get("cost_s", DEFAULT_STEP_COST_S))
     return {"base": (base or "").rstrip("/"), "profile": profile_name or None,
             "runnable": runnable, "skipped": skipped,
             "counts": {"runnable": len(runnable), "skipped": len(skipped),
