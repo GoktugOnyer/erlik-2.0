@@ -3,6 +3,7 @@ import asyncio
 import time
 import json
 import re
+import hmac
 import os
 from datetime import datetime
 from contextlib import asynccontextmanager
@@ -59,27 +60,46 @@ app = FastAPI(title="Erlik Pentest Agent", lifespan=lifespan)
 templates = Jinja2Templates(directory="dashboard/templates")
 
 
+# Paths that stay reachable without the token even when one is configured.
+# Only liveness: it reports the provider name and whether Ollama answers, which
+# a load balancer needs and which discloses no engagement data.
+_UNAUTHENTICATED_PATHS = frozenset({"/api/health"})
+
+
 @app.middleware("http")
 async def _api_token_guard(request: Request, call_next):
-    """Optional shared-secret guard for state-changing API calls.
+    """Shared-secret guard for the API.
 
-    Off by default (no behavior change). When ERLIK_API_TOKEN is set, every
-    state-changing request (POST/PUT/PATCH/DELETE) to /api/* must present the
-    token via `X-API-Token: <t>` or `Authorization: Bearer <t>`. GET/HEAD
-    (the dashboard + read endpoints) and /api/health stay open so the page
-    loads; pair this with ERLIK_HOST=127.0.0.1 for a safe default posture.
+    Off by default. When ERLIK_API_TOKEN is set, EVERY request to /api/* must
+    present the token via `X-API-Token: <t>` or `Authorization: Bearer <t>`.
+
+    Reads were not covered until now, and that was the larger hole. The guard
+    ran only on POST/PUT/PATCH/DELETE, so a deployment that set a token still
+    served 52 GET routes to anyone who could reach the port -- /api/engagements
+    (customer records), /api/v2/targets/credentials, /api/findings, every
+    report format, and /api/thesis/export, which dumps nine tables. Setting a
+    token bought protection against writes while every secret remained
+    readable.
+
+    The comparison is constant-time. `provided != token` leaks the length of
+    the matching prefix through timing, which is a real oracle against a shared
+    secret an attacker can probe at will.
+
+    NOT changed here: the guard is still inert when no token is configured, so
+    an install that sets nothing is exactly as open as before. Making it fail
+    closed is a breaking change for the loopback workflow and wants its own
+    discussion -- SECURITY.md states the current posture plainly.
     """
     from fastapi.responses import JSONResponse
     token = os.environ.get("ERLIK_API_TOKEN", "").strip()
-    if token and request.method in ("POST", "PUT", "PATCH", "DELETE") \
-            and request.url.path.startswith("/api/") \
-            and request.url.path != "/api/health":
+    if token and request.url.path.startswith("/api/") \
+            and request.url.path not in _UNAUTHENTICATED_PATHS:
         provided = request.headers.get("x-api-token", "")
         if not provided:
             auth = request.headers.get("authorization", "")
             if auth.lower().startswith("bearer "):
                 provided = auth[7:].strip()
-        if provided != token:
+        if not hmac.compare_digest(provided, token):
             return JSONResponse({"detail": "missing or invalid API token"}, status_code=401)
     return await call_next(request)
 

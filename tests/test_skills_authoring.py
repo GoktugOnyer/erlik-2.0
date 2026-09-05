@@ -42,7 +42,15 @@ def sandbox(tmp_path, monkeypatch):
 
 @pytest.fixture
 def client():
-    return TestClient(M.app)
+    """Carries the token the `sandbox` fixture configures.
+
+    _api_token_guard used to cover writes only, so these reads went through
+    unauthenticated even with ERLIK_API_TOKEN set. Now that it covers reads
+    too, a client that sends nothing gets 401 and the assertions below read a
+    401 body instead of the payload. Sending the token is the correct fix: the
+    subject of these tests is reachability reporting, not the guard.
+    """
+    return TestClient(M.app, headers={"X-API-Token": "t0ken"})
 
 
 class TestShipsDisabled:

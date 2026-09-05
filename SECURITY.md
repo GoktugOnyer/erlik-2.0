@@ -43,7 +43,7 @@ publicly. There is no bug bounty.
 | Export redaction — mask credentials leaving the system | on | `orchestrator/redaction.py` |
 | Submission policy — demote informational classes in reports | on | `orchestrator/submission_policy.py`, `policy_catalog/never_submit.yaml` |
 | Scope audit — flag findings naming a host outside the snapshot | on | `orchestrator/main.py` (`_scope_audit`) |
-| API token on state-changing requests | **off** | `orchestrator/main.py` (`_api_token_guard`) |
+| API token on every `/api/*` request, reads included | **off** | `orchestrator/main.py` (`_api_token_guard`) |
 | Skill authoring (writes files into the agent prompt) | **off** | `orchestrator/skills_authoring.py` |
 | Bind address | `127.0.0.1` | `run.sh` (`ERLIK_HOST`) |
 
@@ -54,7 +54,7 @@ publicly. There is no bug bounty.
 | `ERLIK_SCOPE_ENFORCE` | `1` | `0` disables scope refusal entirely |
 | `ERLIK_SCOPE_EXTRA_HOSTS` | empty | Comma-separated globs added to scope; snapshotted per session |
 | `ERLIK_SAFE_MODE` | `1` | `0` permits destructive commands |
-| `ERLIK_API_TOKEN` | unset | When set, `POST/PUT/PATCH/DELETE` on `/api/*` require it |
+| `ERLIK_API_TOKEN` | unset | When set, **every** `/api/*` request requires it, reads included. `/api/health` stays open for liveness checks |
 | `ERLIK_HOST` | `127.0.0.1` | `0.0.0.0` exposes the API to the network |
 | `ERLIK_NATIVE` | unset | When set, commands run **on the host as your user**, not in the container |
 | `ERLIK_LLM_PROVIDER` | `ollama` | `openai` sends prompts to a third party (`orchestrator/llm_client.py`) |
@@ -63,10 +63,22 @@ publicly. There is no bug bounty.
 ## What erlik does NOT protect
 
 - **The API is unauthenticated by default.** `_api_token_guard` engages only
-  when `ERLIK_API_TOKEN` is set, and it never applies to `GET`/`HEAD`. Anything
-  that can reach the port can read every session, finding and stored
-  credential. `run.sh` binds loopback; several scripts under `scripts/` bind
-  `0.0.0.0`.
+  when `ERLIK_API_TOKEN` is set. With no token, anything that can reach the
+  port can read every session, finding and stored credential. `run.sh` binds
+  loopback; several scripts under `scripts/` bind `0.0.0.0`.
+
+  When a token *is* set the guard now covers reads as well as writes. It did
+  not until recently: it ran only on `POST/PUT/PATCH/DELETE`, so a deployment
+  that set a token still served 52 `GET` routes to anyone who could reach the
+  port — `/api/engagements`, `/api/v2/targets/credentials`, `/api/findings`,
+  every report format, and `/api/thesis/export`, which returns nine tables.
+  Setting a token bought protection against writes while every secret stayed
+  readable.
+
+- **One shared secret, no users.** The token identifies nobody: there is no
+  account model, so a run cannot be attributed to a person and access cannot be
+  revoked for one operator without rotating it for everyone. That matters the
+  moment a client asks who authorised a test.
 - **Stored credentials are not encrypted.** `session_primitives.value` is plain
   `TEXT`.
 - **The scope guard is not a sandbox.** It refuses commands that *name* an
