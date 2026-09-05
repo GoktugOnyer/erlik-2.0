@@ -181,6 +181,7 @@ async def _api_token_guard(request: Request, call_next):
     # never has to invent a name for a NULL.
     request.state.operator_id = _ops.UNAUTHENTICATED_OPERATOR
     request.state.operator_name = _ops.UNAUTHENTICATED_LABEL
+    request.state.operator_role = _ops.ROLE_ADMIN
 
     if token:
         provided = request.headers.get("x-api-token", "")
@@ -192,27 +193,29 @@ async def _api_token_guard(request: Request, call_next):
         # An OPERATOR token is tried first, and only its own shape reaches the
         # database -- so the shared secret is never used as a lookup key and an
         # unknown token costs one indexed query, not a scan.
-        op_id = op_name = None
+        op_id = op_name = op_role = None
         if _ops.looks_like_token(provided):
             try:
                 db = await get_db()
                 try:
-                    op_id, op_name = await _ops.resolve(db, provided)
+                    op_id, op_name, op_role = await _ops.resolve(db, provided)
                     if op_id:
                         await _ops.touch(db, op_id)
                 finally:
                     await db.close()
             except Exception:
-                op_id = op_name = None      # a broken store must not authorise
+                op_id = op_name = op_role = None   # a broken store must not authorise
 
         if op_id:
             request.state.operator_id = op_id
             request.state.operator_name = op_name
+            request.state.operator_role = op_role or _ops.ROLE_OPERATOR
         elif hmac.compare_digest(provided, token):
             # The shared secret still works, and is still honest about what it
             # is. A run stamped with this is authenticated and unattributed.
             request.state.operator_id = _ops.SHARED_TOKEN_OPERATOR
             request.state.operator_name = _ops.SHARED_TOKEN_LABEL
+            request.state.operator_role = _ops.ROLE_ADMIN
         else:
             return JSONResponse(
                 {"detail": "missing or invalid API token"}, status_code=401,
@@ -244,6 +247,27 @@ def _actor(request: Request) -> str:
     """
     from orchestrator import operators as _ops
     return getattr(request.state, "operator_id", None) or _ops.UNAUTHENTICATED_OPERATOR
+
+
+def _require_admin(request: Request) -> str:
+    """The operator id, if this request may mint, revoke or promote.
+
+    Read off the role `_api_token_guard` already resolved rather than querying
+    again -- one lookup per request, and no window in which the row changes
+    between the check and the action it guards.
+
+    Raises 403, not 404: hiding the existence of an endpoint the caller is
+    simply not allowed to use tells them nothing useful and makes the refusal
+    read like a bug.
+    """
+    from orchestrator import operators as _ops
+    role = getattr(request.state, "operator_role", None)
+    if role != _ops.ROLE_ADMIN:
+        raise HTTPException(
+            status_code=403,
+            detail="this action requires an admin operator; the token you "
+                   "presented is a regular operator")
+    return _actor(request)
 
 
 @app.exception_handler(RequestValidationError)
@@ -5827,18 +5851,22 @@ async def list_operators():
 async def create_operator(body: dict, request: Request):
     """Mint an operator. The token comes back ONCE and is never stored.
 
-    Any authenticated caller may do this, which is a real limitation:
-    possession of the shared token is enough to create a name. `created_by`
-    records which identity did it so the provenance is at least traceable, and
-    SECURITY.md states the limitation rather than implying an admin role that
-    does not exist.
+    ADMIN ONLY. Until the role existed any authenticated caller could do this,
+    so a stolen operator token was enough to create a second identity and
+    attribute work to a name nobody recognises. `created_by` records which
+    admin did it, because minting stays privileged rather than becoming
+    impossible.
+
+    `role` may be "operator" (default) or "admin".
     """
     from orchestrator import operators as _ops
+    actor = _require_admin(request)
     name = (body or {}).get("name") or ""
+    role = (body or {}).get("role") or _ops.ROLE_OPERATOR
     db = await get_db()
     try:
         try:
-            created = await _ops.create(db, name, created_by=_actor(request))
+            created = await _ops.create(db, name, created_by=actor, role=role)
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
         return {
@@ -5851,22 +5879,58 @@ async def create_operator(body: dict, request: Request):
 
 
 @app.post("/api/operators/{operator_id}/revoke")
-async def revoke_operator(operator_id: str):
-    """Withdraw one operator's access. The row is never deleted.
+async def revoke_operator(operator_id: str, request: Request):
+    """Withdraw one operator's access. ADMIN ONLY. The row is never deleted.
 
     Deleting it would turn every run that IS attributable to this person into
     one that reads as unattributed -- destroying the record instead of ending
     the access.
+
+    Refuses to revoke the last human admin: that would leave an instance
+    nobody can administer, recoverable only by setting ERLIK_API_TOKEN again,
+    which is the credential this role model exists to let a deployment retire.
     """
     from orchestrator import operators as _ops
+    _require_admin(request)
     db = await get_db()
     try:
-        if not await _ops.revoke(db, operator_id):
+        try:
+            revoked = await _ops.revoke(db, operator_id)
+        except _ops.LastAdminError as e:
+            raise HTTPException(status_code=409, detail=str(e))
+        if not revoked:
             raise HTTPException(
                 status_code=404,
                 detail="no active operator with that id (already revoked, "
                        "unknown, or one of the synthetic identities)")
         return {"revoked": operator_id}
+    finally:
+        await db.close()
+
+
+@app.post("/api/operators/{operator_id}/role")
+async def set_operator_role(operator_id: str, body: dict, request: Request):
+    """Promote or demote an operator. ADMIN ONLY.
+
+    Refuses to demote the last human admin, for the same reason revoke does.
+    `role_changed_by` is recorded: a promotion is the one action that changes
+    who can create identities, so it has to be traceable.
+    """
+    from orchestrator import operators as _ops
+    actor = _require_admin(request)
+    role = (body or {}).get("role") or ""
+    db = await get_db()
+    try:
+        try:
+            ok = await _ops.set_role(db, operator_id, role, changed_by=actor)
+        except _ops.LastAdminError as e:
+            raise HTTPException(status_code=409, detail=str(e))
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        if not ok:
+            raise HTTPException(status_code=404,
+                                detail="no active operator with that id")
+        return {"operator_id": operator_id, "role": role, "changed_by": actor}
     finally:
         await db.close()
 
@@ -5886,6 +5950,7 @@ async def whoami(request: Request):
         "name": getattr(request.state, "operator_name", None)
                 or _ops.SYNTHETIC.get(op_id),
         "attributable": _ops.is_attributable(op_id),
+        "role": getattr(request.state, "operator_role", _ops.ROLE_OPERATOR),
     }
 
 

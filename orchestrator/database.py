@@ -803,15 +803,49 @@ async def init_db():
             except Exception:
                 pass  # column already exists
 
-        # Who minted this operator. Any authenticated caller can create one, so
-        # without this an attacker holding the shared token could add an
-        # operator and every subsequent action would be attributed to a name
-        # nobody recognises, with no way to trace where it came from.
-        try:
-            await db.execute(
-                "ALTER TABLE operators ADD COLUMN created_by TEXT DEFAULT NULL")
-        except Exception:
-            pass  # column already exists
+        # Who minted this operator, and what they are allowed to do.
+        #
+        # `created_by` is provenance: minting is privileged, so a name that
+        # appears in the audit trail must be traceable to whoever added it.
+        #
+        # `role` closes the escalation. Until it existed, ANY authenticated
+        # caller could mint an operator -- so a stolen operator token was
+        # enough to create a second identity and attribute work to a name
+        # nobody recognises. Only an admin may now mint, revoke or promote.
+        # Existing rows default to 'operator', which is the safe direction:
+        # an upgrade must not silently hand anyone privileges they did not
+        # have before.
+        for _c, _d in (("created_by", "TEXT DEFAULT NULL"),
+                       ("role", "TEXT NOT NULL DEFAULT 'operator'"),
+                       ("role_changed_by", "TEXT DEFAULT NULL"),
+                       ("role_changed_at", "TEXT DEFAULT NULL")):
+            try:
+                await db.execute(f"ALTER TABLE operators ADD COLUMN {_c} {_d}")
+            except Exception:
+                pass  # column already exists
+
+        # THE TWO SYNTHETIC IDENTITIES ARE ADMIN, for different reasons, and
+        # this runs after the ALTER because they were created before `role`
+        # existed and INSERT OR IGNORE above will not update an existing row.
+        #
+        #   opr_shared_token     ERLIK_API_TOKEN is the deployment's root
+        #                        secret -- whoever set it configured the
+        #                        instance. It has to be able to mint the FIRST
+        #                        admin or no admin can ever exist. Once one
+        #                        does, the shared token can be unset and the
+        #                        bootstrap path closes behind it.
+        #
+        #   opr_unauthenticated  only reachable on loopback with no token
+        #                        configured at all, where nothing is enforced
+        #                        and every route is already open. Refusing it
+        #                        here would break local development while
+        #                        protecting nothing.
+        #
+        # Neither is a person, so neither can be granted or revoked as an
+        # account; `set_role` and `revoke` refuse them by id.
+        await db.execute(
+            "UPDATE operators SET role = 'admin' WHERE id IN "
+            "('opr_shared_token', 'opr_unauthenticated')")
 
         await db.commit()
 
