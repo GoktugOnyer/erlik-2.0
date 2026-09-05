@@ -110,6 +110,40 @@ def _eval_when(when: str | None, findings: list[Finding], last: StepResult | Non
     return True
 
 
+def _primary_url(target: dict[str, Any]) -> str | None:
+    """The URL a step is actually aimed at, for cases that do not call it `url`.
+
+    Four of the 29 cases name their target something else -- ATHN-01
+    `login_url`, AUTHZ-04 `url_template`, BUSL-04 `request_template`, CONF-07
+    `host` -- and `target.get("url")` is None for every one of them. That None
+    reached `execute_tool`, whose `_sanitize_command` then had no destination to
+    rewrite to and used its placeholder default, re-pointing the command at
+    localhost:80 and downgrading https to http before it ran. `_sanitize_command`
+    no longer invents a destination; this gives it the real one, so a loopback
+    target under docker is still resolved to the host gateway for these cases
+    as it always was for the other 25.
+
+    Order matters only in that `url` stays first, so nothing changes for the
+    cases that already worked.
+    """
+    for key in ("url", "login_url", "url_template", "base_url", "endpoint"):
+        v = target.get(key)
+        if isinstance(v, str) and "://" in v:
+            return v
+    host = target.get("host")
+    if isinstance(host, str) and host:
+        port = target.get("port")
+        scheme = "https" if str(port) in ("443", "8443") else "http"
+        return f"{scheme}://{host}" + (f":{port}" if port else "")
+    # A raw request template carries its URL inside a shell command.
+    tmpl = target.get("request_template")
+    if isinstance(tmpl, str):
+        m = re.search(r'https?://[^\s\'"\\<>|]+', tmpl)
+        if m:
+            return m.group(0)
+    return None
+
+
 def _validate_target(tc: TestCase, target: dict[str, Any]) -> str | None:
     missing = [k for k in tc.target_schema.required if k not in target or target[k] in (None, "")]
     if missing:
@@ -339,7 +373,7 @@ async def run_test_case(
             # Safety floor: every command must pass scope check before exec.
             if scope is not None:
                 try:
-                    check_command(cmd, scope, primary_url=target.get("url"))
+                    check_command(cmd, scope, primary_url=_primary_url(target))
                 except ScopeViolation as e:
                     result.steps.append(StepResult(
                         step=step.name,
@@ -400,7 +434,7 @@ async def run_test_case(
             raw = await execute_tool(
                 live_cmd,
                 enabled_tools=_TOOLS_ALL,
-                target_url=target.get("url"),
+                target_url=_primary_url(target),
                 no_timeout=False,
                 tool_hint=step.tool,
             )

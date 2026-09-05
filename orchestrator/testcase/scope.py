@@ -38,10 +38,28 @@ def check_url(url: str, scope: Scope) -> None:
     """Raise ScopeViolation if `url` is out of scope. No return value."""
     if not url:
         raise ScopeViolation("empty URL")
-    parsed = urlparse(url if "://" in url else f"http://{url}")
+    # urlparse RAISES on some malformed inputs rather than returning an empty
+    # host -- `ValueError: Invalid IPv6 URL` for anything with an unbalanced
+    # `[` after the scheme. _URL_RX over-extracts on purpose, so a bracket
+    # expression in a step's own grep pattern reaches here as a "URL":
+    #
+    #   grep -Eio "action=[\"']?http://[^\" >]*"
+    #
+    # produced `http://[^\"` and killed the entire run with a traceback --
+    # not a refusal, not a result, no finding either way. An unparseable URL
+    # must be REFUSED, the same as any other host that cannot be shown to be
+    # in scope; this guard exists to fail closed.
+    try:
+        parsed = urlparse(url if "://" in url else f"http://{url}")
+    except ValueError as e:
+        raise ScopeViolation(f"could not parse URL {url!r}: {e}") from e
     host = parsed.hostname or ""
     if not host:
         raise ScopeViolation(f"could not parse host from URL: {url!r}")
+    try:
+        parsed.port          # also raises ValueError on a bad port
+    except ValueError as e:
+        raise ScopeViolation(f"could not parse port from URL {url!r}: {e}") from e
     if _host_matches(host, scope.deny_hosts):
         raise ScopeViolation(f"host {host!r} is explicitly denied")
     if not scope.allow_hosts:
