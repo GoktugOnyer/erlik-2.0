@@ -163,21 +163,45 @@ def _sanitize_command(command: str, target_url: str = None) -> str:
     # it never touches wordlist paths. This is what makes the target reachable;
     # previously `juice-shop:3000` (which works) was rewritten to `localhost`
     # (which doesn't, from inside the container).
-    aliases = ["juice-shop", "localhost", "127.0.0.1", "0.0.0.0"]
-    if target_host and target_host.lower() not in aliases:
-        aliases.append(target_host)
-    for a in aliases:
-        if a == exec_host:
-            continue
-        command = re.sub(r'https?://' + re.escape(a) + r'(?::\d+)?', f'http://{exec_hp}', command)
-        command = re.sub(r'(?<![\w.])' + re.escape(a) + r':\d+\b', exec_hp, command)
-    # Bare host with no port (e.g. `nmap localhost`, `nmap juice-shop`) -> exec
-    # host. Runs after the port-anchored rewrites, so only standalone hosts
-    # remain. Guarded so it never matches a longer host/IP (localhost.foo,
-    # 127.0.0.10).
-    for bare in ("juice-shop", "localhost", "127.0.0.1"):
-        if bare != exec_host:
-            command = re.sub(r'(?<![\w.-])' + re.escape(bare) + r'(?![\w.:-])', exec_host, command)
+    if target_url:
+        aliases = ["juice-shop", "localhost", "127.0.0.1", "0.0.0.0"]
+        if target_host and target_host.lower() not in aliases:
+            aliases.append(target_host)
+        for a in aliases:
+            if a == exec_host:
+                continue
+            command = re.sub(r'https?://' + re.escape(a) + r'(?::\d+)?', f'http://{exec_hp}', command)
+            command = re.sub(r'(?<![\w.])' + re.escape(a) + r':\d+\b', exec_hp, command)
+        # Bare host with no port (e.g. `nmap localhost`, `nmap juice-shop`) ->
+        # exec host. Runs after the port-anchored rewrites, so only standalone
+        # hosts remain. Guarded so it never matches a longer host/IP
+        # (localhost.foo, 127.0.0.10).
+        for bare in ("juice-shop", "localhost", "127.0.0.1"):
+            if bare != exec_host:
+                command = re.sub(r'(?<![\w.-])' + re.escape(bare) + r'(?![\w.:-])', exec_host, command)
+    else:
+        # NO TARGET TO REWRITE *TO*. `target_host` and `target_port` above are
+        # placeholders ("localhost", 80), and the block above treats them as if
+        # they were the real target. Measured 2026-09-05:
+        #
+        #   http://127.0.0.1:9020/login  -> http://localhost:80/login
+        #   https://127.0.0.1:9022/login -> http://localhost:80/login
+        #
+        # The written port is discarded and https is DOWNGRADED to http. Every
+        # test case whose target schema does not use the key `url` reached the
+        # shell that way, because runner.py passes `target.get("url")` --
+        # WSTG-ATHN-01 (login_url), AUTHZ-04 (url_template), BUSL-04
+        # (request_template) and CONF-07 (host). ATHN-01 exists to decide
+        # whether credentials travel encrypted; rewriting its probe to cleartext
+        # port 80 does not weaken that test, it inverts it.
+        #
+        # Under docker a loopback host must still become the gateway or it names
+        # the container instead of the target. That is a HOST substitution only:
+        # the scheme and any written port are facts about the target and survive.
+        if not ERLIK_NATIVE:
+            for a in ("localhost", "127.0.0.1", "0.0.0.0"):
+                command = re.sub(r'(?<![\w.-])' + re.escape(a) + r'(?![\w.-])',
+                                 DOCKER_HOST_GATEWAY, command)
 
     tool_name = _extract_tool_name(command)
     # Tools that need an explicit http:// scheme — fix a bare exec host:port.
