@@ -25,6 +25,30 @@ from fastapi.testclient import TestClient
 
 TOKEN = "s3cr3t-token"
 
+
+# ---------------------------------------------------------------------------
+# A clean clone has no data/ directory at all -- it is gitignored -- so the
+# DB-backed reads these tests probe raise `unable to open database file` rather
+# than returning anything the guard could be judged on. CI caught exactly that.
+# Point the module at a temporary database and create the schema, following the
+# pattern already used in test_redaction.py. The subject here is the auth
+# decision, but it has to be read off a route that actually works, or a passing
+# assertion means only that the request failed for some other reason.
+# ---------------------------------------------------------------------------
+@pytest.fixture(autouse=True)
+def _temp_db(tmp_path):
+    import asyncio
+
+    import orchestrator.database as db_mod
+    old_path, old_dir = db_mod.DB_PATH, db_mod.DB_DIR
+    db_mod.DB_DIR = tmp_path
+    db_mod.DB_PATH = tmp_path / "auth.db"
+    try:
+        asyncio.run(db_mod.init_db())
+        yield
+    finally:
+        db_mod.DB_PATH, db_mod.DB_DIR = old_path, old_dir
+
 # Read routes that carry engagement, credential or finding data.
 SENSITIVE_READS = [
     "/api/engagements",
