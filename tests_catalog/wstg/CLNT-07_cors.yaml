@@ -13,14 +13,17 @@ target_schema:
 steps:
   - name: origin_reflection
     tool: curl
-    # An OAST-marked origin so scope enforcement permits the payload host. If the
+    # The origin MUST come from _OAST_DOMAINS in orchestrator/tool_executor.py.
+    # This read `evil.oast.test`, which is not in that tuple, so the scope guard
+    # refused the command and every CORS test failed before it ran. The header
+    # value is never contacted -- it only has to survive the guard. If the
     # server reflects our arbitrary origin (or returns '*') together with
     # credentials, cross-origin reads are possible.
     command: >-
-      curl -s -b "{{cookie}}" -H "{{auth_header}}" -i -H "Origin: https://evil.oast.test" "{{url}}"
+      curl -s -b "{{cookie}}" -H "{{auth_header}}" -i -H "Origin: https://evil.oastify.com" "{{url}}"
     evaluators:
       - type: regex
-        pattern: 'Access-Control-Allow-Origin:\s*(https://evil\.oast\.test|\*)'
+        pattern: 'Access-Control-Allow-Origin:\s*(https://evil\.oastify\.com|\*)'
         emit_finding:
           vuln_type: CORS Misconfiguration
           severity: medium
@@ -29,7 +32,7 @@ steps:
     tool: curl
     when: has_finding
     command: >-
-      curl -s -b "{{cookie}}" -H "{{auth_header}}" -i -H "Origin: https://evil.oast.test" "{{url}}"
+      curl -s -b "{{cookie}}" -H "{{auth_header}}" -i -H "Origin: https://evil.oastify.com" "{{url}}"
     evaluators:
       - type: regex
         # Reflected origin + credentials true = exploitable (reads authed data).

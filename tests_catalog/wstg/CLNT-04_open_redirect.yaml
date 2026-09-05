@@ -19,12 +19,12 @@ steps:
   - name: declared_parameter_probe
     tool: curl
     command: >-
-      curl -s -b "{{cookie}}" -H "{{auth_header}}" -D - -o /dev/null "{{url}}?{{parameter}}=//erlik-redir.oast.test/"
+      curl -s -b "{{cookie}}" -H "{{auth_header}}" -D - -o /dev/null "{{url}}?{{parameter}}=//erlik-redir.oast.fun/"
     evaluators:
       - type: regex
         # Only a Location that STARTS with the marker host is off-site; the
         # payload merely echoed inside an on-site path is not a redirect.
-        pattern: '^Location:[ \t]*(?:https?:)?//erlik-redir\.oast\.test'
+        pattern: '^Location:[ \t]*(?:https?:)?//erlik-redir\.oast\.fun'
         emit_finding:
           vuln_type: Open Redirect
           severity: medium
@@ -35,10 +35,10 @@ steps:
     tool: curl
     when: no_finding_yet
     command: >-
-      curl -s -b "{{cookie}}" -H "{{auth_header}}" -D - -o /dev/null "{{url}}?redirect=//erlik-redir.oast.test/&next=//erlik-redir.oast.test/&url=//erlik-redir.oast.test/&returnUrl=//erlik-redir.oast.test/&dest=//erlik-redir.oast.test/&continue=//erlik-redir.oast.test/"
+      curl -s -b "{{cookie}}" -H "{{auth_header}}" -D - -o /dev/null "{{url}}?redirect=//erlik-redir.oast.fun/&next=//erlik-redir.oast.fun/&url=//erlik-redir.oast.fun/&returnUrl=//erlik-redir.oast.fun/&dest=//erlik-redir.oast.fun/&continue=//erlik-redir.oast.fun/"
     evaluators:
       - type: regex
-        pattern: '^Location:[ \t]*(?:https?:)?//erlik-redir\.oast\.test'
+        pattern: '^Location:[ \t]*(?:https?:)?//erlik-redir\.oast\.fun'
         emit_finding:
           vuln_type: Open Redirect
           severity: medium
@@ -53,10 +53,10 @@ steps:
     tool: curl
     when: no_finding_yet
     command: >-
-      curl -s -b "{{cookie}}" -H "{{auth_header}}" -D - -o /dev/null "{{url}}?{{parameter}}=%2f%2ferlik-redir.oast.test/"
+      curl -s -b "{{cookie}}" -H "{{auth_header}}" -D - -o /dev/null "{{url}}?{{parameter}}=%2f%2ferlik-redir.oast.fun/"
     evaluators:
       - type: regex
-        pattern: '^Location:[ \t]*(?:https?:)?//erlik-redir\.oast\.test'
+        pattern: '^Location:[ \t]*(?:https?:)?//erlik-redir\.oast\.fun'
         emit_finding:
           vuln_type: Open Redirect via Encoded Path Separators
           severity: medium
@@ -67,11 +67,11 @@ steps:
     tool: curl
     when: no_finding_yet
     command: >-
-      curl -s -b "{{cookie}}" -H "{{auth_header}}" "{{url}}?{{parameter}}=//erlik-redir.oast.test/"
+      curl -s -b "{{cookie}}" -H "{{auth_header}}" "{{url}}?{{parameter}}=//erlik-redir.oast.fun/"
     evaluators:
       - type: llm
         instruction: >-
-          The request injected the marker host erlik-redir.oast.test as a
+          The request injected the marker host erlik-redir.oast.fun as a
           scheme-relative URL. Set matched=true ONLY if the response body sends
           the browser to that marker: a meta refresh whose content url is the
           marker, or script that assigns it to location, location.href,
