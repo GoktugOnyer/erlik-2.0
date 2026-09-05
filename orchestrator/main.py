@@ -154,12 +154,33 @@ async def _api_token_guard(request: Request, call_next):
     The comparison is constant-time. `provided != token` leaks the length of
     the matching prefix through timing, which is a real oracle against a shared
     secret an attacker can probe at will.
+
+    IT ALSO RESOLVES WHO IS ASKING. `ERLIK_API_TOKEN` authenticates a request
+    and identifies nobody, so nothing written to the database could be
+    attributed to a person -- `engagement_revisions` recorded the field, the
+    old value, the new value and the timestamp, and no actor. An operator with
+    their own token (see orchestrator/operators.py) is resolved here and
+    stamped on what follows.
+
+    `request.state.operator_id` is always set, and never to None. A request
+    that authenticated with the shared secret carries `opr_shared_token`, and
+    one on the unauthenticated loopback path carries `opr_unauthenticated`;
+    both are named for what they are, so no caller has to decide what a NULL
+    means and no report can print one as though it were a person.
     """
     from fastapi.responses import JSONResponse
+    from orchestrator import operators as _ops
     token = os.environ.get("ERLIK_API_TOKEN", "").strip()
     if not request.url.path.startswith("/api/") \
             or request.url.path in _UNAUTHENTICATED_PATHS:
         return await call_next(request)
+
+    # Identity for this request, resolved once and read by everything that
+    # writes a row. Never None: the two synthetic ids say plainly that the
+    # request was authenticated without anyone being identified, so a caller
+    # never has to invent a name for a NULL.
+    request.state.operator_id = _ops.UNAUTHENTICATED_OPERATOR
+    request.state.operator_name = _ops.UNAUTHENTICATED_LABEL
 
     if token:
         provided = request.headers.get("x-api-token", "")
@@ -167,7 +188,32 @@ async def _api_token_guard(request: Request, call_next):
             auth = request.headers.get("authorization", "")
             if auth.lower().startswith("bearer "):
                 provided = auth[7:].strip()
-        if not hmac.compare_digest(provided, token):
+
+        # An OPERATOR token is tried first, and only its own shape reaches the
+        # database -- so the shared secret is never used as a lookup key and an
+        # unknown token costs one indexed query, not a scan.
+        op_id = op_name = None
+        if _ops.looks_like_token(provided):
+            try:
+                db = await get_db()
+                try:
+                    op_id, op_name = await _ops.resolve(db, provided)
+                    if op_id:
+                        await _ops.touch(db, op_id)
+                finally:
+                    await db.close()
+            except Exception:
+                op_id = op_name = None      # a broken store must not authorise
+
+        if op_id:
+            request.state.operator_id = op_id
+            request.state.operator_name = op_name
+        elif hmac.compare_digest(provided, token):
+            # The shared secret still works, and is still honest about what it
+            # is. A run stamped with this is authenticated and unattributed.
+            request.state.operator_id = _ops.SHARED_TOKEN_OPERATOR
+            request.state.operator_name = _ops.SHARED_TOKEN_LABEL
+        else:
             return JSONResponse(
                 {"detail": "missing or invalid API token"}, status_code=401,
                 headers={"X-Erlik-Auth": "token-required"})
@@ -186,6 +232,18 @@ async def _api_token_guard(request: Request, call_next):
                 headers={"X-Erlik-Auth": "unconfigured"},
             )
     return await call_next(request)
+
+
+def _actor(request: Request) -> str:
+    """The operator id `_api_token_guard` resolved for this request.
+
+    Falls back to the unauthenticated id rather than None so a write site never
+    has to decide what a missing actor means -- and so a row can never be
+    stamped with a value that later reads as a person. The fallback is reached
+    only on paths the guard does not run for.
+    """
+    from orchestrator import operators as _ops
+    return getattr(request.state, "operator_id", None) or _ops.UNAUTHENTICATED_OPERATOR
 
 
 @app.exception_handler(RequestValidationError)
@@ -5696,7 +5754,7 @@ async def list_findings(engagement_id: str | None = None, severity: str | None =
 
 
 @app.put("/api/engagements/{engagement_id}")
-async def update_engagement(engagement_id: str, body: dict):
+async def update_engagement(engagement_id: str, body: dict, request: Request):
     """Correct an engagement record. Explicit save, previous value retained.
 
     PUT rather than PATCH-as-you-type on purpose: this record carries the
@@ -5707,7 +5765,8 @@ async def update_engagement(engagement_id: str, body: dict):
     db = await get_db()
     try:
         try:
-            result = await E.update(db, engagement_id, body or {})
+            result = await E.update(db, engagement_id, body or {},
+                                    operator_id=_actor(request))
         except KeyError:
             raise HTTPException(status_code=404, detail="engagement not found")
         await db.commit()
@@ -5719,14 +5778,16 @@ async def update_engagement(engagement_id: str, body: dict):
 
 
 @app.post("/api/engagements/{engagement_id}/archive")
-async def archive_engagement(engagement_id: str, body: dict | None = None):
+async def archive_engagement(engagement_id: str, request: Request,
+                             body: dict | None = None):
     """Close or reopen an engagement. Never deletes: sessions, findings, scope
     rules and assets all reference this row."""
     from orchestrator import engagement as E
     archived = True if not body else bool(body.get("archived", True))
     db = await get_db()
     try:
-        if not await E.archive(db, engagement_id, archived):
+        if not await E.archive(db, engagement_id, archived,
+                               operator_id=_actor(request)):
             raise HTTPException(status_code=404, detail="engagement not found")
         await db.commit()
         return await E.summary(db, engagement_id)
@@ -5743,6 +5804,89 @@ async def engagement_revisions(engagement_id: str):
         return {"revisions": await E.revisions(db, engagement_id)}
     finally:
         await db.close()
+
+
+@app.get("/api/operators")
+async def list_operators():
+    """Every operator, with what each has actually done.
+
+    Never returns a token or its hash. The two synthetic rows are included and
+    flagged `attributable: false` rather than hidden, because a deployment
+    where all the work sits under `opr_shared_token` is exactly the state an
+    operator needs to see.
+    """
+    from orchestrator import operators as _ops
+    db = await get_db()
+    try:
+        return {"operators": await _ops.listing(db)}
+    finally:
+        await db.close()
+
+
+@app.post("/api/operators")
+async def create_operator(body: dict, request: Request):
+    """Mint an operator. The token comes back ONCE and is never stored.
+
+    Any authenticated caller may do this, which is a real limitation:
+    possession of the shared token is enough to create a name. `created_by`
+    records which identity did it so the provenance is at least traceable, and
+    SECURITY.md states the limitation rather than implying an admin role that
+    does not exist.
+    """
+    from orchestrator import operators as _ops
+    name = (body or {}).get("name") or ""
+    db = await get_db()
+    try:
+        try:
+            created = await _ops.create(db, name, created_by=_actor(request))
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        return {
+            **created,
+            "warning": "This token is shown once and is not stored. "
+                       "It is bearer material: whoever holds it is this operator.",
+        }
+    finally:
+        await db.close()
+
+
+@app.post("/api/operators/{operator_id}/revoke")
+async def revoke_operator(operator_id: str):
+    """Withdraw one operator's access. The row is never deleted.
+
+    Deleting it would turn every run that IS attributable to this person into
+    one that reads as unattributed -- destroying the record instead of ending
+    the access.
+    """
+    from orchestrator import operators as _ops
+    db = await get_db()
+    try:
+        if not await _ops.revoke(db, operator_id):
+            raise HTTPException(
+                status_code=404,
+                detail="no active operator with that id (already revoked, "
+                       "unknown, or one of the synthetic identities)")
+        return {"revoked": operator_id}
+    finally:
+        await db.close()
+
+
+@app.get("/api/whoami")
+async def whoami(request: Request):
+    """Which identity this request is carrying.
+
+    The honest answer includes `attributable`, so a caller can tell an operator
+    from the shared token instead of reading a label and assuming it names a
+    person.
+    """
+    from orchestrator import operators as _ops
+    op_id = _actor(request)
+    return {
+        "operator_id": op_id,
+        "name": getattr(request.state, "operator_name", None)
+                or _ops.SYNTHETIC.get(op_id),
+        "attributable": _ops.is_attributable(op_id),
+    }
 
 
 @app.post("/api/engagements/{engagement_id}/scope")
@@ -5904,7 +6048,7 @@ async def get_test_case(test_case_id: str):
 
 
 @app.post("/api/v2/testcases/{test_case_id}/run")
-async def run_v2_test_case(test_case_id: str, body: dict):
+async def run_v2_test_case(test_case_id: str, body: dict, request: Request):
     """Execute one test case.
 
     Request body:
@@ -5938,7 +6082,8 @@ async def run_v2_test_case(test_case_id: str, body: dict):
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     run_id = await save_v2_run(result, provider=provider, model=model,
-                               engagement_id=engagement_id)
+                               engagement_id=engagement_id,
+                               operator_id=_actor(request))
     out = result.model_dump()
     out["run_id"] = run_id
     return out
@@ -6237,7 +6382,7 @@ async def get_v2_run_endpoint(run_id: str):
 
 
 @app.post("/api/v2/runs")
-async def run_v2_chain(body: dict):
+async def run_v2_chain(body: dict, request: Request):
     """Execute a root test case + auto-follow its chain.
 
     Body:
@@ -6266,7 +6411,8 @@ async def run_v2_chain(body: dict):
         provider=provider, model=model,
         max_depth=max_depth, max_runs=max_runs,
     )
-    saved = await save_v2_chain(chain_result, provider=provider, model=model)
+    saved = await save_v2_chain(chain_result, provider=provider, model=model,
+                                operator_id=_actor(request))
     out = chain_result.model_dump()
     out["root_run_id"] = saved["root_run_id"]
     out["run_ids"] = saved["run_ids"]
@@ -6704,7 +6850,7 @@ async def enforce_engagement_scope(engagement_id: str | None, target_url: str) -
 
 
 @app.post("/api/sessions", response_model=SessionResponse)
-async def create_session(data: SessionCreate):
+async def create_session(data: SessionCreate, request: Request):
     session_id = uuid.uuid4().hex[:12]
 
     # RQ3-b: if client passed a named toolset_preset, its tool list WINS over
@@ -6729,14 +6875,14 @@ async def create_session(data: SessionCreate):
             "INSERT INTO sessions (id, target_url, scope_mode, system_prompt, model, enabled_tools, "
             "session_type, parent_session_id, vuln_category, no_timeout, max_turns, "
             "toolset_preset, disable_stagnation, tool_timeout, run_config, scope_extra, "
-            "authorization_ref, engagement_id) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "authorization_ref, engagement_id, operator_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (session_id, data.target_url, data.scope_mode.value, data.system_prompt, data.model,
              enabled_tools_str, data.session_type, data.parent_session_id, data.vuln_category,
              1 if data.no_timeout else 0, effective_max_turns, data.toolset_preset,
              1 if data.disable_stagnation else 0, data.tool_timeout, _run_config_json,
              json.dumps(current_scope_extra()), data.authorization_ref,
-             data.engagement_id),
+             data.engagement_id, _actor(request)),
         )
         await db.commit()
         row = await db.execute("SELECT * FROM sessions WHERE id = ?", (session_id,))

@@ -77,12 +77,13 @@ caught. Follow them.
   states per-file which figures are regenerable and which are carried forward.
   Product changes may drift from these — that is fine, but say so rather than
   editing the historical record.
-- **What was out of scope for a thesis is now roadmap**: multi-tenancy and
-  user accounts (`ERLIK_API_TOKEN` is one shared secret identifying nobody, so
-  a run cannot be attributed to a person; it now covers reads, and an
-  unconfigured instance fails closed off-loopback), OAST/interactsh,
+- **What was out of scope for a thesis is now roadmap**: OAST/interactsh,
   per-session rate limiting, PDF and HackerOne export, and WSTG breadth (29 of
-  ~90+ cases).
+  ~90+ cases). Authentication has moved: the token covers reads, an
+  unconfigured instance fails closed off-loopback, and `orchestrator/operators.py`
+  gives each operator their own token so sessions, v2 runs and engagement
+  revisions record who did them. Still missing there: no login, no admin role
+  (any authenticated caller can mint an operator), and no multi-tenancy.
 - **Licensing matters more now.** `THIRD_PARTY_LICENSES.md` tracks vendored
   corpora — MIT and CC BY 4.0 sheets with different attribution obligations,
   plus GPL tooling in the Kali image. Shipping commercially makes these

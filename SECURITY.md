@@ -87,10 +87,32 @@ publicly. There is no bug bounty.
   protection against writes while every secret stayed readable. Both are
   closed.
 
-- **One shared secret, no users.** The token identifies nobody: there is no
-  account model, so a run cannot be attributed to a person and access cannot be
-  revoked for one operator without rotating it for everyone. That matters the
-  moment a client asks who authorised a test.
+- **Operators, and what they are not.** `ERLIK_API_TOKEN` still identifies
+  nobody, but it is no longer the only identity. An operator is a named row
+  with their own token (`POST /api/operators`, shown once, stored as a
+  SHA-256 — these are 256-bit random secrets, not passwords, so a password
+  hash buys nothing here). Their id is stamped on sessions, v2 runs and
+  engagement revisions, so "who ran this test and who changed the
+  authorisation record" is answerable from the data. Access can be withdrawn
+  from one person without rotating anyone else's token, and the row is never
+  deleted — deleting it would turn an attributable run into one that reads as
+  unattributed.
+
+  Requests that authenticate with the shared secret carry
+  `opr_shared_token`, and unauthenticated loopback requests carry
+  `opr_unauthenticated`. Both are real rows named for what they are, flagged
+  `attributable: false`, so nothing renders them as a person.
+
+  What this is **not**: there is no login, no password, no session and no
+  rotation policy. A token is bearer material — whoever holds it is that
+  operator. And **any authenticated caller can mint an operator**, so
+  possession of the shared token is enough to create a name; `created_by`
+  records which identity did it, which makes that traceable but not
+  prevented. An admin role is the next piece of work, not something this
+  already has.
+
+  Rows written before this existed have a NULL `operator_id` and read as
+  unattributed, which is the truth about them.
 - **Stored credentials are not encrypted.** `session_primitives.value` is plain
   `TEXT`.
 - **The scope guard is not a sandbox.** It refuses commands that *name* an

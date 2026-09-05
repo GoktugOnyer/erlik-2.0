@@ -247,3 +247,82 @@ class TestPayloadHostsDeclaration:
         cat = load_catalog()
         for tid in ("WSTG-CLNT-07", "WSTG-AUTHZ-05", "WSTG-INPV-19"):
             assert cat[tid].payload_hosts, f"{tid} declares nothing"
+
+
+class TestOperatorClaims:
+    """SECURITY.md now describes an operator model. Each limitation it admits
+    to is asserted against the code, and so is each capability -- a document
+    that overstates what erlik does is the defect this project treats as equal
+    to a crash, and one that understates it goes stale just as quietly."""
+
+    def test_the_shared_token_is_still_not_a_person(self):
+        from orchestrator import operators as O
+        assert O.is_attributable(O.SHARED_TOKEN_OPERATOR) is False
+        assert O.is_attributable(O.UNAUTHENTICATED_OPERATOR) is False
+
+    def test_tokens_are_stored_hashed_as_documented(self):
+        import inspect
+
+        from orchestrator import operators as O
+        assert "sha256" in inspect.getsource(O.token_hash)
+        t = O.new_token()
+        assert O.token_hash(t) != t
+
+    def test_revocation_does_not_delete_as_documented(self):
+        import inspect
+
+        from orchestrator import operators as O
+        src = inspect.getsource(O.revoke)
+        assert "DELETE" not in src.upper().replace("DELETING", "")
+
+    def test_there_is_no_admin_role_as_documented(self):
+        """The doc says any authenticated caller can mint an operator. If an
+        admin check is ever added, that paragraph must come out.
+
+        Checked against the CODE with the docstring stripped -- the endpoint's
+        own docstring explains that there is no admin role, so asserting over
+        the whole source matches the explanation and fails on the honest
+        version. Same trap as the constant-time check above.
+        """
+        import ast
+        import inspect
+        import textwrap
+
+        import orchestrator.main as M
+        tree = ast.parse(textwrap.dedent(inspect.getsource(M.create_operator)))
+        fn = tree.body[0]
+        if (fn.body and isinstance(fn.body[0], ast.Expr)
+                and isinstance(fn.body[0].value, ast.Constant)):
+            fn.body = fn.body[1:]
+        code = ast.unparse(fn)
+        for word in ("is_admin", "require_admin", "_role"):
+            assert word not in code, (
+                f"create_operator now checks {word!r}; SECURITY.md still says "
+                "any authenticated caller can mint an operator"
+            )
+
+    def test_provenance_is_recorded_as_documented(self):
+        import inspect
+
+        from orchestrator import operators as O
+        assert "created_by" in inspect.getsource(O.create)
+
+    def test_the_three_stamped_tables_are_the_ones_documented(self):
+        import asyncio
+        import pathlib
+        import sqlite3
+        import tempfile
+
+        import orchestrator.database as db_mod
+        with tempfile.TemporaryDirectory() as d:
+            old = db_mod.DB_DIR, db_mod.DB_PATH
+            db_mod.DB_DIR = pathlib.Path(d)
+            db_mod.DB_PATH = pathlib.Path(d) / "t.db"
+            try:
+                asyncio.run(db_mod.init_db())
+                con = sqlite3.connect(db_mod.DB_PATH)
+                for t in ("sessions", "v2_runs", "engagement_revisions"):
+                    cols = [r[1] for r in con.execute(f"PRAGMA table_info({t})")]
+                    assert "operator_id" in cols, t
+            finally:
+                db_mod.DB_DIR, db_mod.DB_PATH = old
