@@ -24,7 +24,8 @@ async def _asset_for(db, engagement_id: str | None, url: str | None) -> str | No
 
 async def save_run(result: RunResult, *, provider: str | None, model: str | None,
                    chain_root_run_id: str | None = None,
-                   engagement_id: str | None = None) -> str:
+                   engagement_id: str | None = None,
+                   operator_id: str | None = None) -> str:
     """Persist a single RunResult. Returns the new run_id.
 
     `engagement_id` is the customer this run belongs to. It has to be PASSED
@@ -41,8 +42,8 @@ async def save_run(result: RunResult, *, provider: str | None, model: str | None
             """INSERT INTO v2_runs
                (id, test_case_id, target_json, provider, model, duration_ms,
                 stopped_early, chain_root_run_id, steps_json, chain_next_json,
-                engagement_id, not_assessed_json)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                engagement_id, not_assessed_json, operator_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 run_id,
                 result.test_case_id,
@@ -57,6 +58,7 @@ async def save_run(result: RunResult, *, provider: str | None, model: str | None
                 engagement_id,
                 json.dumps([n.model_dump() for n in result.not_assessed])
                 if result.not_assessed else None,
+                operator_id,
             ),
         )
         # Same inventory as the agent lane. Without this the deterministic
@@ -128,20 +130,29 @@ async def save_run(result: RunResult, *, provider: str | None, model: str | None
 
 
 async def save_chain(chain: ChainRun, *, provider: str | None, model: str | None,
-                     engagement_id: str | None = None) -> dict[str, Any]:
+                     engagement_id: str | None = None,
+                     operator_id: str | None = None) -> dict[str, Any]:
     """Persist a ChainRun. Returns {root_run_id, run_ids}.
 
     The root carries the engagement explicitly and each child inherits it via
     chain_root_run_id, so a chained run belongs to the same customer as the run
     that started it.
+
+    The operator is stamped on EVERY run, root and children alike, rather than
+    only the root. A chain is one person's action; leaving the children NULL
+    would make "who ran this" answerable for the first case in a chain and
+    unanswerable for the rest of it -- and the engagement is inherited through
+    a lookup the children can do, whereas an operator is not recoverable from
+    the row at all once it is missing.
     """
     if not chain.runs:
         return {"root_run_id": None, "run_ids": []}
     root_id = await save_run(chain.runs[0], provider=provider, model=model,
-                             engagement_id=engagement_id)
+                             engagement_id=engagement_id, operator_id=operator_id)
     ids = [root_id]
     for r in chain.runs[1:]:
-        rid = await save_run(r, provider=provider, model=model, chain_root_run_id=root_id)
+        rid = await save_run(r, provider=provider, model=model,
+                             chain_root_run_id=root_id, operator_id=operator_id)
         ids.append(rid)
     return {"root_run_id": root_id, "run_ids": ids}
 

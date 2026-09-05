@@ -406,6 +406,41 @@ async def init_db():
                 except Exception:
                     pass  # column already exists
 
+        # WHO RAN IT. `ERLIK_API_TOKEN` is one shared secret that identifies
+        # nobody, so until now no run and no engagement edit could be
+        # attributed to a person. `engagement_revisions` in particular records
+        # the field, the old value, the new value and the timestamp -- an audit
+        # trail with no actor, which is the one column an audit trail exists
+        # for.
+        #
+        # See orchestrator/operators.py. The two synthetic ids are seeded here
+        # so that every row can carry an operator and nothing has to special
+        # case NULL; both are honest about identifying no one.
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS operators (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                token_hash TEXT,
+                status TEXT NOT NULL DEFAULT 'active',
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                last_seen_at TEXT,
+                created_by TEXT
+            )
+        """)
+        # Unique so two operators cannot share a token, which would put the
+        # attribution back where it started. Partial, because the synthetic
+        # rows have no token and NULLs must not collide.
+        await db.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_operators_token "
+            "ON operators(token_hash) WHERE token_hash IS NOT NULL")
+        for _id, _name in (
+            ("opr_shared_token", "shared token (not attributed to a person)"),
+            ("opr_unauthenticated", "unauthenticated (no token configured)"),
+        ):
+            await db.execute(
+                "INSERT OR IGNORE INTO operators (id, name, token_hash, status) "
+                "VALUES (?, ?, NULL, 'active')", (_id, _name))
+
         # Evaluators that could not reach a verdict on this run. Additive.
         #
         # Without it a stored run cannot answer "was this actually checked?".
@@ -749,6 +784,34 @@ async def init_db():
                     f"ALTER TABLE {table} ADD COLUMN {col} TEXT DEFAULT NULL")
             except Exception:
                 pass  # column already exists
+
+        # WHO DID IT, on the three tables that answer "who ran this test and
+        # who changed the authorisation record". Runs last, after every CREATE
+        # above, because ALTER on a table that does not exist yet raises the
+        # same Exception as "column already exists" and the bare except would
+        # swallow it -- which is exactly what happened on the first attempt:
+        # engagement_revisions is created below the point this was originally
+        # placed, and silently never got the column.
+        #
+        # Nullable on purpose. Rows written before erlik could attribute
+        # anything must read as unattributed, not be assigned to whoever
+        # happens to be first.
+        for _t in ("sessions", "v2_runs", "engagement_revisions"):
+            try:
+                await db.execute(
+                    f"ALTER TABLE {_t} ADD COLUMN operator_id TEXT DEFAULT NULL")
+            except Exception:
+                pass  # column already exists
+
+        # Who minted this operator. Any authenticated caller can create one, so
+        # without this an attacker holding the shared token could add an
+        # operator and every subsequent action would be attributed to a name
+        # nobody recognises, with no way to trace where it came from.
+        try:
+            await db.execute(
+                "ALTER TABLE operators ADD COLUMN created_by TEXT DEFAULT NULL")
+        except Exception:
+            pass  # column already exists
 
         await db.commit()
 
