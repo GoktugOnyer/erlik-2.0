@@ -624,12 +624,35 @@ def _scope_violation(command: str, target_url: str | None,
     return None
 
 
+# One leading `NAME=VALUE` assignment, the ordinary shell way to set a variable
+# for a single command. The value may be quoted and contain spaces.
+_ENV_PREFIX = r'[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|\'[^\']*\'|\S*)\s+'
+
+
 def _extract_tool_name(command: str) -> str | None:
-    """Extract the base tool name from a shell command."""
-    # Strip leading env vars, sudo, timeout wrappers
-    cmd = re.sub(r'^(sudo\s+|timeout\s+\d+\s+|env\s+\S+=\S+\s+)*', '', command.strip())
+    """Extract the base tool name from a shell command.
+
+    Returns None when the segment runs no program at all -- a bare assignment
+    such as `S="value"` is not a program and must not be reported as one.
+
+    The env-prefix case is why WSTG-CONF-04 could not run: it pipes into
+    `LC_ALL=C tr`, the old pattern stripped only the `env FOO=bar` COMMAND form
+    and not the bare prefix, so the segment's program name came back as
+    'LC_ALL=C' and the toolset guard refused all four of its steps. The failure
+    was in the safe direction -- a NAME=VALUE token can never equal an allowed
+    name, so such a command is refused rather than admitted -- but the case was
+    dead, and it is `tr` that should have been checked.
+    """
+    cmd = re.sub(r'^(sudo\s+|timeout\s+\d+\s+|env\s+\S+=\S+\s+|' + _ENV_PREFIX + r')*',
+                 '', command.strip())
     parts = cmd.split()
     if not parts:
+        return None
+    # A segment that is ONLY assignments -- `S="value"` with no command after
+    # it -- runs no program. The prefix pattern above needs trailing space to
+    # match, so such a segment survives it intact and would otherwise be
+    # reported as a program named `S="value"`.
+    if re.match(r'^[A-Za-z_][A-Za-z0-9_]*=', parts[0]):
         return None
     tool = parts[0].split("/")[-1]  # handle /usr/bin/nmap -> nmap
     return tool
