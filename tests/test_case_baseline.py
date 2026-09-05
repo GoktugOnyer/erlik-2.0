@@ -50,9 +50,10 @@ def _module():
 CB = _module()
 
 
-def _rec(findings=(), not_assessed=(), refused=(), failed=()):
+def _rec(findings=(), not_assessed=(), refused=(), denied=(), failed=()):
     return {"findings": list(findings), "not_assessed": list(not_assessed),
-            "refused": list(refused), "failed_steps": list(failed)}
+            "refused": list(refused), "denied": list(denied),
+            "failed_steps": list(failed)}
 
 
 def _snap(cases, skipped=None, unrunnable=None):
@@ -86,7 +87,8 @@ class TestTheComparisonCanFail:
         d = CB._diff(before, after)
         assert d and "NEWLY" in d[0], d
 
-    @pytest.mark.parametrize("field", ["not_assessed", "refused", "failed_steps"])
+    @pytest.mark.parametrize("field", ["not_assessed", "refused", "denied",
+                                       "failed_steps"])
     def test_every_recorded_field_is_compared(self, field):
         """A field recorded and never diffed is decoration. `refused` in
         particular: a scope guard that started refusing every step would leave
@@ -225,9 +227,17 @@ class TestTheMeasurementIsHonest:
         self._measured(targets["web"], "", only={"WSTG-CONF-02"})
         assert (os.environ.get("ERLIK_NATIVE"), TE.ERLIK_NATIVE) == before
 
-    def test_a_scope_refusal_is_not_a_step_failure(self):
-        """They mean different things to whoever reads the baseline: refused is
-        the guard doing its job, failed is the command not working."""
+    def test_refused_denied_and_broken_are_three_different_things(self):
+        """They mean three different things to whoever reads the baseline:
+        refused is outside the engagement, denied is inside it and not
+        authorised, failed is the command not working.
+
+        The first CI run recorded WSTG-CONF-06's `put_probe` as FAILED when
+        safe mode had refused it — "HTTP write verb (DELETE/PUT/PATCH)... this
+        engagement has not authorised destructive testing". That is the guard
+        working, and whoever read the baseline would have gone looking for a
+        broken curl invocation.
+        """
         class _S:
             def __init__(self, step, success, error):
                 self.step, self.success, self.error = step, success, error
@@ -235,12 +245,33 @@ class TestTheMeasurementIsHonest:
         class _R:
             steps = [_S("a", False, "scope violation: host 'x' is not allowed"),
                      _S("b", False, "curl: (7) connection refused"),
+                     _S("d", False, "SAFE_MODE: HTTP write verb (DELETE/PUT/PATCH)"),
                      _S("c", True, None)]
             findings = []
             not_assessed = []
 
         n = CB._normalise(_R())
-        assert n["refused"] == ["a"] and n["failed_steps"] == ["b"]
+        assert n["refused"] == ["a"], n
+        assert n["denied"] == ["d"], n
+        assert n["failed_steps"] == ["b"], n
+
+    def test_the_real_put_probe_is_denied_not_broken(self):
+        """Asserted against the shipped safe-mode guard and the shipped case,
+        not a re-typed error string: a test carrying its own copy of the
+        message passes even after the guard stops producing it."""
+        from orchestrator.testcase import find_by_id
+        from orchestrator.testcase.runner import _render
+        from orchestrator.tool_executor import _safe_mode_violation
+        step = next(x for x in find_by_id("WSTG-CONF-06").steps
+                    if x.name == "put_probe")
+        cmd = _render(step.command, {"url": "http://127.0.0.1:3000",
+                                     "cookie": "", "auth_header": ""})
+        why = _safe_mode_violation(cmd, enabled=True)
+        assert why, "safe mode no longer refuses the PUT probe"
+        assert CB._normalise(type("R", (), {
+            "steps": [type("S", (), {"step": "put_probe", "success": False,
+                                     "error": f"SAFE_MODE: {why}"})()],
+            "findings": [], "not_assessed": []})())["denied"] == ["put_probe"]
 
 
 class TestCIActuallyRunsIt:

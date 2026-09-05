@@ -73,18 +73,36 @@ def _normalise(result) -> dict:
     names and evidence excerpts all change run to run, and a baseline that
     included them would fail every time while proving nothing. What is kept is
     what an operator would act on: which vulnerability types were reported,
-    which steps could not be assessed, and which the scope guard refused.
+    which steps could not be assessed, and which were refused, denied or
+    broken — three different things, kept apart deliberately.
     """
-    refused, failed = [], []
+    refused, denied, failed = [], [], []
     for s in result.steps:
         if s.success:
             continue
-        (refused if str(s.error or "").startswith("scope violation") else failed
-         ).append(s.step)
+        e = str(s.error or "")
+        # THREE DIFFERENT THINGS, and collapsing them is the mislabelling this
+        # project treats as equal to a crash. Measured on the first CI run:
+        # WSTG-CONF-06's `put_probe` was recorded as a FAILED step, when what
+        # actually happened is that safe mode refused it —
+        #
+        #   HTTP write verb (DELETE/PUT/PATCH) — can modify or destroy client
+        #   data. Safe mode is on; this engagement has not authorised
+        #   destructive testing.
+        #
+        # — which is the guard working, not the command breaking. Whoever read
+        # that baseline would have gone looking for a broken curl invocation.
+        if e.startswith("scope violation"):
+            refused.append(s.step)          # out of the engagement's scope
+        elif e.startswith("SAFE_MODE:"):
+            denied.append(s.step)           # in scope, not authorised
+        else:
+            failed.append(s.step)           # the command itself did not work
     return {
         "findings": sorted({f.vuln_type for f in (result.findings or [])}),
         "not_assessed": sorted({n.step for n in (result.not_assessed or [])}),
         "refused": sorted(set(refused)),
+        "denied": sorted(set(denied)),
         "failed_steps": sorted(set(failed)),
     }
 
@@ -153,7 +171,8 @@ def _diff(expected: dict, actual: dict) -> list[str]:
         if cid not in a_cases:
             out.append(f"{cid}: in the baseline and did not run")
             continue
-        for field in ("findings", "not_assessed", "refused", "failed_steps"):
+        for field in ("findings", "not_assessed", "refused", "denied",
+                      "failed_steps"):
             e, a = e_cases[cid].get(field) or [], a_cases[cid].get(field) or []
             if e == a:
                 continue
