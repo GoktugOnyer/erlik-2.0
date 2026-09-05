@@ -1,6 +1,19 @@
 id: WSTG-INPV-19
 name: Server-Side Request Forgery
 category: Input Validation
+# All PAYLOAD: each of these is put in a parameter VALUE for THE TARGET to
+# fetch. erlik connects only to `url`, and an SSRF probe that may not name an
+# address other than the target is not a probe.
+#
+#   169.254.169.254            AWS/Azure instance metadata (RFC 3927 link-local)
+#   metadata.google.internal   the GCP equivalent
+#   localhost                  the TARGET's own loopback, the classic
+#                              internal-service reach
+payload_hosts:
+  - 169.254.169.254
+  - metadata.google.internal
+  - localhost
+
 attack_class: ssrf
 severity: high
 references:

@@ -97,6 +97,28 @@ publicly. There is no bug bounty.
   unrelated public host. It cannot stop a tool from following a redirect, and
   it is not a network control. Put erlik on a network that cannot reach what it
   must not touch.
+
+  Because it refuses on the *name*, three WSTG cases could not run at all:
+  their probes have to name a host that is not the target — CLNT-07 sends an
+  attacker `Origin:`, AUTHZ-05 offers an unregistered `redirect_uri`, INPV-19
+  asks the target to fetch the cloud metadata address. In each, erlik's own
+  socket goes only to the in-scope target and the host is a header or
+  parameter *value*.
+
+  A case may now declare those in `payload_hosts:`. The declaration lives in
+  committed, reviewed YAML and is deliberately narrow: exact hostnames only —
+  a glob is rejected by the schema — matching the declared name and names
+  under it, never a sibling or a different TLD; it applies to that case alone;
+  it never covers the case's own target, which is checked against the
+  engagement scope exactly as before; a declared host no step actually names
+  is a test failure, so unused permissions cannot accumulate; and
+  **`deny_hosts` always wins**, so an operator's explicit exclusion cannot be
+  reversed by a case file.
+
+  What it does not do is prove the host is unreachable. A case author who
+  wrote `curl http://declared-host/` would connect there — the same trust
+  already placed in the step's command itself. Nothing in the agent lane
+  changed; that lane has its own guard and its own OAST allowlist.
 - **`ERLIK_NATIVE=1` removes the container boundary.** Commands run as your
   user on your machine.
 - **A remote LLM provider sees your prompts.** With `ERLIK_LLM_PROVIDER=openai`,

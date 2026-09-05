@@ -111,6 +111,59 @@ class TestCase(BaseModel):
     # the whole time. Correct attribution needs a second opinion, and the case
     # itself is the one source that knows what it tests.
     attack_class: Optional[str] = None
+
+    # Hosts this case names as PAYLOAD, never as a destination.
+    #
+    # Some probes cannot be written without naming a host that is not the
+    # target: CLNT-07 has to send an attacker `Origin:` or it is not testing
+    # CORS, AUTHZ-05 has to offer an unregistered `redirect_uri`, and INPV-19
+    # has to ask the target to fetch the cloud metadata address. In each case
+    # erlik's own socket goes only to the in-scope target and the host appears
+    # in a header or parameter VALUE.
+    #
+    # `scope.check_command` extracts every host-shaped substring of a rendered
+    # command and refuses anything outside the engagement, which is right for a
+    # guard on where erlik connects -- but it meant those three cases aborted
+    # at their first step on every run and had never produced a result.
+    #
+    # A declaration here, in committed and reviewed YAML, is the narrow way to
+    # say "this string is data". It is deliberately weak on purpose:
+    #
+    #   * exact hostnames only, no globs -- a wildcard is how a per-case
+    #     allowance becomes a general bypass;
+    #   * it never covers the case's own target, which is checked against the
+    #     engagement scope as before;
+    #   * `deny_hosts` still wins, so an operator's explicit refusal cannot be
+    #     overridden by a case file;
+    #   * it applies to THIS case only, and a declared host that no step
+    #     actually names is a test failure, so unused permissions cannot
+    #     accumulate.
+    #
+    # It does not, and cannot, prove the host is unreachable -- a case author
+    # who wrote `curl http://declared-host/` would connect there. That is the
+    # same trust already placed in the step's command itself.
+    payload_hosts: list[str] = Field(default_factory=list)
+
+    @field_validator("payload_hosts")
+    @classmethod
+    def _payload_hosts_are_plain_exact_hosts(cls, v: list[str]) -> list[str]:
+        out = []
+        for h in v:
+            h = (h or "").strip().lower()
+            if not h:
+                raise ValueError("payload_hosts entries must not be empty")
+            if any(c in h for c in "*?["):
+                raise ValueError(
+                    f"payload_hosts must name exact hosts, not patterns: {h!r}. "
+                    "A glob turns a per-case allowance into a general bypass."
+                )
+            if "://" in h or "/" in h or " " in h:
+                raise ValueError(
+                    f"payload_hosts takes a bare hostname, not a URL: {h!r}"
+                )
+            out.append(h)
+        return out
+
     steps: list[TestStep]
     chain: Optional[ChainRule] = None
 
