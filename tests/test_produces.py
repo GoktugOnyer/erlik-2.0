@@ -207,17 +207,17 @@ class TestHarvestIsActuallyCalled:
         return asyncio.run(R._run_evaluator(e, sr, tc, {}, None, None))
 
     def test_run_evaluator_returns_what_it_harvested(self):
-        _, _, _, produced = self._evaluate(r"^Disallow:\s*(\S+)",
-                                           {"endpoint": 1}, ROBOTS)
+        _, _, _, produced, _ = self._evaluate(r"^Disallow:\s*(\S+)",
+                                              {"endpoint": 1}, ROBOTS)
         assert produced == {"endpoint": ["/ftp", "/admin", "/api/internal", "/backup"]}
 
     def test_run_evaluator_returns_nothing_without_produces(self):
-        _, _, _, produced = self._evaluate(r"^Disallow:", None, ROBOTS)
+        _, _, _, produced, _ = self._evaluate(r"^Disallow:", None, ROBOTS)
         assert produced == {}
 
     def test_a_producing_evaluator_still_reports_a_match(self):
-        finding, _, _, produced = self._evaluate(r"^Disallow:\s*(\S+)",
-                                                 {"endpoint": 1}, ROBOTS)
+        finding, _, _, produced, _ = self._evaluate(r"^Disallow:\s*(\S+)",
+                                                    {"endpoint": 1}, ROBOTS)
         assert produced, "harvest did not run through the evaluator"
 
     def test_run_test_case_accumulates_across_evaluators(self):

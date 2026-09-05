@@ -41,8 +41,8 @@ async def save_run(result: RunResult, *, provider: str | None, model: str | None
             """INSERT INTO v2_runs
                (id, test_case_id, target_json, provider, model, duration_ms,
                 stopped_early, chain_root_run_id, steps_json, chain_next_json,
-                engagement_id)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                engagement_id, not_assessed_json)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 run_id,
                 result.test_case_id,
@@ -55,6 +55,8 @@ async def save_run(result: RunResult, *, provider: str | None, model: str | None
                 json.dumps([s.model_dump() for s in result.steps]),
                 json.dumps(result.chain_next),
                 engagement_id,
+                json.dumps([n.model_dump() for n in result.not_assessed])
+                if result.not_assessed else None,
             ),
         )
         # Same inventory as the agent lane. Without this the deterministic

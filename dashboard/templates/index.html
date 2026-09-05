@@ -3744,6 +3744,16 @@
             if (failed) return {kind: 'error', label: 'step failed',
                                 color: 'var(--neon-orange)',
                                 why: failed.error || failed.step};
+            // Structured first: an evaluator that could not reach a verdict
+            // reports itself here. It used to report nothing at all -- an LLM
+            // evaluator with an unreachable backend set matched=false, which is
+            // the same value as a clean verdict, so the row rendered green for
+            // a check that never ran.
+            const na = d.not_assessed || [];
+            if (na.length) return {kind: 'unassessed', label: 'not assessed',
+                                   color: 'var(--neon-yellow)',
+                                   why: na.map(x => `${x.step}: ${x.reason}`).join(' | ')};
+            // Then the in-band markers a case emits in its own output.
             for (const s of steps) {
                 const m = TL_NOT_ASSESSED.exec(s.output || '');
                 if (m) return {kind: 'unassessed', label: 'not assessed',
