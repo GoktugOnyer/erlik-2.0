@@ -1,6 +1,13 @@
 id: WSTG-CLNT-07
 name: Cross Origin Resource Sharing
 category: Client-side
+# The attacker origin is PAYLOAD: it is sent as a header VALUE and curl connects
+# only to `url`. Without this declaration `scope.check_command` refused the
+# first step on every run and the case had never produced a result -- a CORS
+# test cannot be written without naming an origin that is not the target.
+payload_hosts:
+  - evil.oastify.com
+
 attack_class: cors
 severity: medium
 references:

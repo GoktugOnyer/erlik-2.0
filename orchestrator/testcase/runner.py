@@ -373,7 +373,8 @@ async def run_test_case(
             # Safety floor: every command must pass scope check before exec.
             if scope is not None:
                 try:
-                    check_command(cmd, scope, primary_url=_primary_url(target))
+                    check_command(cmd, scope, primary_url=_primary_url(target),
+                                  payload_hosts=tc.payload_hosts)
                 except ScopeViolation as e:
                     result.steps.append(StepResult(
                         step=step.name,

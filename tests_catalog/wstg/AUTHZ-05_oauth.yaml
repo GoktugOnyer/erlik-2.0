@@ -1,6 +1,17 @@
 id: WSTG-AUTHZ-05
 name: OAuth Authorisation Flow Weaknesses
 category: Authorization
+# PAYLOAD, not a destination: both probes put this host in a `redirect_uri`
+# query VALUE to see whether the authorisation server accepts an unregistered
+# callback. curl connects only to `url`. `.example` is RFC 2606 reserved and
+# cannot be registered by anyone.
+#
+# The suffix-confusion probe offers `{{url}}.erlik-not-registered.example`, so
+# the host it names depends on the target -- which is why payload_hosts permits
+# names UNDER a declared domain rather than only the exact string.
+payload_hosts:
+  - erlik-not-registered.example
+
 attack_class: oauth
 severity: high
 references:

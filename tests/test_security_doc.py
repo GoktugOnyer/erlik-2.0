@@ -198,3 +198,52 @@ class TestEveryWriteSiteCarriesTheColumn:
             assert len(stmts) == expected, f"{table}: found {len(stmts)}, expected {expected}"
             for st in stmts:
                 assert "authorization_ref" in st, f"{table} INSERT missing the column: {st[:90]}"
+
+class TestPayloadHostsDeclaration:
+    """SECURITY.md now describes a way a case can name a host outside the
+    engagement. Every constraint it promises is asserted against the code --
+    a documented limit that does not hold is worse than no document."""
+
+    def test_globs_are_rejected_as_documented(self):
+        import pytest as _pytest
+        from pydantic import ValidationError
+
+        from orchestrator.testcase.schema import TestCase as _Case
+        with _pytest.raises(ValidationError):
+            _Case(id="X", name="n", category="c", payload_hosts=["*.evil.example"],
+                  steps=[{"name": "s", "tool": "curl", "command": "curl x"}])
+
+    def test_deny_hosts_still_wins_as_documented(self):
+        import pytest as _pytest
+
+        from orchestrator.testcase.scope import (Scope, ScopeViolation,
+                                                 check_command)
+        scope = Scope(allow_hosts=["127.0.0.1"], deny_hosts=["evil.example"])
+        with _pytest.raises(ScopeViolation):
+            check_command('curl -H "Origin: https://evil.example" "http://127.0.0.1/"',
+                          scope, payload_hosts=["evil.example"])
+
+    def test_it_does_not_cover_the_target_as_documented(self):
+        import pytest as _pytest
+
+        from orchestrator.testcase.scope import (Scope, ScopeViolation,
+                                                 check_command)
+        with _pytest.raises(ScopeViolation):
+            check_command('curl "http://evil.example/"', Scope(allow_hosts=["127.0.0.1"]),
+                          primary_url="http://evil.example/",
+                          payload_hosts=["evil.example"])
+
+    def test_the_agent_lane_is_untouched_as_documented(self):
+        """The doc says the agent lane has its own guard and its own OAST
+        allowlist, and that nothing there changed."""
+        import inspect
+
+        import orchestrator.tool_executor as TE
+        assert "payload_hosts" not in inspect.getsource(TE._scope_violation)
+        assert TE._OAST_DOMAINS
+
+    def test_the_three_cases_the_doc_names_do_declare(self):
+        from orchestrator.testcase import load_catalog
+        cat = load_catalog()
+        for tid in ("WSTG-CLNT-07", "WSTG-AUTHZ-05", "WSTG-INPV-19"):
+            assert cat[tid].payload_hosts, f"{tid} declares nothing"
