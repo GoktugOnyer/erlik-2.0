@@ -35,12 +35,45 @@
                 } catch (e) { /* ignore */ }
                 const resp = await _f(url, opts);
                 if (resp.status === 401 && typeof url === 'string' && url.indexOf('/api/') === 0) {
-                    const t = prompt('API token required (ERLIK_API_TOKEN). Enter it to continue:');
-                    if (t) { try { localStorage.setItem('erlik_api_token', t); } catch (e) {} location.reload(); }
+                    // Two different 401s. The server labels them, because
+                    // prompting for a token an unconfigured instance does not
+                    // have would loop forever asking for a secret that does
+                    // not exist -- and the operator would read every failure
+                    // as "I typed it wrong".
+                    if (resp.headers.get('X-Erlik-Auth') === 'unconfigured') {
+                        _erlikAuthBanner();
+                    } else {
+                        const t = prompt('API token required (ERLIK_API_TOKEN). Enter it to continue:');
+                        if (t) { try { localStorage.setItem('erlik_api_token', t); } catch (e) {} location.reload(); }
+                    }
                 }
                 return resp;
             };
         })();
+
+        // Shown once, not per failed request: an unconfigured off-loopback
+        // instance refuses every /api/* call, so the app would otherwise just
+        // render empty with no stated reason.
+        let _erlikAuthBannerShown = false;
+        function _erlikAuthBanner() {
+            if (_erlikAuthBannerShown) return;
+            _erlikAuthBannerShown = true;
+            const show = function () {
+                const d = document.createElement('div');
+                d.id = 'erlik-auth-banner';
+                d.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:9999;'
+                    + 'background:#2d0d12;color:#ffb3c0;border-bottom:1px solid #ff2d55;'
+                    + 'padding:10px 16px;font:13px/1.5 monospace;';
+                d.textContent = 'This instance is reachable off-loopback and has no '
+                    + 'ERLIK_API_TOKEN configured, so the API is refusing every request. '
+                    + 'Set ERLIK_API_TOKEN and restart \u2014 or set '
+                    + 'ERLIK_ALLOW_UNAUTHENTICATED=1 if authentication is enforced in '
+                    + 'front of it.';
+                document.body.appendChild(d);
+            };
+            if (document.body) show();
+            else document.addEventListener('DOMContentLoaded', show);
+        }
     </script>
     <style>
         /* ===== CSS Custom Properties ===== */

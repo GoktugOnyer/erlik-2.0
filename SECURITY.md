@@ -44,6 +44,7 @@ publicly. There is no bug bounty.
 | Submission policy — demote informational classes in reports | on | `orchestrator/submission_policy.py`, `policy_catalog/never_submit.yaml` |
 | Scope audit — flag findings naming a host outside the snapshot | on | `orchestrator/main.py` (`_scope_audit`) |
 | API token on every `/api/*` request, reads included | **off** | `orchestrator/main.py` (`_api_token_guard`) |
+| Refuse `/api/*` off-loopback when no token is set | on | `orchestrator/main.py` (`_api_token_guard`) |
 | Skill authoring (writes files into the agent prompt) | **off** | `orchestrator/skills_authoring.py` |
 | Bind address | `127.0.0.1` | `run.sh` (`ERLIK_HOST`) |
 
@@ -55,25 +56,36 @@ publicly. There is no bug bounty.
 | `ERLIK_SCOPE_EXTRA_HOSTS` | empty | Comma-separated globs added to scope; snapshotted per session |
 | `ERLIK_SAFE_MODE` | `1` | `0` permits destructive commands |
 | `ERLIK_API_TOKEN` | unset | When set, **every** `/api/*` request requires it, reads included. `/api/health` stays open for liveness checks |
-| `ERLIK_HOST` | `127.0.0.1` | `0.0.0.0` exposes the API to the network |
+| `ERLIK_HOST` | `127.0.0.1` | `0.0.0.0` exposes the API to the network; with no `ERLIK_API_TOKEN` set, `/api/*` then refuses every request |
+| `ERLIK_ALLOW_UNAUTHENTICATED` | unset | `1` waives that refusal, for an instance behind an authenticating proxy. It does **not** waive a configured `ERLIK_API_TOKEN` |
 | `ERLIK_NATIVE` | unset | When set, commands run **on the host as your user**, not in the container |
 | `ERLIK_LLM_PROVIDER` | `ollama` | `openai` sends prompts to a third party (`orchestrator/llm_client.py`) |
 | `ERLIK_SKILL_AUTHORING` | unset | `1` enables writing skill sheets from the dashboard. Requires `ERLIK_API_TOKEN`, loopback, and non-native mode |
 
 ## What erlik does NOT protect
 
-- **The API is unauthenticated by default.** `_api_token_guard` engages only
-  when `ERLIK_API_TOKEN` is set. With no token, anything that can reach the
-  port can read every session, finding and stored credential. `run.sh` binds
-  loopback; several scripts under `scripts/` bind `0.0.0.0`.
+- **The API is unauthenticated on loopback.** With no `ERLIK_API_TOKEN`,
+  anything that can reach `127.0.0.1` can read every session, finding and
+  stored credential. That is the local development and thesis workflow and it
+  is deliberate.
 
-  When a token *is* set the guard now covers reads as well as writes. It did
-  not until recently: it ran only on `POST/PUT/PATCH/DELETE`, so a deployment
-  that set a token still served 52 `GET` routes to anyone who could reach the
-  port — `/api/engagements`, `/api/v2/targets/credentials`, `/api/findings`,
-  every report format, and `/api/thesis/export`, which returns nine tables.
-  Setting a token bought protection against writes while every secret stayed
-  readable.
+  It no longer extends off-loopback. An unconfigured instance that looks
+  network-reachable refuses `/api/*` with a 401 naming the variable that fixes
+  it. Two signals decide it, because each alone has a blind spot: `ERLIK_HOST`
+  (which `run.sh` sets and which several scripts under `scripts/` set to
+  `0.0.0.0`) and the peer address of the request itself, since
+  `uvicorn --host 0.0.0.0` typed by hand sets nothing. A forwarded header
+  counts as remote on its own — behind a proxy the peer address is loopback
+  and therefore no evidence at all. `ERLIK_ALLOW_UNAUTHENTICATED=1` waives it.
+
+  Until recently there was no such fallback: an install that set nothing served
+  every route to whoever could reach the port. And when a token *was* set the
+  guard ran only on `POST/PUT/PATCH/DELETE`, so a deployment that configured
+  one still served 52 `GET` routes — `/api/engagements`,
+  `/api/v2/targets/credentials`, `/api/findings`, every report format, and
+  `/api/thesis/export`, which returns nine tables. Setting a token bought
+  protection against writes while every secret stayed readable. Both are
+  closed.
 
 - **One shared secret, no users.** The token identifies nobody: there is no
   account model, so a run cannot be attributed to a person and access cannot be
