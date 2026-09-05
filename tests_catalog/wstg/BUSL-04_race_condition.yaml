@@ -8,8 +8,37 @@ references:
 
 # Typical use: redeem a single-use coupon / withdraw funds / apply a discount.
 # `request_template` is a curl command body the user supplies — we fire it
-# `parallel_n` times and the LLM judges whether more than one attempt
-# succeeded when only one should have.
+# `parallel_n` times and count how many attempts succeeded when only one
+# should have.
+#
+# TWO DEFECTS MEASURED 2026-09-05, both of which made this case report a clean
+# run it had not performed.
+#
+# 1. `parallel_n` is optional, and nothing supplied a default. Omitted, the
+#    step rendered as
+#
+#        for i in $(seq 1 ); do (...) & done; wait
+#
+#    which fires ZERO requests. `wait` returns 0, so the step reported success
+#    with empty output and the case reported nothing — a race-condition test
+#    that sent no requests, presented as a clean result. It now defaults to 10
+#    and says how many it fired.
+#
+# 2. The verdict was `({{success_marker}}.*){2,}`. `.` does not cross a
+#    newline, so both successes had to land on the SAME LINE. Measured against
+#    five concurrent successes:
+#
+#        REDEEM_OKREDEEM_OK...           (no trailing newline)  -> matched
+#        "REDEEM_OK applied\n" x 5                             -> NO MATCH
+#        pretty-printed JSON bodies x 3                         -> NO MATCH
+#
+#    Every API that ends its body with a newline — which is most of them —
+#    won the race five times out of five and was reported clean. The count is
+#    now done with `grep -c`, which does not care where the newlines fall.
+#
+# The marker is counted LITERALLY (`grep -F`), not as a regex. It is called a
+# marker, an operator will type one, and a `$` or `.` in a JSON snippet should
+# not silently change what is counted.
 target_schema:
   required: [request_template, success_marker]
   # No auth field here on purpose: this case fires the operator's own
@@ -22,24 +51,47 @@ target_schema:
 steps:
   - name: race_burst
     tool: curl
+    # Deterministic, like AUTHZ-04 and INPV-15: the verdict is a canary a
+    # regex matches, so it does not depend on a model being reachable. Three
+    # outcomes, and the third is the one that used to be indistinguishable
+    # from a clean result -- if the request never succeeded even ONCE, the
+    # template or the marker is wrong and this run says nothing about timing.
     command: >-
-      bash -c 'for i in $(seq 1 {{parallel_n}}); do ({{request_template}}) & done; wait'
+      bash -c 'N="{{parallel_n}}"; case "$N" in ""|*[!0-9]*) N=10;; esac;
+      [ "$N" -lt 2 ] && N=10;
+      OUT=$(for i in $(seq 1 "$N"); do ({{request_template}}) & done; wait);
+      HITS=$(printf "%s" "$OUT" | grep -oF "{{success_marker}}" | wc -l);
+      echo "requests_fired=$N successes=$HITS";
+      printf "%s\n" "$OUT";
+      if [ "$HITS" -gt 1 ]; then
+        echo "ERLIK_BUSL_RACE: the request succeeded $HITS times out of $N fired in parallel, on an endpoint that should succeed at most once";
+      elif [ "$HITS" -eq 1 ]; then
+        echo "ERLIK_BUSL_SINGLE_SUCCESS: exactly one of $N parallel requests succeeded, which is the correct behaviour";
+      else
+        echo "ERLIK_BUSL_NO_SUCCESS: none of the $N requests contained the success marker, so the request never succeeded even once and this run says nothing about process timing";
+      fi'
     evaluators:
       - type: regex
-        pattern: '({{success_marker}}.*){2,}'
+        pattern: 'ERLIK_BUSL_RACE'
         emit_finding:
           vuln_type: Race Condition (multiple successes)
           severity: high
       - type: llm
+        # Only where the request DID succeed once and the marker count found
+        # nothing more. Two successful responses can differ in ways a single
+        # marker cannot count -- two transaction ids, two confirmations -- and
+        # that is the only thing left for a model to add here.
         when: no_finding_yet
         instruction: >-
           We fired the same request N times in parallel against an endpoint
-          that is supposed to succeed at most once (e.g. a coupon redeem or
-          a balance withdrawal). The output is the concatenation of all
-          responses. Set matched=true if you can see the success_marker
-          appearing more than once, OR if you can clearly see two different
-          successful responses (e.g. two different transaction IDs, two
-          confirmed redemptions). Otherwise matched=false.
+          that is supposed to succeed at most once (e.g. a coupon redeem or a
+          balance withdrawal). The output begins with a summary line, then the
+          concatenated responses, then a verdict line. If the verdict is
+          ERLIK_BUSL_NO_SUCCESS, set matched=false — the request never
+          succeeded, so nothing can be concluded. Otherwise set matched=true
+          only if you can see TWO DISTINCT successful responses that the marker
+          count would not have caught, such as two different transaction IDs or
+          two separate confirmations. Otherwise matched=false.
         emit_finding:
           vuln_type: Race Condition (LLM-judged multiple successes)
           severity: high
