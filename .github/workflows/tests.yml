@@ -77,3 +77,80 @@ jobs:
         with:
           name: junit-${{ matrix.python-version }}
           path: junit.xml
+
+  # THE CASES, AGAINST AN APPLICATION NOBODY HERE WROTE.
+  #
+  # `tests/targets/` proves a case fires on a planted flaw and stays silent on
+  # a matched control, and it found every case defect on 2026-09-05. But those
+  # targets and those cases have the same author, so a shared misunderstanding
+  # of what a real application returns is invisible to that whole harness.
+  # Juice Shop is the application the `juiceshop` profile already aims at, and
+  # the one every reported campaign result was produced against.
+  #
+  # This job does NOT assert that Juice Shop is vulnerable — that is Juice
+  # Shop's business and it changes between releases. It asserts that what erlik
+  # REPORTS about it does not change without someone saying so, in both
+  # directions: a finding that disappeared is a case that silently stopped
+  # working, and one that appeared is either new coverage or a false positive.
+  cases-vs-juiceshop:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    services:
+      juiceshop:
+        # PINNED, not `latest`. On `latest` this job would go red whenever
+        # Juice Shop shipped a release, for reasons that have nothing to do
+        # with this repository — and the baseline it compares against is a
+        # statement about one specific application build.
+        image: bkimminich/juice-shop:v20.2.0
+        ports:
+          - 3000:3000
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # Service containers have no healthcheck here, so the job would otherwise
+      # race the application's startup and record "no findings" for a target
+      # that was not listening yet — a clean bill of health from a run that
+      # never reached anything.
+      - name: Wait for Juice Shop
+        run: |
+          for i in $(seq 1 60); do
+            if curl -sf -o /dev/null http://127.0.0.1:3000/; then
+              echo "up after ${i}s"; exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::Juice Shop never answered on :3000 — this run measured nothing"
+          exit 1
+
+      # The cases run natively here: there is no Kali container on the runner,
+      # and without ERLIK_NATIVE every step is refused, which reads as a case
+      # that found nothing. The script sets it for its own process.
+      #
+      # sqlmap, dalfox, testssl, wafw00f and whatweb are NOT installed, and the
+      # four cases naming them are recorded as `unrunnable` with the missing
+      # tool named rather than folded into "no findings".
+      - name: Cases vs Juice Shop
+        run: |
+          python scripts/case_baseline.py \
+            --base http://127.0.0.1:3000 \
+            --profile juiceshop \
+            --baseline tests/baselines/juiceshop.json \
+            --out measured-juiceshop.json
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: measured-juiceshop
+          path: measured-juiceshop.json
