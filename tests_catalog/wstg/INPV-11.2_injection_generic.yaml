@@ -46,11 +46,31 @@ steps:
           severity: high
         stop_after: true
 
+  # THE PAYLOAD WAS BEING EATEN BY THE SHELL BEFORE IT WAS SENT, and the step
+  # never ran at all. It was written as
+  #
+  #     --data-urlencode "{{parameter}}=erlik\"|]}$(){}"
+  #
+  # inside DOUBLE quotes, where `$()` is command substitution. Measured with
+  # curl replaced by a shim that prints its argv:
+  #
+  #     sent:     q=erlik"|]}{}          <- $() evaluated locally, to nothing
+  #     intended: q=erlik"|]}$(){}
+  #
+  # So the metacharacters the step is named for never reached the target. And
+  # `_command_segments` does not treat `\"` as an escaped quote, so it read the
+  # rest of the line as a pipeline and the admission guard refused the step:
+  #
+  #     TOOLSET: command segment runs '){}"', which is not in this session's toolset
+  #
+  # Single quotes fix both: nothing inside them is interpreted, so the payload
+  # is sent verbatim and the guard sees one program. A payload is data; it must
+  # never be written where the shell will evaluate it.
   - name: expression_metachars
     tool: curl
     when: no_finding_yet
     command: >-
-      curl -s -b "{{cookie}}" -H "{{auth_header}}" -G "{{url}}" --data-urlencode "{{parameter}}=erlik\"|]}$(){}"
+      curl -s -b "{{cookie}}" -H "{{auth_header}}" -G "{{url}}" --data-urlencode '{{parameter}}=erlik"|]}$(){}'
     evaluators:
       - type: regex
         pattern: 'XPathException|javax\.xml\.xpath|SpelEvaluationException|ognl\.OgnlException|jakarta\.el|javax\.el\.ELException|Traceback \(most recent call last\)|PHP (Parse|Fatal) error|System\.Data\.\w+Exception|NoMethodError'
