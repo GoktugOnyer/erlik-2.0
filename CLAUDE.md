@@ -40,6 +40,11 @@ describes this accurately; earlier drafts did not.
 - `orchestrator/testcase/` — the deterministic lane
 - `dashboard/templates/index.html` — ~7.5k lines, **single file, all JS inline, no
   build step**. Tailwind via Play CDN. Edit it directly.
+- `tests/targets/` — applications with PLANTED flaws and matched controls,
+  plus fixtures that run the real cases against them (`tests/test_cases_against_targets.py`).
+  Every case defect found on 2026-09-05 came from running these, none from
+  reading YAML. A case must fire on the flaw AND stay silent on the control:
+  half those defects were false positives.
 - `tests/` — 51 files, 1737 passing + 31 skipped. Run with `.venv/bin/python -m pytest -q`.
 
 ## Conventions this codebase actually holds itself to
