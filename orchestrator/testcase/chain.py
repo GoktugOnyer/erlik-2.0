@@ -52,9 +52,6 @@ async def run_chain(
     # the first fanned-out child and silently drop its siblings.
     visited: set[tuple[str, str]] = set()
 
-    def _key(cid: str, tgt: dict[str, Any]) -> tuple[str, str]:
-        return (cid, str(tgt.get("url") or tgt.get("host") or ""))
-
     # (test_case_id, depth, target)
     queue: list[tuple[str, int, dict[str, Any]]] = [(root_id, 0, target)]
 
@@ -64,7 +61,7 @@ async def run_chain(
             break
 
         tc_id, depth, tc_target = queue.pop(0)
-        key = _key(tc_id, tc_target)
+        key = queue_key(tc_id, tc_target)
         if key in visited:
             continue
         visited.add(key)
@@ -91,10 +88,33 @@ async def run_chain(
                 out.skipped.append({"id": nxt, "reason": "not found in catalog"})
                 continue
             for child_target in _retarget(child, tc_target, result.produced, max_runs):
-                if _key(nxt, child_target) not in visited:
+                if queue_key(nxt, child_target) not in visited:
                     queue.append((nxt, depth + 1, child_target))
 
     return out
+
+
+def queue_key(cid: str, tgt: dict[str, Any]):
+    """Identity of a queued run, for loop protection.
+
+    Extracted from `run_chain` so it can be tested directly. It was a closure,
+    and a test that could only grep the source for it passed against the exact
+    regression below.
+
+    Keyed on the URL ALONE until now, which silently discarded every fan over
+    any other field: harvest `q` and `user_id`, chain to a child that needs a
+    parameter, and the second target collided with the first and was dropped as
+    already-visited. It went unnoticed because the only producer in the
+    catalogue emitted `url`, which is in the key.
+
+    Scalars only, and `scope` excluded -- it is a dict, identical on every
+    target in a chain, and unhashable. Loop protection is unaffected: a genuine
+    cycle revisits an identical target, which still collides.
+    """
+    scalars = tuple(sorted(
+        (k, str(v)) for k, v in tgt.items()
+        if k != "scope" and isinstance(v, (str, int, float, bool))))
+    return (cid, str(tgt.get("url") or tgt.get("host") or ""), scalars)
 
 
 def _retarget(child, parent_target: dict[str, Any],
@@ -106,11 +126,27 @@ def _retarget(child, parent_target: dict[str, Any],
     `cap`, because a crawl of a large site would otherwise plan an unbounded
     number of runs from one parent.
     """
-    wanted = set(child.target_schema.required) | set(child.target_schema.optional)
+    required = set(child.target_schema.required)
+    wanted = required | set(child.target_schema.optional)
     fields = [f for f in produced if f in wanted and produced[f]]
     if not fields:
         return [parent_target]
-    # Fan over ONE field — the first the child needs. Crossing several
-    # fields multiplies runs combinatorially for no established benefit.
-    field = fields[0]
+
+    # Fan over ONE field, because crossing several multiplies runs
+    # combinatorially for no established benefit -- but over the field that
+    # actually UNBLOCKS the child, not merely the first one it mentions.
+    #
+    # Measured: a parent producing both `url` and `parameter`, chained to a
+    # child requiring both and given only `url`, fanned over `url` and
+    # discarded every produced parameter. Each child target then failed
+    # validation with "Missing required target fields: ['parameter']", so the
+    # harvest that would have satisfied it was thrown away one step before it
+    # was needed. Preference order:
+    #
+    #   1. a REQUIRED field the parent target does not already supply -- the
+    #      one thing standing between the child and running at all;
+    #   2. otherwise the first produced field the child wants, as before.
+    missing_required = [f for f in fields
+                        if f in required and not parent_target.get(f)]
+    field = missing_required[0] if missing_required else fields[0]
     return [{**parent_target, field: v} for v in produced[field][:cap]]

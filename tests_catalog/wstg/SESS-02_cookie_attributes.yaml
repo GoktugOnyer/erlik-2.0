@@ -82,6 +82,22 @@ steps:
         emit_finding:
           vuln_type: Insecure Cookie Attributes
           severity: medium
+      # PRODUCER — harvests only, emits nothing, so what this case REPORTS is
+      # byte-identical and every recorded run stays comparable.
+      #
+      # WSTG-SESS-10 requires a `jwt` and nothing in the catalogue produced
+      # one, so it could only ever run against a token pasted in by hand --
+      # which is why it has no recorded result. A session cookie holding a JWT
+      # is the ordinary way an application hands one out, and this step already
+      # has the Set-Cookie headers in its output.
+      #
+      # Group 0 (the whole match) because the token IS the value; there is no
+      # inner capture worth taking. The three dot-separated base64url segments
+      # are distinctive enough that this does not match ordinary cookie values.
+      - type: regex
+        pattern: 'eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]*'
+        produces:
+          jwt: 0
       - type: llm
         # Second opinion only. A cookie whose NAME is not session-shaped but
         # whose value is plainly a session token is what a name list misses.
@@ -98,3 +114,13 @@ steps:
         emit_finding:
           vuln_type: Insecure Cookie Attributes (value looks like a session token)
           severity: medium
+
+chain:
+  # ALWAYS, not on_finding. A JWT handed out in a properly-flagged cookie is
+  # exactly the case worth examining -- gating this on SESS-02 finding a
+  # missing HttpOnly would run the JWT checks only where the cookie was
+  # already wrong. Where no JWT was harvested, run_chain records SESS-10 in
+  # `skipped` with "Missing required target fields: ['jwt']", which is a
+  # declared non-result rather than a silent one.
+  always:
+    - WSTG-SESS-10
