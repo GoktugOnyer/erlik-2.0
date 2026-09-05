@@ -10,20 +10,91 @@ target_schema:
   required: [url]
   optional: [cookie, auth_header]
 
+# THE CASE HAD ONE EVALUATOR AND IT WAS AN LLM. The question it asked --
+# "does this Set-Cookie header lack HttpOnly, Secure or SameSite" -- is a
+# string test, and routing it through a model meant the case produced NOTHING
+# on any deployment with no model reachable. Measured 2026-09-05 against a
+# target serving `Set-Cookie: session=abc123; Path=/`, which is the textbook
+# finding this case is named for:
+#
+#   findings: []
+#   not_assessed: [fetch_headers/llm: "LLM evaluator could not run"]
+#
+# Unlike CONF-07, there was no deterministic path to fall back to at all.
+#
+# The parse is now in the step. Three rules, and each is narrower than it
+# looks:
+#
+#   HttpOnly   always required on a session cookie.
+#   SameSite   always required. Browsers default it differently and have
+#              changed that default more than once, so absent is not "Lax".
+#   Secure     required ONLY on an https target. Demanding it of an http
+#              target would flag every cookie on every plain-http site for a
+#              flag that would stop the cookie working -- the finding there is
+#              the cleartext channel, which is ATHN-01 and CONF-07's subject.
+#
+# Only session-shaped cookie NAMES are judged. A tracking or preference cookie
+# without HttpOnly is not a session-fixation risk, and flagging it trains an
+# operator to ignore this case.
+#
+# The LLM evaluator is kept as a SECOND opinion, gated on no_finding_yet: a
+# cookie whose name does not look session-shaped but whose value is plainly a
+# JWT is the kind of thing a model catches and a name list does not.
+
 steps:
   - name: fetch_headers
     tool: curl
+    # -D - -o /dev/null rather than -i: the body cannot then be mistaken for a
+    # header, which matters here because the parse greps for "^Set-Cookie:"
+    # and a page echoing that string would otherwise be read as one.
     command: >-
-      curl -s -b "{{cookie}}" -H "{{auth_header}}" -i "{{url}}"
+      bash -c 'U="{{url}}"; SCHEME=$(printf "%s" "$U" | cut -d: -f1);
+      H=$(curl -s -b "{{cookie}}" -H "{{auth_header}}" -D - -o /dev/null
+      --connect-timeout 5 --max-time 15 -w "HTTPCODE=%{http_code}" "$U");
+      CODE=$(printf "%s" "$H" | grep -o "HTTPCODE=[0-9]*" | tail -1 | cut -d= -f2);
+      printf "%s\n" "$H";
+      C=$(printf "%s" "$H" | grep -i "^Set-Cookie:");
+      BAD=$(printf "%s\n" "$C" | while IFS= read -r L; do
+      [ -z "$L" ] && continue;
+      N=$(printf "%s" "$L" | sed -E "s/^[Ss]et-[Cc]ookie:[[:space:]]*([^=]+)=.*/\\1/");
+      case "$(printf "%s" "$N" | tr "A-Z" "a-z")" in
+      *sess*|*sid*|*token*|*jwt*|*auth*|*login*) ;;
+      *) continue;; esac;
+      M="";
+      printf "%s" "$L" | grep -qi "httponly" || M="$M HttpOnly";
+      printf "%s" "$L" | grep -qi "samesite" || M="$M SameSite";
+      if [ "$SCHEME" = "https" ]; then
+      printf "%s" "$L" | grep -qi "[;[:space:]]secure" || M="$M Secure"; fi;
+      [ -n "$M" ] && printf "%s(missing:%s) " "$N" "$M";
+      done);
+      if [ "$CODE" = "000" ]; then
+        echo "ERLIK_COOKIE_NO_RESPONSE: no response was received, so the cookie attributes were not assessed";
+      elif [ -z "$C" ]; then
+        echo "ERLIK_COOKIE_NONE_SET: the response set no cookies, so there is nothing to judge here";
+      elif [ -n "$BAD" ]; then
+        echo "ERLIK_COOKIE_INSECURE: $BAD";
+      else
+        echo "ERLIK_COOKIE_OK: every session-shaped cookie carries the attributes required for this scheme ($SCHEME)";
+      fi'
     evaluators:
-      - type: llm
-        instruction: >-
-          Examine the Set-Cookie response headers. If a cookie that looks like a
-          session/auth token (e.g. session, sid, token, jwt, connect.sid) is
-          missing the HttpOnly flag, the Secure flag (on an https target), or a
-          SameSite attribute, set matched=true and name the cookie + the missing
-          attribute(s). If there are no cookies, or all session cookies are
-          properly flagged, set matched=false.
+      - type: regex
+        pattern: 'ERLIK_COOKIE_INSECURE'
         emit_finding:
           vuln_type: Insecure Cookie Attributes
+          severity: medium
+      - type: llm
+        # Second opinion only. A cookie whose NAME is not session-shaped but
+        # whose value is plainly a session token is what a name list misses.
+        when: no_finding_yet
+        instruction: >-
+          The output is HTTP response headers followed by a verdict line. If
+          the verdict is ERLIK_COOKIE_NO_RESPONSE, set matched=false — nothing
+          was assessed. The deterministic check already judged every cookie
+          whose NAME looks session-shaped and found nothing wrong. Set
+          matched=true only if a cookie whose name does NOT look session-shaped
+          is nonetheless plainly a session or auth token by its VALUE (for
+          example a JWT), and it is missing HttpOnly or SameSite. Name the
+          cookie and the missing attributes. Otherwise matched=false.
+        emit_finding:
+          vuln_type: Insecure Cookie Attributes (value looks like a session token)
           severity: medium
