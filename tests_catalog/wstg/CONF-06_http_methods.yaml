@@ -24,6 +24,32 @@ steps:
           vuln_type: Dangerous HTTP Method Enabled
           severity: medium
 
+  # WSTG-CONF-06 covers Cross-Site Tracing, and the OPTIONS step above only
+  # catches TRACE when the server ADVERTISES it in an Allow header. Servers
+  # routinely answer TRACE without advertising it -- which is why the guide
+  # says to probe the method, not to read a header and believe it. Verified
+  # against a target that returns no Allow header at all and still answers
+  # TRACE 200 with the request echoed back.
+  #
+  # Deliberately NOT gated on no_finding_yet: "the server advertises TRACE"
+  # and "the server actually performs TRACE" are different claims, and the
+  # second is the one worth putting in front of a client.
+  - name: trace_probe
+    tool: curl
+    command: >-
+      bash -c "curl -s -b \"{{cookie}}\" -H \"{{auth_header}}\" -i -X TRACE
+      --max-time 10 \"{{url}}\"; echo; curl -s -b \"{{cookie}}\"
+      -H \"{{auth_header}}\" -i -X TRACK --max-time 10 \"{{url}}\""
+    evaluators:
+      - type: regex
+        # A 200 alone is not enough -- a server that answers everything 200
+        # would false-positive. The distinguishing signature of TRACE is the
+        # ECHO: message/http, or the request line reflected in the body.
+        pattern: 'HTTP/[0-9.]+ 200[\s\S]*?(content-type:\s*message/http|\n(?:TRACE|TRACK)\s+\S+\s+HTTP/)'
+        emit_finding:
+          vuln_type: TRACE/TRACK Method Enabled (Cross-Site Tracing)
+          severity: medium
+
   - name: put_probe
     tool: curl
     when: no_finding_yet
