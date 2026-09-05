@@ -91,35 +91,27 @@ class TestEveryStepIsAdmittedByTheRealGuard:
     ALIASES = {"nc": "netcat", "ncat": "netcat", "zap-cli": "zap-cli",
                "jwt_tool.py": "jwt_tool", "theharvester": "theHarvester"}
 
-    # Three steps ARE refused today, for a different reason than a broken
-    # payload, and they are recorded here rather than hidden behind an xfail.
+    # KNOWN_REFUSED is now empty, and that is the point of keeping it.
     #
-    # They write shell directly -- subshells, `if`, `[` -- instead of wrapping
-    # it in `bash -c '...'`. `_command_segments` splits on `(` and reads it as
-    # a program name, and `_segment_violation` refuses the step:
+    # Three steps used to sit here: WSTG-INPV-05.6/operator_differential and
+    # both of WSTG-INPV-06's differentials. They wrote shell directly --
+    # subshells, `if`, `[` -- and `_command_segments` splits on those and reads
+    # them as program names, so the admission guard refused each one before any
+    # request went out:
     #
     #     TOOLSET: command segment runs '(', which is not in this session's toolset
+    #     TOOLSET: command segment runs 'if', which is not in this session's toolset
     #
-    # Every other shell-writing case in the catalogue (AUTHZ-04, INPV-15,
-    # ATHN-01, BUSL-04, CONF-07, SESS-02) wraps its logic in `bash -c '...'`,
-    # which the guard admits via the step's declared `tool:`. These three do
-    # not, so they have never executed. Confirmed live 2026-09-05:
+    # They have been wrapped in `bash -c '...'`, which is what every other
+    # shell-writing case in the catalogue does and what the guard admits via
+    # the step's declared `tool:`. Verified live: all three now execute and
+    # produce findings on a target that exhibits the flaw, and stay silent on
+    # one that escapes its input.
     #
-    #     WSTG-INPV-06  filter_syntax_probe        ok=True
-    #     WSTG-INPV-06  wildcard_differential      ok=False  TOOLSET: ... '('
-    #     WSTG-INPV-06  blind_boolean_differential ok=False  TOOLSET: ... '('
-    #
-    # which is also why WSTG-INPV-05.6 reports "not assessed" against a target
-    # that honours the operator it probes for: its differential step is one of
-    # these. Fixing them means rewriting three long commands whose bodies
-    # already contain single quotes, and that is its own change -- so this
-    # asserts the current state exactly, and fails the moment it changes in
-    # either direction.
-    KNOWN_REFUSED = {
-        ("WSTG-INPV-05.6", "operator_differential"),
-        ("WSTG-INPV-06", "wildcard_differential"),
-        ("WSTG-INPV-06", "blind_boolean_differential"),
-    }
+    # The set stays so that a step which genuinely cannot be admitted has a
+    # declared place to live rather than being hidden behind an xfail -- and
+    # test_the_known_refused_list_is_not_stale keeps it honest.
+    KNOWN_REFUSED: set[tuple[str, str]] = set()
 
     @pytest.mark.parametrize("tid,step", ALL_STEPS, ids=lambda v: getattr(v, "name", v))
     def test_the_step_is_not_refused_before_it_runs(self, tid, step):

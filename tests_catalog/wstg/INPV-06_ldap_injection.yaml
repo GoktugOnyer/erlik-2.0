@@ -51,16 +51,28 @@ steps:
   # every reading by roughly the payload length, so we require B to be
   # substantially LARGER than A (a matched directory, not a shorter echo) while
   # C stays within a few bytes of A.
+  # WRAPPED IN `bash -c` BECAUSE THE STEP HAD NEVER RUN. It wrote shell
+  # directly -- subshells, `if`, `[` -- and `_command_segments` splits on those
+  # and reads them as program names, so the admission guard refused it before
+  # any request went out:
+  #
+  #     TOOLSET: command segment runs '(', which is not in this session's toolset
+  #
+  # Every other shell-writing case in the catalogue wraps its logic this way,
+  # which the guard admits via the step's declared `tool:`. Measured 2026-09-05.
+  # The arithmetic and the differential are unchanged; only the quoting moved.
   - name: wildcard_differential
     tool: curl
     command: >-
-      A=$(curl -s -m 6 -o /dev/null -w '%{http_code}:%{size_download}' '{{url}}?{{parameter}}=erlikprobe9zq7');
-      B=$(curl -s -m 6 -o /dev/null -w '%{http_code}:%{size_download}' '{{url}}?{{parameter}}=%2A');
-      C=$(curl -s -m 6 -o /dev/null -w '%{http_code}:%{size_download}' '{{url}}?{{parameter}}=erlikprobe9zq7%2A');
+      bash -c 'W="%{http_code}:%{size_download}";
+      A=$(curl -s -m 6 -o /dev/null -w "$W" "{{url}}?{{parameter}}=erlikprobe9zq7");
+      B=$(curl -s -m 6 -o /dev/null -w "$W" "{{url}}?{{parameter}}=%2A");
+      C=$(curl -s -m 6 -o /dev/null -w "$W" "{{url}}?{{parameter}}=erlikprobe9zq7%2A");
       echo "literal=$A wildcard=$B prefixed_wildcard=$C";
       an=${A#*:}; bn=${B#*:}; cn=${C#*:};
       gap=$(( cn - an )); if [ "$gap" -lt 0 ]; then gap=$(( 0 - gap )); fi;
-      if [ "$(( bn - an ))" -gt 32 ] && [ "$gap" -le 8 ]; then echo ERLIK_LDAP_WILDCARD_INTERPRETED; fi
+      if [ "$(( bn - an ))" -gt 32 ] && [ "$gap" -le 8 ];
+      then echo ERLIK_LDAP_WILDCARD_INTERPRETED; fi'
     evaluators:
       - type: regex
         pattern: 'ERLIK_LDAP_WILDCARD_INTERPRETED'
@@ -94,17 +106,28 @@ steps:
   # still tracks the injected truth value proves the filter is
   # attacker-controlled. Both payloads only read; neither adds, changes or
   # removes directory data.
+  # WRAPPED IN `bash -c` BECAUSE THE STEP HAD NEVER RUN. It wrote shell
+  # directly -- subshells, `if`, `[` -- and `_command_segments` splits on those
+  # and reads them as program names, so the admission guard refused it before
+  # any request went out:
+  #
+  #     TOOLSET: command segment runs '(', which is not in this session's toolset
+  #
+  # Every other shell-writing case in the catalogue wraps its logic this way,
+  # which the guard admits via the step's declared `tool:`. Measured 2026-09-05.
+  # The arithmetic and the differential are unchanged; only the quoting moved.
   - name: blind_boolean_differential
     tool: curl
     when: no_finding_yet
     command: >-
-      N=$(curl -s -m 6 -o /dev/null -w '%{http_code}:%{size_download}' '{{url}}?{{parameter}}=erlikprobe9zq7');
-      T=$(curl -s -m 6 -o /dev/null -w '%{http_code}:%{size_download}' '{{url}}?{{parameter}}=%2A%29%28objectClass%3D%2A%29%29%28%26%28objectClass%3Derlikvoid');
-      F=$(curl -s -m 6 -o /dev/null -w '%{http_code}:%{size_download}' '{{url}}?{{parameter}}=%78%29%28objectClass%3D%78%29%29%28%26%28objectClass%3Derlikvoid');
+      bash -c 'W="%{http_code}:%{size_download}";
+      N=$(curl -s -m 6 -o /dev/null -w "$W" "{{url}}?{{parameter}}=erlikprobe9zq7");
+      T=$(curl -s -m 6 -o /dev/null -w "$W" "{{url}}?{{parameter}}=%2A%29%28objectClass%3D%2A%29%29%28%26%28objectClass%3Derlikvoid");
+      F=$(curl -s -m 6 -o /dev/null -w "$W" "{{url}}?{{parameter}}=%78%29%28objectClass%3D%78%29%29%28%26%28objectClass%3Derlikvoid");
       echo "nonsense=$N always_true=$T always_false=$F";
       tn=${T#*:}; fn=${F#*:};
       if [ "$(( tn - fn ))" -gt 32 ]; then echo ERLIK_LDAP_BLIND_DIFFERENTIAL; fi;
-      if [ "${T%%:*}" != "${F%%:*}" ]; then echo ERLIK_LDAP_BLIND_DIFFERENTIAL; fi
+      if [ "${T%%:*}" != "${F%%:*}" ]; then echo ERLIK_LDAP_BLIND_DIFFERENTIAL; fi'
     evaluators:
       - type: regex
         pattern: 'ERLIK_LDAP_BLIND_DIFFERENTIAL'
