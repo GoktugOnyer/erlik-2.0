@@ -242,6 +242,53 @@ class TestPayloadHostsDeclaration:
         assert "payload_hosts" not in inspect.getsource(TE._scope_violation)
         assert TE._OAST_DOMAINS
 
+    def test_the_collaborator_name_is_declared_by_the_runner_as_documented(self):
+        """The doc says the runner adds the minted name to the case's
+        `payload_hosts` for the run. Asserted against `run_test_case` itself
+        rather than against a copy of the list it builds: a test that rebuilt
+        the list would pass on a runner that stopped passing it along.
+        """
+        import inspect
+
+        from orchestrator.testcase.runner import run_test_case
+        src = inspect.getsource(run_test_case)
+        assert "step_payload_hosts" in src
+        assert "payload_hosts=step_payload_hosts" in src, (
+            "the runner no longer passes the minted collaborator to the scope "
+            "guard; the only step that can prove a blind finding is refused")
+        assert "payload_hosts=tc.payload_hosts" not in src
+
+    def test_denying_a_domain_denies_the_names_under_it_as_documented(self):
+        """SECURITY.md promises `deny_hosts: [oast.test]` blocks
+        `abcd1234.oast.test`. It did not before -- deny is a glob list."""
+        import pytest as _pytest
+
+        from orchestrator.testcase.scope import (Scope, ScopeViolation,
+                                                 check_command)
+        scope = Scope(allow_hosts=["127.0.0.1"], deny_hosts=["oast.test"])
+        with _pytest.raises(ScopeViolation):
+            check_command("curl http://abcd1234abcd1234.oast.test/erlik-oob",
+                          scope, payload_hosts=["abcd1234abcd1234.oast.test"])
+
+    def test_a_name_under_a_declared_host_is_still_allowed(self):
+        """The negative control for the two above: without it they pass on a
+        guard that refuses every payload host."""
+        from orchestrator.testcase.scope import Scope, check_command
+        check_command("curl http://abcd1234abcd1234.oast.test/erlik-oob",
+                      Scope(allow_hosts=["127.0.0.1"]),
+                      payload_hosts=["oast.test"])
+
+    def test_general_deny_matching_is_unchanged_as_documented(self):
+        """The doc says only the PAYLOAD path gained subdomain-reaching deny.
+        A `deny_hosts` entry elsewhere is still a glob matched against the
+        host, symmetric with `allow_hosts`."""
+        import inspect
+
+        from orchestrator.testcase import scope as S
+        assert "_payload_denied" not in inspect.getsource(S.check_url), (
+            "check_url now uses the payload deny rule; deny_hosts and "
+            "allow_hosts are no longer symmetric outside the payload path")
+
     def test_the_three_cases_the_doc_names_do_declare(self):
         from orchestrator.testcase import load_catalog
         cat = load_catalog()

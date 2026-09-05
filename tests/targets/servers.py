@@ -8,10 +8,13 @@ from __future__ import annotations
 
 import html
 import json
+import re
 import ssl
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
+
+_TOKEN_RX = re.compile(r"^[0-9a-f]{16}$")
 
 JWT = ("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"
        ".eyJzdWIiOiIxMjMiLCJuYW1lIjoiYWxpY2UifQ"
@@ -227,3 +230,99 @@ def serve(handler, tls: tuple[str, str] | None = None) -> tuple[ThreadingHTTPSer
     port = srv.server_address[1]
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     return srv, port
+
+
+class Collaborator(_Base):
+    """A receiver speaking the interaction API `orchestrator.collaborator` polls.
+
+    Real OAST needs a name resolvable from the internet and a server outside
+    the target's network, neither of which a test has. This records HTTP hits
+    by the token in their Host header or path and serves them back, which is
+    exactly the contract the poller depends on -- so mint, inject, target
+    fetches, poll and correlate are all exercised for real.
+
+    What it does NOT exercise is DNS-only interaction, or interact.sh's own
+    wire protocol. Those need an instance on the internet.
+    """
+
+    INTERACTIONS: dict = {}
+
+    # A receiver that returns EVERYTHING it has, ignoring the token filter.
+    # Not a hypothetical: a shared or self-hosted collaborator sees every
+    # probe on the account, and correlation is the client's job. With this
+    # False the receiver filters server-side, which silently masks whether the
+    # poller correlates at all -- a mutation that deleted the client-side
+    # filter passed the whole suite until this existed.
+    LEAKS_EVERYTHING = False
+
+    @classmethod
+    def reset(cls):
+        cls.INTERACTIONS = {}
+
+    def do_GET(self):
+        u = urlparse(self.path)
+        if u.path == "/interactions":
+            token = (parse_qs(u.query).get("token") or [""])[0]
+            if self.LEAKS_EVERYTHING:
+                rows = [i for v in self.INTERACTIONS.values() for i in v]
+            else:
+                rows = self.INTERACTIONS.get(token, [])
+            return self._send(200, json.dumps({"interactions": rows}),
+                              "application/json")
+        # Anything else is a HIT. The token arrives as the leftmost label of
+        # the Host header -- which is how a real collaborator sees it -- and a
+        # test may also drive it by path when it cannot control DNS.
+        host = (self.headers.get("Host") or "").split(":")[0]
+        token = host.split(".")[0] if "." in host else ""
+        if not token or not _TOKEN_RX.match(token):
+            token = u.path.strip("/").split("/")[0]
+        if _TOKEN_RX.match(token or ""):
+            self.INTERACTIONS.setdefault(token, []).append({
+                "token": token, "protocol": "http",
+                "remote_addr": self.client_address[0],
+                "at": "now", "detail": f"GET {self.path}",
+            })
+        self._send(200, "ok", "text/plain")
+
+
+class Ssrf(_Base):
+    """A target that FETCHES a user-supplied URL -- the flaw itself.
+
+    The control parses the parameter and refuses to fetch it, so a case that
+    fires on both is caught.
+    """
+
+    FETCHES = True
+
+    # STANDING IN FOR DNS, as (host suffix, receiver base URL).
+    #
+    # The minted collaborator name is a subdomain of a domain nothing here can
+    # resolve: `*.localhost` does not resolve on Linux and this environment's
+    # egress blocks a real OAST provider. A target that fetched the name
+    # verbatim would get NXDOMAIN and prove nothing. This maps it onto the
+    # local receiver instead, which is the ONE hop the harness cannot perform
+    # for real. Everything on erlik's side is untouched: it mints the name,
+    # plants it, polls and correlates with no test seam at all.
+    RESOLVE = ("", "")
+
+    def _resolved(self, dest: str) -> str:
+        suffix, base = self.RESOLVE
+        if not (suffix and base):
+            return dest
+        p = urlparse(dest)
+        if p.hostname and p.hostname.endswith(suffix):
+            return f"{base}/{p.hostname.split('.')[0]}{p.path or '/'}"
+        return dest
+
+    def do_GET(self):
+        u = urlparse(self.path)
+        dest = self._resolved((parse_qs(u.query).get("url") or [""])[0])
+        if self.FETCHES and dest.startswith("http://"):
+            try:
+                import urllib.request
+                with urllib.request.urlopen(dest, timeout=3):
+                    pass            # blind: the response is discarded
+            except Exception:
+                pass
+            return self._send(200, "fetched", "text/plain")
+        self._send(400, "url parameter refused", "text/plain")

@@ -44,6 +44,36 @@ def _safe_host(url: str) -> str | None:
         return None
 
 
+def _payload_denied(host: str, deny: list[str]) -> bool:
+    """Whether `host` falls under `deny_hosts` FOR PAYLOAD PURPOSES.
+
+    `_is_declared_payload` reaches UNDER a declared name -- `a.b.example` is
+    permitted by a declaration of `b.example` -- so the deny check has to reach
+    exactly as far, or the two are asymmetric in the one direction that must
+    never move. Measured before this existed:
+
+        Scope(allow_hosts=["127.0.0.1"], deny_hosts=["oast.test"])
+        payload_hosts=["abcd1234abcd1234.oast.test"]
+        curl http://abcd1234abcd1234.oast.test/erlik-oob    ALLOWED
+
+    An operator had excluded the domain and a declaration reached under it
+    anyway, because `deny_hosts` is a glob list and `oast.test` does not
+    fnmatch `abcd.oast.test`.
+
+    General scope matching is deliberately left alone: everywhere else a
+    `deny_hosts` entry is a glob (`*.example.com`) matched against the host,
+    symmetric with `allow_hosts`. The payload path is the only place a bare
+    name grants its subdomains, so it is the only place one must also deny
+    them.
+    """
+    h = (host or "").lower()
+    if _host_matches(h, deny):
+        return True
+    return any(h.endswith("." + d) for d in
+               ((p or "").strip().lower() for p in deny)
+               if d and "*" not in d and "?" not in d)
+
+
 def payload_allowlist(declared: list[str] | None, scope: Scope) -> set[str]:
     """The declared payload hosts that are actually permitted for this run.
 
@@ -65,7 +95,7 @@ def payload_allowlist(declared: list[str] | None, scope: Scope) -> set[str]:
     out: set[str] = set()
     for h in declared or []:
         h = (h or "").strip().lower()
-        if not h or _host_matches(h, scope.deny_hosts):
+        if not h or _payload_denied(h, scope.deny_hosts):
             continue
         out.add(h)
     return out
@@ -85,9 +115,10 @@ def _is_declared_payload(host: str, permitted: set[str]) -> bool:
       * OAST works by assigning a unique subdomain per probe, so an exact-host
         declaration would have to be edited every time.
 
-    `deny_hosts` has already removed anything the operator excluded, and it is
-    matched against the full host below as well, so denying one subdomain of a
-    declared domain still works.
+    `deny_hosts` has already removed anything the operator excluded, and
+    `_payload_denied` is applied to the full host below as well -- reaching
+    under a denied name exactly as far as this reaches under a declared one, so
+    denying a domain also denies the subdomains a declaration would grant.
     """
     h = (host or "").lower()
     return any(h == d or h.endswith("." + d) for d in permitted)
@@ -164,7 +195,7 @@ def check_command(command: str, scope: Scope, primary_url: str | None = None,
         except ScopeViolation:
             host = _safe_host(candidate)
             if (host is not None and _is_declared_payload(host, permitted)
-                    and not _host_matches(host, scope.deny_hosts)):
+                    and not _payload_denied(host, scope.deny_hosts)):
                 return
             raise
 

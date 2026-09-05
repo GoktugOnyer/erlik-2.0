@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 from orchestrator import llm_client
 from orchestrator import credentials as _CRED
 from orchestrator.testcase.schema import TestCase, TestStep, Evaluator
+from orchestrator import collaborator as _oast
 from orchestrator.testcase.scope import Scope, ScopeViolation, check_command, from_target
 from orchestrator.tool_executor import execute_tool
 
@@ -362,19 +363,74 @@ async def run_test_case(
     last_step: StepResult | None = None
     chain_set: list[str] = []
     scope = from_target(target)
+
+    # A UNIQUE name per RUN, minted once and shared by every OOB step in it.
+    # Per-run rather than per-step so several probes in one case correlate to
+    # the same run, and per-run rather than global so an interaction identifies
+    # WHICH run caused it -- a blind finding that cannot be attributed to a
+    # payload is not evidence a client can act on.
+    #
+    # An operator-supplied `collaborator_host` wins: someone running their own
+    # Burp Collaborator has a name erlik cannot mint.
+    oast_token = ""
+    oast_host = str(target.get("collaborator_host") or "")
+    if tc.needs_collaborator and not oast_host and _oast.is_enabled():
+        oast_token = _oast.new_token()
+        try:
+            oast_host = _oast.host_for(oast_token)
+        except _oast.CollaboratorError:
+            oast_token, oast_host = "", ""
+
+    # THE COLLABORATOR IS A PAYLOAD HOST, and has to be declared as one or the
+    # scope guard refuses the only step that can prove a blind finding: the
+    # name is minted per run, so no case file could ever list it.
+    #
+    # It is not a hole in the guard. `payload_allowlist` still filters it
+    # against `deny_hosts`, so an operator who excluded the domain keeps it
+    # excluded; it does not touch `allow_hosts`, so it cannot widen where the
+    # case is AIMED (the primary URL is checked against the engagement scope
+    # alone); and the name only exists because the operator configured
+    # ERLIK_OAST_DOMAIN or passed `collaborator_host` themselves. That
+    # configuration IS the declaration.
+    step_payload_hosts = list(tc.payload_hosts)
+    if oast_host:
+        step_payload_hosts.append(oast_host)
+
+    # Whether a payload naming the collaborator was actually SENT. Not
+    # `any(st.oob for st in tc.steps)`: a `when:` guard, a dry run or a scope
+    # refusal all leave an OOB step un-sent, and reporting "payloads were sent,
+    # go check your collaborator" for a probe that never left is the same class
+    # of untrue interface label as the silence it replaces.
+    oob_sent = False
     try:
         for step in tc.steps:
             if not _eval_when(step.when, result.findings, last_step):
                 continue
 
+            # AN OOB STEP WITHOUT A COLLABORATOR IS NOT RUN.
+            #
+            # Its payload can only be proven by something contacting a name we
+            # control; planting one nobody can read back would leave the case
+            # reporting a clean verdict for a check that was never performed.
+            # That is reported as not-assessed, which is the difference between
+            # "no blind vulnerability" and "blind detection was off".
+            if step.oob and not oast_host:
+                result.not_assessed.append(NotAssessed(
+                    step=step.name, evaluator="collaborator",
+                    reason=_oast.status().get("reason", "out-of-band detection "
+                                              "is unavailable")))
+                continue
+
             ctx: dict[str, Any] = {**target, "step": {s.step: s for s in result.steps}}
+            if oast_host:
+                ctx["collaborator_host"] = oast_host
             cmd = _render(step.command, ctx)
 
             # Safety floor: every command must pass scope check before exec.
             if scope is not None:
                 try:
                     check_command(cmd, scope, primary_url=_primary_url(target),
-                                  payload_hosts=tc.payload_hosts)
+                                  payload_hosts=step_payload_hosts)
                 except ScopeViolation as e:
                     result.steps.append(StepResult(
                         step=step.name,
@@ -399,6 +455,9 @@ async def run_test_case(
                 result.steps.append(sr)
                 last_step = sr
                 continue
+
+            if step.oob:
+                oob_sent = True
 
             # AUTH RESOLUTION. `cmd` carries opaque handles; the secret exists
             # only in `live_cmd`, only for the duration of this call, and is
@@ -490,6 +549,50 @@ async def run_test_case(
     finally:
         if saved_provider is not None:
             llm_client.PROVIDER = saved_provider
+
+    # OUT-OF-BAND EVIDENCE, collected after the probes have been sent.
+    #
+    # Polled once at the end rather than after each step: the target may take a
+    # moment to make the call, and several probes in one case share the run's
+    # token, so one poll answers for all of them.
+    #
+    # A collaborator erlik did not mint cannot be polled: the receiver API is
+    # keyed by the token, and a Burp Collaborator instance has neither that
+    # token nor this API. Without this branch the probe would be SENT and
+    # nothing reported either way -- no finding, no not-assessed -- which is
+    # the clean-looking non-result the rest of this file exists to prevent.
+    # The operator has to read their own collaborator; the run says so.
+    if oast_host and not oast_token and oob_sent:
+        result.not_assessed.append(NotAssessed(
+            step="collaborator_poll", evaluator="collaborator",
+            reason=f"out-of-band payloads naming {oast_host} were sent, but "
+                   f"that collaborator was supplied rather than minted by "
+                   f"erlik, which cannot poll it — check it yourself for "
+                   f"interactions from this run"))
+    elif oast_token:
+        try:
+            hits = _oast.poll(oast_token)
+        except _oast.CollaboratorError as e:
+            # A receiver that is down must not read as "nothing called out".
+            # Silence from an unreachable poller is exactly the clean-looking
+            # non-result this project treats as equal to a crash.
+            result.not_assessed.append(NotAssessed(
+                step="collaborator_poll", evaluator="collaborator",
+                reason=f"out-of-band payloads were planted but could not be "
+                       f"read back: {e}"))
+        else:
+            if hits:
+                result.findings.append(Finding(
+                    test_case_id=tc.id,
+                    step="collaborator_poll",
+                    vuln_type=f"Out-of-Band Interaction ({tc.attack_class or 'blind'})",
+                    severity=tc.severity,
+                    url=target.get("url") or target.get("url_template"),
+                    parameter=target.get("parameter"),
+                    evidence=(f"The target contacted {oast_host}, which only "
+                              f"this run's payload named.\n"
+                              + _oast.describe(hits))[:1500],
+                ))
 
     result.duration_ms = int((time.time() - started) * 1000)
     return result
