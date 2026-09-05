@@ -26,9 +26,14 @@ references:
 # authorisation server to do something it should refuse, and reports its
 # ANSWER; no victim session is involved.
 
+# NO `collaborator_host`. It was listed here and rendered by no step, which
+# advertised out-of-band confirmation this case never performed. It does not
+# need one: every probe reads the authorisation server's own `Location` header,
+# which comes straight back to erlik. Nothing about this flow is blind, so the
+# right fix is to stop offering the field rather than to invent a probe for it.
 target_schema:
   required: [url]
-  optional: [client_id, collaborator_host, cookie, auth_header]
+  optional: [client_id, cookie, auth_header]
 
 steps:
   # The core OAuth failure: an authorisation server that redirects to a

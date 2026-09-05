@@ -6325,6 +6325,10 @@ def _v2_case_summary(tc) -> dict:
         "severity": tc.severity,
         "target_schema": tc.target_schema.model_dump(),
         "steps": [s.name for s in tc.steps],
+        # Surfaced so a planner and an operator can both see, BEFORE a run,
+        # that part of this case can only be proven out of band. Without it a
+        # sweep with OAST off reads as complete coverage of a blind case.
+        "needs_collaborator": tc.needs_collaborator,
     }
 
 
@@ -6659,6 +6663,24 @@ async def v2_declared_retire(target: str, test_case_id: str, field: str):
     finally:
         await db.close()
     return {"ok": done, "declared": rows}
+
+
+@app.get("/api/v2/oast")
+async def v2_oast_status():
+    """Whether out-of-band detection is available, and what depends on it.
+
+    An operator has to be able to tell "no blind vulnerabilities" from "blind
+    detection was never running" — the two produce identical findings lists.
+    So the capability is reported with the cases it affects rather than left to
+    be inferred from an empty result.
+    """
+    from orchestrator import collaborator as _oast
+    catalog = load_catalog()
+    return {
+        **_oast.status(),
+        "cases": sorted(tid for tid, tc in catalog.items()
+                        if tc.needs_collaborator),
+    }
 
 
 @app.get("/api/v2/sweep/profiles")

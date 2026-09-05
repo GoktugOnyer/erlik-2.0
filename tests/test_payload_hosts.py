@@ -178,6 +178,13 @@ class TestTheCatalogue:
             f"{tid} declares {unused}, which no step names. Remove them."
         )
 
+    # A minted collaborator name, in the shape `collaborator.host_for` builds.
+    # It is NOT declared in any case file and cannot be: the token is minted
+    # per run, so `run_test_case` appends it to the case's declaration for the
+    # duration of that run. This sweep has to do the same or it audits a
+    # command the runner never sends.
+    OAST = "abcd1234abcd1234.oast.example"
+
     def test_no_step_in_the_catalogue_is_refused(self):
         """The property the whole change exists for."""
         scope = Scope(allow_hosts=["app.example.test"])
@@ -187,12 +194,76 @@ class TestTheCatalogue:
                 cmd = re.sub(r"\{\{(url|login_url|url_template|request_template)\}\}",
                              "http://app.example.test/x", st.command)
                 cmd = re.sub(r"\{\{host\}\}", "app.example.test", cmd)
+                cmd = re.sub(r"\{\{collaborator_host\}\}", self.OAST, cmd)
                 cmd = re.sub(r"\{\{[a-z_0-9]+\}\}", "q", cmd)
+                declared = list(tc.payload_hosts)
+                if st.oob:
+                    declared.append(self.OAST)
                 try:
-                    check_command(cmd, scope, payload_hosts=tc.payload_hosts)
+                    check_command(cmd, scope, payload_hosts=declared)
                 except ScopeViolation as e:
                     refused.append(f"{tid}/{st.name}: {e}")
         assert not refused, refused
+
+    # What the guard sees under REAL rendering, measured 2026-09-05 with
+    # `{{url}}` expanded to a full `http://app.example.test/fetch` — the shape
+    # the runner actually sends, which the sweep above does not reproduce
+    # because it substitutes a bare hostname for `{{url}}`.
+    #
+    #   WSTG-INPV-07/blind_oob_entity           REFUSED without the allowance
+    #   WSTG-AUTHZ-05/redirect_uri_not_validated REFUSED without the allowance
+    #   WSTG-CLNT-07/origin_reflection           REFUSED without the allowance
+    #   WSTG-INPV-19/*                           ALLOWED either way
+    #
+    # The last line is a real property of the guard, not an oversight in these
+    # tests. `_URL_RX` is greedy, so in
+    #
+    #   curl "http://app.example.test/fetch?q=http://169.254.169.254/latest/"
+    #
+    # the whole string matches as ONE URL whose host is the in-scope target.
+    # A payload host appended to the target's own query string is therefore
+    # never host-checked, and INPV-19's three declarations are inert. That is
+    # permissive, not unsafe -- the declaration exists to allow, and the guard
+    # was already allowing -- but it means the sweep above cannot be read as
+    # "every declaration is load-bearing".
+    RENDERED_REFUSALS = {
+        "WSTG-INPV-07": "blind_oob_entity",
+        "WSTG-AUTHZ-05": "redirect_uri_not_validated",
+        "WSTG-CLNT-07": "origin_reflection",
+    }
+
+    @pytest.mark.parametrize("tid,step_name", sorted(RENDERED_REFUSALS.items()))
+    def test_the_allowance_is_load_bearing_under_real_rendering(self, tid,
+                                                                step_name):
+        """The sweep above renders `{{url}}` as a bare hostname, which changes
+        which substring `_URL_RX` matches. These are the steps whose host the
+        guard genuinely sees in the command the runner sends, so these are the
+        ones where withholding the declaration must refuse."""
+        from orchestrator.testcase.runner import _render
+        ctx = {"url": "http://app.example.test/fetch", "parameter": "q",
+               "cookie": "", "auth_header": "", "client_id": "cid",
+               "collaborator_host": self.OAST}
+        st = next(x for x in CATALOG[tid].steps if x.name == step_name)
+        cmd = _render(st.command, ctx)
+        with pytest.raises(ScopeViolation):
+            check_command(cmd, Scope(allow_hosts=["app.example.test"]),
+                          payload_hosts=[])
+        # ... and permitted once declared, or the refusal proves only that the
+        # host is out of scope, which was never in doubt.
+        declared = list(CATALOG[tid].payload_hosts)
+        if st.oob:
+            declared.append(self.OAST)
+        check_command(cmd, Scope(allow_hosts=["app.example.test"]),
+                      payload_hosts=declared)
+
+    def test_a_payload_host_in_the_targets_query_string_is_not_checked(self):
+        """The property behind the INPV-19 line above, asserted directly so it
+        cannot quietly change. If `_URL_RX` is ever tightened this fails, and
+        whoever tightens it has to revisit the declarations that became
+        load-bearing overnight."""
+        check_command(
+            'curl "http://app.example.test/fetch?q=http://169.254.169.254/x"',
+            Scope(allow_hosts=["app.example.test"]), payload_hosts=[])
 
     def test_the_audit_above_would_catch_a_regression(self):
         """Guard on the guard: with the declarations withheld, the same sweep
@@ -218,6 +289,19 @@ class TestTheRunnerPassesThemThrough:
 
         import orchestrator.testcase.runner as R
         src = inspect.getsource(R.run_test_case)
-        assert "payload_hosts=tc.payload_hosts" in src, (
-            "run_test_case calls check_command without the case's declaration"
+        # The list handed to the guard is built FROM the case declaration and
+        # then extended with the run's minted collaborator, which no case file
+        # can name. Both halves are asserted: passing `tc.payload_hosts`
+        # straight through would refuse every out-of-band step, and building
+        # the list without seeding it from the case would drop every declared
+        # payload host the in-band probes depend on.
+        assert "step_payload_hosts = list(tc.payload_hosts)" in src, (
+            "run_test_case no longer seeds the guard from the case's declaration"
+        )
+        assert "step_payload_hosts.append(oast_host)" in src, (
+            "the run's minted collaborator is not added, so the only step that "
+            "can prove a blind finding is refused by the scope guard"
+        )
+        assert "payload_hosts=step_payload_hosts" in src, (
+            "run_test_case calls check_command without the declaration"
         )

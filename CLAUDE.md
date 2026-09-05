@@ -90,9 +90,15 @@ caught. Follow them.
   states per-file which figures are regenerable and which are carried forward.
   Product changes may drift from these — that is fine, but say so rather than
   editing the historical record.
-- **What was out of scope for a thesis is now roadmap**: OAST/interactsh,
-  per-session rate limiting, PDF and HackerOne export, and WSTG breadth (29 of
-  ~90+ cases). Authentication has moved: the token covers reads, an
+- **What was out of scope for a thesis is now roadmap**: per-session rate
+  limiting, PDF and HackerOne export, and WSTG breadth (29 of ~90+ cases).
+  OAST has moved: `orchestrator/collaborator.py` mints a per-run name, cases
+  declare `needs_collaborator` and steps `oob: true`, and a step whose result
+  nobody could observe is reported not-assessed rather than run. It is off
+  unless `ERLIK_OAST_DOMAIN` and `ERLIK_OAST_RECEIVER` are set, and it speaks
+  a small documented receiver API, **not** interact.sh's or Burp
+  Collaborator's wire protocol — that adapter has to be written against a live
+  instance, and the DNS round trip is not exercised by any test here. Authentication has moved: the token covers reads, an
   unconfigured instance fails closed off-loopback, and `orchestrator/operators.py`
   gives each operator their own token so sessions, v2 runs and engagement
   revisions record who did them, and only an `admin` operator may mint, revoke

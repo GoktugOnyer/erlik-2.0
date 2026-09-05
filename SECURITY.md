@@ -155,6 +155,23 @@ publicly. There is no bug bounty.
   wrote `curl http://declared-host/` would connect there — the same trust
   already placed in the step's command itself. Nothing in the agent lane
   changed; that lane has its own guard and its own OAST allowlist.
+- **The collaborator name is declared the same way, by the operator.** An
+  out-of-band probe names `<token>.<your-oast-domain>` in a payload, and the
+  token is minted per run, so no case file can list it. The runner adds that
+  one name to the case's `payload_hosts` for the duration of the run. It is
+  the same narrow allowance: it does not touch `allow_hosts`, the case's own
+  target is still checked against the engagement scope alone, and the name
+  only exists because the operator set `ERLIK_OAST_DOMAIN` or passed
+  `collaborator_host` — that configuration *is* the declaration.
+
+  `deny_hosts` still wins, and reaches as far as the allowance does. A payload
+  declaration grants the names *under* a declared host, so an exclusion now
+  denies the names under an excluded host: `deny_hosts: [oast.test]` blocks
+  `abcd1234.oast.test`. Before that, it did not — `deny_hosts` is a glob list
+  and `oast.test` does not match a subdomain — so an operator's explicit
+  exclusion could be reached under by a declaration. General scope matching is
+  unchanged; the payload path is the only place a bare name grants its
+  subdomains, so it is the only place one must also deny them.
 - **`ERLIK_NATIVE=1` removes the container boundary.** Commands run as your
   user on your machine.
 - **A remote LLM provider sees your prompts.** With `ERLIK_LLM_PROVIDER=openai`,

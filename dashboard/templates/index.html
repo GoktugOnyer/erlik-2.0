@@ -2076,6 +2076,12 @@
                     <h2 class="font-pixel" style="font-size:0.7rem;">&#9635; TEST LAB</h2>
                     <div id="tl-meta" class="font-mono" style="font-size:0.6rem; opacity:.75;">loading&hellip;</div>
                 </div>
+                <!-- OUT-OF-BAND detection. A blind case with OAST off returns
+                     the same empty findings list as a clean target, so the
+                     capability is stated here rather than inferred from a
+                     result. Hidden only until the status is known. -->
+                <div id="tl-oast" class="font-mono mt-2 hidden"
+                     style="font-size:0.6rem;"></div>
                 <p class="font-mono mt-2" style="font-size:0.6rem; opacity:.7; max-width:82ch;">
                     Committed WSTG test cases. Each one runs fixed steps and asserts on the
                     response &mdash; no model decides what to try, and every result names the case
@@ -3338,6 +3344,26 @@
                 psel.innerHTML = (pv.providers || []).map(x =>
                     `<option value="${tlEsc(x)}">provider: ${tlEsc(x)}</option>`).join('');
                 if (pv.current) psel.value = pv.current;
+
+                try {
+                    const oa = await (await fetch('/api/v2/oast')).json();
+                    const box = document.getElementById('tl-oast');
+                    const cases = (oa.cases || []).join(', ');
+                    box.classList.remove('hidden');
+                    if (oa.enabled) {
+                        box.style.opacity = '.75';
+                        box.textContent = `Out-of-band detection ON via ${oa.domain}.`
+                            + (cases ? ` Used by ${cases}.` : '');
+                    } else {
+                        // Not a warning colour for decoration: with this off, a
+                        // blind case reports its OOB step as not-assessed, and
+                        // an operator who does not know that reads the empty
+                        // findings list as a clean result.
+                        box.style.color = '#e0a030';
+                        box.textContent = `Out-of-band detection OFF — ${oa.reason || ''}.`
+                            + (cases ? ` Affected: ${cases}.` : '');
+                    }
+                } catch (e) { /* additive line; must not break the panel */ }
 
                 const c = await (await fetch('/api/v2/testcases')).json();
                 document.getElementById('tl-meta').textContent =

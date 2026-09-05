@@ -84,8 +84,14 @@ To cross from *capable research instrument* to *credible pentest tool*, the prio
   every `execute_tool` is stateless; re-attaching creds depends on LLM discipline. No CSRF/OAuth/SAML/SSO.
 
 ### E. Coverage
-- **Whole classes untooled**: GraphQL/API, SSRF (no OAST/collaborator), deserialization/SSTI/XXE (labels
-  only), cloud/container, non-HTTP network services, AD/Kerberos, mobile.
+- **Whole classes untooled**: GraphQL/API, deserialization/SSTI (labels only), cloud/container,
+  non-HTTP network services, AD/Kerberos, mobile.
+- **OAST is no longer absent** — `orchestrator/collaborator.py` mints a per-run name, WSTG-INPV-19
+  and WSTG-INPV-07 carry blind probes that use it, and a probe nobody could observe is reported
+  not-assessed rather than run. It is off unless `ERLIK_OAST_DOMAIN` and `ERLIK_OAST_RECEIVER` are
+  set, and it speaks a small documented receiver API, not interact.sh's or Burp Collaborator's wire
+  protocol — so "blind SSRF/XXE can be proven" holds only against a receiver implementing that API.
+  This line previously read "SSRF (no OAST/collaborator)"; that was true when written.
 - **WSTG deterministic coverage** — 29 cases are committed under `tests_catalog/wstg/`,
   not the 9 this line reported. Coverage of the full WSTG corpus is still partial and
   whole categories remain absent, so the gap is real; the number was not.
@@ -161,8 +167,10 @@ run-config/flag pattern (off by default), preserving research baselines.
 11. **Stateful primitive store + generic session manager** *(L)* — extract tokens/cookies/CSRF and injection
     points into a per-session store and auto-attach auth to subsequent tool calls; replace the Juice-Shop login
     hardcode with a configurable login provider. Enables real multi-stage chains.
-12. **Fill the biggest blind spots** *(M each)* — OAST/collaborator (interactsh) for blind SSRF/RCE/XXE; a
-    GraphQL tool; an SSTI/deserialization tool.
+12. **Fill the biggest blind spots** *(M each)* — ~~OAST/collaborator for blind SSRF/RCE/XXE~~ **done**,
+    see section E; what remains under this item is an **interact.sh adapter** (the current backend speaks
+    erlik's own receiver API, and the DNS round trip is exercised by no test), a GraphQL tool, and an
+    SSTI/deserialization tool.
 13. **Expand the WSTG catalog** *(M, incremental)* — grow from 9 toward broad coverage (optionally auto-draft
     cases from the skills corpus, human-reviewed).
 
