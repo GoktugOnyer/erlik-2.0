@@ -17,6 +17,14 @@ below. When the two conflict, ask rather than assume.
 | **Agent loop** | `POST /api/sessions/{id}/start` | `sessions`, `findings`, `steps` | LLM plans, orchestrator executes. Every reported thesis result comes from here. |
 | **Deterministic** | `/api/v2/*`, `orchestrator/testcase/` | `v2_runs`, `v2_findings` | YAML WSTG cases (29 in `tests_catalog/wstg/`), fixed command sequences with regex/status/llm evaluators. No thesis result uses it. |
 
+The two lanes now talk **both ways**. `orchestrator/handoff.py` gives the agent
+the deterministic lane's results at session start; the `run_case` action lets
+the agent invoke a WSTG case mid-run instead of improvising a probe. A case
+result is recorded to `v2_runs` and reported to the model, but never written to
+`findings` — that table is what recall and precision are computed from, and
+counting a deterministic result there would make every new run incomparable
+with the recorded campaigns.
+
 The tool interface is a **JSON action protocol over the model's text channel** —
 `TOOL_USE_SYSTEM_PROMPT` names tools in prose, the model replies with one JSON
 object per turn, `render_system_prompt()` fills placeholders, and

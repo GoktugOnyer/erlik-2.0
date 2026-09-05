@@ -1300,6 +1300,15 @@ To run a tool:
 To report a vulnerability:
 {"action": "finding", "vuln_type": "SQL Injection", "severity": "high", "url": "{target_url}/endpoint?q=test", "parameter": "q", "evidence": "Error message revealed SQL syntax"}
 
+To run a DETERMINISTIC TEST CASE instead of improvising a command:
+{"action": "run_case", "case_id": "WSTG-INPV-05", "target": {"url": "{target_url}", "parameter": "q"}, "reason": "Found a search parameter"}
+
+Each case is a reviewed, fixed sequence of checks with a definite verdict. When
+you have found something a case covers — a parameter, a login form, an upload,
+a cookie, an API object id — running the case is more reliable than probing it
+yourself, and its result is recorded automatically. Cases and what they need:
+{case_catalogue}
+
 To finish (ONLY after covering at least 3 phases):
 {"action": "done", "summary": "Completed testing. Found 3 vulnerabilities."}
 
@@ -2246,6 +2255,27 @@ def _discovery_filter(target_url: str, tool: str = "gobuster") -> str:
     return soft404.filter_flag(soft404.recall(target_url), tool)
 
 
+def _case_catalogue_for_prompt() -> str:
+    """The deterministic cases the agent may name, and what each one needs.
+
+    Generated from the catalogue rather than written out, because a hand-listed
+    set is exactly the kind of thing that goes stale the first time a case is
+    added -- and a model told about a case that does not exist wastes a turn
+    discovering that. The required fields are included because without them the
+    model's first attempt at a case is a guess.
+    """
+    try:
+        catalog = load_catalog()
+    except Exception:
+        return "  (catalogue unavailable)"
+    lines = []
+    for tc_id in sorted(catalog):
+        tc = catalog[tc_id]
+        req = ", ".join(tc.target_schema.required) or "url"
+        lines.append(f"  {tc_id} — {tc.name} (needs: {req})")
+    return "\n".join(lines)
+
+
 def render_system_prompt(target_url: str) -> str:
     """TOOL_USE_SYSTEM_PROMPT with every placeholder resolved for this target.
 
@@ -2272,6 +2302,7 @@ def render_system_prompt(target_url: str) -> str:
             .replace("{target_port}", port)
             .replace("{discovery_filter}", _discovery_filter(target_url))
             .replace("{discovery_filter_ffuf}", _discovery_filter(target_url, "ffuf"))
+            .replace("{case_catalogue}", _case_catalogue_for_prompt())
             # Residual literals from the era when the prompt was Juice-Shop-specific.
             .replace("http://juice-shop:3000", target_url)
             .replace("juice-shop", host))
@@ -3994,6 +4025,67 @@ async def engagement_rows_for_session(session_id: str):
         await db.close()
 
 
+def _runnable_case_ids() -> list[str]:
+    """Case ids the agent may name in a `run_case` action."""
+    try:
+        return list(load_catalog().keys())
+    except Exception:
+        return []
+
+
+def _agent_scope_hosts(target_url: str) -> list[str]:
+    """Allow-list for a case invoked from inside an agent run.
+
+    Just the session's own target host. That is deliberately NARROWER than the
+    agent's tool scope: a case the model chose must be aimed at the thing the
+    session is aimed at, and cannot become a way to reach a second host that
+    the engagement happens to allow. Where a case legitimately needs to NAME
+    another host -- an attacker Origin, a metadata address -- that is its
+    declared `payload_hosts`, which the scope guard applies on top of this.
+    """
+    from urllib.parse import urlparse
+    u = target_url if "://" in (target_url or "") else f"http://{target_url}"
+    host = (urlparse(u).hostname or "").lower()
+    return [host] if host else []
+
+
+def _format_case_result_for_agent(case_id: str, tc, result) -> str:
+    """Render a case result as evidence for the model.
+
+    States the verdict and stops. It does NOT tell the agent what to do next:
+    a measured 12-run experiment found injected guidance costs recall
+    dose-dependently, which is why handoff.format_for_agent is terse for the
+    same reason. Facts, not instruction.
+
+    A case that DECLINED to assess is reported as such and never as clean --
+    the same rule the dashboard follows. "No finding" and "could not check"
+    are different answers and the model must not conflate them.
+    """
+    lines = [f"{case_id} ({tc.name}) ran."]
+    findings = getattr(result, "findings", []) or []
+    not_assessed = getattr(result, "not_assessed", []) or []
+    refused = [st for st in (getattr(result, "steps", []) or [])
+               if not getattr(st, "success", True)]
+
+    if findings:
+        lines.append(f"CONFIRMED {len(findings)} finding(s):")
+        for f in findings[:8]:
+            lines.append(f"  [{f.severity}] {f.vuln_type}"
+                         + (f" (parameter: {f.parameter})" if f.parameter else ""))
+    else:
+        lines.append("No finding.")
+
+    for na in not_assessed[:5]:
+        lines.append(f"  NOT ASSESSED — {na.step}: {na.reason}")
+    for st in refused[:5]:
+        lines.append(f"  STEP FAILED — {st.step}: {st.error}")
+
+    if not findings and (not_assessed or refused):
+        lines.append("Part of this case did not run, so its silence is not a "
+                     "clean result.")
+    return "\n".join(lines)
+
+
 async def agent_loop(session_id: str, target_url: str, scope_mode: str,
                      system_prompt: str, enabled_tools: list[str], model: str,
                      session_type: str = "cold", parent_session_id: str = None,
@@ -4005,6 +4097,23 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
     # would set up, inject context, then die on an opaque 404 at the first
     # generation. Never substitutes a near neighbour — see ensure_model_available.
     runcfg = await _load_run_config(session_id)
+    # Read once: a `run_case` action persists its run like any other, so it has
+    # to carry the same customer and the same operator as the session it came
+    # from -- otherwise a deterministic run invoked by the agent would be the
+    # one row in v2_runs that nobody can attribute.
+    session_engagement_id = session_operator_id = None
+    try:
+        _sdb = await get_db()
+        try:
+            _srow = await (await _sdb.execute(
+                "SELECT engagement_id, operator_id FROM sessions WHERE id = ?",
+                (session_id,))).fetchone()
+            if _srow:
+                session_engagement_id, session_operator_id = _srow[0], _srow[1]
+        finally:
+            await _sdb.close()
+    except Exception as e:
+        print(f"[agent {session_id[:8]}] could not read session owner: {e}", flush=True)
     _eng_rows = await engagement_rows_for_session(session_id)
     if _eng_rows is not None:
         print(f"[scope {session_id[:8]}] engagement scope active: "
@@ -5199,6 +5308,125 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
                     f"Finding recorded: [{severity}] {vuln_type}. "
                     f"Continue testing with the next tool, or use 'done' if all tests are complete."
                 })
+
+            # --- ACTION: run_case ---
+            #
+            # THE HANDOFF WAS ONE-DIRECTIONAL. `orchestrator/handoff.py` gives
+            # the agent the deterministic lane's results at session start, so
+            # it does not rediscover ports and endpoints a scan already found.
+            # Nothing went the other way: `run_test_case` was reachable only
+            # from the v2 HTTP endpoints, so an agent that FOUND a parameter,
+            # a login form or an upload field had to keep probing it with LLM
+            # turns -- when a reviewed, mutation-tested case for exactly that
+            # already existed and costs a handful of curl requests.
+            #
+            # This lets the model spend a turn CHOOSING a probe instead of
+            # improvising one. The case still runs through `run_test_case`, so
+            # it goes through the same scope guard, the same admission control
+            # and the same evaluators as the deterministic lane -- there is no
+            # second path to the network here.
+            #
+            # THE RESULT IS NOT COPIED INTO `findings`, deliberately, and for
+            # the reason handoff.py already records: `findings` is what recall
+            # and precision are computed from, so counting a deterministic
+            # result there would inflate every agent-lane metric and make new
+            # runs incomparable with every recorded one. The run is persisted
+            # to v2_runs/v2_findings exactly as the deterministic lane does,
+            # and the agent is TOLD the verdict so it can act on it. Evidence,
+            # not credit.
+            elif action_type == "run_case":
+                case_id = (action.get("case_id") or "").strip()
+                case_target = action.get("target") or {}
+                reason = action.get("reason", "")
+
+                from orchestrator.testcase import find_by_id as _find_case
+                tc = _find_case(case_id)
+                if not tc:
+                    _ids = ", ".join(sorted(_runnable_case_ids())[:40])
+                    messages.append({"role": "assistant", "content": response})
+                    messages.append({"role": "user", "content":
+                        f"No test case '{case_id}'. Available: {_ids}. "
+                        f"Reply with a JSON action."})
+                    continue
+
+                # The session's own scope, not the case's. A case invoked from
+                # inside an agent run is bound by the engagement the run
+                # belongs to, exactly as a `run_tool` command is.
+                case_target = dict(case_target)
+                case_target.setdefault("url", target_url)
+                case_target["scope"] = {"allow_hosts": _agent_scope_hosts(target_url)}
+
+                await manager.broadcast(session_id, {
+                    "type": "log", "phase": phase,
+                    "message": f">> CASE {case_id}: {reason or tc.name}",
+                })
+
+                _t0 = time.time()
+                try:
+                    _cdb = await get_db()
+                    try:
+                        case_result = await run_test_case(
+                            tc, case_target, provider=None, model=None, db=_cdb)
+                    finally:
+                        await _cdb.close()
+                except ValueError as e:
+                    # Missing required target fields. Tell the model exactly
+                    # what the case needs rather than failing the turn.
+                    messages.append({"role": "assistant", "content": response})
+                    messages.append({"role": "user", "content":
+                        f"{case_id} could not run: {e}. Required: "
+                        f"{tc.target_schema.required}. Optional: "
+                        f"{tc.target_schema.optional}. Reply with a JSON action."})
+                    continue
+                except Exception as e:
+                    messages.append({"role": "assistant", "content": response})
+                    messages.append({"role": "user", "content":
+                        f"{case_id} failed to run: {e}. Try a different "
+                        f"approach. Reply with a JSON action."})
+                    continue
+                _case_ms = int((time.time() - _t0) * 1000)
+                # NO step_number increment here. It advances once per TURN at
+                # the top of the loop, for every action type -- `run_tool` and
+                # `finding` both rely on that and do not touch it. Adding one
+                # here double-counted every case: measured step_number=2 after
+                # a single case ran.
+                try:
+                    await save_v2_run(case_result, provider=None, model=None,
+                                      engagement_id=session_engagement_id,
+                                      operator_id=session_operator_id)
+                except Exception as e:
+                    print(f"[run_case {session_id[:8]}] persist failed: {e}", flush=True)
+
+                summary = _format_case_result_for_agent(case_id, tc, case_result)
+
+                db = await get_db()
+                await db.execute(
+                    "INSERT INTO steps (session_id, phase, step_number, prompt_sent, "
+                    "model_response, tool_called, tool_input, tool_output, duration_ms, denied) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (session_id, phase, step_number, reason[:500], response[:2000],
+                     f"case:{case_id}", json.dumps(case_target)[:1000],
+                     summary[:4000], _case_ms, 0),
+                )
+                await db.commit()
+                await db.close()
+                db = None
+
+                full_steps_data.append({
+                    "step": step_number, "phase": phase, "tool": f"case:{case_id}",
+                    "command": f"{case_id} {json.dumps(case_target)}",
+                    "reason": reason, "output": summary,
+                    "success": True, "duration_ms": _case_ms,
+                })
+
+                await manager.broadcast(session_id, {
+                    "type": "log", "phase": phase, "message": summary[:600]})
+
+                messages.append({"role": "assistant", "content": response})
+                messages.append({"role": "user", "content": summary +
+                    "\n\nThis was a deterministic check and is already recorded. "
+                    "Do not re-report it as a finding. Continue with the next "
+                    "action."})
 
             # --- ACTION: done ---
             elif action_type == "done":
