@@ -11,9 +11,9 @@ The comparison was also `provided != token`, which leaks the length of the
 matching prefix through timing -- a real oracle against a shared secret an
 attacker can probe at will.
 
-What this file does NOT assert is that the guard is on by default. It is not,
-and SECURITY.md says so; making it fail closed is a breaking change for the
-loopback workflow and belongs in its own change.
+This file covers the configured-token path only. What happens when NO token is
+set -- loopback open, off-loopback refused -- is tested in
+test_auth_fail_closed.py.
 """
 
 import importlib
@@ -124,9 +124,10 @@ class TestTheComparisonIsConstantTime:
 
 
 class TestNothingChangesWithoutAToken:
-    """The guard stays inert when none is configured. This is the documented
-    posture, not an oversight -- and it is what keeps the loopback workflow
-    working."""
+    """No token and a loopback client: served, exactly as before. This is what
+    keeps the local workflow working, and it is the reason the fail-closed
+    fallback in test_auth_fail_closed.py keys on the deployment rather than
+    simply demanding a token from everyone."""
 
     @pytest.mark.parametrize("path", SENSITIVE_READS)
     def test_reads_are_open(self, app_without_token, path):

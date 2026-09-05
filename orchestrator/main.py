@@ -60,6 +60,59 @@ app = FastAPI(title="Erlik Pentest Agent", lifespan=lifespan)
 templates = Jinja2Templates(directory="dashboard/templates")
 
 
+def _is_loopback(host: str | None) -> bool:
+    """True only for an address that cannot be reached from the network.
+
+    A host that is not an IP at all -- Starlette's in-process TestClient
+    reports "testclient" -- is NOT treated as remote. This predicate is only
+    ever used to DENY, so an unparseable value must not manufacture a denial
+    on a deployment that is in fact local.
+    """
+    if not host:
+        return False
+    import ipaddress
+
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return host in ("localhost", "testclient")
+
+
+def _bind_is_exposed() -> bool:
+    """Whether the operator asked to listen beyond loopback.
+
+    ERLIK_HOST is what run.sh binds and what an operator sets deliberately;
+    several scripts under scripts/ bind 0.0.0.0. Unset means the run.sh default
+    of 127.0.0.1, so absence is not exposure.
+    """
+    host = os.environ.get("ERLIK_HOST", "").strip()
+    if not host:
+        return False
+    if host in ("0.0.0.0", "::", "*"):
+        return True
+    return not _is_loopback(host)
+
+
+def _request_is_remote(request: Request) -> bool:
+    """Whether THIS request plausibly came from off-box.
+
+    Complements _bind_is_exposed: someone running `uvicorn --host 0.0.0.0`
+    directly never sets ERLIK_HOST, so the bind check alone would miss it.
+
+    A forwarded header means a proxy sits in front, which makes the peer
+    address loopback and therefore useless as evidence of locality -- so its
+    presence counts as remote on its own.
+    """
+    if request.headers.get("x-forwarded-for") or request.headers.get("x-real-ip"):
+        return True
+    client = request.client.host if request.client else None
+    if client is None:
+        return False        # unknown: do not manufacture a denial
+    return not _is_loopback(client)
+
+
+_TRUTHY = frozenset({"1", "true", "yes", "on"})
+
 # Paths that stay reachable without the token even when one is configured.
 # Only liveness: it reports the provider name and whether Ollama answers, which
 # a load balancer needs and which discloses no engagement data.
@@ -81,26 +134,57 @@ async def _api_token_guard(request: Request, call_next):
     token bought protection against writes while every secret remained
     readable.
 
+    With NO token configured the API now fails closed off-loopback. Previously
+    an unconfigured install served every route to anyone who could reach the
+    port, and the only thing standing between a hosted Erlik and its
+    engagement records was that the operator remembered to set a variable
+    nothing prompted them for. Local work is unaffected: a request from
+    127.0.0.1 to a loopback bind is still served with no token at all, which
+    is the entire development and thesis workflow.
+
+    Two independent signals decide "off-loopback", because either alone has a
+    blind spot: ERLIK_HOST catches `run.sh` and the scripts that bind
+    0.0.0.0 before any request arrives, and the peer address catches someone
+    running uvicorn --host 0.0.0.0 by hand, which sets nothing.
+
+    ERLIK_ALLOW_UNAUTHENTICATED=1 opts back out, for a deployment behind an
+    authenticating proxy. It is deliberately not the default and it is
+    deliberately loud in SECURITY.md.
+
     The comparison is constant-time. `provided != token` leaks the length of
     the matching prefix through timing, which is a real oracle against a shared
     secret an attacker can probe at will.
-
-    NOT changed here: the guard is still inert when no token is configured, so
-    an install that sets nothing is exactly as open as before. Making it fail
-    closed is a breaking change for the loopback workflow and wants its own
-    discussion -- SECURITY.md states the current posture plainly.
     """
     from fastapi.responses import JSONResponse
     token = os.environ.get("ERLIK_API_TOKEN", "").strip()
-    if token and request.url.path.startswith("/api/") \
-            and request.url.path not in _UNAUTHENTICATED_PATHS:
+    if not request.url.path.startswith("/api/") \
+            or request.url.path in _UNAUTHENTICATED_PATHS:
+        return await call_next(request)
+
+    if token:
         provided = request.headers.get("x-api-token", "")
         if not provided:
             auth = request.headers.get("authorization", "")
             if auth.lower().startswith("bearer "):
                 provided = auth[7:].strip()
         if not hmac.compare_digest(provided, token):
-            return JSONResponse({"detail": "missing or invalid API token"}, status_code=401)
+            return JSONResponse(
+                {"detail": "missing or invalid API token"}, status_code=401,
+                headers={"X-Erlik-Auth": "token-required"})
+    elif os.environ.get("ERLIK_ALLOW_UNAUTHENTICATED", "").strip().lower() not in _TRUTHY:
+        if _bind_is_exposed() or _request_is_remote(request):
+            # The two 401s are NOT interchangeable and the header says which is
+            # which. The dashboard's handler prompts for a token on 401; here
+            # there is no token to enter, so prompting would loop forever
+            # asking for a secret that does not exist.
+            return JSONResponse(
+                {"detail": "this instance is reachable off-loopback and has no "
+                           "ERLIK_API_TOKEN configured; set one (or set "
+                           "ERLIK_ALLOW_UNAUTHENTICATED=1 if authentication is "
+                           "enforced in front of it)"},
+                status_code=401,
+                headers={"X-Erlik-Auth": "unconfigured"},
+            )
     return await call_next(request)
 
 

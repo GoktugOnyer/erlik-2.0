@@ -35,7 +35,8 @@ fi
 
 # Bind to loopback by default so the (attack-launching) API isn't exposed on the
 # network. Override with ERLIK_HOST=0.0.0.0 only behind auth / on a trusted net.
-# Set ERLIK_API_TOKEN to require a token on state-changing API calls.
+# Set ERLIK_API_TOKEN to require a token on every API call, reads included.
+# Without one, an off-loopback bind refuses /api/* outright.
 ERLIK_HOST="${ERLIK_HOST:-127.0.0.1}"
 ERLIK_PORT="${ERLIK_PORT:-8002}"
 

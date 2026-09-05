@@ -75,10 +75,42 @@ class TestClaimedDefaultsAreReal:
         assert _safe_mode_enabled() is True
 
     def test_api_token_guard_is_off_by_default(self):
-        """SECURITY.md says the API is unauthenticated by default. If that ever
-        stops being true, the doc must change with it."""
+        """SECURITY.md says the API is unauthenticated ON LOOPBACK by default.
+        If that ever stops being true, the doc must change with it."""
         import os
         assert not os.environ.get("ERLIK_API_TOKEN")
+
+    def test_the_off_loopback_fallback_is_on_by_default(self):
+        """The other half of that claim: no token plus a network-reachable
+        bind must refuse. Asserted against the real middleware, since the doc
+        now promises a default behaviour rather than the absence of one."""
+        import importlib
+        import os
+
+        from fastapi.testclient import TestClient
+
+        old = os.environ.get("ERLIK_HOST")
+        os.environ["ERLIK_HOST"] = "0.0.0.0"
+        try:
+            import orchestrator.main as M
+            importlib.reload(M)
+            assert TestClient(M.app).get("/api/engagements").status_code == 401
+        finally:
+            if old is None:
+                os.environ.pop("ERLIK_HOST", None)
+            else:
+                os.environ["ERLIK_HOST"] = old
+            import orchestrator.main as M
+            importlib.reload(M)
+
+    def test_the_opt_out_the_doc_names_exists(self):
+        """SECURITY.md tells operators ERLIK_ALLOW_UNAUTHENTICATED=1 waives the
+        refusal. A documented escape hatch that does nothing is worse than
+        none: it is what someone reaches for when the app stops working."""
+        import inspect
+
+        import orchestrator.main as M
+        assert "ERLIK_ALLOW_UNAUTHENTICATED" in inspect.getsource(M._api_token_guard)
 
     def test_bind_address_defaults_to_loopback(self):
         assert 'ERLIK_HOST="${ERLIK_HOST:-127.0.0.1}"' in (ROOT / "run.sh").read_text()
