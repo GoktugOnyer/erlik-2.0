@@ -10,11 +10,50 @@ target_schema:
   required: [host]
   optional: [port]
 
+# THREE DEFECTS MEASURED 2026-09-05 by rendering the case, not reading it.
+#
+# 1. THE HSTS CHECK PROBED A DIFFERENT ENDPOINT THAN THE SCAN. `port` exists
+#    precisely because the service may not be on 443, and the HSTS steps
+#    ignored it:
+#
+#      target host=127.0.0.1 port=9023
+#      tls_scan   -> testssl ... "127.0.0.1:9023"
+#      hsts_check -> curl -sI "https://127.0.0.1/"      <- port 443
+#
+#    So the TLS verdict and the HSTS verdict described two different services,
+#    or the HSTS verdict described nothing at all.
+#
+# 2. `port` IS OPTIONAL AND HAD NO DEFAULT. Omitted, the scan rendered as
+#    `testssl ... "127.0.0.1:"`, which is not a target.
+#
+# 3. THE HSTS STEP COULD NOT REACH A VERDICT. `hsts_check` carried two
+#    evaluators with the SAME pattern and NO `emit_finding` on either.
+#    runner.py:319 emits a finding only `if ev.emit_finding`, so both were dead
+#    by construction -- the step issued a request and concluded nothing. Its
+#    own comments said so ("Presence means OK -- emit no finding", "If the
+#    above did not match, this will not either; that is fine"). The actual
+#    verdict was then delegated to `hsts_llm_judge`, which re-issued the
+#    identical request and asked a model whether a header was present.
+#
+#    "Is this string in this output" is what a regex answers. Routing it
+#    through a model meant the whole HSTS check produced NOTHING on any
+#    deployment with no model reachable, which is every offline run.
+#
+# The HSTS half is now one deterministic step on the right port, with an
+# explicit no-response verdict so an unreachable endpoint is not reported as
+# missing HSTS.
+#
+# NOT CHANGED: `tls_scan`'s evaluators. `testssl` is not installed in this
+# environment, so any edit to its patterns could not be verified against real
+# output -- and `pattern: VULNERABLE|HIGH` alongside `--severity HIGH` in the
+# command deserves that verification before anyone touches it.
+
 steps:
   - name: tls_scan
     tool: testssl
     command: >-
-      testssl --quiet --color 0 --severity HIGH --warnings off "{{host}}:{{port}}"
+      bash -c 'P="{{port}}"; case "$P" in ""|*[!0-9]*) P=443;; esac;
+      testssl --quiet --color 0 --severity HIGH --warnings off "{{host}}:$P"'
     evaluators:
       - type: regex
         pattern: 'VULNERABLE|HIGH'
@@ -27,32 +66,41 @@ steps:
           vuln_type: Deprecated TLS Protocol Enabled
           severity: high
 
-  - name: hsts_check
+  - name: hsts_header
     tool: curl
+    # The URL is assembled into a variable rather than written literally with
+    # `$P` in it. scope.check_command extracts every `https://…` substring of a
+    # rendered command and parses it, and `https://host:$P/` raises on the port
+    # -- which is now a refusal rather than a crash, so the step would simply
+    # never run. `"$U"` carries no scheme for the extractor to find, and the
+    # host is still checked via the literal `https://{{host}}` on the line
+    # above it.
+    #
+    # No -k: a certificate this client will not accept is a finding for
+    # tls_scan to report, and answering "missing HSTS" off a connection that
+    # was never established would be a verdict about nothing.
+    #
+    # `-D - -o /dev/null` rather than `-sI`, which sends HEAD. Measured against
+    # a local TLS server with no HEAD handler: 501, no headers, and the case
+    # would have reported Missing HSTS for a service whose GET sets it. This
+    # takes the response headers off a real GET and discards the body, the same
+    # way CLNT-07b reads CORS headers.
     command: >-
-      curl -sI "https://{{host}}/"
+      bash -c 'U="https://{{host}}"; P="{{port}}";
+      case "$P" in ""|*[!0-9]*) P=443;; esac;
+      H=$(curl -s -D - -o /dev/null --connect-timeout 5 --max-time 15 -w "HTTPCODE=%{http_code}" "$U:$P/");
+      CODE=$(printf "%s" "$H" | grep -o "HTTPCODE=[0-9]*" | tail -1 | cut -d= -f2);
+      printf "%s\n" "$H";
+      if [ "$CODE" = "000" ]; then
+        echo "ERLIK_HSTS_NO_RESPONSE: no response was received over TLS on port $P, so whether the service sets HSTS was not assessed";
+      elif printf "%s" "$H" | grep -qi "^Strict-Transport-Security:"; then
+        echo "ERLIK_HSTS_PRESENT: the service sets Strict-Transport-Security";
+      else
+        echo "ERLIK_HSTS_ABSENT: the service answered over TLS on port $P and set no Strict-Transport-Security header";
+      fi'
     evaluators:
       - type: regex
-        pattern: '^Strict-Transport-Security:'
-        # Presence means OK — emit no finding. Inverted check below.
-      - type: regex
-        pattern: '^Strict-Transport-Security:'
-        when: no_finding_yet
-        # If the above didn't match, this won't either; that's fine — we
-        # use a follow-up step with an LLM judge to make the absence call
-        # explicit rather than fighting regex negation.
-
-  - name: hsts_llm_judge
-    tool: curl
-    when: no_finding_yet
-    command: >-
-      curl -sI "https://{{host}}/"
-    evaluators:
-      - type: llm
-        instruction: >-
-          The output is HTTP response headers. Set matched=true ONLY if the
-          response is missing a Strict-Transport-Security header. If HSTS
-          is present, set matched=false.
+        pattern: 'ERLIK_HSTS_ABSENT'
         emit_finding:
           vuln_type: Missing HSTS
           severity: medium
