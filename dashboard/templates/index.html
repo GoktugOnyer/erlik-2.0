@@ -3766,7 +3766,16 @@
         // because a redirect is not the page an attacker would frame. Rendering
         // that as "clean" would put "no clickjacking issue" in front of an
         // operator when the truth is "not tested".
-        const TL_NOT_ASSESSED = /ERLIK_\w*(?:NOT_ASSESSED|NO_RESPONSE|INCONCLUSIVE)\w*/;
+        // Both separators, because the catalogue uses both: CLNT-09 emits
+        // ERLIK_FRAMING_NO_RESPONSE and AUTHZ-04 emits
+        // ERLIK-AUTHZ-INCONCLUSIVE. `ERLIK_\w*` required the underscore, so
+        // AUTHZ-04's "the low-privilege session was not authenticated here, so
+        // this says nothing about access control" rendered GREEN -- the case
+        // declined to assess and the row read as clean. INPV-15's
+        // ERLIK_HBH_UNSTABLE_BASELINE ("the baseline moved between adjacent
+        // samples") did the same, for the opposite reason: the separator was
+        // right and the word was not in the list.
+        const TL_NOT_ASSESSED = /ERLIK[_-][A-Z0-9_-]*(?:NOT_ASSESSED|NO_RESPONSE|INCONCLUSIVE|UNSTABLE|NO_SUCCESS)[A-Z0-9_-]*/;
         const tlLast = {};
 
         function tlVerdict(d) {
