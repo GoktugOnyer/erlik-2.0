@@ -30,6 +30,18 @@ def test_doc_exists():
     assert DOC.exists()
 
 
+
+def _sig_has_default_none(fn, name: str) -> bool:
+    """`name` is a parameter of `fn` defaulting to None.
+
+    A declaration that had to be passed in cannot be picked up by accident; one
+    with any other default could change what every caller gets.
+    """
+    import inspect
+    p = inspect.signature(fn).parameters.get(name)
+    return p is not None and p.default is None
+
+
 class TestEveryPathResolves:
     def test_backticked_repo_paths_exist(self):
         """The original design named `testcase/runner.py`; the real lane is
@@ -233,14 +245,48 @@ class TestPayloadHostsDeclaration:
                           primary_url="http://evil.example/",
                           payload_hosts=["evil.example"])
 
-    def test_the_agent_lane_is_untouched_as_documented(self):
-        """The doc says the agent lane has its own guard and its own OAST
-        allowlist, and that nothing there changed."""
+    def test_both_guards_honour_the_declaration_as_documented(self):
+        """SECURITY.md now says BOTH guards honour it, because a case step
+        passes through both.
+
+        This test used to assert the OPPOSITE -- that `payload_hosts` appears
+        nowhere in `_scope_violation` -- and it passed for six months while the
+        declaration bought nothing: the case lane granted it and the agent lane
+        took it away. Asserting the absence of the plumbing is what let a
+        feature that never worked end to end look verified.
+        """
+        from orchestrator.tool_executor import _scope_violation
+        assert _scope_violation("curl http://erlik-not-registered.example/cb",
+                                "http://127.0.0.1/",
+                                payload_hosts=["erlik-not-registered.example"]) is None
+        assert _scope_violation("curl http://evil.example/cb", "http://127.0.0.1/",
+                                payload_hosts=["erlik-not-registered.example"])
+
+    def test_a_declaration_cannot_reach_the_agent_lane_on_its_own(self):
+        """The other half of what the doc promises: it arrives as an explicit
+        argument from `run_test_case`, never from the environment or a global,
+        so an ordinary agent-lane command cannot acquire one."""
         import inspect
 
         import orchestrator.tool_executor as TE
-        assert "payload_hosts" not in inspect.getsource(TE._scope_violation)
+        src = inspect.getsource(TE._scope_allows)
+        assert "os.environ" not in src, (
+            "the payload allowance now reads process state; an agent command "
+            "could acquire one")
+        assert _sig_has_default_none(TE.execute_tool, "payload_hosts")
         assert TE._OAST_DOMAINS
+
+    def test_the_engagement_gate_is_not_widened_by_a_declaration(self):
+        """SECURITY.md: "a case file may not reach a host the customer
+        excluded"."""
+        from orchestrator.tool_executor import _scope_violation
+        rows = [{"pattern": "127.0.0.1", "kind": "host", "in_scope": 1,
+                 "source": "declared"},
+                {"pattern": "erlik-not-registered.example", "kind": "domain",
+                 "in_scope": 0, "source": "declared"}]
+        assert _scope_violation("curl http://erlik-not-registered.example/cb",
+                                "http://127.0.0.1/", engagement_rows=rows,
+                                payload_hosts=["erlik-not-registered.example"])
 
     def test_the_collaborator_name_is_declared_by_the_runner_as_documented(self):
         """The doc says the runner adds the minted name to the case's

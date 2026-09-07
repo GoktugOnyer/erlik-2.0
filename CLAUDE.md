@@ -130,6 +130,21 @@ caught. Follow them.
 - The session's GitHub token **cannot delete refs** (403 from GitHub, not the
   proxy — pushing commits works). Branch cleanup is a human step.
 
+## Two guards, not one
+
+Every deterministic-lane step is checked by `testcase/scope.py::check_command`
+**and then** by `tool_executor::_scope_violation`. They are separate on purpose
+— the second is the agent lane's and applies to everything — but anything a
+case declares has to reach both or it is granted by one and taken away by the
+other. That is exactly what happened to `payload_hosts` for six months; see
+SECURITY.md. If you add a case-level allowance, pass it to both, and test it
+through `run_test_case`, not through `check_command`.
+
+`execute_tool` returns `executed` and `denied` on every refusal path, and
+`StepResult` carries them. Do not classify a refusal by matching its message
+text: a refusal is not a broken command, and `scripts/case_baseline.py` recorded
+one as the other in a committed baseline by reading prefixes.
+
 ## Already fixed — do not re-report
 
 SQLite WAL and `busy_timeout` are set in `get_db()`. Older notes in

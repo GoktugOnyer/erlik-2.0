@@ -31,9 +31,13 @@ references:
 # need one: every probe reads the authorisation server's own `Location` header,
 # which comes straight back to erlik. Nothing about this flow is blind, so the
 # right fix is to stop offering the field rather than to invent a probe for it.
+# `host` and `scheme` are DERIVED from the base URL by the planner. The suffix
+# probe below needs them: it must name the target's HOST with an attacker
+# suffix, and building that out of `{{url}}` produced a different thing on every
+# target shape (see the step's own comment).
 target_schema:
   required: [url]
-  optional: [client_id, cookie, auth_header]
+  optional: [client_id, cookie, auth_header, host, scheme]
 
 steps:
   # The core OAuth failure: an authorisation server that redirects to a
@@ -47,8 +51,16 @@ steps:
       --data-urlencode "redirect_uri=https://erlik-not-registered.example/cb"
       --data-urlencode "state=erlikstate"
     evaluators:
+      # ANCHORED ON THE AUTHORITY, not on the string appearing anywhere.
+      # `%{http_code} %{redirect_url}` carries whatever the server put in
+      # Location, and a server that REFUSES the probe commonly echoes the value
+      # it rejected -- in an error page's query string, or in a login wall's
+      # `?next=`. The old pattern was the bare domain, unanchored, so those
+      # refusals matched and were reported as critical. This requires a 3xx
+      # whose redirect AUTHORITY is the unregistered domain, which is the
+      # vulnerability itself rather than a mention of it.
       - type: regex
-        pattern: 'erlik-not-registered\.example'
+        pattern: '^30[1237] https?://(?:[^\s/]*[@.])?erlik-not-registered\.example(?::\d+)?(?:[/?#]|$)'
         emit_finding:
           vuln_type: OAuth redirect_uri not validated (authorisation code can be redirected off-origin)
           severity: critical
@@ -56,6 +68,29 @@ steps:
 
   # Same failure, reached by appending rather than replacing — servers that
   # prefix-match the registered URI accept this and reject the step above.
+  #
+  # BUILT FROM THE HOST, not from `{{url}}`. Suffix confusion needs the
+  # resulting URL's HOST to be the registered host with an attacker-controlled
+  # suffix. Appending to the whole URL achieved that on exactly one target
+  # shape. Measured 2026-09-06:
+  #
+  #   http://h:3000            -> http://h:3000.erlik-...  port unparseable, so
+  #                               the guard refused it and the case aborted here
+  #   http://h:3000/authorize  -> http://h:3000/authorize.erlik-...
+  #                               the suffix lands in the PATH, so the redirect
+  #                               host is the TARGET and this tests nothing
+  #   http://h                 -> http://h.erlik-...       correct
+  #
+  # Only the bare origin was right, and this case's own note above says `url`
+  # must be the authorise endpoint -- exactly the shape that is wrong. Against a
+  # server validating redirect_uri STRICTLY BY ORIGIN, which is correct
+  # behaviour, the old probe and the old unanchored pattern together reported:
+  #
+  #   CRITICAL: OAuth redirect_uri prefix-matched (suffix bypass)
+  #   302 http://127.0.0.1:37649/oauth/authorize.erlik-not-registered.example?code=abc
+  #
+  # The code never left the origin. `{{scheme}}://{{host}}.` is a valid URL on
+  # every target shape, and the host is attacker-controlled on every one.
   - name: redirect_uri_suffix_bypass
     tool: curl
     when: no_finding_yet
@@ -63,11 +98,11 @@ steps:
       curl -s -b "{{cookie}}" -H "{{auth_header}}" -i -o /dev/null -w "%{http_code} %{redirect_url}" -G "{{url}}"
       --data-urlencode "response_type=code"
       --data-urlencode "client_id={{client_id}}"
-      --data-urlencode "redirect_uri={{url}}.erlik-not-registered.example"
+      --data-urlencode "redirect_uri={{scheme}}://{{host}}.erlik-not-registered.example/cb"
       --data-urlencode "state=erlikstate"
     evaluators:
       - type: regex
-        pattern: '\.erlik-not-registered\.example'
+        pattern: '^30[1237] https?://(?:[^\s/]*[@.])?erlik-not-registered\.example(?::\d+)?(?:[/?#]|$)'
         emit_finding:
           vuln_type: OAuth redirect_uri prefix-matched (suffix bypass)
           severity: critical

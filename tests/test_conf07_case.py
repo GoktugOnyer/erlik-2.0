@@ -55,8 +55,13 @@ class TestBothHalvesUseTheSamePort:
         scan = [s for s in case["steps"] if s["name"] == "tls_scan"][0]
         assert '{{port}}' in scan["command"]
 
+    # The empty port is GONE from this list, and that is the change: `port` is
+    # now required, so `build_target` derives it from the base URL and
+    # `run_test_case` refuses a hand-written target that omits it. There is no
+    # longer a state in which the case has to invent one. See
+    # `test_a_missing_port_is_refused_not_invented` below.
     @pytest.mark.parametrize("port,expect", [
-        ("9023", ":9023/"), ("8443", ":8443/"), ("", ":443/"),
+        ("9023", ":9023/"), ("8443", ":8443/"), ("443", ":443/"),
     ])
     def test_the_port_reaches_the_url_the_probe_requests(self, hsts, tmp_path,
                                                          port, expect):
@@ -81,20 +86,38 @@ class TestBothHalvesUseTheSamePort:
         assert urls, out[:400]
         assert all(u.endswith(expect) for u in urls), urls
 
-    def test_both_default_to_443(self, case):
-        for step in case["steps"]:
-            assert "P=443" in step["command"], step["name"]
+    def test_the_default_is_resolved_by_the_planner(self):
+        """It used to be a shell prologue -- `case "$P" in ""|*[!0-9]*) P=443`
+        -- and that is exactly what hid the port from the scope guard: `$P` is
+        not a port the guard can read, so it scored `{{host}}:$P` as a bare host
+        and defaulted it to 80. Measured 2026-09-06, `tls_scan` was refused on
+        EVERY https target, always. The default now lives where the port is a
+        fact about the target."""
+        from orchestrator.testcase.sweep import build_target
+        c = {"id": "WSTG-CONF-07",
+             "target_schema": {"required": ["host", "port"], "optional": []}}
+        for base, expect in (("https://app.example.test", 443),
+                             ("https://app.example.test:8443", 8443)):
+            t, why = build_target(c, base, {})
+            assert t and t["port"] == expect, (base, t, why)
 
-    @pytest.mark.parametrize("given,expected", [
-        ("", "443"), ("notaport", "443"), ("9023", "9023"), ("8443", "8443"),
-    ])
-    def test_the_default_runs(self, given, expected):
-        """Executes the real prologue instead of re-deriving it."""
-        import subprocess
-        sh = 'P="%s"; case "$P" in ""|*[!0-9]*) P=443;; esac; echo "$P"' % given
-        out = subprocess.run(["bash", "-c", sh], capture_output=True,
-                             text=True).stdout.strip()
-        assert out == expected
+    def test_a_missing_port_is_refused_not_invented(self):
+        """`required` means the case cannot run without knowing this, and
+        inventing 443 does not make it known. A hand-written target that omits
+        it is refused by name rather than silently scanned on the wrong port."""
+        import asyncio
+
+        from orchestrator.testcase import find_by_id, run_test_case
+        with pytest.raises(ValueError, match="port"):
+            asyncio.run(run_test_case(find_by_id("WSTG-CONF-07"),
+                                      {"host": "127.0.0.1"}))
+
+    def test_no_step_hides_the_port_in_a_shell_variable(self, case):
+        """The guard reads the rendered command. A port assembled at runtime is
+        invisible to it, which is how both halves came to be refused."""
+        for step in case["steps"]:
+            assert "$P" not in step["command"], step["name"]
+            assert "{{host}}:{{port}}" in step["command"], step["name"]
 
 
 class TestTheHstsStepReachesAVerdict:

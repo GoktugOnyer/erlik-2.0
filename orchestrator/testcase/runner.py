@@ -33,6 +33,18 @@ class StepResult(BaseModel):
     duration_ms: int
     error: str | None = None
 
+    # WHETHER THE COMMAND EVER REACHED A SHELL, and whether a guard is why.
+    #
+    # `execute_tool` has returned both of these all along and this model threw
+    # them away, leaving the human-readable message prefix as the only signal.
+    # Everything downstream then had to match on prose: `case_baseline` knew two
+    # of the five prefixes and filed an agent-lane scope refusal under "the
+    # command did not work" in a committed baseline. A refusal and a breakage
+    # are different facts about an engagement and must not be told apart by
+    # reading English.
+    executed: bool = True
+    denied: bool = False
+
 
 class NotAssessed(BaseModel):
     """An evaluator that could not reach a verdict, as opposed to one that
@@ -401,6 +413,11 @@ async def run_test_case(
     # refusal all leave an OOB step un-sent, and reporting "payloads were sent,
     # go check your collaborator" for a probe that never left is the same class
     # of untrue interface label as the silence it replaces.
+    #
+    # Set AFTER the step runs and only when the executor says it ran. It was
+    # first written just before the `execute_tool` call, which made it true for
+    # a probe the executor then refused -- the exact untrue label this comment
+    # claims it prevents, three lines above the bug.
     oob_sent = False
     try:
         for step in tc.steps:
@@ -439,7 +456,12 @@ async def run_test_case(
                         output="",
                         duration_ms=0,
                         error=f"scope violation: {e}",
+                        executed=False, denied=True,
                     ))
+                    result.not_assessed.append(NotAssessed(
+                        step=step.name, evaluator="scope",
+                        reason=f"the step was refused before it ran, so nothing "
+                               f"about it was assessed: {e}"))
                     result.stopped_early = True
                     break
 
@@ -456,9 +478,6 @@ async def run_test_case(
                 last_step = sr
                 continue
 
-            if step.oob:
-                oob_sent = True
-
             # AUTH RESOLUTION. `cmd` carries opaque handles; the secret exists
             # only in `live_cmd`, only for the duration of this call, and is
             # never stored. See credentials.HANDLE_RX.
@@ -467,7 +486,7 @@ async def run_test_case(
                 if db is None:
                     sr = StepResult(
                         step=step.name, command=cmd, success=False, output="",
-                        duration_ms=0,
+                        duration_ms=0, executed=False, denied=True,
                         error="this step needs an authenticated session and the "
                               "runner was given no credential store; refusing to "
                               "send the request unauthenticated")
@@ -483,6 +502,7 @@ async def run_test_case(
                     sr = StepResult(
                         step=step.name, command=cmd, success=False, output="",
                         duration_ms=0,
+                        executed=False, denied=True,
                         error="the session this step needs is no longer verified; "
                               "re-authenticate and re-run (refusing to fall back "
                               "to an unauthenticated request)")
@@ -497,6 +517,11 @@ async def run_test_case(
                 target_url=_primary_url(target),
                 no_timeout=False,
                 tool_hint=step.tool,
+                # The SAME list the case-lane guard was given, so the two
+                # guards agree about what this case declared. Without it the
+                # declaration was honoured by one and refused by the other, and
+                # `payload_hosts` granted nothing it was not already given.
+                payload_hosts=step_payload_hosts,
             )
             sr = StepResult(
                 step=step.name,
@@ -505,9 +530,29 @@ async def run_test_case(
                 output=_CRED.scrub(raw.get("output", "") or "", secret_values),
                 duration_ms=int((time.time() - t0) * 1000),
                 error=_CRED.scrub(raw.get("error") or "", secret_values) or None,
+                executed=bool(raw.get("executed", True)),
+                denied=bool(raw.get("denied")),
             )
             result.steps.append(sr)
             last_step = sr
+
+            # A REFUSED STEP IS NOT EVIDENCE. `execute_tool`'s own docstring
+            # says callers must skip detection when `executed` is False -- it
+            # exists because a refusal string once became detection input -- and
+            # this caller did not. The evaluators below ran against the refusal
+            # message, so a guard's own words could match a pattern and be
+            # emitted as a finding, and a case that was never allowed to run
+            # reported a clean verdict rather than an unassessed one.
+            if step.oob and sr.executed:
+                oob_sent = True
+
+            if not sr.executed:
+                result.not_assessed.append(NotAssessed(
+                    step=step.name,
+                    evaluator="admission",
+                    reason=f"the step was refused before it ran, so nothing "
+                           f"about it was assessed: {sr.error or 'no reason given'}"))
+                continue
 
             stop = False
             for ev in step.evaluators:

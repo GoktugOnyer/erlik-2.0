@@ -195,6 +195,13 @@ class TestTheCatalogue:
                              "http://app.example.test/x", st.command)
                 cmd = re.sub(r"\{\{host\}\}", "app.example.test", cmd)
                 cmd = re.sub(r"\{\{collaborator_host\}\}", self.OAST, cmd)
+                # `port` and `scheme` are DERIVED facts and have to be rendered
+                # as such. Substituting the catch-all "q" produced
+                # `https://app.example.test:q/`, which the guard refuses on an
+                # unparseable port -- a refusal invented by this test's own
+                # renderer, not one the planner can ever produce.
+                cmd = re.sub(r"\{\{port\}\}", "443", cmd)
+                cmd = re.sub(r"\{\{scheme\}\}", "https", cmd)
                 cmd = re.sub(r"\{\{[a-z_0-9]+\}\}", "q", cmd)
                 declared = list(tc.payload_hosts)
                 if st.oob:

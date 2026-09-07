@@ -148,7 +148,8 @@ def build_target(case: dict[str, Any], base: str,
 
     # DERIVED from the target the operator gave us. These are facts, not
     # guesses: the base URL is the base URL.
-    derived = {"url": base, "host": host, "port": port, "url_template": base}
+    derived = {"url": base, "host": host, "port": port, "url_template": base,
+               "scheme": p.scheme or "http"}
 
     # GUESSES. A parameter named "q" and a login form at /login are inventions
     # that happen to be true on some applications and false on most.
@@ -198,6 +199,21 @@ def build_target(case: dict[str, Any], base: str,
     for o in schema.get("optional") or []:
         if o in over and o not in tgt:
             tgt[o] = over[o]
+        # A DERIVED value may fill an optional field; a GUESS may not.
+        #
+        # Optional fields were filled only from `over`, so a case declaring
+        # `port` optional never received one however plainly the base URL said
+        # it. WSTG-CONF-07 declares exactly that, uses `{{port}}` in both steps,
+        # and rendered it empty on every run -- a shell fallback then picked 443
+        # and both steps were refused by the scope guard, which had been told
+        # allow_ports=[8443]. Its TLS scan had never run on any target.
+        #
+        # `guessed` stays excluded, and that distinction is the whole point:
+        # the base URL's port is a fact about the target, while `?q=` and
+        # `/login` are inventions. See the GUESS_REASON block above for what
+        # letting a guess fill a field cost the last time.
+        elif o in derived and o not in tgt and derived[o] not in (None, ""):
+            tgt[o] = derived[o]
     # Every OTHER member of a satisfied group is offered too when it exists, so
     # a command written for both shapes can pick whichever it was given.
     for group in req_any:

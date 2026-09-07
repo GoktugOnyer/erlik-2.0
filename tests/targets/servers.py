@@ -326,3 +326,60 @@ class Ssrf(_Base):
                 pass
             return self._send(200, "fetched", "text/plain")
         self._send(400, "url parameter refused", "text/plain")
+
+class OAuth(_Base):
+    """An authorisation server, in three flavours of `redirect_uri` validation.
+
+    `MODE` selects the flaw, and the point of the trio is the CONTROL: a probe
+    must fire on `prefix` and `open` and stay silent on `strict`.
+
+      strict  compares the ORIGIN for equality. Correct -- no off-origin
+              redirect is possible, so nothing may be reported against it.
+      prefix  compares the HOST with startswith and ignores the port. This is
+              the common sloppy implementation and it is the actual
+              suffix-confusion flaw.
+      open    accepts any redirect_uri at all.
+
+    All three ECHO the value they rejected back in a Location header, which is
+    not incidental: WSTG-AUTHZ-05's evaluators were the bare domain, unanchored,
+    so a REFUSAL matched them and was reported as critical. Measured 2026-09-06
+    against the strict server, which is behaving correctly:
+
+        CRITICAL: OAuth redirect_uri prefix-matched (suffix bypass)
+        302 http://127.0.0.1:37649/oauth/authorize.erlik-not-registered.example?code=abc
+
+    The echo is therefore part of the control, not decoration.
+    """
+
+    MODE = "strict"
+    ORIGIN = ""
+
+    def do_GET(self):
+        u = urlparse(self.path)
+        q = parse_qs(u.query)
+        ru = (q.get("redirect_uri") or [""])[0]
+        if not ru:
+            return self._send(200, "ok", "text/plain")
+        p = urlparse(ru)
+        if self.MODE == "strict":
+            ok = f"{p.scheme}://{p.netloc}" == self.ORIGIN
+        elif self.MODE == "prefix":
+            ok = (p.hostname or "").startswith(
+                urlparse(self.ORIGIN).hostname or "\x00")
+        else:
+            ok = True
+        loc = (ru + "?code=abc") if ok else f"{self.ORIGIN}/oauth/error?bad={ru}"
+        # Through `_send`, so the redirect carries a Content-Length. `_Base` is
+        # HTTP/1.1: a 302 written with a bare `end_headers()` leaves the client
+        # waiting for a body that never comes, and every probe here came back
+        # "[TIMEOUT after 30s]" -- which reads as a server that does not answer,
+        # not as a test-harness bug.
+        self._send(302, b"", "text/plain", {"Location": loc})
+
+
+def serve_oauth(mode: str) -> tuple[ThreadingHTTPServer, int]:
+    """An OAuth server of `mode`, whose ORIGIN knows its own ephemeral port."""
+    handler = type(f"OAuth{mode.title()}", (OAuth,), {"MODE": mode})
+    srv, port = serve(handler)
+    handler.ORIGIN = f"http://127.0.0.1:{port}"
+    return srv, port

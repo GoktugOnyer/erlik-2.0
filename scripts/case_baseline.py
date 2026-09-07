@@ -81,21 +81,27 @@ def _normalise(result) -> dict:
         if s.success:
             continue
         e = str(s.error or "")
-        # THREE DIFFERENT THINGS, and collapsing them is the mislabelling this
-        # project treats as equal to a crash. Measured on the first CI run:
-        # WSTG-CONF-06's `put_probe` was recorded as a FAILED step, when what
-        # actually happened is that safe mode refused it —
+        # BUCKETED ON THE STRUCTURED FLAGS, not on the wording of the message.
         #
-        #   HTTP write verb (DELETE/PUT/PATCH) — can modify or destroy client
-        #   data. Safe mode is on; this engagement has not authorised
-        #   destructive testing.
+        # This read the error's prefix, knew two of the five that `execute_tool`
+        # emits, and filed the rest under "the command did not work". The first
+        # CI run against Juice Shop recorded WSTG-CONF-06's `put_probe` as
+        # FAILED when safe mode had refused it, and
+        # WSTG-AUTHZ-05.redirect_uri_not_validated as FAILED when the agent-lane
+        # scope guard had refused it — the second of which was the only visible
+        # trace of `payload_hosts` never working end to end.
         #
-        # — which is the guard working, not the command breaking. Whoever read
-        # that baseline would have gone looking for a broken curl invocation.
-        if e.startswith("scope violation"):
-            refused.append(s.step)          # out of the engagement's scope
-        elif e.startswith("SAFE_MODE:"):
-            denied.append(s.step)           # in scope, not authorised
+        # `executed` and `denied` come from the executor itself and are now set
+        # on every refusal path, so a guard added later is classified correctly
+        # without anyone editing this function. The prefix is consulted only to
+        # split scope from authorisation, which is a distinction the flags do
+        # not draw, and a refusal with an unrecognised prefix still lands in a
+        # refusal bucket rather than being called a breakage.
+        if not getattr(s, "executed", True) or getattr(s, "denied", False):
+            if e.startswith(("SAFE_MODE:",)):
+                denied.append(s.step)       # in scope, not authorised
+            else:
+                refused.append(s.step)      # a guard would not let it run
         else:
             failed.append(s.step)           # the command itself did not work
     return {

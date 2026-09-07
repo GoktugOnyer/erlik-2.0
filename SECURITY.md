@@ -153,8 +153,24 @@ publicly. There is no bug bounty.
 
   What it does not do is prove the host is unreachable. A case author who
   wrote `curl http://declared-host/` would connect there — the same trust
-  already placed in the step's command itself. Nothing in the agent lane
-  changed; that lane has its own guard and its own OAST allowlist.
+  already placed in the step's command itself.
+
+  **Both guards honour it, because a case step passes through both.** A
+  deterministic step is checked by the case lane's guard and then by the agent
+  lane's, and for its first six months the declaration was honoured only by the
+  first. Measured 2026-09-06 by running the three declaring cases:
+  `WSTG-CLNT-07` and `WSTG-INPV-19` were admitted by the agent lane for reasons
+  unrelated to the declaration (a public OAST domain, and local/private
+  addresses), and `WSTG-AUTHZ-05` was refused outright. The feature worked only
+  where it was not needed, and the same gap refused every out-of-band probe
+  whose collaborator domain was not one of the eleven public names hardcoded in
+  that lane. The declaration is now passed to the agent lane as an explicit
+  argument by `run_test_case` — never from the environment or a global, so an
+  agent-lane command cannot acquire one — and it is matched there on DNS label
+  boundaries, the same rule the case lane applies.
+
+  The engagement gate is checked **before** the allowance and is unaffected by
+  it: a case file may not reach a host the customer excluded.
 - **The collaborator name is declared the same way, by the operator.** An
   out-of-band probe names `<token>.<your-oast-domain>` in a payload, and the
   token is minted per run, so no case file can list it. The runner adds that

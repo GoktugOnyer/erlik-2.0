@@ -238,14 +238,21 @@ class TestTheMeasurementIsHonest:
         working, and whoever read the baseline would have gone looking for a
         broken curl invocation.
         """
+        # The STRUCTURED flags, not the message text. This test used to build
+        # steps carrying only an error string, which is exactly the design the
+        # classifier was moved off: `execute_tool` emits five refusal prefixes
+        # and reading them recognised two.
         class _S:
-            def __init__(self, step, success, error):
+            def __init__(self, step, success, error, executed=True, denied=False):
                 self.step, self.success, self.error = step, success, error
+                self.executed, self.denied = executed, denied
 
         class _R:
-            steps = [_S("a", False, "scope violation: host 'x' is not allowed"),
+            steps = [_S("a", False, "scope violation: host 'x' is not allowed",
+                        executed=False, denied=True),
                      _S("b", False, "curl: (7) connection refused"),
-                     _S("d", False, "SAFE_MODE: HTTP write verb (DELETE/PUT/PATCH)"),
+                     _S("d", False, "SAFE_MODE: HTTP write verb (DELETE/PUT/PATCH)",
+                        executed=False, denied=True),
                      _S("c", True, None)]
             findings = []
             not_assessed = []
@@ -270,7 +277,8 @@ class TestTheMeasurementIsHonest:
         assert why, "safe mode no longer refuses the PUT probe"
         assert CB._normalise(type("R", (), {
             "steps": [type("S", (), {"step": "put_probe", "success": False,
-                                     "error": f"SAFE_MODE: {why}"})()],
+                                     "error": f"SAFE_MODE: {why}",
+                                     "executed": False, "denied": True})()],
             "findings": [], "not_assessed": []})())["denied"] == ["put_probe"]
 
 

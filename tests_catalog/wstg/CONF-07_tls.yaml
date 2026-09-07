@@ -14,9 +14,12 @@ references:
 preconditions:
   scheme: https
 
+# `port` is REQUIRED, not optional. The planner always derives it from the base
+# URL, so requiring it costs a sweep nothing -- but a hand-written target that
+# omits it now gets a NAMED skip instead of silently defaulting to 443 and
+# reporting a verdict about a port the operator never mentioned.
 target_schema:
-  required: [host]
-  optional: [port]
+  required: [host, port]
 
 # THREE DEFECTS MEASURED 2026-09-05 by rendering the case, not reading it.
 #
@@ -59,9 +62,20 @@ target_schema:
 steps:
   - name: tls_scan
     tool: testssl
+    # The port is written into the command, not into a shell variable. With
+    # `"{{host}}:$P"` the scope guard extracted a BARE hostname -- `$P` is not a
+    # port it can read -- and `check_url` defaults a bare host to port 80, which
+    # is in no https target's allow_ports. Measured 2026-09-06, before this
+    # change, on every https target shape:
+    #
+    #   https://app.example.test        tls_scan REFUSED (port 80)
+    #   https://app.example.test:443    tls_scan REFUSED (port 80)
+    #   https://app.example.test:8443   tls_scan REFUSED (port 80)
+    #
+    # This step had never run, anywhere. `{{host}}:{{port}}` gives the guard the
+    # endpoint the step actually contacts.
     command: >-
-      bash -c 'P="{{port}}"; case "$P" in ""|*[!0-9]*) P=443;; esac;
-      testssl --quiet --color 0 --severity HIGH --warnings off "{{host}}:$P"'
+      testssl --quiet --color 0 --severity HIGH --warnings off "{{host}}:{{port}}"
     evaluators:
       - type: regex
         pattern: 'VULNERABLE|HIGH'
@@ -76,13 +90,11 @@ steps:
 
   - name: hsts_header
     tool: curl
-    # The URL is assembled into a variable rather than written literally with
-    # `$P` in it. scope.check_command extracts every `https://…` substring of a
-    # rendered command and parses it, and `https://host:$P/` raises on the port
-    # -- which is now a refusal rather than a crash, so the step would simply
-    # never run. `"$U"` carries no scheme for the extractor to find, and the
-    # host is still checked via the literal `https://{{host}}` on the line
-    # above it.
+    # The URL carries its own port, so the literal the guard extracts is the
+    # endpoint this step actually contacts. It used to be assembled from
+    # `U="https://{{host}}"` plus `:$P` at runtime, which meant the guard read
+    # `https://app.example.test` and scored it as port 443 -- so on a service on
+    # 8443, the exact case `port` exists for, the step was refused.
     #
     # No -k: a certificate this client will not accept is a finding for
     # tls_scan to report, and answering "missing HSTS" off a connection that
@@ -94,17 +106,15 @@ steps:
     # takes the response headers off a real GET and discards the body, the same
     # way CLNT-07b reads CORS headers.
     command: >-
-      bash -c 'U="https://{{host}}"; P="{{port}}";
-      case "$P" in ""|*[!0-9]*) P=443;; esac;
-      H=$(curl -s -D - -o /dev/null --connect-timeout 5 --max-time 15 -w "HTTPCODE=%{http_code}" "$U:$P/");
+      bash -c 'H=$(curl -s -D - -o /dev/null --connect-timeout 5 --max-time 15 -w "HTTPCODE=%{http_code}" "https://{{host}}:{{port}}/");
       CODE=$(printf "%s" "$H" | grep -o "HTTPCODE=[0-9]*" | tail -1 | cut -d= -f2);
       printf "%s\n" "$H";
       if [ "$CODE" = "000" ]; then
-        echo "ERLIK_HSTS_NO_RESPONSE: no response was received over TLS on port $P, so whether the service sets HSTS was not assessed";
+        echo "ERLIK_HSTS_NO_RESPONSE: no response was received over TLS on port {{port}}, so whether the service sets HSTS was not assessed";
       elif printf "%s" "$H" | grep -qi "^Strict-Transport-Security:"; then
         echo "ERLIK_HSTS_PRESENT: the service sets Strict-Transport-Security";
       else
-        echo "ERLIK_HSTS_ABSENT: the service answered over TLS on port $P and set no Strict-Transport-Security header";
+        echo "ERLIK_HSTS_ABSENT: the service answered over TLS on port {{port}} and set no Strict-Transport-Security header";
       fi'
     evaluators:
       - type: regex

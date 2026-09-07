@@ -555,7 +555,31 @@ def _host_has_suffix(host: str, domains) -> bool:
     return any(host == d or host.endswith("." + d) for d in domains)
 
 
-def _scope_allows(host: str, target_host: str, extra: list[str]) -> bool:
+def _scope_allows(host: str, target_host: str, extra: list[str],
+                  payload_hosts: list[str] | None = None) -> bool:
+    """Whether this lane may see `host` named in a command.
+
+    `payload_hosts` is the DECLARATION carried by a deterministic-lane test
+    case: hosts it names as DATA rather than connects to -- an attacker
+    `Origin:`, an unregistered `redirect_uri`, a cloud metadata address in a
+    parameter value, the per-run collaborator name. It arrives as an explicit
+    argument from `run_test_case` and is never read from the environment or a
+    global, so an agent-lane command cannot acquire one.
+
+    Without it the declaration was honoured by the case lane and then refused
+    here, because every deterministic step passes through BOTH guards in
+    series. Measured 2026-09-06, running the real cases:
+
+        WSTG-CLNT-07   evil.oastify.com   ALLOWED -- via _OAST_DOMAINS
+        WSTG-INPV-19   169.254.169.254    ALLOWED -- via local/private
+        WSTG-AUTHZ-05  erlik-not-registered.example
+                       REFUSED: "SCOPE: out-of-scope host"
+
+    Two of the three passed for reasons that had nothing to do with the
+    declaration, so the feature appeared to work while granting nothing. The
+    same gap refused every out-of-band probe whose operator OAST domain was not
+    one of the eleven names in `_OAST_DOMAINS`.
+    """
     h = (host or "").lower().rstrip(".")
     if not h:
         return True
@@ -566,6 +590,11 @@ def _scope_allows(host: str, target_host: str, extra: list[str]) -> bool:
     if _host_has_suffix(h, _OAST_DOMAINS):
         return True
     if any(fnmatch.fnmatchcase(h, g.lower()) for g in extra):
+        return True
+    # Exact host or a name under it, on DNS label boundaries -- the same rule
+    # `scope._is_declared_payload` applies, so the two guards agree about what
+    # a declaration covers instead of each having its own idea.
+    if _host_has_suffix(h, tuple(d.lower() for d in (payload_hosts or []) if d)):
         return True
     return False
 
@@ -630,8 +659,15 @@ def _engagement_violation(command: str, rows) -> str | None:
 
 
 def _scope_violation(command: str, target_url: str | None,
-                     engagement_rows=None) -> str | None:
-    """Return a reason string if the command targets a host it must not."""
+                     engagement_rows=None,
+                     payload_hosts: list[str] | None = None) -> str | None:
+    """Return a reason string if the command targets a host it must not.
+
+    The ENGAGEMENT check runs first and is not affected by `payload_hosts`.
+    That ordering is the point: an engagement is the customer's authorisation
+    record, so a case file may not name a host the customer excluded, and a
+    declaration can only ever widen this lane's own target heuristic.
+    """
     breach = _engagement_violation(command, engagement_rows)
     if breach:
         return breach
@@ -643,7 +679,7 @@ def _scope_violation(command: str, target_url: str | None,
         extra.append(os.environ["ERLIK_DOCKER_TARGET_HOST"].lower())
 
     for host in extract_hosts(command):
-        if host and not _scope_allows(host, target_host, extra):
+        if host and not _scope_allows(host, target_host, extra, payload_hosts):
             return f"out-of-scope host {host!r} (target {target_host!r}); set ERLIK_SCOPE_EXTRA_HOSTS to allow, or ERLIK_SCOPE_ENFORCE=0 to disable"
     return None
 
@@ -814,7 +850,7 @@ def _sync_check_container() -> bool:
         return False
 
 
-async def execute_tool(command: str, enabled_tools: list[str], no_timeout: bool = False, target_url: str = None, tool_hint: str = None, custom_timeout: int = None, safe_mode: bool | None = None, engagement_rows=None) -> dict:
+async def execute_tool(command: str, enabled_tools: list[str], no_timeout: bool = False, target_url: str = None, tool_hint: str = None, custom_timeout: int = None, safe_mode: bool | None = None, engagement_rows=None, payload_hosts: list[str] | None = None) -> dict:
     """
     Execute a command in the kali-tools Docker container.
 
@@ -839,12 +875,20 @@ async def execute_tool(command: str, enabled_tools: list[str], no_timeout: bool 
     request that was never sent — as a MEDIUM Security Misconfiguration, and the
     null-byte rule does the same at HIGH. Verified live before this change.
     Callers must skip detection when this is False.
+
+    `denied: True` accompanies EVERY return that refused rather than attempted.
+    It used to be set on only two of the five, which made the flag useless as a
+    classifier and left the message prefix as the only signal -- so a caller
+    wanting to tell "we would not run this" from "it ran and broke" had to match
+    on prose. `scripts/case_baseline.py` did exactly that, recognised two of the
+    prefixes, and recorded a scope refusal as a broken command in a committed
+    baseline. A guard added later inherits the flag by writing this dict.
     """
     # Validate
     error = _validate_command(command)
     if error:
         return {"success": False, "output": "", "tool": "blocked", "duration_ms": 0,
-                "error": error, "executed": False}
+                "error": error, "executed": False, "denied": True}
 
     # Test cases (v2) declare the tool explicitly via `tool:`. Trust that
     # declaration for whitelist checking — commands like `bash -c '... curl ...'`
@@ -854,7 +898,8 @@ async def execute_tool(command: str, enabled_tools: list[str], no_timeout: bool 
     tool_name = tool_hint or extracted
     if not tool_name:
         return {"success": False, "output": "", "tool": "unknown", "duration_ms": 0,
-                "error": "Could not parse tool name", "executed": False}
+                "error": "Could not parse tool name", "executed": False,
+                "denied": True}
 
     # Check if tool is enabled
     # Map some tool names (e.g. ncat -> netcat, nc -> netcat)
@@ -868,14 +913,14 @@ async def execute_tool(command: str, enabled_tools: list[str], no_timeout: bool 
     if check_name not in enabled_tools and tool_name not in enabled_tools:
         return {"success": False, "output": "", "tool": tool_name, "duration_ms": 0,
                 "error": f"Tool '{tool_name}' is not enabled for this session",
-                "executed": False}
+                "executed": False, "denied": True}
 
     # The toolset check above reads the FIRST token only, so every chained or
     # piped program used to run unchecked. Enforce it on every segment.
     seg_err = _segment_violation(command, enabled_tools, tool_hint, tool_aliases)
     if seg_err:
         return {"success": False, "output": "", "tool": tool_name, "duration_ms": 0,
-                "error": f"TOOLSET: {seg_err}", "executed": False}
+                "error": f"TOOLSET: {seg_err}", "executed": False, "denied": True}
 
     # Resolve timeout (seconds). Precedence:
     #   no_timeout=True       -> truly unlimited (None). Optional ERLIK_NO_TIMEOUT_CAP>0
@@ -894,7 +939,8 @@ async def execute_tool(command: str, enabled_tools: list[str], no_timeout: bool 
     sanitized = _sanitize_command(command, target_url=target_url)
 
     # Scope enforcement: refuse commands that target an unrelated public host.
-    scope_err = _scope_violation(sanitized, target_url, engagement_rows)
+    scope_err = _scope_violation(sanitized, target_url, engagement_rows,
+                                 payload_hosts=payload_hosts)
     if scope_err:
         return {"success": False, "output": "", "tool": tool_name, "duration_ms": 0,
                 "error": f"SCOPE: {scope_err}", "executed": False, "denied": True}
