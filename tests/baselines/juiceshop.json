@@ -9,14 +9,10 @@
     },
     "WSTG-AUTHZ-05": {
       "denied": [],
-      "failed_steps": [
-        "redirect_uri_not_validated"
-      ],
+      "failed_steps": [],
       "findings": [],
       "not_assessed": [],
-      "refused": [
-        "redirect_uri_suffix_bypass"
-      ]
+      "refused": []
     },
     "WSTG-CLNT-04": {
       "denied": [],
@@ -72,7 +68,9 @@
       ],
       "failed_steps": [],
       "findings": [],
-      "not_assessed": [],
+      "not_assessed": [
+        "put_probe"
+      ],
       "refused": []
     },
     "WSTG-ERRH-01": {
