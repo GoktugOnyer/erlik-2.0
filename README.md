@@ -179,12 +179,19 @@ curl request AND interpolates nothing the lane cannot supply, so a case that
 would half-run is excluded rather than reported as having passed.
 
 The limit is not the curl dialect. Of the 23 cases out of reach, **12 need a
-target field discovery does not produce** — eight of them just want a
-`parameter` name — 4 run a shell pipeline or a tool that is not curl, and only
-2 are blocked by the dialect itself (one uses a cookie as an injection payload,
-which the per-stage identity rule forbids; one pipes curl into `tr`). Feeding
-discovered parameters into the lane would unlock roughly four times what any
-further widening of curl options could.
+target field discovery does not produce** — eight want only a `parameter` name
+— 4 run a shell pipeline or a tool that is not curl, 2 interpolate a field
+nothing supplies, 1 needs credentials the lane cannot choose between, and 1
+runs through the Interactsh collector instead. Three hit a dialect refusal
+first, but two of those also name four URLs per step and pipe curl into `tr`,
+so no widening reaches them; the third delivers a PHP object-injection payload
+in a cookie, which the per-stage identity rule forbids on purpose.
+
+So feeding discovered **parameters** into the lane would unlock roughly four
+times what any further widening of curl options could. The dialect is also
+deliberately narrower than "safe": `-w` and `-e` were allowed and then removed
+because ablation showed they bought zero runnable cases while `-w` let a case
+write its own evaluator input (see `tests/test_curl_dialect.py`).
 
 Active development. The deterministic engine and WSTG catalogue are
 operational; the catalogue is being expanded toward broader WSTG coverage.
