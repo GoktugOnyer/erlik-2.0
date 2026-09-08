@@ -66,6 +66,28 @@ step from session data to `gt_hit_ids` is taken on trust in a clean clone.
 only surviving copy of those numbers. They were produced by the scripts named,
 on a machine that held `runs/`, and re-deriving them requires that data.
 
+### `docs/recomputed_all_experiments.csv` lists two runs twice
+
+Two run directories appear under two different parents, with identical model,
+session and finding counts in both rows:
+
+```
+runs/cloud_2026-04-14_32b/2026-04-14_21-17-14       qwen2.5-coder:32b  65 sessions  190 findings
+runs/cloud_2026-04-15_balanced/2026-04-14_21-17-14  qwen2.5-coder:32b  65 sessions  190 findings
+
+runs/cloud_2026-04-14_32b/2026-04-14_23-59-45       pentest-32b        60 sessions  127 findings
+runs/cloud_2026-04-15_balanced/2026-04-14_23-59-45  pentest-32b        60 sessions  127 findings
+```
+
+The Apr-15 balanced directory re-lists two Apr-14 runs rather than holding
+separate ones. **Any total computed over the whole file therefore counts 125
+sessions and 317 findings twice** — a naive sum of the `sessions` column gives
+1,556 where the distinct figure is 1,431. Per-run figures are unaffected, and
+no number reported in the thesis is a whole-file total.
+
+The file is not corrected here because its SHA-256 is pinned above and in the
+thesis; de-duplicate on the leaf run directory when aggregating it.
+
 ### `docs/recomputed_gt_coverage_all.json` has no generator
 
 This file is cited by `docs/THESIS_UNIFIED_RESULTS.md` and holds per-experiment

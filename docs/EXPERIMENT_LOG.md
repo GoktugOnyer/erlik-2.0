@@ -1,5 +1,20 @@
 # Erlik 2.0 — Experiment Log
 
+> **Historical record — superseded by `docs/THESIS_UNIFIED_RESULTS.md`.**
+>
+> This log was written as the campaigns ran and predates the canonical
+> 4-dimension scored matcher. Its ground-truth coverage figures use the earlier
+> lenient (type-only) matching and do **not** agree with the numbers reported in
+> the thesis or in `docs/recomputed_all_experiments.csv`. The April 11 entry is
+> the clearest case: it records DVWA coverage of 12/19 (63%) for the Coder
+> models and 14/19 (74%) for Instruct, where canonical matching gives **4/19
+> (21%) for all four models**. Its "H3a CONFIRMED" verdict has likewise been
+> narrowed — the thesis attributes the Coder/Instruct gap to action selection
+> within the JSON taxonomy, not to a pretraining-knowledge differential.
+>
+> Read it for what happened and when. For any figure, use
+> `docs/THESIS_UNIFIED_RESULTS.md` and the recomputed data files.
+
 This document records every experiment, key finding, and lesson learned during the evaluation. Use this to update the thesis with accurate details.
 
 ---
