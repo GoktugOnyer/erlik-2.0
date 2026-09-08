@@ -146,6 +146,14 @@ REFUSED = [
     ('curl -s -L --max-redirs 999999999 "https://app.test/a"', "a redirect chain is bounded"),
     ('curl -s -L --max-redirs 51 "https://app.test/a"', "and never above curl's own default of 50"),
     ('curl -s -L --max-redirs 3.5 "https://app.test/a"', "hops are whole; curl exits 2 on this"),
+    # curl keeps -X across a redirect (no 302 POST->GET downgrade), so with -L
+    # the TARGET picks the resource a state-changing request acts on. Verified
+    # on the wire: `-L -X DELETE /redir` against `302 Location: /users/1` sent
+    # DELETE /redir then DELETE /users/1.
+    ('curl -sL -X DELETE "https://app.test/users/999"',
+     "a target must not choose which resource a DELETE hits"),
+    ('curl -sL -X POST -d "a=1" "https://app.test/u"', "the body is re-sent to the new path too"),
+    ('curl -s --location -X PUT "https://app.test/u"', "the long spelling as well"),
     ('sh -c "curl https://app.test"', "the tool is curl, not a shell"),
     ('curl -s "https://app.test/" | tee /tmp/x', "no pipelines"),
 ]
@@ -320,3 +328,13 @@ def test_a_case_cannot_author_the_budget_that_is_supposed_to_bound_it():
     src = inspect.getsource(deterministic.CatalogueAdapter.run)
     assert "budget.stage_seconds" in src, "the appended --max-time must be clamped"
     assert "custom_timeout" in src and "min(" in src
+
+
+def test_a_safe_method_may_still_follow_redirects():
+    """WSTG-INFO-03 does. Every hop is re-checked by the proxy for host, port,
+    path and method, so the worst case is another in-scope URL, not a
+    mutation — which is exactly the distinction the refusal above draws."""
+    _, url, method = curl_request(
+        'curl -s -A "Mozilla/5.0" -L --max-time 10 "https://app.test/robots.txt"')
+    assert (method, url) == ("GET", "https://app.test/robots.txt")
+    assert "WSTG-INFO-03" in executable_test_cases()

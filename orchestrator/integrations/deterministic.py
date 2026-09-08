@@ -148,6 +148,7 @@ def curl_request(command):
     if not args or args.pop(0) != "curl":
         raise ScopeViolation("unsupported deterministic execution tool")
     method, urls, headers, data = "GET", [], [], False
+    follows_redirects = False
     # -I and -X are SEPARATE state in curl: -I sets no-body, -X replaces the
     # verb. Tracking them in one variable made the parser report whichever came
     # last, so `-X DELETE -I` reported HEAD while curl put `DELETE /u/7` on the
@@ -175,6 +176,8 @@ def curl_request(command):
 
         if arg in _VALUELESS:
             marker = _VALUELESS[arg]
+            if arg in ("-L", "--location"):
+                follows_redirects = True
             if marker == "HEAD":
                 head_only = True
             elif marker == "QUERY":
@@ -340,6 +343,27 @@ def curl_request(command):
     # the audit log to show a body existed. Verified on the wire.
     if data and not query_from_data and method in ("GET", "HEAD", "OPTIONS"):
         raise ScopeViolation("a body-carrying request is not a safe method")
+
+    # -L HANDS THE TARGET THE NEXT DESTINATION, AND -X SURVIVES THE HOP.
+    # curl keeps CURLOPT_CUSTOMREQUEST across a redirect — there is no 302
+    # POST->GET downgrade — so `-L -X DELETE /users/999` against a target that
+    # answers `302 Location: /users/1` puts `DELETE /users/1` on the wire.
+    # Verified. Both gates approve that: the parser reports /users/999,
+    # step_policy and EgressPolicy approve DELETE for it, and when the operator
+    # selected an OpenAPI operation like DELETE /users/{id} the route's
+    # `/users/[^/]+` regex fullmatches the redirected path too — so the proxy
+    # permits it and attaches the stage identity, because the origin still
+    # matches. The target chose which resource was deleted and nothing refused
+    # it. mitmproxy gives the addon no redirect provenance, so there is no
+    # proxy-side fix; the combination has to be refused here.
+    #
+    # A SAFE method may still follow redirects (WSTG-INFO-03 does): every hop
+    # is re-checked by the proxy for host, port, path and method, so the worst
+    # case is a request to some other in-scope URL, not a mutation.
+    if follows_redirects and method not in ("GET", "HEAD", "OPTIONS"):
+        raise ScopeViolation(
+            "a state-changing request may not follow redirects; the target "
+            "would choose which resource it acts on")
     if len(urls) != 1:
         raise ScopeViolation("expected one explicit HTTP destination and method")
 
