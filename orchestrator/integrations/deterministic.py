@@ -48,6 +48,18 @@ _STREAM_SINKS = {"-", "/dev/null", "/dev/stdout", "/dev/stderr"}
 
 _NUMERIC = re.compile(r"\d+(?:\.\d+)?\Z")
 
+# RFC 9110 method token. curl does NOT validate -X: it writes the string
+# straight into the request line, so a value containing CRLF emits a COMPLETE
+# extra request ahead of the real one --
+#     -X 'GET / HTTP/1.1\r\nX-Injected: yes\r\n\r\nGET'
+# put `GET / HTTP/1.1 / X-Injected: yes` on the wire before the request curl
+# meant to send. Verified against the pinned curl with a raw socket server.
+# The mutation gate happens to refuse a mangled method (it is not GET/HEAD/
+# OPTIONS, so it needs an operation route, and no route matches it either) --
+# but "the smuggling is stopped by a check that was looking for something
+# else" is not a defence, it is a coincidence.
+_METHOD = re.compile(r"[A-Za-z]{1,20}\Z")
+
 
 def _urlencode_segment(value: str) -> str:
     """Reproduce one --data-urlencode item the way curl builds it.
@@ -143,6 +155,8 @@ def curl_request(command):
                 continue
 
             if arg in ("-X", "--request"):
+                if not _METHOD.match(value):
+                    raise ScopeViolation("a request method is a bare token")
                 method = value.upper()
 
             elif arg in ("-H", "--header"):

@@ -84,6 +84,12 @@ REFUSED = [
      "the allowlist is still an allowlist"),
     ('curl -s -X OPTIONS -H "Access-Control-Request-Method: PUT\r\nX-Injected: 1" "https://app.test/"',
      "the new headers inherit the CRLF rule"),
+    # curl writes -X straight into the request line without validating it, so a
+    # CRLF value emits a COMPLETE extra request before the real one. Verified
+    # against curl 7.88.1 with a raw socket server.
+    ('curl -s -X "GET / HTTP/1.1\r\nX-Injected: yes\r\n\r\nGET" "https://app.test/"',
+     "-X with CRLF is request smuggling"),
+    ('curl -s -X "GET /x HTTP/1.1" "https://app.test/"', "a method has no spaces"),
     ('sh -c "curl https://app.test"', "the tool is curl, not a shell"),
     ('curl -s "https://app.test/" | tee /tmp/x', "no pipelines"),
 ]
@@ -150,6 +156,12 @@ def test_the_returned_url_is_the_url_curl_will_request(command, effective):
     _, url, method = curl_request(command)
     assert url == effective
     assert method == "GET", "-G leaves the method alone"
+
+
+@pytest.mark.parametrize("method", ["POST", "PUT", "PATCH", "DELETE", "OPTIONS", "PROPFIND"])
+def test_a_real_method_is_still_accepted(method):
+    _, _, parsed = curl_request(f'curl -s -X {method} "https://app.test/"')
+    assert parsed == method
 
 
 def test_an_explicit_method_still_wins_over_G():
