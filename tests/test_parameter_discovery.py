@@ -285,3 +285,136 @@ async def test_two_parameters_on_one_url_do_not_collapse_into_one_finding(databa
     source = inspect.getsource(deterministic.CatalogueAdapter.run)
     assert "probed, ctx.identity_id" in source, "the parameter must reach the fingerprint"
     assert "parameter=probed" in source, "and the finding must name it"
+
+
+async def test_the_operators_own_target_can_name_a_parameter(database):
+    """If they pointed the assessment at https://app.test/search?q=… they named
+    one; waiting for a crawler to rediscover it would be perverse. seeds()
+    already treats the target as a URL candidate for the same reason."""
+    class TargetCtx(Ctx):
+        target = "https://app.test/search?q=hello&page=2"
+    found = await parameters_by_url(TargetCtx(), POLICY)
+    assert found == {"https://app.test/search": ["q", "page"]}
+
+
+async def test_a_truncated_sweep_says_so(database, tmp_path):
+    """A truncated sweep that reports nothing looks exactly like a clean one.
+
+    The cap is denominated in REQUESTS: the proxy spends max_urls on distinct
+    (method, URL) and one pair costs a case one request per step, so a
+    pair-denominated cap was looser than the wall it protects by exactly the
+    step count and could never bind first."""
+    cfg = config(active=True, test_cases=["WSTG-INPV-18"], max_urls=12)
+    steps = len(find_by_id("WSTG-INPV-18").steps)
+    await database.persist_result("s", "discovery", StageResult(endpoints=[
+        Endpoint(url=f"https://app.test/p{n}", source="katana", identity="anonymous",
+                 parameters=["a", "b"]) for n in range(4)
+    ]))
+    sandbox = Sandbox(tmp_path, cfg.model_dump())
+    result = await CatalogueAdapter().run(Context("s", "tests", "https://app.test", cfg), sandbox)
+
+    allowed = max(1, cfg.max_urls // steps)
+    assert allowed < 8, "the fixture must actually exceed the budget"
+    urls = {a for argv in sandbox.calls for a in argv if a.startswith("https://")}
+    assert len(urls) <= cfg.max_urls, "the sweep stays inside the budget the proxy enforces"
+    truncated = [o for o in result.observations if o["type"] == "test_case_truncated"]
+    assert len(truncated) == 1
+    assert f"{8 - allowed} of 8" in truncated[0]["reason"], truncated[0]["reason"]
+    assert f"one pair costs {steps}" in truncated[0]["reason"]
+
+
+class TestATargetCannotChooseTheEvidence:
+    """The name is chosen by the target; so is the response. Most applications
+    echo an unrecognised parameter name back, so a name matching the case's own
+    marker makes that echo the evidence."""
+
+    @pytest.mark.parametrize("case_id,name,vuln", [
+        ("WSTG-INPV-18", "219359", "Server-Side Template Injection"),
+        ("WSTG-INPV-18", "7777777", "string repetition"),
+        ("WSTG-INPV-11.2", "XPathException", "reaches an interpreter"),
+        ("WSTG-INPV-11.2", "smtplib", "mail/header layer"),
+    ])
+    async def test_a_name_that_is_the_marker_never_reaches_the_case(self, case_id, name, vuln):
+        from orchestrator.testcase.runner import run_test_case
+        from orchestrator.integrations.inventory import parameter_can_forge
+        tc = find_by_id(case_id)
+
+        async def echoes_the_name(command, **kw):
+            body = f'<input type="hidden" name="{name}">Unknown field: {name}'
+            return {"success": True, "exit_code": 0, "error": None,
+                    "output": f"HTTP/1.1 200 OK\r\n\r\n{body}"}
+
+        # Without the gate this stub — an ordinary app with no template engine —
+        # produces the finding outright.
+        run = await run_test_case(tc, {"url": "https://app.test/s", "parameter": name,
+                                       "scope": {"allow_hosts": ["app.test"]}},
+                                  executor=echoes_the_name, allow_llm=False)
+        assert any(vuln in (f.vuln_type or "") for f in run.findings), (
+            "the stub must actually forge it, or this test proves nothing")
+        # The gate is what stops the pair ever being built.
+        assert parameter_can_forge(tc, name)
+
+    @pytest.mark.parametrize("name", ["q", "page", "next", "user[id]", "search", "id"])
+    def test_an_ordinary_name_is_not_refused_by_any_case(self, name):
+        from orchestrator.integrations.inventory import parameter_can_forge
+        for case_id in ("WSTG-INPV-18", "WSTG-INPV-11.2", "WSTG-CLNT-04"):
+            assert not parameter_can_forge(find_by_id(case_id), name)
+
+    async def test_a_forgeable_name_is_dropped_and_reported(self, database, tmp_path):
+        cfg = config(active=True, test_cases=["WSTG-INPV-18"])
+        await database.persist_result("s", "discovery", StageResult(endpoints=[
+            Endpoint(url="https://app.test/s?219359=1&q=2", source="katana",
+                     identity="anonymous", parameters=["219359", "q"]),
+        ]))
+        sandbox = Sandbox(tmp_path, cfg.model_dump())
+        result = await CatalogueAdapter().run(Context("s", "tests", "https://app.test", cfg), sandbox)
+        probed = {a.split("=", 1)[0] for argv in sandbox.calls for a in argv
+                  if "=" in a and not a.startswith("-") and not a.startswith("http")}
+        assert probed == {"q"}, "the planted name is never sent"
+        refused = [o for o in result.observations if o["type"] == "parameter_refused"]
+        assert refused and refused[0]["parameters"] == ["219359"]
+
+
+class TestTheSchemaIsTheOneSourceTheTargetDoesNotControl:
+    """Every crawler-derived name is text the application chose to publish. The
+    OpenAPI document is the operator's, and it states each parameter's location
+    outright instead of leaving it to be inferred from a URL — so a name from
+    here cannot be planted to match a case's evidence."""
+
+    DOC = {"paths": {
+        "/search": {"parameters": [{"name": "lang", "in": "query"}],
+                    "get": {"parameters": [{"name": "q", "in": "query"},
+                                           {"name": "X-Trace", "in": "header"},
+                                           {"name": "sid", "in": "cookie"}]}},
+        "/items/{id}": {"get": {"parameters": [{"name": "expand", "in": "query"}]}},
+        "/submit": {"post": {"parameters": [{"name": "csrf", "in": "query"}]}},
+        "/none": {"get": {}},
+    }}
+
+    def test_only_query_parameters_of_untemplated_safe_operations(self):
+        from orchestrator.integrations.adapters import schema_endpoints
+        found = schema_endpoints(self.DOC, "https://app.test/api/", "reader")
+        assert [(e.url, e.method, e.parameters, e.source) for e in found] == [
+            ("https://app.test/search", "GET", ["lang", "q"], "openapi")]
+
+    def test_a_header_or_cookie_parameter_never_becomes_a_query_probe(self):
+        from orchestrator.integrations.adapters import schema_endpoints
+        names = {n for e in schema_endpoints(self.DOC, "https://app.test/", "reader") for n in e.parameters}
+        assert "X-Trace" not in names and "sid" not in names
+
+    def test_it_is_recorded_whether_or_not_the_scanner_reaches_anything(self):
+        """The schema is known before the run; endpoints from it must not
+        depend on Schemathesis producing a request log."""
+        import inspect
+        from orchestrator.integrations import adapters
+        source = inspect.getsource(adapters.SchemathesisAdapter.run)
+        assert source.index("schema_declared = schema_endpoints") < source.index("requests.har")
+
+
+async def test_schema_file_returns_the_same_shape_with_and_without_a_schema():
+    """It grew a third return value (the parsed document) and the no-schema
+    early return kept two, so every ZAP run — which calls this whether or not a
+    schema was configured — died unpacking it. Four Docker acceptance tests
+    caught it; nothing in the unit suite would have."""
+    from orchestrator.integrations.adapters import schema_file
+    assert len(await schema_file(Context("s", "stage", "https://app.test", config()), None)) == 3

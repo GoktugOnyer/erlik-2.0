@@ -1,9 +1,10 @@
 """Identity-specific inventory shared by discovery and downstream testing."""
 import json
+import re
 from functools import lru_cache
 from urllib.parse import urldefrag, urlsplit, urlunsplit
 from orchestrator.engagement import looks_injectable
-from .contracts import PARAMETER_NAME
+from .contracts import PARAMETER_NAME, parameter_names
 from . import persistence as db
 from .egress_policy import EgressPolicy
 
@@ -150,6 +151,40 @@ def base_url(url: str) -> str:
     return urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
 
 
+def parameter_can_forge(tc, name: str) -> bool:
+    """Whether this parameter NAME could satisfy the case's own evidence.
+
+    A parameter name is chosen by the target; so is the response. Most
+    applications echo an unrecognised parameter name back — a hidden input, a
+    "no such field" message, a search summary — so a name that matches the
+    case's own marker makes the echo the evidence.
+
+    WSTG-INPV-18 looks for the literal `219359`, being 31337*7 evaluated. That
+    reasoning held while the payload was the only case-supplied text in the
+    request. Supplying a target-CHOSEN name puts a second target-controlled
+    string in there, and that one comes back by design: a planted
+    `<a href="/search?219359=1">` yields a CRITICAL "Server-Side Template
+    Injection" from an application with no template engine at all. Measured —
+    `219359` and `7777777` forge two criticals, `XPathException` and `smtplib`
+    two highs, against a stub that only echoes the name.
+
+    So the pairing is refused rather than the finding downgraded: a probe whose
+    positive result cannot be told from its own input is not a weaker probe, it
+    is an uninterpretable one. A genuinely injectable parameter that happens to
+    be NAMED `219359` is missed, which is the right side to err on.
+    """
+    for step in tc.steps:
+        for ev in step.evaluators:
+            if ev.type != "regex" or not ev.pattern:
+                continue
+            try:
+                if re.search(ev.pattern, name, re.IGNORECASE if ev.case_insensitive else 0):
+                    return True
+            except re.error:
+                continue
+    return False
+
+
 def case_needs_parameter(tc) -> bool:
     """Whether any step of this case interpolates {{parameter}}."""
     return any("parameter" in unfilled_fields(step.command, {"url": "x"}) for step in tc.steps)
@@ -166,8 +201,13 @@ async def parameters_by_url(context, policy) -> dict[str, list[str]]:
         "SELECT url,parameters FROM integration_endpoints "
         "WHERE session_id=? AND identity_id=? ORDER BY url",
         (context.session_id, context.identity_id))
-    checker, found = EgressPolicy(policy), {}
-    for row in rows:
+    # The operator's own target is a candidate here for the same reason seeds()
+    # treats it as one: if they pointed the assessment at
+    # https://app.test/search?q=… they named a parameter, and waiting for a
+    # crawler to rediscover it would be perverse.
+    candidates = [{"url": context.target, "parameters": json.dumps(parameter_names(context.target))}, *rows]
+    checker, found, dropped = EgressPolicy(policy), {}, 0
+    for row in candidates:
         names = [n for n in json.loads(row["parameters"] or "[]") if PARAMETER_NAME.match(n)]
         if not names:
             continue
@@ -178,8 +218,16 @@ async def parameters_by_url(context, policy) -> dict[str, list[str]]:
             continue
         bucket = found.setdefault(url, [])
         for name in names:
-            if name not in bucket and len(bucket) < MAX_PARAMETERS_PER_URL:
+            if name in bucket:
+                continue
+            if len(bucket) < MAX_PARAMETERS_PER_URL:
                 bucket.append(name)
+            else:
+                dropped += 1
+    if dropped:
+        # A cap that is not reported reads as "we tested everything".
+        print(f"[integrations] {dropped} discovered parameter(s) beyond "
+              f"{MAX_PARAMETERS_PER_URL} per URL were not tested", flush=True)
     return found
 
 

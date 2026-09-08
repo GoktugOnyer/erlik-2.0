@@ -154,7 +154,7 @@ def parse_zap(document, ctx):
 async def schema_file(ctx, sandbox):
     source = ctx.config.schema_input
     if not source:
-        return None, None
+        return None, None, None
     content = source.content
     if source.url:
         response = await rpc(sandbox, {"action": "request", "request": {"url": source.url}})
@@ -194,7 +194,38 @@ async def schema_file(ctx, sandbox):
         if "openapi" in document:
             document["servers"] = [{"url": ctx.target}]
         content = json.dumps(document)
-    return sandbox.write("schema.graphql" if source.kind == "graphql" else "schema.json", content), hashlib.sha256(content.encode()).hexdigest()
+    return (sandbox.write("schema.graphql" if source.kind == "graphql" else "schema.json", content),
+            hashlib.sha256(content.encode()).hexdigest(),
+            document if source.kind == "openapi" else None)
+
+
+def schema_endpoints(document, target, identity):
+    """Endpoints and their QUERY parameters, as the OpenAPI document declares them.
+
+    The best parameter source in the lane, and the only one that is not
+    target-controlled: the operator supplied this schema, and it states each
+    parameter's location outright (`in: query`) instead of leaving it to be
+    inferred from a URL. A name from here cannot be planted by the application
+    under test, so it cannot be chosen to match a case's own evidence.
+
+    Templated paths (`/items/{id}`) are skipped: the template is not a URL, and
+    the concrete ones arrive anyway from the request log Schemathesis leaves.
+    """
+    found = []
+    for path, operations in (document or {}).get("paths", {}).items():
+        if not isinstance(operations, dict) or "{" in path:
+            continue
+        shared = operations.get("parameters", [])
+        for method, operation in operations.items():
+            if method.lower() not in ("get", "head") or not isinstance(operation, dict):
+                continue
+            names = [item.get("name", "") for item in [*shared, *operation.get("parameters", [])]
+                     if isinstance(item, dict) and item.get("in") == "query"]
+            url = urljoin(target, path)
+            if names:
+                found.append(Endpoint(url=url, method=method.upper(), source="openapi",
+                                      identity=identity, parameters=parameter_names(url, *names)))
+    return found
 
 
 class ZapAdapter(BaseAdapter):
@@ -221,7 +252,7 @@ class ZapAdapter(BaseAdapter):
         return {"env": {"contexts": [context], "parameters": {"failOnError": True, "failOnWarning": False}}, "jobs": jobs}
 
     async def run(self, ctx, sandbox):
-        schema, digest = await schema_file(ctx, sandbox)
+        schema, digest, document = await schema_file(ctx, sandbox)
         from .inventory import seeds
         inventory = await seeds(ctx, sandbox.policy)
         plan = self.plan(ctx, schema, inventory)
@@ -284,7 +315,10 @@ class SchemathesisAdapter(BaseAdapter):
     name = "schemathesis"
 
     async def run(self, ctx, sandbox):
-        schema, digest = await schema_file(ctx, sandbox)
+        schema, digest, document = await schema_file(ctx, sandbox)
+        # Recorded before the run, not after: these come from the operator's own
+        # schema, so they are known whether or not Schemathesis reaches anything.
+        schema_declared = schema_endpoints(document, ctx.target, ctx.identity_id)
         phases = "examples,coverage,fuzzing,stateful" if ctx.config.state_changing else "examples,coverage,fuzzing"
         argv = ["schemathesis", "run", schema, "--url", ctx.target, "--workers", str(ctx.config.budget.concurrency),
                 "--phases", phases, "--seed", str(ctx.config.seed), "--max-examples", "30", "--request-timeout", "15",
@@ -321,6 +355,7 @@ class SchemathesisAdapter(BaseAdapter):
                 request = entry["request"]
                 result.endpoints.append(Endpoint(url=request["url"], method=request["method"], source="schemathesis",
                                                  identity=ctx.identity_id, parameters=parameter_names(request["url"])))
+        result.endpoints.extend(schema_declared)
         if workflow:
             detail = json.loads(output.stdout)
             result.observations.append({"type": "workflow", **detail})

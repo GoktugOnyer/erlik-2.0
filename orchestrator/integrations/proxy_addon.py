@@ -56,7 +56,16 @@ class Guard:
             allowed, reason = False, "URL budget exhausted"
         self.record({"url": flow.request.pretty_url, "method": flow.request.method, "allowed": allowed, "reason": reason, "timestamp": time.time()})
         if not allowed:
-            flow.response = http.Response.make(403, reason.encode(), {"X-Erlik-Blocked": "true"})
+            # The marker goes in the BODY as well as the header. A catalogue
+            # step that prints only the response body — `curl -s -G` with no
+            # -i and no -D, which is exactly what WSTG-INPV-18 and
+            # WSTG-INPV-11.2 use — otherwise sees a 403 body reading "URL
+            # budget exhausted", curl exits 0, the step reports success, the
+            # evaluator matches nothing, and the case reports CLEAN for a
+            # request that never left this proxy.
+            flow.response = http.Response.make(
+                403, f"X-Erlik-Blocked: true\n{reason}\n".encode(),
+                {"X-Erlik-Blocked": "true"})
             return
         await self.semaphore.acquire()
         self.active.add(flow.id)

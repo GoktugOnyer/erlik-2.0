@@ -9,7 +9,8 @@ from orchestrator.testcase.scope import ScopeViolation, check_url
 from .adapters import BaseAdapter, record
 from .contracts import StageResult, IntegrationFinding, fingerprint
 from .egress_policy import EgressPolicy
-from .inventory import seeds, eligible_test_cases, parameters_by_url, case_needs_parameter
+from .inventory import (seeds, eligible_test_cases, parameters_by_url,
+                        case_needs_parameter, parameter_can_forge)
 from .runtime import JobOutput
 from .security import redact
 from . import persistence as db
@@ -428,7 +429,14 @@ class CatalogueAdapter(BaseAdapter):
         # pairing them any other way would test a parameter somewhere it was
         # never seen, and report the result against the URL.
         parameters = await parameters_by_url(ctx, sandbox.policy)
-        budget = ctx.config.max_urls
+        # Denominated in REQUESTS, not pairs. The proxy spends config.max_urls
+        # on distinct (method, URL), and one (endpoint, parameter) pair costs a
+        # case one request per step — so a pair-denominated cap was looser than
+        # the wall it exists to protect by exactly the step count, and could
+        # never bind first. What happened instead was the proxy refusing
+        # mid-case, which the two unlocked cases cannot even see.
+        def pair_budget(case):
+            return max(1, ctx.config.max_urls // max(1, len(case.steps)))
         result.metadata["parameters_discovered"] = sum(len(v) for v in parameters.values())
 
         for case_id in ctx.config.test_cases:
@@ -438,10 +446,31 @@ class CatalogueAdapter(BaseAdapter):
             if case_id == "WSTG-INPV-19" and ctx.config.callback:
                 case_targets = [probe for probe in ctx.config.callback.probes]
             elif case_needs_parameter(tc):
-                case_targets = [{"url": url, "parameter": name}
-                                for url, names in sorted(parameters.items())
-                                for name in names
-                                if case_id in eligible_test_cases(url, parameters=names)][:budget]
+                pairs, forgeable = [], []
+                for url, names in sorted(parameters.items()):
+                    if case_id not in eligible_test_cases(url, parameters=names):
+                        continue
+                    for name in names:
+                        if parameter_can_forge(tc, name):
+                            forgeable.append(name)
+                        else:
+                            pairs.append({"url": url, "parameter": name})
+                if forgeable:
+                    result.observations.append({
+                        "type": "parameter_refused", "test_case_id": case_id, "url": None, "steps": [],
+                        "parameters": sorted(set(forgeable)),
+                        "reason": "these parameter names match this case's own evidence pattern, so an "
+                                  "application that merely echoes the name would satisfy it"})
+                case_targets = pairs[:pair_budget(tc)]
+                if len(pairs) > len(case_targets):
+                    # Said out loud, because a truncated sweep that reports
+                    # nothing looks exactly like a clean one.
+                    result.observations.append({
+                        "type": "test_case_truncated", "test_case_id": case_id, "url": None, "steps": [],
+                        "reason": f"{len(pairs) - len(case_targets)} of {len(pairs)} "
+                                  f"(endpoint, parameter) pairs were not tested; "
+                                  f"raise max_urls to cover them (one pair costs "
+                                  f"{len(tc.steps)} of the {ctx.config.max_urls} URL budget)"})
             else:
                 case_targets = [{"url": url} for url in targets
                                 if case_id in eligible_test_cases(url)]
