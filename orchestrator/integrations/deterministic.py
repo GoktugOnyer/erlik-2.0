@@ -264,7 +264,21 @@ def curl_request(command):
                         "catalogue requests may only write to a stream "
                         "(" + ", ".join(sorted(_STREAM_SINKS)) + ")")
 
-            elif arg in ("-m", "--max-time", "--connect-timeout", "--max-redirs"):
+            elif arg == "--max-redirs":
+                # Integers only (curl exits 2 on `--max-redirs 3.5`, which the
+                # decimal-tolerant numeric check would have passed through) and
+                # never above curl's own default of 50, so a case can only
+                # NARROW what plain -L already permits. Measured on the pinned
+                # curl: `--max-redirs 999999999` against a self-redirect loop
+                # issued 2310 requests from one argv token. Every hop IS
+                # policed by the proxy, so this is not a scope hole — it is
+                # target-chosen volume charged to the request budget, and each
+                # hop is attributed in the finding to the URL the case named
+                # rather than the one actually fetched.
+                if not re.fullmatch(r"[0-9]{1,2}", value) or not 0 < int(value) <= 50:
+                    raise ScopeViolation("--max-redirs takes a whole number of hops, at most 50")
+
+            elif arg in ("-m", "--max-time", "--connect-timeout"):
                 # Bounds only, and the sandbox appends its own --max-time after
                 # this argv — curl takes the LAST occurrence, so a case cannot
                 # widen the stage budget, only narrow it.
@@ -363,7 +377,16 @@ class CatalogueAdapter(BaseAdapter):
 
         async def execute(command, **kwargs):
             argv, _, _ = curl_request(command)
-            output = await sandbox.run([*argv, "--max-time", str(kwargs.get("custom_timeout") or 20),
+            # The appended --max-time is what makes curl's last-wins ordering a
+            # real bound on a case's own -m. But custom_timeout is step.timeout
+            # straight from YAML, and TestStep.timeout is an unbounded
+            # Optional[int] — so `timeout: 999999` had the case authoring the
+            # very budget that was supposed to bound it, leaving one step free
+            # to consume the whole stage. Clamped to the stage budget, which the
+            # operator set and the case cannot.
+            step_seconds = min(int(kwargs.get("custom_timeout") or 20),
+                               ctx.config.budget.stage_seconds)
+            output = await sandbox.run([*argv, "--max-time", str(max(1, step_seconds)),
                                         "--proxy", sandbox.proxy_url, "--cacert", "/input/ca.pem"])
             blocked = bool(re.search(r"(?im)^x-erlik-blocked:\s*true", output.stdout))
             return {"success": output.code == 0 and not blocked, "output": output.stdout,

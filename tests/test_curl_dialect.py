@@ -139,6 +139,13 @@ REFUSED = [
     ('curl -s -o /dev/null -w "x-erlik-blocked: true" "https://app.test/admin"',
      "-w would make a permitted request report itself as scope-refused"),
     ('curl -s -w "noop" "https://app.test/"', "any literal word at all"),
+    # Measured on the pinned curl: `--max-redirs 999999999` against a
+    # self-redirect loop issued 2310 requests from one argv token. Every hop is
+    # policed by the proxy, so this is volume, not scope — but it is
+    # target-chosen volume charged to the operator's request budget.
+    ('curl -s -L --max-redirs 999999999 "https://app.test/a"', "a redirect chain is bounded"),
+    ('curl -s -L --max-redirs 51 "https://app.test/a"', "and never above curl's own default of 50"),
+    ('curl -s -L --max-redirs 3.5 "https://app.test/a"', "hops are whole; curl exits 2 on this"),
     ('sh -c "curl https://app.test"', "the tool is curl, not a shell"),
     ('curl -s "https://app.test/" | tee /tmp/x', "no pipelines"),
 ]
@@ -301,3 +308,15 @@ class TestAWriteOutFormatCannotForgeAFinding:
         for case_id in executable_test_cases():
             for step in catalog[case_id].steps:
                 curl_request(_render(step.command, {"url": "https://app.test/", "step": {}}))
+
+
+def test_a_case_cannot_author_the_budget_that_is_supposed_to_bound_it():
+    """execute() appends its own --max-time so curl's last-wins ordering bounds
+    a case's -m. But that value is step.timeout straight from YAML, and
+    TestStep.timeout is an unbounded Optional[int] — so `timeout: 999999` had
+    the case setting the bound, and one step could consume the whole stage."""
+    import inspect
+    from orchestrator.integrations import deterministic
+    src = inspect.getsource(deterministic.CatalogueAdapter.run)
+    assert "budget.stage_seconds" in src, "the appended --max-time must be clamped"
+    assert "custom_timeout" in src and "min(" in src
