@@ -37,10 +37,10 @@ ACCEPTED = [
      "GET", "https://app.test/", "identity options the lane leaves unfilled are dropped"),
     ('curl -s --connect-timeout 3 --max-redirs 3 -L "https://app.test/"',
      "GET", "https://app.test/", "connection bounds"),
-    ('curl -s -w "[erlik] %{http_code}:%{content_type}" "https://app.test/"',
-     "GET", "https://app.test/", "a literal label beside known variables"),
-    ('curl -s -w "noop" "https://app.test/"',
-     "GET", "https://app.test/", "a -w format with no variables at all"),
+    ('curl -s -w "%{http_code}:%{size_download}" "https://app.test/"',
+     "GET", "https://app.test/", "variables joined by separators"),
+    ('curl -s -X PUT --data "x=1" "https://app.test/"',
+     "PUT", "https://app.test/", "a body is fine on a method that carries one"),
     ('curl -s -D - -o /dev/null -X OPTIONS -H "Origin: null" '
      '-H "Access-Control-Request-Method: PUT" "https://app.test/"',
      "OPTIONS", "https://app.test/", "a CORS preflight is these headers or it is nothing"),
@@ -118,6 +118,27 @@ REFUSED = [
     # and writes a file, -k takes none and drops certificate checks.
     ('curl -s -sO "https://app.test/"', "-O in a bundle would write a file"),
     ('curl -s -sk "https://app.test/"', "-k in a bundle would drop certificate checks"),
+    # -I sets no-body, -X replaces the verb: separate state in curl, so the
+    # parser cannot hold both in one variable. `-X DELETE -I` reported HEAD
+    # while curl put `DELETE /u/7` on the wire — verified.
+    ('curl -s -o /dev/null -X DELETE -I "https://app.test/u/7"',
+     "-X and -I state two different methods"),
+    ('curl -s -D - -X PATCH --head "https://app.test/u/7"', "the long spelling too"),
+    ('curl -s -o /dev/null -X DELETE -sI "https://app.test/u/7"', "and through a bundle"),
+    # curl sends HEAD with a Content-Length and the body; the proxy sees HEAD
+    # and permits it, so BOTH gates missed this one.
+    ('curl -s -X HEAD -d "id=7&confirm=true" "https://app.test/admin/delete"',
+     "a body on HEAD is a mutation wearing a safe method"),
+    ('curl -s -X OPTIONS -d "x=1" "https://app.test/"', "and on OPTIONS"),
+    # With -o /dev/null the response body never reaches stdout, so the -w text
+    # IS step_result.output and every evaluator reads what the case wrote.
+    ('curl -s -o /dev/null -w "root:x:0:0:" "https://app.test/?p=1"',
+     "-w would fire AUTHZ-01, INPV-07 and INPV-19 from a request that touched nothing"),
+    ('curl -s -o /dev/null -w "302 http://app.test/login" "https://app.test/"',
+     "-w would forge ATHN-01's finding"),
+    ('curl -s -o /dev/null -w "x-erlik-blocked: true" "https://app.test/admin"',
+     "-w would make a permitted request report itself as scope-refused"),
+    ('curl -s -w "noop" "https://app.test/"', "any literal word at all"),
     ('sh -c "curl https://app.test"', "the tool is curl, not a shell"),
     ('curl -s "https://app.test/" | tee /tmp/x', "no pipelines"),
 ]
@@ -243,3 +264,40 @@ class TestCapabilityIsDerivedNotDeclared:
         assert unfilled_fields('curl -b "{{cookie}}" -H "{{auth_header}}" "{{url}}"',
                                {"url": "https://app.test/"}) == [], "identity is the proxy's job, not the case's"
         assert "WSTG-CLNT-04" not in executable_test_cases()
+
+
+class TestAWriteOutFormatCannotForgeAFinding:
+    """The sharpest failure this dialect can have is not an escape — it is a
+    finding for a request that never happened. An adversarial pass found 64 of
+    the catalogue's 111 regex evaluators forgeable by one grammar-legal -w
+    literal, 49 of them high or critical.
+    """
+
+    @pytest.mark.parametrize("literal", [
+        "root:x:0:0:", "302 http://app.test/login", "x-erlik-blocked: true",
+        "HTTP/1.1 200 OK", "Set-Cookie: session=x", "uid=0(root)",
+        "SQLSTATE", "<?xml", "Server: Apache/2.4.1",
+    ])
+    def test_no_evaluator_string_can_be_spelled_in_a_write_out_value(self, literal):
+        with pytest.raises(ScopeViolation):
+            curl_request(f'curl -s -o /dev/null -w "{literal}" "https://app.test/"')
+
+    def test_the_grammar_admits_no_letter_or_digit_the_case_controls(self):
+        """The property behind those cases: only curl fills in a %{variable},
+        so only curl can put a word or a number in the output."""
+        from orchestrator.integrations.deterministic import _WRITE_OUT
+        import re
+        for bad in ("a", "1", "GET", "200", "%{http_code}x", "x%{http_code}", "_"):
+            assert not _WRITE_OUT.match(bad), bad
+        for good in ("", "%{http_code}", "%{http_code} %{url_effective}",
+                     "%{http_code}:%{size_download}", " : , ; | = / . -", "%%"):
+            assert _WRITE_OUT.match(good), good
+
+    def test_every_write_out_a_runnable_case_uses_still_parses(self):
+        from orchestrator.integrations.inventory import executable_test_cases
+        from orchestrator.testcase.loader import load_catalog
+        from orchestrator.testcase.runner import _render
+        catalog = load_catalog()
+        for case_id in executable_test_cases():
+            for step in catalog[case_id].steps:
+                curl_request(_render(step.command, {"url": "https://app.test/", "step": {}}))

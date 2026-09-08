@@ -58,6 +58,9 @@ _BUNDLABLE = {"-s", "-S", "-i", "-L", "-g", "-I", "-G"}
 
 _NUMERIC = re.compile(r"\d+(?:\.\d+)?\Z")
 
+# A header value curl will emit verbatim. Printable ASCII only.
+_HEADER_VALUE = re.compile(r"[\x20-\x7e]*\Z")
+
 # A closed grammar for -w. Any character except % \ CR LF; or a literal %%; or
 # %{one known variable}. Backslash is excluded because curl turns \r and \n
 # into REAL line breaks, which would let a case write `HTTP/1.1 200 OK` into
@@ -75,7 +78,17 @@ _WRITE_OUT_VARS = (
     "time_appconnect|time_pretransfer|time_starttransfer|time_redirect|"
     "exitcode|errormsg|ssl_verify_result|url_effective|urlnum|remote_port"
 )
-_WRITE_OUT = re.compile(r"(?:[^%\\\r\n]|%%|%\{(?:" + _WRITE_OUT_VARS + r")\})*\Z")
+# NO LETTERS AND NO DIGITS as literals. With `-o /dev/null` the response body
+# never reaches stdout, so step_result.output IS the -w text, and every
+# evaluator then reads a string the CASE wrote. `-w "root:x:0:0:"` fires
+# AUTHZ-01 (LFI), INPV-07 (XXE) and INPV-19 (SSRF) at once from a request that
+# touched nothing; `-w "302 http://app.test/login"` forges ATHN-01's finding;
+# `-w "x-erlik-blocked: true"` makes a permitted request report itself as
+# refused by the scope policy. An adversarial pass found 64 of the catalogue's
+# 111 regex evaluators forgeable this way, 49 of them high or critical.
+# Separators cannot spell a word, and %{...} values come from curl, not the
+# case. Every -w format in a runnable case is still accepted.
+_WRITE_OUT = re.compile(r"(?:[ \t:,;|=/.-]|%%|%\{(?:" + _WRITE_OUT_VARS + r")\})*\Z")
 
 # RFC 9110 method token. curl does NOT validate -X: it writes the string
 # straight into the request line, so a value containing CRLF emits a COMPLETE
@@ -135,6 +148,11 @@ def curl_request(command):
     if not args or args.pop(0) != "curl":
         raise ScopeViolation("unsupported deterministic execution tool")
     method, urls, headers, data = "GET", [], [], False
+    # -I and -X are SEPARATE state in curl: -I sets no-body, -X replaces the
+    # verb. Tracking them in one variable made the parser report whichever came
+    # last, so `-X DELETE -I` reported HEAD while curl put `DELETE /u/7` on the
+    # wire — verified. Kept apart, and the combination refused.
+    custom_method, head_only = None, False
     query_from_data, query_parts = False, []
     # argv is REBUILT from what was validated, never echoed back raw, so an
     # option this parser decided to drop cannot reach the sandbox anyway.
@@ -158,7 +176,7 @@ def curl_request(command):
         if arg in _VALUELESS:
             marker = _VALUELESS[arg]
             if marker == "HEAD":
-                method = "HEAD"
+                head_only = True
             elif marker == "QUERY":
                 # -G moves the data into the query string, so a GET carrying
                 # data is legitimate here and the URL below has to be rebuilt.
@@ -186,7 +204,7 @@ def curl_request(command):
             if arg in ("-X", "--request"):
                 if not _METHOD.match(value):
                     raise ScopeViolation("a request method is a bare token")
-                method = value.upper()
+                custom_method = value.upper()
 
             elif arg in ("-H", "--header"):
                 # The allowlist is about what a header can REPOINT or IMPERSONATE.
@@ -213,8 +231,19 @@ def curl_request(command):
                     "identity is applied per stage by the assessment proxy")
 
             elif arg in ("-A", "--user-agent", "-e", "--referer"):
-                # These become request headers, so they inherit the header rule.
-                if any(c in value for c in "\r\n"):
+                # These become request headers, and curl emits the value into
+                # the header block without validating it: a CR or an LF (either
+                # alone is enough) appends arbitrary extra headers. Verified on
+                # the pinned curl — `-A 'ua\r\nCookie: sid=stolen'` puts that
+                # Cookie on the wire, which is the case authenticating itself
+                # on a stage that was given no identity.
+                #
+                # This is the ONLY gate: the proxy inspects host, port, method
+                # and Upgrade, never arbitrary request headers. Printable ASCII
+                # rather than just a CR/LF ban, because no catalogue value needs
+                # more and a header value was never meant to carry control
+                # characters.
+                if not _HEADER_VALUE.match(value):
                     raise ScopeViolation("unsupported catalogue header")
 
             elif arg in ("-w", "--write-out"):
@@ -284,7 +313,20 @@ def curl_request(command):
             raise ScopeViolation("unsupported curl option or execution syntax")
         i += 1
 
-    if len(urls) != 1 or (data and method == "GET" and not query_from_data):
+    if head_only and custom_method and custom_method != "HEAD":
+        raise ScopeViolation(
+            "-I and -X state two different methods; curl would send the -X verb")
+    method = custom_method or ("HEAD" if head_only else "GET")
+
+    # A body is refused by what it IS, not by which verb was declared. The old
+    # guard only fired for GET, so `-X HEAD -d "id=7&confirm=true"` slipped
+    # past: curl sends HEAD with a Content-Length and the body, and the proxy
+    # sees HEAD and permits it — an arbitrary form-encoded payload delivered to
+    # an in-scope URL on a stage that reports itself read-only, with nothing in
+    # the audit log to show a body existed. Verified on the wire.
+    if data and not query_from_data and method in ("GET", "HEAD", "OPTIONS"):
+        raise ScopeViolation("a body-carrying request is not a safe method")
+    if len(urls) != 1:
         raise ScopeViolation("expected one explicit HTTP destination and method")
 
     url = urls[0]
