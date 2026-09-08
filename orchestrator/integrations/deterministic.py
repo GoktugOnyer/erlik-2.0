@@ -27,19 +27,30 @@ _VALUELESS = {
     "-G": "QUERY", "--get": "QUERY",
 }
 
+# -w/--write-out IS DELIBERATELY ABSENT. Its output is indistinguishable from
+# the response in step_result.output — with `-o /dev/null` it IS the whole of
+# it — so every evaluator then reads a string the case chose. Closing it needs
+# more than refusing `@file` and `%output{}`: `-w "root:x:0:0:"` fires AUTHZ-01,
+# INPV-07 and INPV-19 at once, and even a no-literals grammar is reopened by any
+# variable that echoes case-supplied text (`%{referer}` returns -e verbatim;
+# `%{url_effective}` returns a path the case, or a target's discovered link,
+# chose). No case that runs in this lane uses -w at all — measured by ablation,
+# it buys zero cases — so the whole class is removed rather than fenced. If
+# ATHN-01 or AUTHZ-05 ever become runnable, -w returns with its output LABELLED
+# so an evaluator can tell it from a response.
+
 # Options that consume the following token.
 _VALUED = {
     "-X", "--request", "-H", "--header",
     "--data", "-d", "--data-binary", "--data-urlencode",
-    "-b", "--cookie", "-A", "--user-agent", "-e", "--referer",
-    "-w", "--write-out", "-o", "--output", "-D", "--dump-header",
+    "-b", "--cookie", "-A", "--user-agent",
+    "-o", "--output", "-D", "--dump-header",
     "-m", "--max-time", "--connect-timeout", "--max-redirs",
 }
 
 # An option whose value renders empty was never filled in (see the note in
 # curl_request); dropping it is what the operator meant.
-_DROP_IF_EMPTY = {"-H", "--header", "-b", "--cookie", "-A", "--user-agent",
-                  "-e", "--referer", "-w", "--write-out"}
+_DROP_IF_EMPTY = {"-H", "--header", "-b", "--cookie", "-A", "--user-agent"}
 
 # `-o`/`-D` are file writes in general. These two values are the exceptions,
 # and only these two: `-` is curl's own spelling of stdout, and /dev/null
@@ -61,34 +72,6 @@ _NUMERIC = re.compile(r"\d+(?:\.\d+)?\Z")
 # A header value curl will emit verbatim. Printable ASCII only.
 _HEADER_VALUE = re.compile(r"[\x20-\x7e]*\Z")
 
-# A closed grammar for -w. Any character except % \ CR LF; or a literal %%; or
-# %{one known variable}. Backslash is excluded because curl turns \r and \n
-# into REAL line breaks, which would let a case write `HTTP/1.1 200 OK` into
-# the output that the regex, cors, idor and cookie_attributes evaluators then
-# read as a captured response — evidence forged by the case that is being
-# evaluated. The variable list omits output{} (writes a file), stderr/stdout
-# (move the report off the audited channel), header{} and certs (dump
-# server- and TLS-controlled text into the evaluator buffer unlabelled), and
-# local_ip/remote_ip (container-internal host state with no assessment value).
-_WRITE_OUT_VARS = (
-    "http_code|response_code|http_version|method|scheme|content_type|"
-    "num_headers|num_redirects|num_connects|redirect_url|referer|"
-    "size_download|size_header|size_request|size_upload|"
-    "speed_download|speed_upload|time_total|time_namelookup|time_connect|"
-    "time_appconnect|time_pretransfer|time_starttransfer|time_redirect|"
-    "exitcode|errormsg|ssl_verify_result|url_effective|urlnum|remote_port"
-)
-# NO LETTERS AND NO DIGITS as literals. With `-o /dev/null` the response body
-# never reaches stdout, so step_result.output IS the -w text, and every
-# evaluator then reads a string the CASE wrote. `-w "root:x:0:0:"` fires
-# AUTHZ-01 (LFI), INPV-07 (XXE) and INPV-19 (SSRF) at once from a request that
-# touched nothing; `-w "302 http://app.test/login"` forges ATHN-01's finding;
-# `-w "x-erlik-blocked: true"` makes a permitted request report itself as
-# refused by the scope policy. An adversarial pass found 64 of the catalogue's
-# 111 regex evaluators forgeable this way, 49 of them high or critical.
-# Separators cannot spell a word, and %{...} values come from curl, not the
-# case. Every -w format in a runnable case is still accepted.
-_WRITE_OUT = re.compile(r"(?:[ \t:,;|=/.-]|%%|%\{(?:" + _WRITE_OUT_VARS + r")\})*\Z")
 
 # RFC 9110 method token. curl does NOT validate -X: it writes the string
 # straight into the request line, so a value containing CRLF emits a COMPLETE
@@ -233,13 +216,18 @@ def curl_request(command):
                     "catalogue requests cannot carry their own credentials; "
                     "identity is applied per stage by the assessment proxy")
 
-            elif arg in ("-A", "--user-agent", "-e", "--referer"):
-                # These become request headers, and curl emits the value into
+            elif arg in ("-A", "--user-agent"):
+                # -A becomes a request header, and curl emits the value into
                 # the header block without validating it: a CR or an LF (either
                 # alone is enough) appends arbitrary extra headers. Verified on
-                # the pinned curl — `-A 'ua\r\nCookie: sid=stolen'` puts that
-                # Cookie on the wire, which is the case authenticating itself
-                # on a stage that was given no identity.
+                # curl 7.88.1 and 8.14.1 — `-A 'ua\r\nCookie: sid=stolen'` puts
+                # that Cookie on the wire, which is the case authenticating
+                # itself on a stage that was given no identity.
+                #
+                # -e/--referer shared this branch and was removed: it appears
+                # nowhere in the catalogue, so it was arbitrary-header-value
+                # surface bought for no case at all. This whole branch now
+                # exists for one hardcoded "Mozilla/5.0" in WSTG-INFO-03.
                 #
                 # This is the ONLY gate: the proxy inspects host, port, method
                 # and Upgrade, never arbitrary request headers. Printable ASCII
@@ -248,18 +236,6 @@ def curl_request(command):
                 # characters.
                 if not _HEADER_VALUE.match(value):
                     raise ScopeViolation("unsupported catalogue header")
-
-            elif arg in ("-w", "--write-out"):
-                # `-w @file` reads the format FROM A LOCAL FILE (verified
-                # against the pinned curl), and `%output{...}` writes one from
-                # curl 8.3 onward — this image ships 7.88, where it is inert,
-                # but the base image is not pinned to that forever.
-                if value.startswith("@"):
-                    raise ScopeViolation("catalogue requests cannot read local files")
-                if "%output{" in value.lower():
-                    raise ScopeViolation("catalogue requests cannot write local files")
-                if not _WRITE_OUT.match(value):
-                    raise ScopeViolation("unsupported write-out format")
 
             elif arg in ("-o", "--output", "-D", "--dump-header"):
                 if value not in _STREAM_SINKS:

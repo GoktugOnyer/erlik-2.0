@@ -27,8 +27,8 @@ ACCEPTED = [
      "GET", "https://app.test/robots.txt", "user agent, redirects and a time bound"),
     ('curl -sI -A "Mozilla/5.0" "https://app.test/"',
      "HEAD", "https://app.test/", "bundled short flags"),
-    ('curl -s -o /dev/null -w "%{http_code}" "https://app.test/login"',
-     "GET", "https://app.test/login", "discard the body, format the status"),
+    ('curl -s -o /dev/null "https://app.test/login"',
+     "GET", "https://app.test/login", "discard the body"),
     ('curl -s -D - -o /dev/null -H "Origin: null" "https://app.test/"',
      "GET", "https://app.test/", "headers to stdout, body discarded"),
     ('curl -s -X POST -H "Content-Type: application/xml" --data-binary "<x/>" "https://app.test/x"',
@@ -37,8 +37,6 @@ ACCEPTED = [
      "GET", "https://app.test/", "identity options the lane leaves unfilled are dropped"),
     ('curl -s --connect-timeout 3 --max-redirs 3 -L "https://app.test/"',
      "GET", "https://app.test/", "connection bounds"),
-    ('curl -s -w "%{http_code}:%{size_download}" "https://app.test/"',
-     "GET", "https://app.test/", "variables joined by separators"),
     ('curl -s -X PUT --data "x=1" "https://app.test/"',
      "PUT", "https://app.test/", "a body is fine on a method that carries one"),
     ('curl -s -D - -o /dev/null -X OPTIONS -H "Origin: null" '
@@ -281,32 +279,38 @@ class TestCapabilityIsDerivedNotDeclared:
         assert "WSTG-CLNT-04" not in executable_test_cases()
 
 
-class TestAWriteOutFormatCannotForgeAFinding:
+class TestWriteOutIsNotInTheDialectAtAll:
     """The sharpest failure this dialect can have is not an escape — it is a
-    finding for a request that never happened. An adversarial pass found 64 of
-    the catalogue's 111 regex evaluators forgeable by one grammar-legal -w
-    literal, 49 of them high or critical.
+    finding for a request that never happened. -w output is indistinguishable
+    from the response in step_result.output, and with `-o /dev/null` it IS the
+    whole of it, so every evaluator reads a string the case chose. An
+    adversarial pass rated 64 of the catalogue's 111 regex evaluators forgeable
+    that way, 49 of them high or critical.
+
+    A no-literals grammar was not enough: any variable that echoes case-supplied
+    text reopens it at full width (%{referer} returns -e verbatim, and
+    %{url_effective} returns a path the case — or a target's discovered link —
+    chose). Measured by ablation, -w buys ZERO runnable cases, so the class is
+    removed rather than fenced.
     """
 
-    @pytest.mark.parametrize("literal", [
+    @pytest.mark.parametrize("value", [
         "root:x:0:0:", "302 http://app.test/login", "x-erlik-blocked: true",
-        "HTTP/1.1 200 OK", "Set-Cookie: session=x", "uid=0(root)",
-        "SQLSTATE", "<?xml", "Server: Apache/2.4.1",
+        "HTTP/1.1 200 OK", "Set-Cookie: session=x", "%{http_code}",
+        "%{referer}", "%{url_effective}", "@/input/ca.pem", "%output{/tmp/x}",
     ])
-    def test_no_evaluator_string_can_be_spelled_in_a_write_out_value(self, literal):
+    def test_no_write_out_value_is_accepted(self, value):
         with pytest.raises(ScopeViolation):
-            curl_request(f'curl -s -o /dev/null -w "{literal}" "https://app.test/"')
+            curl_request(f'curl -s -o /dev/null -w "{value}" "https://app.test/"')
 
-    def test_the_grammar_admits_no_letter_or_digit_the_case_controls(self):
-        """The property behind those cases: only curl fills in a %{variable},
-        so only curl can put a word or a number in the output."""
-        from orchestrator.integrations.deterministic import _WRITE_OUT
-        import re
-        for bad in ("a", "1", "GET", "200", "%{http_code}x", "x%{http_code}", "_"):
-            assert not _WRITE_OUT.match(bad), bad
-        for good in ("", "%{http_code}", "%{http_code} %{url_effective}",
-                     "%{http_code}:%{size_download}", " : , ; | = / . -", "%%"):
-            assert _WRITE_OUT.match(good), good
+    def test_removing_it_cost_no_coverage(self):
+        """The reason this is deletion rather than a narrower grammar."""
+        from orchestrator.integrations.inventory import executable_test_cases
+        from orchestrator.testcase.loader import load_catalog
+        catalog = load_catalog()
+        for case_id in executable_test_cases():
+            for step in catalog[case_id].steps:
+                assert "-w " not in step.command, f"{case_id} needs -w after all"
 
     def test_every_write_out_a_runnable_case_uses_still_parses(self):
         from orchestrator.integrations.inventory import executable_test_cases
@@ -338,3 +342,41 @@ def test_a_safe_method_may_still_follow_redirects():
         'curl -s -A "Mozilla/5.0" -L --max-time 10 "https://app.test/robots.txt"')
     assert (method, url) == ("GET", "https://app.test/robots.txt")
     assert "WSTG-INFO-03" in executable_test_cases()
+
+
+class TestATargetCannotOpenTheArgv:
+    """Discovered URLs are target-controlled text substituted into a
+    DOUBLE-QUOTED slot (`curl ... -i "{{url}}"`) that curl_request then
+    shlex.splits. A quote in the value closes the slot and the remainder
+    becomes new argv tokens — and the unfilled-option rule swallows a trailing
+    empty `-A ""`, so the injection closes neatly.
+
+    Every injected token still has to pass the option allowlist, which is what
+    made this survivable rather than fatal. The fix is not to let a target open
+    the argv at all: Endpoint.url is a bare `str` and katana/ZAP/playwright
+    store whatever they found.
+    """
+
+    @pytest.mark.parametrize("stored", [
+        'http://app.test/a" -o /dev/null -A "',
+        'http://app.test/a" -L --max-redirs 50 -A "',
+        "http://app.test/a' -X DELETE '",
+        "http://app.test/a\\",
+    ])
+    async def test_a_breakout_url_never_becomes_a_target(self, stored, monkeypatch):
+        from orchestrator.integrations import inventory
+
+        async def rows(sql, args=()):
+            return [{"url": stored, "method": "GET"},
+                    {"url": "http://app.test/clean", "method": "GET"}]
+        monkeypatch.setattr(inventory.db, "rows", rows)
+
+        class Ctx:
+            session_id, identity_id, target = "s", "reader", "http://app.test/"
+            class config:
+                max_urls = 20
+
+        selected = await inventory.seeds(Ctx(), {"scope": {"allow_hosts": ["app.test"],
+                                                           "allow_ports": [80]}})
+        assert stored not in selected
+        assert "http://app.test/clean" in selected, "only the hostile one is dropped"

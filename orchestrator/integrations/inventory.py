@@ -1,6 +1,7 @@
 """Identity-specific inventory shared by discovery and downstream testing."""
 from functools import lru_cache
 from urllib.parse import urldefrag
+from orchestrator.engagement import looks_injectable
 from . import persistence as db
 from .egress_policy import EgressPolicy
 
@@ -16,6 +17,17 @@ async def seeds(context, policy):
         if method not in ("GET", "HEAD", "OPTIONS") or url in seen:
             continue
         if not EgressPolicy(policy).check(url, method)[0]:
+            continue
+        # A discovered URL is TARGET-CONTROLLED text, and it is substituted into
+        # a double-quoted slot (`curl ... -i "{{url}}"`) which curl_request then
+        # shlex.splits. A quote in the value therefore closes that slot and the
+        # rest becomes new argv tokens — verified: a stored URL ending
+        # `a" -o /dev/null -A "` parsed clean, and the trailing empty -A was
+        # swallowed by the unfilled-option rule so the injection closed neatly.
+        # Every injected token still has to pass the option allowlist, but the
+        # right answer is not to let a target open the argv at all. Endpoint.url
+        # is a bare `str` and katana/ZAP/playwright store what they found.
+        if looks_injectable(url):
             continue
         seen.add(url)
         selected.append(url)
