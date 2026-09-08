@@ -69,7 +69,9 @@ publicly. There is no bug bounty.
   scripts under `scripts/` bind `0.0.0.0`.
 
   When the token IS set the boundary is now whole: `GET`/`HEAD` are covered as
-  well as writes, and WebSocket handshakes are refused with close code 4401.
+  well as writes, and WebSocket handshakes are refused. (The middleware closes
+  with code 4401 before accepting, which Starlette surfaces to the client as an
+  HTTP 403 during the handshake — verified against a running server.)
   The previous guard applied only to `POST/PUT/PATCH/DELETE`, so a reader could
   `GET` every report without presenting anything, and `/ws/` was outside it
   entirely. Browsers cannot set headers on a WebSocket handshake, so the

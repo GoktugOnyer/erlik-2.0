@@ -86,8 +86,17 @@ pip install -r requirements.txt
 docker compose up -d        # first run builds the Kali tools image (~10–20 min)
 
 # Start the orchestrator — dashboard at http://localhost:8002
+export ERLIK_API_TOKEN='choose-a-long-random-token'
 ./run.sh                    # or: uvicorn orchestrator.main:app --host 0.0.0.0 --port 8002
 ```
+
+Setting `ERLIK_API_TOKEN` protects every `/api/` and `/ws/` path, reads
+included; the dashboard exchanges it for an HttpOnly cookie at `POST /api/auth`,
+and API clients send `X-API-Token` or a bearer token. Leaving it unset keeps the
+API open, as it has always been — pair that with the default loopback bind.
+Integration assessments are the exception: `/api/integrations/*` is refused
+whether or not a token is set, because it exposes credential handles and client
+evidence. See [SECURITY.md](SECURITY.md).
 
 > **Note:** the first `docker compose up` builds the Kali tools container — it pulls
 > the Kali base image and installs the toolset (nmap, sqlmap, nuclei, dalfox,
@@ -156,6 +165,15 @@ Because inference runs at non-zero temperature, individual session findings vary
 between runs; aggregate coverage is stable across repeats.
 
 ## Status
+
+The optional [integration assessment pipeline](docs/integrations.md) adds
+isolated ZAP, Schemathesis, Interactsh and Katana stages plus explicit
+DefectDojo export, each running as a Docker job behind a scope-checking egress
+proxy. It does not change the existing toolset presets; the dashboard is at
+`/integrations`. Note that the sandboxed executor runs 3 of the 29 catalogue
+cases (`WSTG-SESS-02`, `WSTG-CLNT-07`, `WSTG-CONF-06`) — the rest need a shell
+or curl options its deliberately small argv dialect does not accept, and
+`eligible_test_cases` reports that honestly rather than silently skipping.
 
 Active development. The deterministic engine and WSTG catalogue are
 operational; the catalogue is being expanded toward broader WSTG coverage.

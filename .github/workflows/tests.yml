@@ -35,7 +35,11 @@ jobs:
       - name: Install
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt pytest
+          # requirements-dev, not a bare `pytest`: pytest.ini sets
+          # `asyncio_mode = auto`, so the suite does not collect without
+          # pytest-asyncio. Installing pytest alone turned every async test
+          # into a collection error.
+          pip install -r requirements-dev.txt
 
       # The runner has NO Docker container and NO data/pentest.db — data/ is
       # gitignored because it holds real client findings. Every test that needs

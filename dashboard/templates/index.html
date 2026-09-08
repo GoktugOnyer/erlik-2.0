@@ -22,9 +22,46 @@
             return (window.DOMPurify ? DOMPurify.sanitize(html) : escapeHtml(md));
         }
 
-        // --- Optional API-token attachment (when ERLIK_API_TOKEN is set server-side) ---
+        // --- API-token attachment (when ERLIK_API_TOKEN is set server-side) ---
+        //
+        // Two things changed under this and both matter here. Reads are now
+        // guarded too, so a page load fires six or more /api/ requests that can
+        // all 401 at once — the old code raised a prompt() per failure, so you
+        // got a stack of identical dialogs. And the guard now covers /ws/,
+        // which a browser cannot send a header on at all, so the live-update
+        // socket could never authenticate by header no matter what was stored.
+        //
+        // Both are answered by exchanging the token ONCE at POST /api/auth for
+        // an HttpOnly, SameSite=strict cookie: the socket is carried by the
+        // cookie, and the token stops living in localStorage where any XSS in
+        // a probed host's reflected output could read it. The stored token is
+        // still honoured, and immediately upgraded to a cookie, so an operator
+        // who set one before this change is not locked out.
         (function () {
             const _f = window.fetch;
+            let pending = null;          // single-flight: one prompt, not six
+
+            async function exchange(token) {
+                const r = await _f('/api/auth', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ token: token })
+                });
+                return r.ok;
+            }
+
+            async function authenticate() {
+                let stored = null;
+                try { stored = localStorage.getItem('erlik_api_token'); } catch (e) { }
+                if (stored && await exchange(stored)) {
+                    // It is in the cookie now; stop keeping a copy JS can read.
+                    try { localStorage.removeItem('erlik_api_token'); } catch (e) { }
+                    return true;
+                }
+                const entered = prompt('API token required (ERLIK_API_TOKEN). Enter it to continue:');
+                return entered ? await exchange(entered) : false;
+            }
+
             window.fetch = async function (url, opts) {
                 try {
                     const t = localStorage.getItem('erlik_api_token');
@@ -34,12 +71,28 @@
                     }
                 } catch (e) { /* ignore */ }
                 const resp = await _f(url, opts);
-                if (resp.status === 401 && typeof url === 'string' && url.indexOf('/api/') === 0) {
-                    const t = prompt('API token required (ERLIK_API_TOKEN). Enter it to continue:');
-                    if (t) { try { localStorage.setItem('erlik_api_token', t); } catch (e) {} location.reload(); }
+                if (resp.status === 401 && typeof url === 'string'
+                        && url.indexOf('/api/') === 0 && url.indexOf('/api/auth') !== 0) {
+                    if (!pending) { pending = authenticate().finally(() => { pending = null; }); }
+                    if (await pending) { location.reload(); }
                 }
                 return resp;
             };
+
+            // Upgrade eagerly, not only on a 401. A stored token makes /api/
+            // succeed by header, so nothing would ever trigger the exchange —
+            // and the live-update WebSocket, which cannot send a header, would
+            // stay refused with no visible cause. Self-limiting: the token is
+            // removed on success, so the next load finds nothing to upgrade.
+            (async function () {
+                let stored = null;
+                try { stored = localStorage.getItem('erlik_api_token'); } catch (e) { return; }
+                if (!stored) { return; }
+                if (await exchange(stored)) {
+                    try { localStorage.removeItem('erlik_api_token'); } catch (e) { }
+                    location.reload();
+                }
+            })();
         })();
     </script>
     <style>
