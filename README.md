@@ -172,26 +172,38 @@ DefectDojo export, each running as a Docker job behind a scope-checking egress
 proxy. It does not change the existing toolset presets; the dashboard is at
 `/integrations`.
 
-The sandboxed executor runs **6 of the 29** catalogue cases. Which six is
+The sandboxed executor runs **9 of the 29** catalogue cases. Which nine is
 derived from the parser itself (`inventory.executable_test_cases`), not written
 down: a case qualifies only when every one of its steps parses as a single
 curl request AND interpolates nothing the lane cannot supply, so a case that
 would half-run is excluded rather than reported as having passed.
 
-The limit is not the curl dialect. Of the 23 cases out of reach, **12 need a
-target field discovery does not produce** — eight want only a `parameter` name
-— 4 run a shell pipeline or a tool that is not curl, 2 interpolate a field
-nothing supplies, 1 needs credentials the lane cannot choose between, and 1
-runs through the Interactsh collector instead. Three hit a dialect refusal
-first, but two of those also name four URLs per step and pipe curl into `tr`,
-so no widening reaches them; the third delivers a PHP object-injection payload
-in a cookie, which the per-stage identity rule forbids on purpose.
+The lane supplies two target fields. `url` comes from discovery; `parameter`
+comes from the query strings of the endpoints katana, the browser crawler,
+Schemathesis and ZAP report — merged per endpoint and kept per identity, so a
+parameter learned as an admin is never replayed anonymously. ZAP's own `param`
+field is deliberately NOT used: it names the input vector an alert fired on,
+which is a cookie or a header at least as often as a query parameter. A case that tests
+a parameter runs once per (endpoint, parameter) pair and only against a URL the
+parameter was actually observed on. That field is what makes WSTG-CLNT-04,
+WSTG-INPV-11.2 and WSTG-INPV-18 runnable; before it, discovery produced
+endpoints and every injection case sat idle for want of somewhere to inject.
 
-So feeding discovered **parameters** into the lane would unlock roughly four
-times what any further widening of curl options could. The dialect is also
-deliberately narrower than "safe": `-w` and `-e` were allowed and then removed
-because ablation showed they bought zero runnable cases while `-w` let a case
-write its own evaluator input (see `tests/test_curl_dialect.py`).
+Of the 20 cases still out of reach: 6 run a shell pipeline or a tool that is
+not curl, 4 need a target field discovery still does not produce (`login_url`,
+`host`, `jwt`, `request_template`/`success_marker` — one case each), 4
+interpolate a field nothing supplies (three want a form `submit` control, and
+all three are shell cases regardless), 4 hit a dialect refusal, 1 needs
+credentials the lane cannot choose between, and 1 runs through the Interactsh
+collector instead. There is no longer a single change worth several cases —
+the remaining blockers are one-offs.
+
+The dialect is deliberately narrower than "safe": `-w` and `-e` were allowed
+and then removed because ablation showed they bought zero runnable cases while
+`-w` let a case write its own evaluator input. A parameter NAME is held to a
+stricter rule than "not shell-injectable" for the same reason — `a#b` would
+silently truncate the probe to `?a`, and reporting on a request you did not
+make is worse than not making it (see `tests/test_parameter_discovery.py`).
 
 Active development. The deterministic engine and WSTG catalogue are
 operational; the catalogue is being expanded toward broader WSTG coverage.

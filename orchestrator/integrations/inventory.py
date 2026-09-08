@@ -1,7 +1,9 @@
 """Identity-specific inventory shared by discovery and downstream testing."""
+import json
 from functools import lru_cache
-from urllib.parse import urldefrag
+from urllib.parse import urldefrag, urlsplit, urlunsplit
 from orchestrator.engagement import looks_injectable
+from .contracts import PARAMETER_NAME
 from . import persistence as db
 from .egress_policy import EgressPolicy
 
@@ -39,7 +41,7 @@ async def seeds(context, policy):
 # credentials, so a case requiring any of those cannot run here however
 # cleanly its command parses. `required_any` groups are credential
 # alternatives — the lane has nothing to choose between.
-LANE_TARGET_FIELDS = frozenset({"url"})
+LANE_TARGET_FIELDS = frozenset({"url", "parameter"})
 
 # Executed through the Interactsh collector rather than the curl dialect, so it
 # is selectable without being parseable here (see CatalogueAdapter.run).
@@ -52,6 +54,7 @@ COLLECTOR_CASES = ("WSTG-INPV-19",)
 IDENTITY_FIELDS = frozenset({"cookie", "auth_header"})
 
 _PROBE_URL = "https://erlik-capability-probe.invalid/"
+_PROBE_PARAMETER = "erlikprobe"
 
 
 def unfilled_fields(command: str, target: dict) -> list[str]:
@@ -107,7 +110,7 @@ def executable_test_cases(url: str = _PROBE_URL) -> tuple[str, ...]:
     from orchestrator.testcase.scope import ScopeViolation
     from .deterministic import curl_request
 
-    target = {"url": url}
+    target = {"url": url, "parameter": _PROBE_PARAMETER}
     supported = []
     for case_id, tc in sorted(load_catalog().items()):
         schema = tc.target_schema
@@ -124,6 +127,76 @@ def executable_test_cases(url: str = _PROBE_URL) -> tuple[str, ...]:
     return tuple(supported)
 
 
-def eligible_test_cases(url, method="GET"):
-    """Catalogue checks with a supported deterministic HTTP execution path."""
-    return list(executable_test_cases(url)) if method == "GET" else []
+# One URL that offers a hundred query parameters must not become a hundred runs
+# of every case. The per-URL cap keeps one pathological endpoint from consuming
+# the whole budget; the total is charged against max_urls, which is the budget
+# the operator already set for how much of the target this assessment touches.
+MAX_PARAMETERS_PER_URL = 10
+
+
+def base_url(url: str) -> str:
+    """The URL with its query and fragment removed.
+
+    WSTG-CLNT-04 interpolates `"{{url}}?{{parameter}}=…"`, so a url that already
+    carried a query would produce two `?` and test nothing. Stripping it also
+    matches the convention this codebase already uses for parameter-bearing
+    targets in orchestrator/testcase/sweep.py PROFILES.
+
+    The stripped URL is a DIFFERENT URL from the one discovery saw, so callers
+    must re-check it against scope rather than inheriting the original's
+    approval.
+    """
+    parts = urlsplit(url)
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
+
+
+def case_needs_parameter(tc) -> bool:
+    """Whether any step of this case interpolates {{parameter}}."""
+    return any("parameter" in unfilled_fields(step.command, {"url": "x"}) for step in tc.steps)
+
+
+async def parameters_by_url(context, policy) -> dict[str, list[str]]:
+    """Query-free URL -> parameter names observed on it, for THIS identity.
+
+    Rows are keyed by identity_id, and this reads only the caller's own, so a
+    parameter learned while authenticated as an admin is never replayed on an
+    anonymous stage — the same separation seeds() keeps for URLs.
+    """
+    rows = await db.rows(
+        "SELECT url,parameters FROM integration_endpoints "
+        "WHERE session_id=? AND identity_id=? ORDER BY url",
+        (context.session_id, context.identity_id))
+    checker, found = EgressPolicy(policy), {}
+    for row in rows:
+        names = [n for n in json.loads(row["parameters"] or "[]") if PARAMETER_NAME.match(n)]
+        if not names:
+            continue
+        url = base_url(row["url"])
+        # Re-checked, because stripping the query produced a URL that was never
+        # itself discovered or approved.
+        if looks_injectable(url) or not checker.check(url, "GET")[0]:
+            continue
+        bucket = found.setdefault(url, [])
+        for name in names:
+            if name not in bucket and len(bucket) < MAX_PARAMETERS_PER_URL:
+                bucket.append(name)
+    return found
+
+
+def eligible_test_cases(url, method="GET", parameters=()):
+    """Catalogue checks with a supported deterministic HTTP execution path.
+
+    `parameters` is what was observed on THIS endpoint. A case that
+    interpolates {{parameter}} is reported eligible only when there is one to
+    give it — otherwise it would run the degenerate probe the unfilled-field
+    rule exists to prevent.
+    """
+    if method != "GET":
+        return []
+    runnable = executable_test_cases()
+    if parameters:
+        return list(runnable)
+    from orchestrator.testcase.loader import load_catalog
+    catalog = load_catalog()
+    return [case_id for case_id in runnable
+            if not (catalog.get(case_id) and case_needs_parameter(catalog[case_id]))]

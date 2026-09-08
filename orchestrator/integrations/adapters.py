@@ -12,7 +12,8 @@ from typing import Protocol
 from urllib.parse import urlsplit, urljoin, urlencode, parse_qsl, urlunsplit
 import yaml
 
-from .contracts import AssessmentConfig, Endpoint, IntegrationFinding, StageResult, fingerprint
+from .contracts import (AssessmentConfig, Endpoint, IntegrationFinding, StageResult,
+                        fingerprint, parameter_names)
 from .runtime import Sandbox, IMAGES, JobOutput
 from .security import SecretStore, secret_values, redact
 from . import persistence as db
@@ -121,7 +122,24 @@ def parse_zap(document, ctx):
                 if not url:
                     continue
                 method, parameter = item.get("method", "GET"), item.get("param", "")
-                result.endpoints.append(Endpoint(url=url, method=method, source="zap", identity=ctx.identity_id))
+                # `parameter` is NOT passed on for discovery, though it is
+                # tempting: ZAP names the input vector its alert fired on, and
+                # that is a cookie or a header at least as often as a query
+                # parameter. This repo already proves it — the real-ZAP
+                # assertion in tests/test_integration_lifecycle.py pins
+                # zap:10010 reporting `fixture_session` on /zap/private, a
+                # COOKIE name on a URL with no query string at all. Feeding it
+                # here would have produced `?fixture_session=<payload>` and
+                # `?X-Frame-Options=<payload>` probes.
+                #
+                # And its marginal value is exactly the wrong set: when ZAP
+                # attacks a real GET query parameter the instance URI carries
+                # that query, so parse_qsl already recovers the name. Anything
+                # `parameter` adds BEYOND the URI is, by construction, a name
+                # that was not a query parameter.
+                result.endpoints.append(Endpoint(url=url, method=method, source="zap",
+                                                 identity=ctx.identity_id,
+                                                 parameters=parameter_names(url)))
                 result.findings.append(IntegrationFinding(
                     fingerprint=fingerprint(ctx.target, rule, method, url, parameter, ctx.identity_id),
                     title=alert.get("name", alert.get("alert", rule)), url=url, rule=rule, source="zap", method=method,
@@ -237,7 +255,8 @@ class KatanaAdapter(BaseAdapter):
         if ctx.config.headless or (ctx.identity or {}).get("storage_state"):
             browser = await rpc(sandbox, {"action": "browser", "url": ctx.target, "storage_state": (ctx.identity or {}).get("storage_state")})
             for request in browser["requests"]:
-                browser_endpoints.append(Endpoint(url=request["url"], method=request["method"], source="playwright", identity=ctx.identity_id))
+                browser_endpoints.append(Endpoint(url=request["url"], method=request["method"], source="playwright",
+                                                  identity=ctx.identity_id, parameters=parameter_names(request["url"])))
             seeds = [ctx.target, *browser["links"], *[e.url for e in browser_endpoints]]
             from .egress_policy import EgressPolicy
             seeds = [u for u in dict.fromkeys(seeds) if EgressPolicy(sandbox.policy).check(u)[0]][:ctx.config.max_urls]
@@ -254,7 +273,8 @@ class KatanaAdapter(BaseAdapter):
             if url and (url, method) not in seen:
                 seen.add((url, method))
                 if len(result.endpoints) < ctx.config.max_urls:
-                    result.endpoints.append(Endpoint(url=url, method=method, source="katana", identity=ctx.identity_id))
+                    result.endpoints.append(Endpoint(url=url, method=method, source="katana",
+                                                     identity=ctx.identity_id, parameters=parameter_names(url)))
         if len(seen) > ctx.config.max_urls:
             result.status, result.reason = "partial", "URL inventory limit reached"
         return await record(ctx, sandbox, output, result)
@@ -299,7 +319,8 @@ class SchemathesisAdapter(BaseAdapter):
         if har.exists():
             for entry in json.loads(har.read_text()).get("log", {}).get("entries", []):
                 request = entry["request"]
-                result.endpoints.append(Endpoint(url=request["url"], method=request["method"], source="schemathesis", identity=ctx.identity_id))
+                result.endpoints.append(Endpoint(url=request["url"], method=request["method"], source="schemathesis",
+                                                 identity=ctx.identity_id, parameters=parameter_names(request["url"])))
         if workflow:
             detail = json.loads(output.stdout)
             result.observations.append({"type": "workflow", **detail})

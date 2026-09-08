@@ -9,7 +9,7 @@ from orchestrator.testcase.scope import ScopeViolation, check_url
 from .adapters import BaseAdapter, record
 from .contracts import StageResult, IntegrationFinding, fingerprint
 from .egress_policy import EgressPolicy
-from .inventory import seeds, eligible_test_cases
+from .inventory import seeds, eligible_test_cases, parameters_by_url, case_needs_parameter
 from .runtime import JobOutput
 from .security import redact
 from . import persistence as db
@@ -127,7 +127,13 @@ def curl_request(command):
     containing `[` chose the fan-out. `-g` is emitted unconditionally (its
     position does not matter to curl) and a case may also pass it harmlessly.
     """
-    args = shlex.split(command)
+    try:
+        args = shlex.split(command)
+    except ValueError as exc:
+        # An unbalanced quote, usually because a target-supplied value carried
+        # one. run_test_case only catches ScopeViolation, so letting ValueError
+        # out of here failed the whole STAGE instead of refusing one step.
+        raise ScopeViolation(f"command does not tokenise: {exc}") from exc
     if not args or args.pop(0) != "curl":
         raise ScopeViolation("unsupported deterministic execution tool")
     method, urls, headers, data = "GET", [], [], False
@@ -367,6 +373,17 @@ class CatalogueAdapter(BaseAdapter):
                 raise ScopeViolation(reason)
 
         def step_policy(step, command):
+            # A step whose ONLY evaluator is `llm` decides nothing here: this
+            # lane runs with allow_llm=False for reproducibility, and the runner
+            # skips those evaluators silently. WSTG-CLNT-04's
+            # `client_side_sink_review` is one — it would have issued a real
+            # request, been recorded success=True/skipped=False, counted toward
+            # executed_checks, and reached no verdict at all. Declining it keeps
+            # the case (its other three steps are real regex arms) while saying
+            # plainly that this arm did not run.
+            if step.evaluators and all(ev.type == "llm" for ev in step.evaluators):
+                return ("skipped: this step decides only by LLM evaluator, and the "
+                        "assessment lane runs deterministically")
             try:
                 _, url, method = curl_request(command)
             except ScopeViolation:
@@ -389,24 +406,55 @@ class CatalogueAdapter(BaseAdapter):
             output = await sandbox.run([*argv, "--max-time", str(max(1, step_seconds)),
                                         "--proxy", sandbox.proxy_url, "--cacert", "/input/ca.pem"])
             blocked = bool(re.search(r"(?im)^x-erlik-blocked:\s*true", output.stdout))
-            return {"success": output.code == 0 and not blocked, "output": output.stdout,
-                    "exit_code": output.code, "error": "request refused by scope policy" if blocked else output.stderr or None}
+            if blocked:
+                # The 403 body is OUR refusal reason, not the target's response,
+                # and the runner evaluates whatever output it is handed. Passing
+                # the proxy's own answer through would have every evaluator read
+                # a document the target never sent — finding nothing in it, and
+                # reporting that as a clean probe. Nothing in the catalogue
+                # matches these strings today, but "no pattern happens to match
+                # our own error page" is a coincidence, not a design.
+                return {"success": False, "exit_code": output.code, "output":
+                        "[erlik] the assessment proxy refused this request; "
+                        "the target was never contacted, so there is nothing to evaluate",
+                        "error": "request refused by scope policy: " + output.stdout.strip()[-200:]}
+            return {"success": output.code == 0, "output": output.stdout,
+                    "exit_code": output.code, "error": output.stderr or None}
 
         targets = await seeds(ctx, sandbox.policy)
+        # Parameter names discovered on this identity's endpoints. A case that
+        # interpolates {{parameter}} runs once per (endpoint, parameter) pair
+        # and ONLY against a URL the parameter was actually observed on —
+        # pairing them any other way would test a parameter somewhere it was
+        # never seen, and report the result against the URL.
+        parameters = await parameters_by_url(ctx, sandbox.policy)
+        budget = ctx.config.max_urls
+        result.metadata["parameters_discovered"] = sum(len(v) for v in parameters.values())
+
         for case_id in ctx.config.test_cases:
             tc = find_by_id(case_id)
             if not tc:
                 raise ValueError("selected catalogue test is unavailable: " + case_id)
-            case_targets = ([probe for probe in ctx.config.callback.probes] if case_id == "WSTG-INPV-19" and ctx.config.callback
-                            else [{"url": url} for url in targets if case_id in eligible_test_cases(url)])
+            if case_id == "WSTG-INPV-19" and ctx.config.callback:
+                case_targets = [probe for probe in ctx.config.callback.probes]
+            elif case_needs_parameter(tc):
+                case_targets = [{"url": url, "parameter": name}
+                                for url, names in sorted(parameters.items())
+                                for name in names
+                                if case_id in eligible_test_cases(url, parameters=names)][:budget]
+            else:
+                case_targets = [{"url": url} for url in targets
+                                if case_id in eligible_test_cases(url)]
             if not case_targets:
                 # Selected, and nothing to run it against. Saying nothing here
                 # made the case indistinguishable from one that ran and found
                 # nothing — the operator picked it, so they are owed the reason.
                 result.observations.append({
                     "type": "test_case_not_run", "test_case_id": case_id, "url": None, "steps": [],
-                    "reason": "no in-scope URL this case can be executed against; "
-                              "see inventory.executable_test_cases"})
+                    "reason": ("no parameter was discovered on any in-scope URL, and this case "
+                               "tests one" if case_needs_parameter(tc) else
+                               "no in-scope URL this case can be executed against; "
+                               "see inventory.executable_test_cases")})
                 result.metadata["catalogue"].append(case_id)
                 continue
             for target in case_targets:
@@ -423,13 +471,30 @@ class CatalogueAdapter(BaseAdapter):
                                                 run.model_dump_json(), ctx.known)
                 result.evidence_ids.append(evidence_id)
                 result.metadata["executed_checks"] += sum(not s.skipped for s in run.steps)
+                # The parameter is part of WHICH check this was. Once a case
+                # runs once per (endpoint, parameter) the observations are
+                # otherwise identical, and the report cannot say which input
+                # was probed.
+                probed = target.get("parameter") or ""
                 result.observations.append({"type": "test_case", "test_case_id": case_id, "url": target["url"],
+                    "parameter": probed or None,
                     "steps": [{"name": s.step, "success": s.success, "skipped": s.skipped, "error": s.error} for s in run.steps],
                     "evidence_id": evidence_id})
                 for finding in run.findings:
                     rule = case_id + ":" + finding.step
-                    result.findings.append(IntegrationFinding(fingerprint=fingerprint(ctx.target, rule, "GET", target["url"], identity=ctx.identity_id),
-                        title=finding.vuln_type or tc.name, url=target["url"], rule=rule, source="testcase", identity=ctx.identity_id,
+                    # fingerprint() has always taken a `parameter` and never been
+                    # given one. That was harmless while a case ran once per URL;
+                    # running it once per parameter makes SSTI-in-`q` and
+                    # SSTI-in-`lang` on the same URL hash identically, and
+                    # persist_result writes findings INSERT OR REPLACE on
+                    # (session_id, fingerprint) — so one silently replaced the
+                    # other and the survivor named no parameter at all. The same
+                    # fingerprint is DefectDojo's dedup key, so the collapse
+                    # would have been exported too.
+                    result.findings.append(IntegrationFinding(
+                        fingerprint=fingerprint(ctx.target, rule, "GET", target["url"], probed, ctx.identity_id),
+                        title=finding.vuln_type or tc.name, url=target["url"], rule=rule, source="testcase",
+                        identity=ctx.identity_id, parameter=probed,
                         severity=finding.severity, confidence=finding.confidence, basis=finding.basis or "Deterministic catalogue evaluator matched the captured HTTP response",
                         methodology=[case_id], evidence_ids=[evidence_id]))
                 if any(not s.success and not s.skipped for s in run.steps):

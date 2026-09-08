@@ -24,6 +24,7 @@ async def migrate():
         CREATE TABLE IF NOT EXISTS integration_endpoints (
           session_id TEXT NOT NULL, url TEXT NOT NULL, method TEXT NOT NULL,
           identity_id TEXT NOT NULL, sources TEXT NOT NULL,
+          parameters TEXT NOT NULL DEFAULT '[]',
           PRIMARY KEY(session_id,url,method,identity_id));
         CREATE TABLE IF NOT EXISTS integration_findings (
           session_id TEXT NOT NULL, fingerprint TEXT NOT NULL, payload TEXT NOT NULL,
@@ -53,6 +54,13 @@ async def migrate():
             await db.execute("ALTER TABLE integration_assessments ADD COLUMN elapsed_seconds REAL NOT NULL DEFAULT 0")
         if "config_secret_id" not in columns:
             await db.execute("ALTER TABLE integration_assessments ADD COLUMN config_secret_id TEXT")
+        endpoint_columns = {r[1] for r in await (await db.execute("PRAGMA table_info(integration_endpoints)")).fetchall()}
+        if "parameters" not in endpoint_columns:
+            # CREATE TABLE IF NOT EXISTS is a no-op on a database that already
+            # has this table, so an existing assessment store needs the column
+            # added explicitly. Existing rows default to "no parameters known",
+            # which is exactly what was true of them.
+            await db.execute("ALTER TABLE integration_endpoints ADD COLUMN parameters TEXT NOT NULL DEFAULT '[]'")
         export_columns = {r[1] for r in await (await db.execute("PRAGMA table_info(integration_exports)")).fetchall()}
         for name, declaration in (("action", "TEXT NOT NULL DEFAULT 'reimport'"),
                                   ("remote_engagement_id", "INTEGER"), ("evidence_id", "TEXT")):
@@ -112,12 +120,19 @@ async def persist_result(session_id, stage_id, result):
     await execute("UPDATE integration_stages SET status=?, reason=?, result=?, finished_at=CURRENT_TIMESTAMP WHERE id=?",
                   (result.status, result.reason, result.model_dump_json(), stage_id))
     for endpoint in result.endpoints:
-        old = await rows("SELECT sources FROM integration_endpoints WHERE session_id=? AND url=? AND method=? AND identity_id=?",
+        old = await rows("SELECT sources,parameters FROM integration_endpoints WHERE session_id=? AND url=? AND method=? AND identity_id=?",
                          (session_id, endpoint.url, endpoint.method, endpoint.identity))
         sources = set(json.loads(old[0]["sources"])) if old else set()
         sources.add(endpoint.source)
-        await execute("INSERT OR REPLACE INTO integration_endpoints VALUES(?,?,?,?,?)",
-                      (session_id, endpoint.url, endpoint.method, endpoint.identity, json.dumps(sorted(sources))))
+        # Parameters MERGE across sources the way sources do: katana sees the
+        # query string, ZAP names the field it exercised, and neither is a
+        # superset of the other. Merged per (url, method, identity), so a
+        # parameter learned as one identity is never offered to another.
+        parameters = set(json.loads(old[0]["parameters"] or "[]")) if old else set()
+        parameters.update(endpoint.parameters)
+        await execute("INSERT OR REPLACE INTO integration_endpoints VALUES(?,?,?,?,?,?)",
+                      (session_id, endpoint.url, endpoint.method, endpoint.identity,
+                       json.dumps(sorted(sources)), json.dumps(sorted(parameters))))
     for finding in result.findings:
         old = await rows("SELECT payload FROM integration_findings WHERE session_id=? AND fingerprint=?", (session_id, finding.fingerprint))
         if old:

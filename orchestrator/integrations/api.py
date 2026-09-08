@@ -69,8 +69,12 @@ async def endpoints(session_id: str):
     result = await db.rows("SELECT * FROM integration_endpoints WHERE session_id=? ORDER BY url,method", (session_id,))
     for item in result:
         item["sources"] = json.loads(item["sources"])
+        item["parameters"] = json.loads(item.get("parameters") or "[]")
         from .inventory import eligible_test_cases
-        item["test_cases"] = eligible_test_cases(item["url"], item["method"])
+        # Answered with THIS endpoint's parameters, so a case that tests one is
+        # listed only where there is one to give it.
+        item["test_cases"] = eligible_test_cases(item["url"], item["method"],
+                                                 parameters=item["parameters"])
     return result
 
 

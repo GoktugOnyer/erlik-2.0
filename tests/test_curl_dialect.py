@@ -272,11 +272,17 @@ class TestCapabilityIsDerivedNotDeclared:
     def test_a_step_that_interpolates_nothing_is_not_a_check(self):
         """WSTG-CLNT-04 lists `parameter` as optional but interpolates it into
         the query, so with nothing to substitute it probes `?=//evil/` — an
-        open-redirect test against a parameter with no name."""
+        open-redirect test against a parameter with no name.
+
+        Now that the lane discovers parameters the case CAN run, but only where
+        one was actually found. Eligibility, not executability, is what carries
+        that distinction."""
+        from orchestrator.integrations.inventory import eligible_test_cases
         assert unfilled_fields('curl "{{url}}?{{parameter}}=x"', {"url": "https://app.test/"}) == ["parameter"]
         assert unfilled_fields('curl -b "{{cookie}}" -H "{{auth_header}}" "{{url}}"',
                                {"url": "https://app.test/"}) == [], "identity is the proxy's job, not the case's"
-        assert "WSTG-CLNT-04" not in executable_test_cases()
+        assert "WSTG-CLNT-04" not in eligible_test_cases("https://app.test/s")
+        assert "WSTG-CLNT-04" in eligible_test_cases("https://app.test/s", parameters=["q"])
 
 
 class TestWriteOutIsNotInTheDialectAtAll:

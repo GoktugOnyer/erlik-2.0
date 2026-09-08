@@ -4,7 +4,8 @@ from __future__ import annotations
 import hashlib
 import json
 from typing import Literal
-from urllib.parse import urlsplit, urlunsplit
+import re
+from urllib.parse import parse_qsl, urlsplit, urlunsplit
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from orchestrator.testcase.scope import Scope, check_url
@@ -187,11 +188,47 @@ def fingerprint(target: str, rule: str, method: str, url: str, parameter: str = 
     return hashlib.sha256(json.dumps(parts, separators=(",", ":")).encode()).hexdigest()
 
 
+# A QUERY PARAMETER NAME THE LANE WILL PUT IN A COMMAND.
+#
+# Deliberately much narrower than "not shell-injectable". A name is
+# target-controlled text rendered into a command slot, and the shell-metachar
+# gate is the wrong instrument for it twice over: it passes names that silently
+# CORRUPT the probe, and it rejects names that were never dangerous here.
+# Measured against the real templates:
+#
+#   a#b   ->  ?a#b=payload    the `#` opens a FRAGMENT, so the request is `?a`
+#                             and the case tests a parameter it never sent
+#   a&b   ->  ?a&b=payload    two parameters, neither the one under test
+#   a=b   ->  ?a=b=payload    parameter `a`, value `b=payload`
+#
+# None of those escape anything; each makes the case report on a probe it did
+# not make, which is this project's recurring defect shape. A real query
+# parameter name is what is allowed, `user[id]` and `x-token` included, and a
+# leading dash is excluded so a name can never read as an option if it ever
+# reaches an unquoted slot.
+PARAMETER_NAME = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.\[\]-]{0,63}\Z")
+
+
+def parameter_names(url: str, *extra: str) -> list[str]:
+    """Query parameter names on `url`, plus any the scanner named, validated."""
+    found = [name for name, _ in parse_qsl(urlsplit(url).query, keep_blank_values=True)]
+    seen, out = set(), []
+    for name in [*found, *extra]:
+        name = (name or "").strip()
+        if name and name not in seen and PARAMETER_NAME.match(name):
+            seen.add(name)
+            out.append(name)
+    return out
+
+
 class Endpoint(StrictModel):
     url: str
     method: str = "GET"
     source: str
     identity: str = "anonymous"
+    # Names observed ON this endpoint, so a case never tests a parameter
+    # against a URL it was not seen on.
+    parameters: list[str] = Field(default_factory=list)
 
 
 class IntegrationFinding(StrictModel):
