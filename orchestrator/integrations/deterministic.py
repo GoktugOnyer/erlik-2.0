@@ -2,7 +2,7 @@
 import json
 import shlex
 import re
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, quote_plus
 from orchestrator.testcase.runner import run_test_case
 from orchestrator.testcase.loader import find_by_id
 from orchestrator.testcase.scope import ScopeViolation, check_url
@@ -15,24 +15,117 @@ from .security import redact
 from . import persistence as db
 
 
+# Options that take no value. A bundle like `-sI` decomposes into these.
+# `-I` and `-G` also carry meaning beyond "present", recorded in the value.
+_VALUELESS = {
+    "-s": None, "--silent": None,
+    "-S": None, "--show-error": None,
+    "-i": None, "--include": None,
+    "-L": None, "--location": None,
+    "-g": None, "--globoff": None,
+    "-I": "HEAD", "--head": "HEAD",
+    "-G": "QUERY", "--get": "QUERY",
+}
+
+# Options that consume the following token.
+_VALUED = {
+    "-X", "--request", "-H", "--header",
+    "--data", "-d", "--data-binary", "--data-urlencode",
+    "-b", "--cookie", "-A", "--user-agent", "-e", "--referer",
+    "-w", "--write-out", "-o", "--output", "-D", "--dump-header",
+    "-m", "--max-time", "--connect-timeout", "--max-redirs",
+}
+
+# An option whose value renders empty was never filled in (see the note in
+# curl_request); dropping it is what the operator meant.
+_DROP_IF_EMPTY = {"-H", "--header", "-b", "--cookie", "-A", "--user-agent",
+                  "-e", "--referer", "-w", "--write-out"}
+
+# `-o`/`-D` are file writes in general. These four values are the exceptions:
+# every one is a non-persistent stream, and none can name a path in the job
+# directory. `-` is curl's own spelling of stdout.
+_STREAM_SINKS = {"-", "/dev/null", "/dev/stdout", "/dev/stderr"}
+
+_NUMERIC = re.compile(r"\d+(?:\.\d+)?\Z")
+
+
+def _urlencode_segment(value: str) -> str:
+    """Reproduce one --data-urlencode item the way curl builds it.
+
+    curl reads the item as `name=content`, `=content`, `content`, `@file` or
+    `name@file`, deciding on whichever of `=` or `@` comes FIRST. The file
+    forms are refused by the caller; the rest are rebuilt here so the URL this
+    parser returns is the URL curl will request.
+
+    Escapes are lowercased because curl emits `%3d` where Python emits `%3D`.
+    RFC 3986 makes those equivalent, so nothing downstream would MISBEHAVE on
+    the difference — but the returned URL is supposed to BE the request, and a
+    string that merely means the same thing is a weaker claim than one that
+    matches. Verified byte-for-byte against the pinned curl.
+    """
+    name, sep, content = value.partition("=")
+    if not sep:
+        encoded = quote_plus(value)
+    elif not name:
+        encoded = quote_plus(content)
+    else:
+        encoded = name + "=" + quote_plus(content)
+    return re.sub(r"%[0-9A-F]{2}", lambda m: m.group(0).lower(), encoded)
+
+
 def curl_request(command):
-    """Parse a deliberately small argv dialect; never pass catalogue text to a shell."""
+    """Parse a deliberately small argv dialect; never pass catalogue text to a shell.
+
+    The (url, method) returned here is what the scope check and the
+    state-changing gate are decided on, so the parser's whole job is to refuse
+    anything that would let the REQUEST differ from what it reports — and to
+    refuse anything that reads or writes a local file, carries its own
+    credentials, or leaves the proxy.
+
+    GLOBBING IS OFF, ALWAYS. curl expands `[1-100]` and `{a,b}` in a URL into
+    many requests, and `http://{a,b}.test/` into requests to DIFFERENT HOSTS —
+    all from a single argv token, so "exactly one explicit HTTP destination"
+    was not true of the request, only of the text. Discovered endpoints are
+    substituted into these commands verbatim, so a target that serves a link
+    containing `[` chose the fan-out. `-g` is emitted unconditionally (its
+    position does not matter to curl) and a case may also pass it harmlessly.
+    """
     args = shlex.split(command)
     if not args or args.pop(0) != "curl":
         raise ScopeViolation("unsupported deterministic execution tool")
     method, urls, headers, data = "GET", [], [], False
+    query_from_data, query_parts = False, []
     # argv is REBUILT from what was validated, never echoed back raw, so an
     # option this parser decided to drop cannot reach the sandbox anyway.
-    emitted: list[str] = []
+    emitted: list[str] = ["-g"]
     i = 0
     while i < len(args):
         arg = args[i]
-        if arg in ("-s", "-i", "-sS", "-L", "--silent", "--include", "--location"):
-            emitted.append(arg)
-        elif arg in ("-I", "--head"):
-            method = "HEAD"
-            emitted.append(arg)
-        elif arg in ("-X", "--request", "-H", "--header", "--data", "-d", "-b", "--cookie"):
+
+        # A bundle of value-less short flags (`-sI`). A bundled option that
+        # TAKES a value is refused rather than decomposed, because curl hands
+        # it the rest of the bundle and then reads the next token as a URL:
+        # `-As ua https://app.test` is `-A s` plus TWO destinations, which is
+        # how a bundle would smuggle a second host past the check below.
+        if len(arg) > 2 and arg[0] == "-" and arg[1] != "-" and arg not in _VALUELESS:
+            letters = ["-" + c for c in arg[1:]]
+            if any(f not in _VALUELESS for f in letters):
+                raise ScopeViolation("unsupported bundled curl options")
+            args[i:i + 1] = letters
+            continue
+
+        if arg in _VALUELESS:
+            marker = _VALUELESS[arg]
+            if marker == "HEAD":
+                method = "HEAD"
+            elif marker == "QUERY":
+                # -G moves the data into the query string, so a GET carrying
+                # data is legitimate here and the URL below has to be rebuilt.
+                query_from_data = True
+            if arg not in ("-g", "--globoff"):
+                emitted.append(arg)
+
+        elif arg in _VALUED:
             i += 1
             if i == len(args):
                 raise ScopeViolation("missing curl option value")
@@ -45,15 +138,28 @@ def curl_request(command):
             # that was never filled in, and dropping it is what the operator
             # meant. Refusing it instead made every auth-capable case in the
             # catalogue unrunnable here.
-            if value == "" and arg in ("-H", "--header", "-b", "--cookie"):
+            if value == "" and arg in _DROP_IF_EMPTY:
                 i += 1
                 continue
+
             if arg in ("-X", "--request"):
                 method = value.upper()
+
             elif arg in ("-H", "--header"):
-                if value.split(":", 1)[0].lower() not in ("origin", "accept", "content-type") or any(c in value for c in "\r\n"):
+                # The allowlist is about what a header can REPOINT or IMPERSONATE.
+                # These five describe the request the browser would have made;
+                # none of them changes the destination (that is Host, refused)
+                # and none carries identity (that is Cookie/Authorization, also
+                # refused). The two Access-Control-Request-* headers are what a
+                # CORS preflight IS — without them WSTG-CLNT-07b could state a
+                # preflight in YAML and never send one.
+                if value.split(":", 1)[0].lower() not in (
+                        "origin", "accept", "content-type",
+                        "access-control-request-method", "access-control-request-headers",
+                ) or any(c in value for c in "\r\n"):
                     raise ScopeViolation("unsupported catalogue header")
                 headers.append(value)
+
             elif arg in ("-b", "--cookie"):
                 # A NON-empty cookie would be the case authenticating itself,
                 # behind the back of the stage's identity. The lane's isolation
@@ -62,20 +168,74 @@ def curl_request(command):
                 raise ScopeViolation(
                     "catalogue requests cannot carry their own credentials; "
                     "identity is applied per stage by the assessment proxy")
-            else:
+
+            elif arg in ("-A", "--user-agent", "-e", "--referer"):
+                # These become request headers, so they inherit the header rule.
+                if any(c in value for c in "\r\n"):
+                    raise ScopeViolation("unsupported catalogue header")
+
+            elif arg in ("-w", "--write-out"):
+                # `-w @file` reads the format FROM A LOCAL FILE (verified
+                # against the pinned curl), and `%output{...}` writes one from
+                # curl 8.3 onward — this image ships 7.88, where it is inert,
+                # but the base image is not pinned to that forever.
+                if value.startswith("@"):
+                    raise ScopeViolation("catalogue requests cannot read local files")
+                if "%output{" in value:
+                    raise ScopeViolation("catalogue requests cannot write local files")
+
+            elif arg in ("-o", "--output", "-D", "--dump-header"):
+                if value not in _STREAM_SINKS:
+                    raise ScopeViolation(
+                        "catalogue requests may only write to a stream "
+                        "(" + ", ".join(sorted(_STREAM_SINKS)) + ")")
+
+            elif arg in ("-m", "--max-time", "--connect-timeout", "--max-redirs"):
+                # Bounds only, and the sandbox appends its own --max-time after
+                # this argv — curl takes the LAST occurrence, so a case cannot
+                # widen the stage budget, only narrow it.
+                if not _NUMERIC.match(value):
+                    raise ScopeViolation("curl limit options take a number")
+
+            elif arg == "--data-urlencode":
+                # curl reads `@file` and `name@file` by whichever of `=` or `@`
+                # comes first. Both read a local file AND put its contents in
+                # the query string, which is a read primitive and an exfil
+                # channel in one; the plain `--data` check (`startswith("@")`)
+                # does not see the `name@file` spelling.
+                at, eq = value.find("@"), value.find("=")
+                if at != -1 and (eq == -1 or at < eq):
+                    raise ScopeViolation("catalogue requests cannot read local files")
+                data = True
+                query_parts.append(_urlencode_segment(value))
+
+            else:  # --data / -d / --data-binary
                 if value.startswith("@"):
                     raise ScopeViolation("catalogue requests cannot read local files")
                 data = True
+                query_parts.append(value)
+
             emitted.extend([arg, value])
+
         elif urlsplit(arg).scheme in ("http", "https"):
             urls.append(arg)
             emitted.append(arg)
+
         else:
             raise ScopeViolation("unsupported curl option or execution syntax")
         i += 1
-    if len(urls) != 1 or (data and method == "GET"):
+
+    if len(urls) != 1 or (data and method == "GET" and not query_from_data):
         raise ScopeViolation("expected one explicit HTTP destination and method")
-    return ["curl", *emitted], urls[0], method
+
+    url = urls[0]
+    if query_from_data and query_parts:
+        # Mirror what curl will actually request: the data is appended to the
+        # query, joined to an existing one with `&`. The proxy re-checks the
+        # real URL, so this reconstruction is for an honest pre-flight
+        # decision, not the only place the destination is policed.
+        url += ("&" if urlsplit(url).query else "?") + "&".join(query_parts)
+    return ["curl", *emitted], url, method
 
 
 class CatalogueAdapter(BaseAdapter):
@@ -115,6 +275,16 @@ class CatalogueAdapter(BaseAdapter):
                 raise ValueError("selected catalogue test is unavailable: " + case_id)
             case_targets = ([probe for probe in ctx.config.callback.probes] if case_id == "WSTG-INPV-19" and ctx.config.callback
                             else [{"url": url} for url in targets if case_id in eligible_test_cases(url)])
+            if not case_targets:
+                # Selected, and nothing to run it against. Saying nothing here
+                # made the case indistinguishable from one that ran and found
+                # nothing — the operator picked it, so they are owed the reason.
+                result.observations.append({
+                    "type": "test_case_not_run", "test_case_id": case_id, "url": None, "steps": [],
+                    "reason": "no in-scope URL this case can be executed against; "
+                              "see inventory.executable_test_cases"})
+                result.metadata["catalogue"].append(case_id)
+                continue
             for target in case_targets:
                 target = {**target, "scope": ctx.config.scope.model_dump()}
                 if case_id == "WSTG-INPV-19":

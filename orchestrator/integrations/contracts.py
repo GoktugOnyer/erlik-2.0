@@ -105,7 +105,12 @@ class AssessmentConfig(StrictModel):
     headless: bool = False
     excluded_paths: list[str] = Field(default_factory=lambda: ["/logout", "/signout"])
     ai_summary: bool = False
-    test_cases: list[Literal["WSTG-SESS-02", "WSTG-CONF-06", "WSTG-CLNT-07", "WSTG-INPV-19"]] = Field(default_factory=list)
+    # Not a Literal. The set of runnable cases is a PROPERTY OF THE PARSER, and
+    # a literal here was a second hand-maintained copy of it that could only
+    # ever drift — it still named exactly three cases after curl_request grew
+    # able to run more. See inventory.executable_test_cases; the check lives in
+    # the validator below because the answer is computed, not declared.
+    test_cases: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def prerequisites(self):
@@ -117,6 +122,14 @@ class AssessmentConfig(StrictModel):
             raise ValueError("select at least one stage")
         if len(self.test_cases) != len(set(self.test_cases)):
             raise ValueError("duplicate test cases")
+        from .inventory import executable_test_cases, COLLECTOR_CASES
+        runnable = set(executable_test_cases()) | set(COLLECTOR_CASES)
+        unrunnable = [case for case in self.test_cases if case not in runnable]
+        if unrunnable:
+            raise ValueError(
+                "these catalogue cases cannot be executed in an assessment: "
+                + ", ".join(sorted(unrunnable))
+                + " (runnable: " + ", ".join(sorted(runnable)) + ")")
         if any(case != "WSTG-SESS-02" for case in self.test_cases) and not self.active:
             raise ValueError("selected deterministic probes require active testing")
         if "WSTG-INPV-19" in self.test_cases and "interactsh" not in self.stages:

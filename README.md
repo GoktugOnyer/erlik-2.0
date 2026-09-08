@@ -170,10 +170,21 @@ The optional [integration assessment pipeline](docs/integrations.md) adds
 isolated ZAP, Schemathesis, Interactsh and Katana stages plus explicit
 DefectDojo export, each running as a Docker job behind a scope-checking egress
 proxy. It does not change the existing toolset presets; the dashboard is at
-`/integrations`. Note that the sandboxed executor runs 3 of the 29 catalogue
-cases (`WSTG-SESS-02`, `WSTG-CLNT-07`, `WSTG-CONF-06`) — the rest need a shell
-or curl options its deliberately small argv dialect does not accept, and
-`eligible_test_cases` reports that honestly rather than silently skipping.
+`/integrations`.
+
+The sandboxed executor runs **6 of the 29** catalogue cases. Which six is
+derived from the parser itself (`inventory.executable_test_cases`), not written
+down: a case qualifies only when every one of its steps parses as a single
+curl request AND interpolates nothing the lane cannot supply, so a case that
+would half-run is excluded rather than reported as having passed.
+
+The limit is not the curl dialect. Of the 23 cases out of reach, **12 need a
+target field discovery does not produce** — eight of them just want a
+`parameter` name — 4 run a shell pipeline or a tool that is not curl, and only
+2 are blocked by the dialect itself (one uses a cookie as an injection payload,
+which the per-stage identity rule forbids; one pipes curl into `tr`). Feeding
+discovered parameters into the lane would unlock roughly four times what any
+further widening of curl options could.
 
 Active development. The deterministic engine and WSTG catalogue are
 operational; the catalogue is being expanded toward broader WSTG coverage.
