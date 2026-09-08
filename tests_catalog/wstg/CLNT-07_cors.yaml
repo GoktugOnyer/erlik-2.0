@@ -13,27 +13,19 @@ target_schema:
 steps:
   - name: origin_reflection
     tool: curl
-    # An OAST-marked origin so scope enforcement permits the payload host. If the
-    # server reflects our arbitrary origin (or returns '*') together with
-    # credentials, cross-origin reads are possible.
+    # An OAST-marked origin so scope enforcement permits the payload host.
+    #
+    # The two-step version reported `Access-Control-Allow-Origin: *` plus
+    # credentials as a High. That combination is not exploitable: browsers
+    # refuse the wildcard the moment credentials are attached, so the finding
+    # was a false positive with a severity on it. The claim worth making is
+    # narrower — the server reflected OUR origin AND allows credentials — and
+    # even that is header evidence, not a browser-confirmed read, which is why
+    # the vuln_type says so and the evaluator grades it `suspected`.
     command: >-
       curl -s -b "{{cookie}}" -H "{{auth_header}}" -i -H "Origin: https://evil.oast.test" "{{url}}"
     evaluators:
-      - type: regex
-        pattern: 'Access-Control-Allow-Origin:\s*(https://evil\.oast\.test|\*)'
+      - type: cors
         emit_finding:
-          vuln_type: CORS Misconfiguration
+          vuln_type: CORS Origin Reflection With Credentials (browser verification required)
           severity: medium
-
-  - name: credentials_check
-    tool: curl
-    when: has_finding
-    command: >-
-      curl -s -b "{{cookie}}" -H "{{auth_header}}" -i -H "Origin: https://evil.oast.test" "{{url}}"
-    evaluators:
-      - type: regex
-        # Reflected origin + credentials true = exploitable (reads authed data).
-        pattern: 'Access-Control-Allow-Credentials:\s*true'
-        emit_finding:
-          vuln_type: CORS Misconfiguration Allows Credentialed Cross-Origin Reads
-          severity: high

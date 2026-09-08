@@ -54,6 +54,7 @@ class SessionCreate(BaseModel):
     disable_stagnation: bool = False  # benchmark opt-out for the agent-loop stagnation auto-stop
     extra_system_prompt: str = ""  # injected memory/context appended to system prompt
     run_config: Optional[dict] = None  # per-session automation flow (see orchestrator/runconfig.py)
+    integration_config: Optional[dict] = None  # validated by AssessmentConfig before persistence
     # The customer this run belongs to. Optional, because 462 findings and 110
     # sessions predate engagements — but when set, the engagement's scope is
     # ENFORCED on the target and every finding is inventoried against its asset.

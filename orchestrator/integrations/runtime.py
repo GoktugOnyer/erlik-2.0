@@ -1,0 +1,283 @@
+"""Short-lived Docker jobs on an internal network, behind an enforcing proxy."""
+from __future__ import annotations
+import asyncio
+import hashlib
+import json
+import os
+import re
+import shutil
+import time
+import uuid
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
+from pathlib import Path
+
+from .contracts import AssessmentConfig, StageResult
+from .security import private_write, runtime_root, secret_values
+
+IMAGES = {
+    "proxy": "erlik-egress:1",
+    "worker": "erlik-integrations:1",
+    "zap": "ghcr.io/zaproxy/zaproxy:2.16.1",
+}
+OWNER = "erlik.owner=" + hashlib.sha256(str(Path(__file__).resolve().parents[2]).encode()).hexdigest()[:12]
+
+
+async def docker(*args, timeout=60, check=True):
+    proc = await asyncio.create_subprocess_exec(os.environ.get("ERLIK_DOCKER_BIN", "docker"), *map(str, args),
+                                                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+    try:
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout)
+    except BaseException:
+        if proc.returncode is None:
+            proc.kill()
+        await proc.wait()
+        raise
+    if check and proc.returncode:
+        raise RuntimeError(f"Docker {args[0]} failed: {stderr.decode(errors='replace')[-1000:]}")
+    return proc.returncode, stdout.decode(errors="replace"), stderr.decode(errors="replace")
+
+
+async def availability():
+    result = {}
+    for name, image in IMAGES.items():
+        try:
+            code, out, err = await docker("image", "inspect", image, "--format", "{{.Id}}", check=False, timeout=10)
+            result[name] = {"available": code == 0, "image": image, "image_id": out.strip(), "reason": err.strip()}
+        except (OSError, RuntimeError, asyncio.TimeoutError) as exc:
+            result[name] = {"available": False, "image": image, "reason": str(exc)}
+    return result
+
+
+async def recover_orphans():
+    # Restrict cleanup to this workspace's integration resources, never other containers.
+    try:
+        _, names, _ = await docker("ps", "-aq", "--filter", f"label={OWNER}", timeout=10)
+        if names.split():
+            # Stop even if a crash left an unreadable artifact manifest.
+            code, _, _ = await docker("stop", "-t", "1", *names.split(), check=False)
+            if code:
+                return False
+        abandoned = []
+        for directory in (runtime_root() / "jobs").glob("*"):
+            if directory.is_symlink() or not re.fullmatch(r"[a-f0-9]{32}", directory.name):
+                continue
+            manifest_path = directory / "manifest.json"
+            if not manifest_path.is_file() or manifest_path.is_symlink():
+                continue
+            manifest = json.loads(manifest_path.read_text())
+            if manifest.get("owner") == OWNER:
+                abandoned.append((directory, manifest))
+        if names.split():
+            # Retain attached scanner logs before removal.
+            for directory, manifest in abandoned:
+                for name in manifest.get("jobs", []):
+                    if not re.fullmatch(r"erlik-job-[a-f0-9]{32}", name):
+                        raise ValueError("invalid container name in recovery manifest")
+                    code, out, err = await docker("logs", name, check=False)
+                    if code == 0:
+                        private_write(directory / "output" / f"{name}.stdout", out)
+                        private_write(directory / "output" / f"{name}.stderr", err)
+            code, _, _ = await docker("rm", "-f", *names.split(), check=False)
+            if code:
+                return False
+        _, networks, _ = await docker("network", "ls", "-q", "--filter", f"label={OWNER}")
+        for network in networks.split():
+            code, _, _ = await docker("network", "rm", network, check=False)
+            if code:
+                return False
+        # A successful CLI invocation is insufficient if any scanner still exists.
+        _, remaining, _ = await docker("ps", "-aq", "--filter", f"label={OWNER}", timeout=10)
+        if remaining.split():
+            return False
+        for directory, manifest in abandoned:
+            context = manifest.get("assessment_context")
+            if context:
+                # Credentials are already present in the private policy file; the
+                # manifest contains only IDs, never another copy of those secrets.
+                from . import persistence as db
+                policy_path = directory / "policy" / "policy.json"
+                policy = json.loads(policy_path.read_text()) if policy_path.exists() else {}
+                known = secret_values(policy.get("identity") or {})
+                for base in (directory / "output", directory / "audit"):
+                    for path in sorted(base.rglob("*")):
+                        if path.is_file() and not path.is_symlink():
+                            kind = "recovered-requests" if path.name == "requests.jsonl" else "recovered-" + path.name
+                            await db.evidence(context["session_id"], context["stage_id"], kind,
+                                              path.read_text(errors="replace"), known)
+                await db.evidence(context["session_id"], context["stage_id"], "recovery",
+                                  json.dumps({"reason": "Orchestrator interrupted; scanner stopped without replay",
+                                              "images": manifest.get("images", {}), "output_truncated": False}))
+            # Discard credential-bearing inputs only after scanners are gone and
+            # available redacted evidence has been preserved successfully.
+            shutil.rmtree(directory)
+    except (OSError, RuntimeError, ValueError, KeyError, asyncio.TimeoutError):
+        return False
+    return True
+
+
+@dataclass
+class JobOutput:
+    code: int
+    stdout: str
+    stderr: str
+    timed_out: bool = False
+
+
+class Sandbox:
+    def __init__(self, config: AssessmentConfig, identity=None, *, services=None, operation_routes=None, publish=False):
+        self.config = config
+        self.identity = identity
+        self.key = uuid.uuid4().hex
+        self.network = f"erlik-int-{self.key}"
+        self.proxy = f"erlik-proxy-{self.key}"
+        self.jobs = set()
+        self.images = {}
+        self.directory = runtime_root() / "jobs" / self.key
+        self.input = self.directory / "input"
+        self.output = self.directory / "output"
+        self.proxy_url = ""
+        self.local_proxy = ""
+        self.publish = publish
+        self.on_close = None
+        self.assessment_context = None
+        self.policy = {
+            "scope": config.scope.model_dump(), "identity": identity,
+            "state_changing": config.state_changing, "excluded_paths": config.excluded_paths,
+            "operation_routes": operation_routes or [], "requests_per_second": config.budget.requests_per_second,
+            "concurrency": config.budget.concurrency,
+            "max_requests": int(config.budget.stage_seconds * config.budget.requests_per_second),
+            "max_urls": config.max_urls,
+            "service_only": services is not None, "services": services or [],
+        }
+
+    async def __aenter__(self):
+        for path in (self.input, self.output, self.directory / "policy", self.directory / "audit"):
+            path.mkdir(parents=True, exist_ok=True, mode=0o700)
+        # Ephemeral output shared with differently-privileged scanner images.
+        self.output.chmod(0o777)
+        self._write_manifest()
+        private_write(self.directory / "policy" / "policy.json", json.dumps(self.policy))
+        additional_ca = os.environ.get("ERLIK_INTEGRATION_CA_FILE")
+        if additional_ca:
+            private_write(self.directory / "policy" / "extra-ca.pem", Path(additional_ca).read_bytes())
+        try:
+            await docker("network", "create", "--internal", "--label", OWNER, self.network)
+            args = ["create", "--name", self.proxy, "--label", OWNER, "--network", self.network,
+                    "--cap-drop=ALL", "--security-opt=no-new-privileges", "--memory=512m", "--pids-limit=128",
+                    "-v", f"{self.directory / 'policy'}:/policy:ro", "-v", f"{self.directory / 'audit'}:/audit"]
+            if self.publish:
+                args += ["-p", "127.0.0.1::8080"]
+            args += [IMAGES["proxy"]]
+            if additional_ca:
+                args += ["--set", "ssl_verify_upstream_trusted_ca=/policy/extra-ca.pem"]
+            await docker(*args)
+            _, digest, _ = await docker("image", "inspect", IMAGES["proxy"], "--format", "{{.Id}}")
+            self.images[IMAGES["proxy"]] = digest.strip()
+            # Only the proxy joins an egress network. A lab network may be supplied.
+            await docker("network", "connect", os.environ.get("ERLIK_INTEGRATION_EGRESS_NETWORK", "bridge"), self.proxy)
+            await docker("start", self.proxy)
+            _, ip, _ = await docker("inspect", "--format", '{{range $k,$v := .NetworkSettings.Networks}}{{if eq $k "' + self.network + '"}}{{$v.IPAddress}}{{end}}{{end}}', self.proxy)
+            self.proxy_url = f"http://{ip.strip()}:8080"
+            # Fail before launching a scanner unless mitmproxy has actually started.
+            for _ in range(50):
+                code, _, _ = await docker("exec", self.proxy, "python", "-c", "import socket; socket.create_connection(('127.0.0.1',8080),1).close()", check=False, timeout=3)
+                if code == 0:
+                    break
+                await asyncio.sleep(0.1)
+            else:
+                _, logs, errors = await docker("logs", self.proxy, check=False)
+                raise RuntimeError("egress proxy did not become ready: " + (logs + errors)[-2000:])
+            await docker("cp", f"{self.proxy}:/tmp/erlik-ca/mitmproxy-ca-cert.pem", str(self.input / "ca.pem"))
+            (self.input / "ca.pem").chmod(0o644)
+            if self.publish:
+                _, port, _ = await docker("port", self.proxy, "8080/tcp")
+                self.local_proxy = "http://" + port.strip()
+            return self
+        except BaseException:
+            await self.close()
+            shutil.rmtree(self.directory, ignore_errors=True)
+            raise
+
+    def write(self, name, value):
+        if Path(name).name != name:
+            raise ValueError("input must be a filename")
+        path = self.input / name
+        private_write(path, value if isinstance(value, (str, bytes)) else json.dumps(value))
+        # Parent remains private; scanner bind-mount needs read access regardless of UID.
+        path.chmod(0o644)
+        return "/input/" + name
+
+    def _write_manifest(self):
+        temporary = self.directory / ".manifest.tmp"
+        private_write(temporary, json.dumps({
+            "owner": OWNER, "assessment_context": self.assessment_context,
+            "jobs": sorted(self.jobs), "images": self.images}))
+        os.replace(temporary, self.directory / "manifest.json")
+
+    async def run(self, argv: list[str], *, image=None, timeout=None, env=None) -> JobOutput:
+        name = f"erlik-job-{uuid.uuid4().hex}"
+        self.jobs.add(name)
+        self._write_manifest()
+        args = ["create", "--name", name, "--label", OWNER, "--network", self.network,
+                "--dns", "127.0.0.1", "--cap-drop=ALL", "--security-opt=no-new-privileges",
+                "--memory=2g", "--cpus=2", "--pids-limit=512", "--tmpfs", "/tmp:rw,nosuid,size=512m",
+                "-v", f"{self.input}:/input:ro", "-v", f"{self.output}:/output",
+                "--workdir", "/output"]
+        environment = {"HTTP_PROXY": self.proxy_url, "HTTPS_PROXY": self.proxy_url,
+                       "http_proxy": self.proxy_url, "https_proxy": self.proxy_url, "NO_PROXY": "", "no_proxy": "",
+                       "SSL_CERT_FILE": "/input/ca.pem", "REQUESTS_CA_BUNDLE": "/input/ca.pem"}
+        environment.update(env or {})
+        for key, value in environment.items():
+            args += ["-e", f"{key}={value}"]
+        args += ["--entrypoint", argv[0], image or IMAGES["worker"], *argv[1:]]
+        try:
+            await docker(*args)
+            _, digest, _ = await docker("image", "inspect", image or IMAGES["worker"], "--format", "{{.Id}}")
+            self.images[image or IMAGES["worker"]] = digest.strip()
+            self._write_manifest()
+            try:
+                code, out, err = await docker("start", "-a", name, timeout=timeout or self.config.budget.stage_seconds, check=False)
+                _, exit_text, _ = await docker("inspect", "--format", "{{.State.ExitCode}}", name)
+                private_write(self.output / f"{name}.stdout", out)
+                private_write(self.output / f"{name}.stderr", err)
+                return JobOutput(int(exit_text.strip()), out, err)
+            except asyncio.TimeoutError:
+                await docker("stop", "-t", "1", name, check=False)
+                _, out, err = await docker("logs", name, check=False)
+                private_write(self.output / f"{name}.stdout", out)
+                private_write(self.output / f"{name}.stderr", err)
+                return JobOutput(124, out, err, True)
+            except asyncio.CancelledError:
+                # The attached Docker CLI was interrupted, but the scanner is
+                # still alive. Stop it and retain logs before the final removal.
+                await asyncio.shield(docker("stop", "-t", "1", name, check=False))
+                _, out, err = await asyncio.shield(docker("logs", name, check=False))
+                private_write(self.output / f"{name}.stdout", out)
+                private_write(self.output / f"{name}.stderr", err)
+                raise
+        finally:
+            await asyncio.shield(docker("rm", "-f", name, check=False))
+            self.jobs.discard(name)
+            if self.directory.exists():
+                self._write_manifest()
+
+    async def close(self):
+        for name in [*self.jobs, self.proxy]:
+            try:
+                await docker("rm", "-f", name, check=False)
+            except (OSError, RuntimeError, asyncio.TimeoutError):
+                pass
+        try:
+            await docker("network", "rm", self.network, check=False)
+        except (OSError, RuntimeError, asyncio.TimeoutError):
+            pass
+
+    async def __aexit__(self, *exc):
+        try:
+            await asyncio.shield(self.close())
+            if self.on_close:
+                await self.on_close(self)
+        finally:
+            # Caller ingests output before leaving context. No secret-bearing raw files survive.
+            shutil.rmtree(self.directory, ignore_errors=True)

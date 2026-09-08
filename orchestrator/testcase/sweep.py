@@ -25,6 +25,8 @@ from __future__ import annotations
 from typing import Any
 from urllib.parse import urlparse
 
+from orchestrator.testcase.schema import endpoint_of
+
 # Per-target endpoint knowledge. Same principle as playbook_catalog: facts about
 # a specific application live in a named profile and are never inferred from a
 # URL. Milestone B moves these into engagement_targets so an operator can enter
@@ -39,6 +41,12 @@ PROFILES: dict[str, dict[str, dict[str, str]]] = {
         "WSTG-INPV-06":   {"url": "{base}/rest/user/login", "parameter": "email"},
         "WSTG-ERRH-01":   {"url": "{base}/rest/products/search", "parameter": "q"},
         "WSTG-ATHN-01":   {"login_url": "{base}/rest/user/login"},
+        # A privileged object for the access-control comparison. Basket 1
+        # belongs to admin (UserId 1); jim reads it byte-identically while an
+        # anonymous request gets 401, which is exactly the three-way shape
+        # WSTG-AUTHZ-04 tests. Juice Shop authenticates with a BEARER TOKEN, so
+        # this is the half of that case DVWA structurally cannot exercise.
+        "WSTG-AUTHZ-04":  {"url_template": "{base}/rest/basket/1"},
         "WSTG-CONF-04":   {"url": "{base}"},
         "WSTG-CONF-02":   {"url": "{base}"},
     },
@@ -322,7 +330,7 @@ def plan_sweep(cases: list[dict[str, Any]], base: str, profile_name: str = "",
             if entries:
                 for t, value in entries:
                     runnable.append({**_entry(case), "target": t,
-                                     "where": t.get("url") or t.get("login_url")
+                                     "where": endpoint_of(t) or t.get("login_url")
                                               or t.get("host"),
                                      "discovered": {fan_field: value}})
                 continue
@@ -339,7 +347,7 @@ def plan_sweep(cases: list[dict[str, Any]], base: str, profile_name: str = "",
             skipped.append({**entry, "reason": why})
         else:
             runnable.append({**entry, "target": tgt,
-                             "where": tgt.get("url") or tgt.get("login_url")
+                             "where": endpoint_of(tgt) or tgt.get("login_url")
                                       or tgt.get("host")})
     return {"base": (base or "").rstrip("/"), "profile": profile_name or None,
             "runnable": runnable, "skipped": skipped,

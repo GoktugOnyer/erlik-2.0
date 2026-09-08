@@ -1,0 +1,39 @@
+{
+  "fixture_sha256": "577ea40ad8c442df9a8e42bd0d5b7ee0aac0e0935c80ec89d2c061a7cbad51c2",
+  "baseline": {
+    "source_sha256": "1831f689bc7794dd8c10f13e0eb9ee2ed3f195e768e60cb0ed27ca2b06302eb8",
+    "description": "Existing pw-crawl.js with proxy/driver transport shims only",
+    "endpoints": [
+      "http://target:8080/private",
+      "http://target:8080/redirect"
+    ],
+    "request_count": 16,
+    "duration_seconds": 4.140358374999778
+  },
+  "integrated": {
+    "endpoints": [
+      "http://target:8080",
+      "http://target:8080/app.js",
+      "http://target:8080/js-only",
+      "http://target:8080/private",
+      "http://target:8080/redirect"
+    ],
+    "request_count": 7,
+    "duration_seconds": 13.21441245800088,
+    "images": {
+      "erlik-egress:1": "sha256:62aca0ddfdf14b4f7f6f436e0d02ac783282be3e40db8b80e750d41a1e1ea2ae",
+      "erlik-integrations:1": "sha256:1774cc338442535ad27b6698b88010cf32be7c5c158b91749b7173b5d214eecc"
+    }
+  },
+  "additional_endpoints": [
+    "http://target:8080",
+    "http://target:8080/app.js",
+    "http://target:8080/js-only"
+  ],
+  "finding_evaluation": {
+    "expected_findings": 0,
+    "reported_findings": 0,
+    "false_positives": 0,
+    "note": "Discovery-only comparison; vulnerability precision/recall is not measured by this experiment"
+  }
+}

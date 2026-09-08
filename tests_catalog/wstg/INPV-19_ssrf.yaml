@@ -9,6 +9,14 @@ references:
 # The user supplies a URL endpoint and a parameter name known to fetch a
 # user-controlled URL (?url=, ?fetch=, ?next=, ?image=, etc.). We do NOT
 # auto-discover these — that's recon's job.
+# Integration assessments dispatch this ID to Collector.run_test_case instead of
+# the steps below (see orchestrator/integrations/deterministic.py). That variant
+# sends one HTTPS callback URL per explicitly selected (url, parameter), each
+# with a unique Interactsh correlation ID, and keeps collecting through the
+# assessment's final grace window. Only the configured self-hosted collector
+# supplies callback URLs — `collaborator_host` does not authorize a callback
+# service. A callback is interaction evidence (`likely`), never automatic proof
+# of metadata access or internal-network impact.
 target_schema:
   required: [url, parameter]
   # `cookie` is what lets this reach an endpoint behind a login. Every probe

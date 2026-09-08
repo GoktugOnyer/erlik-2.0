@@ -272,11 +272,33 @@ class TestAGuessIsNotKnowledge:
         assert plan["counts"]["cases"] == len(cases), "a case vanished from the plan"
         assert plan["counts"]["runnable"] + plan["counts"]["skipped"] >= len(cases)
 
+        # A profile supplies ENDPOINTS. A case that additionally needs
+        # something the sweep cannot synthesise — two authenticated accounts,
+        # a hand-written request template — still skips, and correctly: the
+        # profile knowing WHERE the object lives does not make credentials
+        # appear. WSTG-AUTHZ-04 is the first case in this profile that is both
+        # endpoint-described and credential-gated, which is what surfaced the
+        # gap in this assertion.
+        by_id = {c["id"]: c for c in cases}
+        def needs_more_than_an_endpoint(cid):
+            ts = (by_id.get(cid) or {}).get("target_schema") or {}
+            fields = set(ts.get("required") or [])
+            for g in ts.get("required_any") or []:
+                fields |= set(g)
+            return any(f in S.UNSUPPLIABLE for f in fields)
+
         profiled = set(S.PROFILES["juiceshop"])
         planned = {r["id"] for r in plan["runnable"]}
-        missing = sorted(c for c in profiled if c in {x["id"] for x in cases}
-                         and c not in planned)
+        missing = sorted(c for c in profiled if c in by_id and c not in planned
+                         and not needs_more_than_an_endpoint(c))
         assert not missing, f"the profile describes these but they did not plan: {missing}"
+
+        # And the exemption must not be a blanket one: a credential-gated case
+        # still has to SAY what it needs rather than vanishing.
+        skipped = {r["id"]: r["reason"] for r in plan["skipped"]}
+        for c in profiled & set(by_id):
+            if needs_more_than_an_endpoint(c) and c not in planned:
+                assert skipped.get(c), f"{c} neither planned nor named as skipped"
 
         # And the profile must still BEAT the no-profile path, which is the
         # whole reason it exists.

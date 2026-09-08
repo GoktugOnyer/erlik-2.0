@@ -1,0 +1,8 @@
+FROM mitmproxy/mitmproxy:11.0.2
+USER root
+ENV HOME=/home/mitmproxy
+RUN pip install --no-cache-dir graphql-core==3.2.6
+COPY orchestrator/integrations/egress_policy.py /opt/egress_policy.py
+COPY orchestrator/integrations/proxy_addon.py /opt/proxy_addon.py
+ENV PYTHONPATH=/opt
+ENTRYPOINT ["mitmdump", "--listen-host", "0.0.0.0", "--listen-port", "8080", "--set", "confdir=/tmp/erlik-ca", "--set", "connection_strategy=lazy", "--set", "upstream_cert=false", "--set", "rawtcp=false", "--set", "block_global=false", "--set", "ssl_insecure=false", "-s", "/opt/proxy_addon.py"]

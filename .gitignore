@@ -69,3 +69,6 @@ docs/THREE_TASK_PLAN.md
 # Credential encryption key — never commit. Losing it makes stored
 # credentials unreadable; committing it makes them plaintext.
 data/.secret_key
+# Integration credentials, proxy CAs and scanner artifacts
+data/integrations/
+authenticated-profile*.json*

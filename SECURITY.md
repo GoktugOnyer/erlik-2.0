@@ -54,7 +54,7 @@ publicly. There is no bug bounty.
 | `ERLIK_SCOPE_ENFORCE` | `1` | `0` disables scope refusal entirely |
 | `ERLIK_SCOPE_EXTRA_HOSTS` | empty | Comma-separated globs added to scope; snapshotted per session |
 | `ERLIK_SAFE_MODE` | `1` | `0` permits destructive commands |
-| `ERLIK_API_TOKEN` | unset | When set, `POST/PUT/PATCH/DELETE` on `/api/*` require it |
+| `ERLIK_API_TOKEN` | unset | When set, **every** `/api/*` and `/ws/*` request requires it — reads included. `/api/integrations/*` and `/ws/integrations/*` require it whether it is set or not |
 | `ERLIK_HOST` | `127.0.0.1` | `0.0.0.0` exposes the API to the network |
 | `ERLIK_NATIVE` | unset | When set, commands run **on the host as your user**, not in the container |
 | `ERLIK_LLM_PROVIDER` | `ollama` | `openai` sends prompts to a third party (`orchestrator/llm_client.py`) |
@@ -62,11 +62,26 @@ publicly. There is no bug bounty.
 
 ## What erlik does NOT protect
 
-- **The API is unauthenticated by default.** `_api_token_guard` engages only
-  when `ERLIK_API_TOKEN` is set, and it never applies to `GET`/`HEAD`. Anything
-  that can reach the port can read every session, finding and stored
-  credential. `run.sh` binds loopback; several scripts under `scripts/` bind
-  `0.0.0.0`.
+- **The API is unauthenticated by default.** `AccessMiddleware`
+  (`orchestrator/integrations/access.py`) engages only when `ERLIK_API_TOKEN`
+  is set. Until you set one, anything that can reach the port can read every
+  session, finding and stored credential. `run.sh` binds loopback; several
+  scripts under `scripts/` bind `0.0.0.0`.
+
+  When the token IS set the boundary is now whole: `GET`/`HEAD` are covered as
+  well as writes, and WebSocket handshakes are refused with close code 4401.
+  The previous guard applied only to `POST/PUT/PATCH/DELETE`, so a reader could
+  `GET` every report without presenting anything, and `/ws/` was outside it
+  entirely. Browsers cannot set headers on a WebSocket handshake, so the
+  dashboard exchanges the token for an HttpOnly, `SameSite=strict` cookie at
+  `POST /api/auth`; the value is never readable from page JavaScript.
+
+  **Integration assessment data is the exception to "default off".**
+  `/api/integrations/*` and `/ws/integrations/*` are refused whenever no token
+  is configured, because they expose credential handles, uploaded browser
+  storage state and client evidence, and there would be nothing to
+  authenticate with. Creating an assessment without `ERLIK_API_TOKEN` is
+  refused at `POST /api/sessions` for the same reason.
 - **Stored credentials are not encrypted.** `session_primitives.value` is plain
   `TEXT`.
 - **The scope guard is not a sandbox.** It refuses commands that *name* an

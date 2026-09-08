@@ -24,15 +24,60 @@ class TargetSchema(BaseModel):
     optional: list[str] = Field(default_factory=list)
 
 
+# WHICH TARGET FIELD NAMES THE ENDPOINT. Most cases call it `url`; the
+# access-control cases call it `url_template`, because they substitute an
+# object id into it. Four places read `target["url"]` directly and every one of
+# them was blind to the second name:
+#
+#   runner, execute_tool call   the host-rewriter got target_url=None, decided
+#                               the exec host itself, and rewrote
+#                               http://juice-shop:3000/... to
+#                               host.docker.internal:80 — connection refused,
+#                               zero bytes, and WSTG-AUTHZ-04 duly reported
+#                               "inconclusive" for three empty responses.
+#                               DVWA escaped it only because `dvwa` is not in
+#                               the rewriter's alias list.
+#   runner, scope check         primary_url=None, so the case's real endpoint
+#                               was never checked against scope
+#   persistence                 the finding attached to no asset
+#   plan `where`                the operator saw the bare host, not the endpoint
+#
+# One definition, so a third field name is added here and nowhere else.
+ENDPOINT_FIELDS = ("url", "url_template")
+
+
+def endpoint_of(target: dict | None) -> str:
+    """The URL a target actually points at, whatever the case calls it."""
+    t = target or {}
+    for f in ENDPOINT_FIELDS:
+        v = t.get(f)
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+    return ""
+
+
 class Evaluator(BaseModel):
     """A single check applied to a step's output.
 
-    Three kinds:
+    Three general kinds:
       - regex: match `pattern` against tool stdout/stderr
       - status_code: tool's exit code is in `expect`
       - llm: ask the configured LLM to judge ambiguous output
+
+    ...and four typed ones, which exist because the general kinds cannot state
+    the thing being checked. A regex over a Set-Cookie line cannot say "this
+    cookie is a session cookie and it is missing HttpOnly"; a regex over a CORS
+    header cannot say "and the origin it reflected was MINE". Each of these
+    reads structure the regex evaluator can only approximate:
+      - count: the same marker appears >= `min_count` times (race conditions)
+      - cors: an attacker origin was reflected AND credentials are allowed
+      - idor: the low-priv response matches the privileged BASELINE
+      - cookie_attributes: a session cookie lacks HttpOnly/SameSite/Secure
     """
-    type: Literal["regex", "status_code", "llm"]
+    type: Literal[
+        "regex", "status_code", "llm",
+        "count", "cors", "idor", "cookie_attributes",
+    ]
 
     # Conditional execution. Supported names (kept tiny on purpose):
     #   no_finding_yet, has_finding, previous_success, previous_failure
@@ -44,6 +89,9 @@ class Evaluator(BaseModel):
 
     # status_code evaluator
     expect: Optional[list[int]] = None
+
+    # count evaluator — how many occurrences of the marker constitute a hit
+    min_count: int = 2
 
     # llm evaluator — the model is asked to return JSON
     instruction: Optional[str] = None

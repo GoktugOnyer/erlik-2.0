@@ -25,8 +25,11 @@ steps:
     command: >-
       bash -c 'for i in $(seq 1 {{parallel_n}}); do ({{request_template}}) & done; wait'
     evaluators:
-      - type: regex
-        pattern: '({{success_marker}}.*){2,}'
+      # Was `pattern: '({{success_marker}}.*){2,}'`. Only the COMMAND renderer
+      # substituted {{...}}, so this searched the responses for the literal
+      # text "{{success_marker}}" and reported clean on every race it won.
+      - type: count
+        min_count: 2
         emit_finding:
           vuln_type: Race Condition (multiple successes)
           severity: high

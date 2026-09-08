@@ -1,0 +1,65 @@
+# Local acceptance fixture only; no published ports or persistent client data.
+x-dojo-env: &dojo-env
+  DD_DATABASE_URL: postgresql://defectdojo:${ERLIK_DOJO_DB_PASSWORD:?}@postgres:5432/defectdojo
+  DD_CELERY_BROKER_URL: redis://redis:6379/0
+  DD_SECRET_KEY: ${ERLIK_DOJO_SECRET:?}
+  DD_CREDENTIAL_AES_256_KEY: ${ERLIK_DOJO_AES_KEY:?}
+  DD_ALLOWED_HOSTS: dojo.test
+  DD_DEBUG: 'False'
+  DD_UWSGI_NUM_OF_PROCESSES: '1'
+  DD_UWSGI_NUM_OF_THREADS: '2'
+services:
+  postgres:
+    image: postgres:16-alpine@sha256:4e6e670bb069649261c9c18031f0aded7bb249a5b6664ddec29c013a89310d50
+    environment:
+      POSTGRES_DB: defectdojo
+      POSTGRES_USER: defectdojo
+      POSTGRES_PASSWORD: ${ERLIK_DOJO_DB_PASSWORD:?}
+    tmpfs: [/var/lib/postgresql/data]
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U defectdojo']
+      interval: 2s
+      timeout: 2s
+      retries: 30
+  redis:
+    image: redis:7-alpine@sha256:6ab0b6e7381779332f97b8ca76193e45b0756f38d4c0dcda72dbb3c32061ab99
+  initializer:
+    image: defectdojo/defectdojo-django:2.58.4@sha256:aa1ad27ac55660ccc8d635f5ba03b701a2882285abafd66f248424b6aff9d630
+    entrypoint: ['/entrypoint-initializer.sh']
+    environment:
+      <<: *dojo-env
+      DD_INITIALIZE: 'true'
+      DD_ADMIN_USER: erlik-lab
+      DD_ADMIN_MAIL: erlik-lab@example.invalid
+      DD_ADMIN_PASSWORD: ${ERLIK_DOJO_ADMIN_PASSWORD:?}
+      DD_ADMIN_FIRST_NAME: Erlik
+      DD_ADMIN_LAST_NAME: Lab
+    volumes: ['./settings:/app/docker/extra_settings:ro']
+    depends_on:
+      postgres: {condition: service_healthy}
+  uwsgi:
+    image: defectdojo/defectdojo-django:2.58.4@sha256:aa1ad27ac55660ccc8d635f5ba03b701a2882285abafd66f248424b6aff9d630
+    entrypoint: ['/entrypoint-uwsgi.sh']
+    environment: *dojo-env
+    volumes: ['./settings:/app/docker/extra_settings:ro']
+    depends_on:
+      initializer: {condition: service_completed_successfully}
+      redis: {condition: service_started}
+  nginx:
+    image: defectdojo/defectdojo-nginx:2.58.4@sha256:7d2d0ec29051039f081072366df973fe8d5d12fde4e4a524bdd0a1a0aab1c4fe
+    environment:
+      DD_UWSGI_HOST: uwsgi
+      DD_UWSGI_PORT: '3031'
+      USE_TLS: 'true'
+      GENERATE_TLS_CERTIFICATE: 'false'
+    volumes:
+      - ${ERLIK_DOJO_CERT_DIR:?}/nginx.crt:/etc/nginx/ssl/nginx.crt:ro
+      - ${ERLIK_DOJO_CERT_DIR:?}/nginx.key:/etc/nginx/ssl/nginx.key:ro
+    depends_on: [uwsgi]
+    networks:
+      default:
+        aliases: [dojo.test]
+networks:
+  default:
+    name: ${ERLIK_DOJO_NETWORK:?}
+    internal: true

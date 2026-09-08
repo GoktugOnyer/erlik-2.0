@@ -42,7 +42,12 @@ def sandbox(tmp_path, monkeypatch):
 
 @pytest.fixture
 def client():
-    return TestClient(M.app)
+    # AccessMiddleware protects READS as well as writes once ERLIK_API_TOKEN is
+    # set (see orchestrator/integrations/access.py). The `sandbox` fixture sets
+    # it, so every request from this client presents it; the tests that assert a
+    # 403/503 gate still get one, because those gates are checked inside the
+    # route, after the token boundary.
+    return TestClient(M.app, headers={"X-API-Token": "t0ken"})
 
 
 class TestShipsDisabled:

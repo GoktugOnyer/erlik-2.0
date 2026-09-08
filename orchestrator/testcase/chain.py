@@ -10,6 +10,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from orchestrator.testcase.loader import find_by_id
+from orchestrator.testcase.schema import endpoint_of
 from orchestrator.testcase.runner import run_test_case, RunResult
 
 
@@ -53,7 +54,7 @@ async def run_chain(
     visited: set[tuple[str, str]] = set()
 
     def _key(cid: str, tgt: dict[str, Any]) -> tuple[str, str]:
-        return (cid, str(tgt.get("url") or tgt.get("host") or ""))
+        return (cid, str(endpoint_of(tgt) or tgt.get("host") or ""))
 
     # (test_case_id, depth, target)
     queue: list[tuple[str, int, dict[str, Any]]] = [(root_id, 0, target)]

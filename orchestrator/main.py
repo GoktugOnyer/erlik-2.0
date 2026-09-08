@@ -52,36 +52,76 @@ async def lifespan(app: FastAPI):
         await _seed_ground_truth()
     except Exception as e:  # noqa: BLE001
         print(f"[startup] ground-truth seeding failed (non-fatal): {e}", flush=True)
+
+    # Integration assessments own Docker jobs that outlive the process. On a
+    # restart their rows say "running" and their containers are still up, so
+    # recovery marks them interrupted and stops the orphans. It reports whether
+    # it could — `create_session` refuses a new assessment when it could not,
+    # rather than starting a second scanner alongside an orphan it cannot see.
+    from orchestrator.integrations import persistence as integration_db, service as integration_service
+    await integration_db.migrate()
+    app.state.integration_recovery_ok = await integration_service.recover()
     yield
+    # Shutdown: cancel in-flight runs and let them unwind, so a stage's Docker
+    # job is torn down by its own `finally` rather than left behind.
+    #
+    # `running_tasks` is module-global and outlives any one event loop, so it
+    # can still hold tasks from a loop that has already closed — gathering one
+    # of those raises out of shutdown and masks the teardown that mattered.
+    # Only this loop's tasks are ours to await; the rest are dropped.
+    loop = asyncio.get_running_loop()
+    ours = [t for t in running_tasks.values()
+            if not t.done() and t.get_loop() is loop]
+    for task in ours:
+        task.cancel()
+    if ours:
+        await asyncio.gather(*ours, return_exceptions=True)
+    for session_id, task in list(running_tasks.items()):
+        if task.done() or task.get_loop() is loop:
+            running_tasks.pop(session_id, None)
 
 
 app = FastAPI(title="Erlik Pentest Agent", lifespan=lifespan)
 templates = Jinja2Templates(directory="dashboard/templates")
 
+from orchestrator.integrations.access import AccessMiddleware
+from orchestrator.integrations.api import router as integration_router
+app.add_middleware(AccessMiddleware)
+app.include_router(integration_router)
 
-@app.middleware("http")
-async def _api_token_guard(request: Request, call_next):
-    """Optional shared-secret guard for state-changing API calls.
 
-    Off by default (no behavior change). When ERLIK_API_TOKEN is set, every
-    state-changing request (POST/PUT/PATCH/DELETE) to /api/* must present the
-    token via `X-API-Token: <t>` or `Authorization: Bearer <t>`. GET/HEAD
-    (the dashboard + read endpoints) and /api/health stay open so the page
-    loads; pair this with ERLIK_HOST=127.0.0.1 for a safe default posture.
+# The shared-secret guard used to live here as an @app.middleware("http") that
+# only covered POST/PUT/PATCH/DELETE. It is now AccessMiddleware (added above),
+# for two reasons: GET was never a safe exemption once reports and findings are
+# customer data, and a WebSocket is not an HTTP method at all, so /ws/ streams
+# were outside the guard entirely. Default-off for the base API is preserved
+# there; see orchestrator/integrations/access.py.
+
+
+@app.post("/api/auth")
+async def authenticate_dashboard(request: Request, body: dict):
+    """Exchange the API token for an HttpOnly session cookie.
+
+    The dashboard is a browser page, and a browser cannot attach an
+    `X-API-Token` header to a WebSocket handshake or an <img> report preview.
+    Setting the token as HttpOnly+SameSite=strict lets the page authenticate
+    once; the value never reaches page JavaScript, so an XSS in a probed host's
+    reflected output cannot read it back out.
     """
-    from fastapi.responses import JSONResponse
+    import hmac
     token = os.environ.get("ERLIK_API_TOKEN", "").strip()
-    if token and request.method in ("POST", "PUT", "PATCH", "DELETE") \
-            and request.url.path.startswith("/api/") \
-            and request.url.path != "/api/health":
-        provided = request.headers.get("x-api-token", "")
-        if not provided:
-            auth = request.headers.get("authorization", "")
-            if auth.lower().startswith("bearer "):
-                provided = auth[7:].strip()
-        if provided != token:
-            return JSONResponse({"detail": "missing or invalid API token"}, status_code=401)
-    return await call_next(request)
+    if not token or not hmac.compare_digest(str(body.get("token", "")), token):
+        raise HTTPException(401, "invalid API token")
+    response = JSONResponse({"authenticated": True})
+    response.set_cookie(
+        "erlik_token", token, httponly=True, samesite="strict",
+        secure=request.url.scheme == "https", max_age=28800)
+    return response
+
+
+@app.get("/integrations", response_class=HTMLResponse)
+async def integrations_dashboard(request: Request):
+    return templates.TemplateResponse(request, "integrations.html")
 
 
 @app.exception_handler(RequestValidationError)
@@ -2774,7 +2814,16 @@ async def _build_report_json(session_id: str) -> dict:
     """Assemble the validated pentest-report.json (Phase 2) from the (enriched,
     calibrated) finding rows. Source of truth for GET /report.json and the
     on-disk artifact. Uses calibrated_severity when present, else the raw label.
+
+    An integration assessment answers first: its findings live in the
+    integration tables with their own confidence grades and evidence ids, and
+    the agent-loop tables are empty for that session. Falling through would
+    have rendered an empty report over a completed scan.
     """
+    from orchestrator.integrations.service import report as integration_report
+    integrated = await integration_report(session_id)
+    if integrated is not None:
+        return integrated
     from orchestrator import submission_policy as _sp
 
     db = await get_db()
@@ -6528,6 +6577,24 @@ async def enforce_engagement_scope(engagement_id: str | None, target_url: str) -
 async def create_session(data: SessionCreate):
     session_id = uuid.uuid4().hex[:12]
 
+    # An integration assessment is validated at CREATION, not at start: scope,
+    # stage selection and the identities it names are all refusable, and a
+    # config that cannot run should never become a queued row an operator
+    # watches fail later.
+    integration_config = None
+    if data.integration_config is not None:
+        if not os.environ.get("ERLIK_API_TOKEN", "").strip():
+            raise HTTPException(422, "ERLIK_API_TOKEN is required for integration assessments")
+        if not getattr(app.state, "integration_recovery_ok", True):
+            raise HTTPException(503, "Restart with Docker available to stop orphaned integration jobs")
+        from orchestrator.integrations.contracts import AssessmentConfig
+        from orchestrator.integrations.service import preflight
+        try:
+            integration_config = AssessmentConfig.model_validate(data.integration_config)
+            await preflight(data.target_url, integration_config)
+        except (ValueError, RuntimeError, FileNotFoundError) as exc:
+            raise HTTPException(422, str(exc)) from exc
+
     # RQ3-b: if client passed a named toolset_preset, its tool list WINS over
     # any explicit enabled_tools (except when client explicitly shrunk the list).
     # Precedence:
@@ -6560,6 +6627,9 @@ async def create_session(data: SessionCreate):
              data.engagement_id),
         )
         await db.commit()
+        if integration_config is not None:
+            from orchestrator.integrations.service import register
+            await register(session_id, data.target_url, integration_config)
         row = await db.execute("SELECT * FROM sessions WHERE id = ?", (session_id,))
         session = await row.fetchone()
         return SessionResponse(
@@ -6617,6 +6687,37 @@ async def start_session(session_id: str):
     # Check if already running
     if session_id in running_tasks and not running_tasks[session_id].done():
         return {"status": "already_running", "message": "Session is already running."}
+
+    # An integration assessment runs the scanner stages, not the agent loop.
+    # It is start-once: a completed or interrupted assessment is not resumable
+    # here, because re-running stages against a target the operator has already
+    # been billed for is not something a second POST should decide.
+    from orchestrator.integrations import persistence as integration_db, service as integration_service
+    integrated = await integration_db.rows(
+        "SELECT status FROM integration_assessments WHERE session_id=?", (session_id,)
+    ) if await integration_db.migrated() else []
+    if integrated:
+        if integrated[0]["status"] not in ("queued", "needs_auth"):
+            raise HTTPException(409, "Create a new assessment to repeat a completed or interrupted run")
+
+        async def execute_assessment():
+            try:
+                await integration_service.run(session_id, manager.broadcast)
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                # The reason is deliberately not echoed to the socket: a stage
+                # failure message can carry target output. The evidence rows
+                # carry the detail, behind the access boundary.
+                await integration_db.execute(
+                    "UPDATE integration_assessments SET status='failed' WHERE session_id=?", (session_id,))
+                await integration_db.execute(
+                    "UPDATE sessions SET status='failed' WHERE id=?", (session_id,))
+                await manager.broadcast(session_id, {
+                    "type": "integration", "status": "failed",
+                    "reason": "Assessment preflight or execution failed; inspect stage evidence"})
+        running_tasks[session_id] = asyncio.create_task(execute_assessment())
+        return {"status": "running", "message": "Integration assessment started"}
 
     db = await get_db()
     try:

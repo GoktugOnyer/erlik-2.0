@@ -1,0 +1,11 @@
+FROM golang:1.24.2-bookworm AS go-tools
+RUN go install github.com/projectdiscovery/katana/cmd/katana@v1.2.2 && \
+    go install github.com/projectdiscovery/interactsh/cmd/interactsh-client@v1.2.4 && \
+    go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@v3.4.2
+FROM python:3.12.10-slim-bookworm
+RUN apt-get update && apt-get install -y --no-install-recommends chromium ca-certificates curl && rm -rf /var/lib/apt/lists/*
+COPY docker/integrations/requirements.lock /opt/erlik/requirements.lock
+RUN pip install --no-cache-dir -r /opt/erlik/requirements.lock
+COPY --from=go-tools /go/bin/ /usr/local/bin/
+COPY orchestrator/integrations/worker.py /opt/erlik/worker.py
+ENTRYPOINT ["python", "/opt/erlik/worker.py"]

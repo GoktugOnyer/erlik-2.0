@@ -890,6 +890,9 @@ async def execute_tool(command: str, enabled_tools: list[str], no_timeout: bool 
 
         return {
             "success": result["returncode"] == 0,
+            # The raw code, not just success/failure. A status_code evaluator
+            # asking for curl's exit 7 cannot tell 7 from 28 without it.
+            "exit_code": result["returncode"],
             "output": output.strip(),
             "tool": tool_name,
             "duration_ms": duration_ms,

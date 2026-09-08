@@ -1,0 +1,14 @@
+# Optional build targets; assessments create isolated, labelled jobs themselves.
+services:
+  integration-proxy-image:
+    profiles: [integrations]
+    build:
+      context: .
+      dockerfile: docker/integrations/Dockerfile.proxy
+    image: erlik-egress:1
+  integration-worker-image:
+    profiles: [integrations]
+    build:
+      context: .
+      dockerfile: docker/integrations/Dockerfile.worker
+    image: erlik-integrations:1

@@ -21,6 +21,7 @@ The properties, in the order they matter:
   case runs unauthenticated while claiming otherwise.
 """
 
+import re
 import asyncio
 import json
 
@@ -466,14 +467,22 @@ class TestTheRunnerRefusesToRunUnauthenticated:
         src = inspect.getsource(runner.run_test_case)
         assert "_CRED.has_handle" in src, "handle check removed from the runner"
         assert "_CRED.resolve" in src, "resolution removed from the runner"
-        assert src.index("_CRED.resolve") < src.index("await execute_tool"), \
+        # The call site is `await (executor or execute_tool)(...)` — the runtime
+        # can substitute a sandboxed executor, but resolution still has to come
+        # first, whichever one runs.
+        exec_call = re.search(r"await \(?executor or execute_tool\)?\(|await execute_tool\(", src)
+        assert exec_call, "the execution call site changed shape; re-pin this guard"
+        assert src.index("_CRED.resolve") < exec_call.start(), \
             "resolution must happen before execution"
 
     def test_the_stored_command_is_the_handle_form_not_the_live_one(self):
         import inspect
         from orchestrator.testcase import runner
         src = inspect.getsource(runner.run_test_case)
-        assert "live_cmd," in src and "execute_tool(\n                live_cmd" in src, \
+        # Whatever executor is injected, the FIRST argument it receives is the
+        # resolved command — never the handle form.
+        assert re.search(r"await \(executor or execute_tool\)\(\s*\n\s*live_cmd,|"
+                         r"await execute_tool\(\s*\n\s*live_cmd,", src), \
             "the resolved command must be what executes"
         assert "command=cmd,                       # handles" in src, \
             "the STORED command must be the handle form"

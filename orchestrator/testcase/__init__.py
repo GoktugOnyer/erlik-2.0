@@ -25,3 +25,11 @@ __all__ = [
     "Scope",
     "ScopeViolation",
 ]
+
+
+# Integration stages run through the same bounded runtime whether they were
+# started from REST or from the deterministic lane. The import is deferred
+# because orchestrator.integrations imports the scope types defined here.
+async def run_integrations(target: str, configuration: dict):
+    from orchestrator.integrations.adapters import run_deterministic_integrations
+    return await run_deterministic_integrations(target, configuration)
