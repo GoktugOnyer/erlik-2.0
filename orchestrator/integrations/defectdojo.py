@@ -57,7 +57,15 @@ def digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
-def matches_remote(item, expected):
+def remote_mismatches(item, expected):
+    """Which of the fields we asserted the remote did NOT come back with.
+
+    Named, not counted: "did not retain the locally authoritative finding
+    fields" is true of a title truncation and of DefectDojo deriving its own
+    mitigation state, and those need opposite responses from whoever reads the
+    export row.
+    """
+    differing = []
     for key, value in expected.items():
         if key == "endpoints":
             continue
@@ -66,10 +74,14 @@ def matches_remote(item, expected):
         # 511-character limit in the model's save method.
         if key == "title" and isinstance(actual, str) and isinstance(value, str):
             if actual.casefold() != value[:511].casefold():
-                return False
+                differing.append(f"{key}({actual!r}!={value!r})")
         elif actual != value:
-            return False
-    return True
+            differing.append(f"{key}({actual!r}!={value!r})")
+    return differing
+
+
+def matches_remote(item, expected):
+    return not remote_mismatches(item, expected)
 
 
 def finding_payload(finding):
@@ -77,12 +89,22 @@ def finding_payload(finding):
     description = finding["basis"]
     if finding.get("triage_note"):
         description += "\n\nErlik triage: " + finding["triage_note"]
-    return {"title": finding["title"], "description": description,
-            "severity": finding["severity"].capitalize() if finding["severity"] != "informational" else "Info",
-            "unique_id_from_tool": finding["fingerprint"], "vuln_id_from_tool": finding["fingerprint"],
-            "endpoints": [finding["url"]], "active": triage == "open", "false_p": triage == "false_positive",
-            "is_mitigated": triage == "fixed", "verified": finding["confidence"] == "confirmed" and triage != "false_positive",
-            "static_finding": False, "dynamic_finding": True}
+    payload = {"title": finding["title"], "description": description,
+               "severity": finding["severity"].capitalize() if finding["severity"] != "informational" else "Info",
+               "unique_id_from_tool": finding["fingerprint"], "vuln_id_from_tool": finding["fingerprint"],
+               "endpoints": [finding["url"]], "active": triage == "open", "false_p": triage == "false_positive",
+               "verified": finding["confidence"] == "confirmed" and triage != "false_positive",
+               "static_finding": False, "dynamic_finding": True}
+    # `is_mitigated` is only ours to assert while WE are the ones claiming it.
+    # Closing a finding as a false positive hands the mitigation lifecycle to
+    # DefectDojo: 2.58.4 sets is_mitigated=True on the closed finding, so
+    # sending is_mitigated=False made every triage export fail its own
+    # read-back check and land as `uncertain` — a write that had in fact
+    # succeeded, reported as one that might not have. Verified against a live
+    # 2.58.4 instance; the drift was exactly is_mitigated(True!=False).
+    if triage != "false_positive":
+        payload["is_mitigated"] = triage == "fixed"
+    return payload
 
 
 class RemoteError(RuntimeError):
@@ -255,8 +277,10 @@ async def export(session_id, config: ExportConfig):
                         updated = await remote(sandbox, config, token, audit, f"/api/v2/findings/{item['id']}/", method="PATCH", body=patch)
                         if updated.get("id") != item["id"] or updated.get("unique_id_from_tool") != fingerprint:
                             raise RemoteError(502, "DefectDojo returned a mismatched finding after update")
-                        if not matches_remote(updated, patch):
-                            raise RemoteError(502, "DefectDojo did not retain the locally authoritative finding fields")
+                        drifted = remote_mismatches(updated, patch)
+                        if drifted:
+                            raise RemoteError(502, "DefectDojo did not retain the locally authoritative finding "
+                                                   "fields: " + ", ".join(drifted))
                     await db.execute("INSERT OR REPLACE INTO integration_remote_findings(server,remote_test_id,fingerprint,remote_finding_id,payload_hash) VALUES(?,?,?,?,?)",
                                      (config.server, test_id, fingerprint, item["id"], digest(finding)))
         except RemoteError as exc:

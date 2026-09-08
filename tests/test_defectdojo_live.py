@@ -22,6 +22,16 @@ pytestmark = [pytest.mark.docker, pytest.mark.skipif(os.environ.get('ERLIK_DEFEC
 LAB = Path(__file__).resolve().parents[1] / 'docker' / 'defectdojo-lab'
 
 
+def _export_state(row):
+    """status plus the detail that explains it.
+
+    `assert row['status'] == 'completed', row` truncates the row in pytest's
+    output, and `detail` — the only field that says WHY a write went uncertain
+    — is what gets elided. Report the two fields that matter.
+    """
+    return f"status={row['status']!r} detail={row.get('detail')!r}"
+
+
 @pytest.fixture
 async def live_dojo(tmp_path, monkeypatch):
     import orchestrator.database as original
@@ -93,7 +103,7 @@ async def test_actual_defectdojo_import_reimport_update_partial_and_triage(live_
     cfg = defectdojo.ExportConfig(server='https://dojo.test:8443', secret_id=live_dojo['secret_id'], action='import',
                                   engagement_id=live_dojo['engagement_id'], test_title='Erlik lab acceptance')
     first = await defectdojo.export('live-dojo', cfg)
-    assert first['status'] == 'completed', first
+    assert first['status'] == 'completed', _export_state(first)
     assert first['remote_test_id'] > 0
     second = await defectdojo.export('live-dojo', cfg)
     assert first['id'] == second['id']
@@ -101,13 +111,13 @@ async def test_actual_defectdojo_import_reimport_update_partial_and_triage(live_
     assert len(mappings) == 2 and len({r['remote_finding_id'] for r in mappings}) == 2
     await finding('a' * 64, title='Changed finding title', basis='Additional controlled evidence', severity='high')
     changed = await defectdojo.export('live-dojo', cfg)
-    assert changed['status'] == 'completed', changed
+    assert changed['status'] == 'completed', _export_state(changed)
     assert (await db.rows('SELECT * FROM integration_remote_findings ORDER BY fingerprint'))[0]['remote_finding_id'] == mappings[0]['remote_finding_id']
     # A partial run omits one item; omission must leave that remote finding open.
     await db.execute("UPDATE integration_assessments SET status='partial'")
     await db.execute('DELETE FROM integration_findings WHERE fingerprint=?', ('b' * 64,))
     partial = await defectdojo.export('live-dojo', cfg)
-    assert partial['status'] == 'completed', partial
+    assert partial['status'] == 'completed', _export_state(partial)
     token = SecretStore().get(live_dojo['secret_id'])['token']
     async with Sandbox(config, services=[cfg.server]) as sandbox:
         inventory = await defectdojo.remote_inventory(sandbox, cfg, token, [], first['remote_test_id'])
@@ -117,7 +127,7 @@ async def test_actual_defectdojo_import_reimport_update_partial_and_triage(live_
     assert inventory['b' * 64]['active'] is True and inventory['b' * 64]['is_mitigated'] is False
     await finding('a' * 64, triage_state='false_positive', confidence='confirmed')
     triaged = await defectdojo.export('live-dojo', cfg)
-    assert triaged['status'] == 'completed', triaged
+    assert triaged['status'] == 'completed', _export_state(triaged)
     async with Sandbox(config, services=[cfg.server]) as sandbox:
         inventory = await defectdojo.remote_inventory(sandbox, cfg, token, [], first['remote_test_id'])
     assert inventory['a' * 64]['false_p'] and not inventory['a' * 64]['active'] and not inventory['a' * 64]['verified']

@@ -65,13 +65,33 @@ async def metrics(session_id, duration, stages):
     requested = {urlsplit(e["url"]).path for e in audit if "allowed" in e and e["allowed"] and e.get("method") == "GET"}
     existing = {e["id"] for e in evidence if e["size"] > 0 and (runtime_root() / "evidence" / e["id"]).is_file()}
     supported = sum(bool(f["evidence_ids"]) and all(key in existing for key in f["evidence_ids"]) for f in findings)
+    # "0 of 17" is not a finding anyone can act on. A finding that cited NO
+    # evidence and one that cited an id which does not resolve are different
+    # defects with different fixes, so the metric distinguishes them.
+    uncited = [f["rule"] for f in findings if not f["evidence_ids"]]
+    dangling = {key for f in findings for key in f["evidence_ids"] if key not in existing}
+    by_id = {e["id"]: e for e in evidence}
+    why = {}
+    for key in dangling:
+        row = by_id.get(key)
+        if row is None:
+            why[key] = "no evidence row for this id"
+        elif row["size"] == 0:
+            why[key] = f"stored empty (kind={row['kind']}, stage={row['stage_id']})"
+        elif not (runtime_root() / "evidence" / key).is_file():
+            why[key] = f"row present but artifact missing (kind={row['kind']})"
+        else:
+            why[key] = "unknown"
     return {"duration_seconds": duration, "endpoints": sorted({i["url"] for i in inventory}),
         "endpoint_count": len({i["url"] for i in inventory}), "schema_operations_reached": sorted(requested & OPERATIONS),
         "schema_operation_coverage": len(requested & OPERATIONS) / len(OPERATIONS),
         "expected_findings": sorted(EXPECTED), "expected_findings_recovered": sorted(predictions & EXPECTED),
         "false_positives_in_scored_rules": sorted(predictions - EXPECTED), "unscored_scanner_findings": unscored,
         "recall_in_scored_rules": len(predictions & EXPECTED) / len(EXPECTED),
-        "evidence_completeness": {"findings_with_nonempty_resolvable_evidence": supported, "total_findings": len(findings)},
+        "evidence_completeness": {"findings_with_nonempty_resolvable_evidence": supported, "total_findings": len(findings),
+            "findings_citing_no_evidence": sorted(set(uncited)), "unresolvable_evidence_ids": sorted(dangling),
+            "unresolvable_reasons": sorted(set(why.values())),
+            "stored_evidence_rows": len(evidence), "resolvable_evidence_rows": len(existing)},
         "request_count": sum(e.get("allowed", False) for e in audit), "blocked_request_count": sum(e.get("allowed") is False for e in audit),
         "stages": stages}
 
@@ -115,16 +135,19 @@ async def test_integrated_coverage_and_finding_benchmark(benchmark_lab):
                                    "active": effective.active})
                     assert result.status == "completed", result.model_dump()
         arms[arm] = await metrics(session_id, time.monotonic() - started, stages)
-    assert arms["integrated"]["schema_operation_coverage"] == 1
-    assert arms["integrated"]["recall_in_scored_rules"] == 1
-    assert not arms["integrated"]["false_positives_in_scored_rules"]
-    assert arms["integrated"]["recall_in_scored_rules"] > arms["baseline"]["recall_in_scored_rules"]
-    counts = arms["integrated"]["evidence_completeness"]
-    assert counts["total_findings"] > 0 and counts["findings_with_nonempty_resolvable_evidence"] == counts["total_findings"]
     report = {"fixture_version": "1.0", "fixture_sha256": hashlib.sha256(benchmark_lab.read_bytes()).hexdigest(),
         "baseline_crawler_sha256": hashlib.sha256((ROOT / "scripts/pw-crawl.js").read_bytes()).hexdigest(),
         "protocol": "Same local target, identity and budgets. Baseline: original crawler plus selected catalogue checks. Integrated: Katana, passive ZAP, active Schemathesis and the same catalogue checks.",
         "limitations": "Scored rules are cookie attributes, credentialed CORS reflection and explicit authorization assertion only. Other scanner alerts remain unadjudicated. Evidence metric verifies stored evidence references, not manual evidentiary sufficiency. No client-target generalization.",
         "arms": arms}
+    # Written BEFORE the assertions. A benchmark that only produces its report
+    # when it passes cannot tell you what regressed when it fails, which is the
+    # one time you need the numbers.
     if os.environ.get("ERLIK_COVERAGE_REPORT"):
         Path(os.environ["ERLIK_COVERAGE_REPORT"]).write_text(json.dumps(report, indent=2))
+    assert arms["integrated"]["schema_operation_coverage"] == 1
+    assert arms["integrated"]["recall_in_scored_rules"] == 1
+    assert not arms["integrated"]["false_positives_in_scored_rules"]
+    assert arms["integrated"]["recall_in_scored_rules"] > arms["baseline"]["recall_in_scored_rules"]
+    counts = arms["integrated"]["evidence_completeness"]
+    assert counts["total_findings"] > 0 and counts["findings_with_nonempty_resolvable_evidence"] == counts["total_findings"], counts

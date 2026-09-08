@@ -63,17 +63,27 @@ async def record(context, sandbox, output, result, accepted_codes=(0,)):
     result.exit_code = output.code
     result.metadata["images"] = sandbox.images
     result.metadata["erlik_output_truncated"] = False
-    evidence_id = await db.evidence(context.session_id, context.stage_id, "stdout", output.stdout, context.known)
-    result.evidence_ids.append(evidence_id)
-    if output.stderr:
-        result.evidence_ids.append(await db.evidence(context.session_id, context.stage_id, "stderr", output.stderr, context.known))
+    # An EMPTY artifact is not evidence, and must not be cited as if it were.
+    # Every finding inherits result.evidence_ids below, so a scanner that
+    # exited cleanly with nothing on stderr was attaching a zero-byte
+    # `erlik-job-<id>.stderr` to each of its findings: 22 of them in the
+    # benchmark, which then reported 0 of 17 findings as evidence-backed. The
+    # stage still records that it ran — exit_code, metadata and the audit log
+    # all survive — but a finding now points only at bytes that exist.
+    async def keep(kind: str, content: str):
+        if content:
+            result.evidence_ids.append(
+                await db.evidence(context.session_id, context.stage_id, kind, content, context.known))
+
+    await keep("stdout", output.stdout)
+    await keep("stderr", output.stderr)
     for path in sorted(sandbox.output.rglob("*")):
         if path.is_file() and not path.is_symlink():
-            result.evidence_ids.append(await db.evidence(context.session_id, context.stage_id, path.name, path.read_text(errors="replace"), context.known))
+            await keep(path.name, path.read_text(errors="replace"))
     audit = sandbox.directory / "audit" / "requests.jsonl"
     if audit.exists():
         audit_text = audit.read_text()
-        result.evidence_ids.append(await db.evidence(context.session_id, context.stage_id, "requests", audit_text, context.known))
+        await keep("requests", audit_text)
         events = [json.loads(line) for line in audit_text.splitlines() if line.strip()]
         result.metadata["request_count"] = sum("allowed" in e for e in events)
         result.metadata["blocked_requests"] = sum(e.get("allowed") is False for e in events)

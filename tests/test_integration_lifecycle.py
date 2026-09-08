@@ -198,7 +198,20 @@ asyncio.run(main())
                                                    start_new_session=True, stdout=asyncio.subprocess.PIPE,
                                                    stderr=asyncio.subprocess.PIPE)
     try:
-        await wait_for_request(lifecycle_lab, "/slow")
+        try:
+            await wait_for_request(lifecycle_lab, "/slow")
+        except TimeoutError:
+            # The crashed-orchestrator subprocess is the thing under test; if it
+            # never reached the target, its own stderr is the only account of
+            # why, and discarding it leaves a bare TimeoutError to guess at.
+            if process.returncode is None:
+                process.kill()
+            out, err = await asyncio.wait_for(process.communicate(), 10)
+            raise AssertionError(
+                "the orchestrator subprocess never reached /slow within the wait "
+                f"(returncode={process.returncode}).\n"
+                f"--- subprocess stdout ---\n{out.decode(errors='replace')}\n"
+                f"--- subprocess stderr ---\n{err.decode(errors='replace')}") from None
         _, scanners, _ = await docker("ps", "-q", "--filter", f"label={lifecycle_lab['owner']}",
                                       "--filter", f"ancestor={IMAGES['zap']}")
         assert scanners.strip()

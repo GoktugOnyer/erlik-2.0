@@ -3,7 +3,12 @@ import os
 from pathlib import Path
 
 DB_DIR = Path(__file__).parent.parent / "data"
-DB_PATH = DB_DIR / "pentest.db"
+# Overridable by environment, because a monkeypatched module attribute reaches
+# only the process that set it. The crash-recovery path spawns a REAL second
+# orchestrator, and without this it opened the production database instead of
+# the caller's — finding none of the caller's rows.
+DB_PATH = Path(os.environ.get("ERLIK_DB_PATH", str(DB_DIR / "pentest.db"))).resolve()
+DB_DIR = DB_PATH.parent
 
 
 async def init_db():
