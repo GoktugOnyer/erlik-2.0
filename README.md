@@ -179,11 +179,20 @@ curl request AND interpolates nothing the lane cannot supply, so a case that
 would half-run is excluded rather than reported as having passed.
 
 The lane supplies two target fields. `url` comes from discovery; `parameter`
-comes from the query strings of the endpoints katana, the browser crawler,
-Schemathesis and ZAP report — merged per endpoint and kept per identity, so a
-parameter learned as an admin is never replayed anonymously. ZAP's own `param`
-field is deliberately NOT used: it names the input vector an alert fired on,
-which is a cookie or a header at least as often as a query parameter. A case that tests
+comes from two places: the query strings of the endpoints katana, the browser
+crawler, Schemathesis and ZAP report, and — where one was supplied — the
+OpenAPI document, which names every parameter and states `in: query` outright
+instead of leaving it to be inferred. They are merged per endpoint and kept per
+identity, so a parameter learned as an admin is never replayed anonymously.
+ZAP's own `param` field is deliberately NOT used: it names the input vector an
+alert fired on, which is a cookie or a header at least as often as a query
+parameter.
+
+A discovered name is text the TARGET chose, and so is the response, so a name
+is refused for any case whose own evidence pattern it matches — otherwise a
+planted `<a href="/search?219359=1">` makes an application that merely echoes
+unknown field names report critical template injection. The schema is the one
+source without that property, because the operator supplied it. A case that tests
 a parameter runs once per (endpoint, parameter) pair and only against a URL the
 parameter was actually observed on. That field is what makes WSTG-CLNT-04,
 WSTG-INPV-11.2 and WSTG-INPV-18 runnable; before it, discovery produced
