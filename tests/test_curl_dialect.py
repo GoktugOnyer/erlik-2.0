@@ -37,6 +37,10 @@ ACCEPTED = [
      "GET", "https://app.test/", "identity options the lane leaves unfilled are dropped"),
     ('curl -s --connect-timeout 3 --max-redirs 3 -L "https://app.test/"',
      "GET", "https://app.test/", "connection bounds"),
+    ('curl -s -w "[erlik] %{http_code}:%{content_type}" "https://app.test/"',
+     "GET", "https://app.test/", "a literal label beside known variables"),
+    ('curl -s -w "noop" "https://app.test/"',
+     "GET", "https://app.test/", "a -w format with no variables at all"),
     ('curl -s -D - -o /dev/null -X OPTIONS -H "Origin: null" '
      '-H "Access-Control-Request-Method: PUT" "https://app.test/"',
      "OPTIONS", "https://app.test/", "a CORS preflight is these headers or it is nothing"),
@@ -75,6 +79,8 @@ REFUSED = [
     ('curl -s --proxy http://evil "https://app.test/"', "a case cannot choose its own proxy"),
     ('curl --noproxy "*" https://app.test', "a case cannot leave the proxy"),
     ('curl -s -b "sess=abc" "https://app.test/"', "a case cannot carry its own credentials"),
+    ('curl -s "http://user:pw@app.test/"',
+     "nor spell them into the URL, which is the same rule by another route"),
     ('curl -s "https://app.test/" "https://other.test/"', "one destination only"),
     ('curl -s --data "a=1" "https://app.test/"', "a GET carrying a body is not a GET"),
     ('curl -s -H "Host: evil.test" "https://app.test/"', "Host would repoint the destination"),
@@ -90,6 +96,28 @@ REFUSED = [
     ('curl -s -X "GET / HTTP/1.1\r\nX-Injected: yes\r\n\r\nGET" "https://app.test/"',
      "-X with CRLF is request smuggling"),
     ('curl -s -X "GET /x HTTP/1.1" "https://app.test/"', "a method has no spaces"),
+    # /dev/stdout and /dev/stderr are paths resolving to /proc/self/fd/N, and
+    # curl opens the target with fopen(..., "wb") — on an fd backed by a regular
+    # file that TRUNCATES it. Allowing them while refusing /proc/self/fd/1 was
+    # the same permission spelled two ways.
+    ('curl -s -o /dev/stdout "https://app.test/"', "/dev/stdout is a path, not a stream"),
+    ('curl -s -o /dev/stderr "https://app.test/"', "/dev/stderr likewise"),
+    ('curl -s -o /proc/self/fd/1 "https://app.test/"', "and so is the name it resolves to"),
+    ('curl -s -m 0 "https://app.test/"', "curl reads 0 as NO timeout, the opposite of a bound"),
+    ('curl -s --connect-timeout 0 "https://app.test/"', "same for the connect phase"),
+    # curl turns \r and \n in a -w format into REAL line breaks, so a case
+    # could write a status line into the output that _http_status_ok and the
+    # cors/cookie evaluators then read as a captured response.
+    (r'curl -s -w "\r\nHTTP/1.1 200 OK\r\n\r\nprivate-canary" "https://app.test/"',
+     "-w escapes would let a case forge the evidence it is judged on"),
+    ('curl -s -w "%{stderr}x" "https://app.test/"', "-w must not move its report off the audited channel"),
+    ('curl -s -w "%header{set-cookie}" "https://app.test/"', "-w must not dump server text unlabelled"),
+    ('curl -s -w "%{certs}" "https://app.test/"', "nor TLS material"),
+    ('curl -s -w "%{local_ip}" "https://app.test/"', "nor container-internal host state"),
+    # Bundling is gated on its own set, not on "takes no value": -O takes none
+    # and writes a file, -k takes none and drops certificate checks.
+    ('curl -s -sO "https://app.test/"', "-O in a bundle would write a file"),
+    ('curl -s -sk "https://app.test/"', "-k in a bundle would drop certificate checks"),
     ('sh -c "curl https://app.test"', "the tool is curl, not a shell"),
     ('curl -s "https://app.test/" | tee /tmp/x', "no pipelines"),
 ]

@@ -41,12 +41,41 @@ _VALUED = {
 _DROP_IF_EMPTY = {"-H", "--header", "-b", "--cookie", "-A", "--user-agent",
                   "-e", "--referer", "-w", "--write-out"}
 
-# `-o`/`-D` are file writes in general. These four values are the exceptions:
-# every one is a non-persistent stream, and none can name a path in the job
-# directory. `-` is curl's own spelling of stdout.
-_STREAM_SINKS = {"-", "/dev/null", "/dev/stdout", "/dev/stderr"}
+# `-o`/`-D` are file writes in general. These two values are the exceptions,
+# and only these two: `-` is curl's own spelling of stdout, and /dev/null
+# discards. /dev/stdout and /dev/stderr are NOT here — they are paths that
+# resolve to /proc/self/fd/N, curl opens the target with fopen(..., "wb"), and
+# on any fd backed by a regular file that TRUNCATES it. Allowing /dev/stdout
+# while refusing /proc/self/fd/1 was the same permission spelled two ways, one
+# granted and one denied.
+_STREAM_SINKS = {"-", "/dev/null"}
+
+# Letters that may appear in a bundle like `-sI`. Deliberately NOT _VALUELESS:
+# "takes no value" is not the safety property (curl's -O takes none and writes
+# a file, -k takes none and drops certificate checks), so reusing that table
+# would silently widen bundling the day a harmless-looking flag is added to it.
+_BUNDLABLE = {"-s", "-S", "-i", "-L", "-g", "-I", "-G"}
 
 _NUMERIC = re.compile(r"\d+(?:\.\d+)?\Z")
+
+# A closed grammar for -w. Any character except % \ CR LF; or a literal %%; or
+# %{one known variable}. Backslash is excluded because curl turns \r and \n
+# into REAL line breaks, which would let a case write `HTTP/1.1 200 OK` into
+# the output that the regex, cors, idor and cookie_attributes evaluators then
+# read as a captured response — evidence forged by the case that is being
+# evaluated. The variable list omits output{} (writes a file), stderr/stdout
+# (move the report off the audited channel), header{} and certs (dump
+# server- and TLS-controlled text into the evaluator buffer unlabelled), and
+# local_ip/remote_ip (container-internal host state with no assessment value).
+_WRITE_OUT_VARS = (
+    "http_code|response_code|http_version|method|scheme|content_type|"
+    "num_headers|num_redirects|num_connects|redirect_url|referer|"
+    "size_download|size_header|size_request|size_upload|"
+    "speed_download|speed_upload|time_total|time_namelookup|time_connect|"
+    "time_appconnect|time_pretransfer|time_starttransfer|time_redirect|"
+    "exitcode|errormsg|ssl_verify_result|url_effective|urlnum|remote_port"
+)
+_WRITE_OUT = re.compile(r"(?:[^%\\\r\n]|%%|%\{(?:" + _WRITE_OUT_VARS + r")\})*\Z")
 
 # RFC 9110 method token. curl does NOT validate -X: it writes the string
 # straight into the request line, so a value containing CRLF emits a COMPLETE
@@ -121,7 +150,7 @@ def curl_request(command):
         # how a bundle would smuggle a second host past the check below.
         if len(arg) > 2 and arg[0] == "-" and arg[1] != "-" and arg not in _VALUELESS:
             letters = ["-" + c for c in arg[1:]]
-            if any(f not in _VALUELESS for f in letters):
+            if any(f not in _BUNDLABLE for f in letters):
                 raise ScopeViolation("unsupported bundled curl options")
             args[i:i + 1] = letters
             continue
@@ -195,8 +224,10 @@ def curl_request(command):
                 # but the base image is not pinned to that forever.
                 if value.startswith("@"):
                     raise ScopeViolation("catalogue requests cannot read local files")
-                if "%output{" in value:
+                if "%output{" in value.lower():
                     raise ScopeViolation("catalogue requests cannot write local files")
+                if not _WRITE_OUT.match(value):
+                    raise ScopeViolation("unsupported write-out format")
 
             elif arg in ("-o", "--output", "-D", "--dump-header"):
                 if value not in _STREAM_SINKS:
@@ -208,8 +239,13 @@ def curl_request(command):
                 # Bounds only, and the sandbox appends its own --max-time after
                 # this argv — curl takes the LAST occurrence, so a case cannot
                 # widen the stage budget, only narrow it.
-                if not _NUMERIC.match(value):
-                    raise ScopeViolation("curl limit options take a number")
+                if not _NUMERIC.match(value) or float(value) <= 0:
+                    # `-m 0` is curl's spelling of "no timeout" — the opposite
+                    # of a bound. It is neutralised today only because the
+                    # sandbox appends its own --max-time afterwards and curl is
+                    # last-wins; that ordering is a real guarantee, but a case
+                    # asking for no timeout should be refused on its own terms.
+                    raise ScopeViolation("curl limit options take a positive number")
 
             elif arg == "--data-urlencode":
                 # curl reads `@file` and `name@file` by whichever of `=` or `@`
@@ -232,6 +268,15 @@ def curl_request(command):
             emitted.extend([arg, value])
 
         elif urlsplit(arg).scheme in ("http", "https"):
+            # Userinfo is a credential, and a case may not carry one — the same
+            # rule as -b, which it would otherwise sidestep by spelling the
+            # cookie into the URL. EgressPolicy refuses this too ("invalid HTTP
+            # destination"), but a refusal that names the reason belongs where
+            # the other credential rule already lives.
+            if urlsplit(arg).username or urlsplit(arg).password:
+                raise ScopeViolation(
+                    "catalogue requests cannot carry their own credentials; "
+                    "identity is applied per stage by the assessment proxy")
             urls.append(arg)
             emitted.append(arg)
 
