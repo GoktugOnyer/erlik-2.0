@@ -46,3 +46,24 @@ to a separate report and include the pinned scanner/image versions, schema and
 template hashes, endpoint inventory, expected findings, request counts, runtime,
 and false positives. Missing client credentials or public callback infrastructure
 must appear as untested coverage, never as a passing security result.
+
+### Lab baseline — 2026-09-09
+
+The first such report is
+[measurements/2026-09-09-lab-baseline.md](measurements/2026-09-09-lab-baseline.md):
+the lane run against Juice Shop v17.1.1 and DVWA, both local lab containers.
+
+Headline: the plumbing works end to end and produced **no false positives**,
+but recall is the weak side and the limit is not the scanners. On Juice Shop it
+discovered 120 endpoints and 3 parameters, sent 69 probes with none blocked,
+and every zero that was checked by hand was a true negative — while missing a
+KNOWN open redirect on a parameter it did probe, for want of an
+allow-list-bypass payload shape. On DVWA it discovered nothing at all, because
+katana emits no output there and neither crawler submits a form; that run is
+recorded as untested coverage, not as a clean result.
+
+Measuring against real applications found four defects a fixture could not: a
+timing-out stage discarded everything it had found, the first broad case
+consumed the whole URL budget and starved the targeted probes, an empty
+discovery stage reported `completed`, and the catalogue's per-request cost is a
+container start. All four are fixed in the same branch.

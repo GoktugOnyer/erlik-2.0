@@ -308,6 +308,19 @@ class KatanaAdapter(BaseAdapter):
                                                      identity=ctx.identity_id, parameters=parameter_names(url)))
         if len(seen) > ctx.config.max_urls:
             result.status, result.reason = "partial", "URL inventory limit reached"
+        elif not result.endpoints:
+            # A crawler that finds nothing and exits 0 is indistinguishable from
+            # a target with no attack surface, and everything downstream is
+            # sized by this inventory: no endpoints means no parameters, which
+            # means every case that tests one reports nothing. Measured against
+            # DVWA — katana emits no output at all and exits 0 there, while
+            # working normally on Juice Shop — and the stage was recorded
+            # "completed", which reads as a clean result for an application
+            # that is famously full of holes.
+            result.status = "partial"
+            result.reason = ("discovery returned no endpoints; the target may be unreachable, "
+                             "behind a login this identity does not satisfy, or served in a form "
+                             "this crawler cannot follow — nothing downstream has an inventory to test")
         return await record(ctx, sandbox, output, result)
 
 

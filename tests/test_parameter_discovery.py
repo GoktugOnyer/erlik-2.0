@@ -418,3 +418,53 @@ async def test_schema_file_returns_the_same_shape_with_and_without_a_schema():
     caught it; nothing in the unit suite would have."""
     from orchestrator.integrations.adapters import schema_file
     assert len(await schema_file(Context("s", "stage", "https://app.test", config()), None)) == 3
+
+
+async def test_a_stage_that_runs_out_of_time_keeps_what_it_found(database, tmp_path):
+    """service.py wraps each stage in asyncio.timeout and on expiry REPLACES the
+    accumulated StageResult with an empty one, so everything found before the
+    deadline is discarded. Measured against Juice Shop: a 120-URL inventory
+    times out here long before it finishes. The adapter therefore stops on its
+    own, short of the outer deadline, and returns what it has."""
+    import time
+    cfg = config(active=True, test_cases=["WSTG-SESS-02", "WSTG-INFO-03"],
+                 budget={"stage_seconds": 3})
+    await database.persist_result("s", "discovery", StageResult(endpoints=[
+        Endpoint(url=f"https://app.test/p{n}", source="katana", identity="anonymous")
+        for n in range(60)]))
+
+    class SlowSandbox(Sandbox):
+        async def run(self, argv, **kw):
+            time.sleep(0.1)                        # blocking, like a container start
+            return await super().run(argv, **kw)
+
+    sandbox = SlowSandbox(tmp_path, cfg.model_dump())
+    result = await CatalogueAdapter().run(Context("s", "tests", "https://app.test", cfg), sandbox)
+
+    assert result.status == "partial"
+    assert "budget" in (result.reason or "")
+    assert sandbox.calls, "it did real work before stopping"
+    unrun = [o for o in result.observations
+             if o["type"] in ("test_case_not_run", "test_case_truncated")]
+    assert unrun, "and says what it did not reach"
+
+
+async def test_a_crawler_that_finds_nothing_does_not_report_success(database, tmp_path):
+    """Measured against DVWA: katana emits no output and exits 0 there, while
+    working normally on Juice Shop. The stage was recorded "completed", which
+    reads as a clean result for an application famously full of holes — and
+    everything downstream is sized by this inventory, so no endpoints means no
+    parameters means every case that tests one reports nothing."""
+    from orchestrator.integrations.adapters import ADAPTERS
+
+    class EmptySandbox(Sandbox):
+        async def run(self, argv, **kw):
+            await super().run(argv, **kw)
+            return JobOutput(0, "", "")               # katana's DVWA behaviour
+
+    cfg = config()
+    sandbox = EmptySandbox(tmp_path, cfg.model_dump())
+    result = await ADAPTERS["katana"].run(Context("s", "katana", "https://app.test", cfg), sandbox)
+    assert result.endpoints == []
+    assert result.status == "partial", "an empty inventory is not a clean result"
+    assert "no endpoints" in (result.reason or "")

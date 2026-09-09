@@ -1,6 +1,7 @@
 """Existing catalogue evaluators, executed only in the assessment sandbox."""
 import json
 import shlex
+import time
 import re
 from urllib.parse import urlsplit, quote_plus
 from orchestrator.testcase.runner import run_test_case
@@ -364,6 +365,7 @@ class CatalogueAdapter(BaseAdapter):
     name = "testcases"
 
     async def run(self, ctx, sandbox, collector=None):
+        started_at = time.monotonic()
         result = StageResult(metadata={"catalogue": [], "executed_checks": 0})
         policy = EgressPolicy(sandbox.policy)
         def check(command, scope, primary_url=None):
@@ -429,17 +431,48 @@ class CatalogueAdapter(BaseAdapter):
         # pairing them any other way would test a parameter somewhere it was
         # never seen, and report the result against the URL.
         parameters = await parameters_by_url(ctx, sandbox.policy)
-        # Denominated in REQUESTS, not pairs. The proxy spends config.max_urls
-        # on distinct (method, URL), and one (endpoint, parameter) pair costs a
-        # case one request per step — so a pair-denominated cap was looser than
-        # the wall it exists to protect by exactly the step count, and could
-        # never bind first. What happened instead was the proxy refusing
-        # mid-case, which the two unlocked cases cannot even see.
-        def pair_budget(case):
-            return max(1, ctx.config.max_urls // max(1, len(case.steps)))
+        # NO CASE MAY STARVE ANOTHER.
+        #
+        # The proxy spends config.max_urls on distinct (method, URL) across the
+        # whole stage, so the budget is shared. Cases ran in selection order
+        # against everything they were eligible for, which meant the first
+        # broad case took all of it. Measured against Juice Shop: WSTG-SESS-02
+        # swept 120 discovered URLs, and 29 of the 60 parameter probes that
+        # followed were refused "URL budget exhausted" — including
+        # `/redirect?to=//erlik-redir.oast.test/`, the probe for that
+        # application's KNOWN open redirect. The stage reported zero findings,
+        # and zero meant untested rather than clean.
+        #
+        # Each selected case now gets an equal share, denominated in requests
+        # because one target costs a case one request per step. A case with
+        # fewer targets than its share simply uses less; a case with more says
+        # what it did not reach.
+        def target_budget(case):
+            share = ctx.config.max_urls // max(1, len(ctx.config.test_cases))
+            return max(1, share // max(1, len(case.steps)))
         result.metadata["parameters_discovered"] = sum(len(v) for v in parameters.values())
 
-        for case_id in ctx.config.test_cases:
+        # STOP BEFORE THE AXE FALLS. service.py wraps each stage in
+        # asyncio.timeout and, on expiry, REPLACES the accumulated StageResult
+        # with an empty one — so a stage that found a real vulnerability at
+        # minute 3 and ran out of budget at minute 10 reported "partial" with
+        # no findings at all. Measured against Juice Shop: a 120-URL inventory
+        # times out here long before it finishes, because this loop is
+        # cases x urls x steps and each request is its own container (0.29s
+        # measured). Leaving a margin lets the adapter return what it has, and
+        # say what it did not get to.
+        deadline = started_at + ctx.config.budget.stage_seconds * 0.85
+        for index, case_id in enumerate(ctx.config.test_cases):
+            if time.monotonic() > deadline:
+                remaining = ctx.config.test_cases[index:]
+                result.status = "partial"
+                result.reason = ("stage time budget reached with "
+                                 f"{len(remaining)} of {len(ctx.config.test_cases)} selected checks unrun")
+                result.observations.append({
+                    "type": "test_case_not_run", "test_case_id": ",".join(remaining), "url": None, "steps": [],
+                    "reason": "the stage ran out of time before these were reached; findings above are complete "
+                              "for the checks that did run"})
+                break
             tc = find_by_id(case_id)
             if not tc:
                 raise ValueError("selected catalogue test is unavailable: " + case_id)
@@ -461,7 +494,7 @@ class CatalogueAdapter(BaseAdapter):
                         "parameters": sorted(set(forgeable)),
                         "reason": "these parameter names match this case's own evidence pattern, so an "
                                   "application that merely echoes the name would satisfy it"})
-                case_targets = pairs[:pair_budget(tc)]
+                case_targets = pairs[:target_budget(tc)]
                 if len(pairs) > len(case_targets):
                     # Said out loud, because a truncated sweep that reports
                     # nothing looks exactly like a clean one.
@@ -472,8 +505,16 @@ class CatalogueAdapter(BaseAdapter):
                                   f"raise max_urls to cover them (one pair costs "
                                   f"{len(tc.steps)} of the {ctx.config.max_urls} URL budget)"})
             else:
-                case_targets = [{"url": url} for url in targets
-                                if case_id in eligible_test_cases(url)]
+                eligible = [{"url": url} for url in targets
+                            if case_id in eligible_test_cases(url)]
+                case_targets = eligible[:target_budget(tc)]
+                if len(eligible) > len(case_targets):
+                    result.observations.append({
+                        "type": "test_case_truncated", "test_case_id": case_id, "url": None, "steps": [],
+                        "reason": f"{len(eligible) - len(case_targets)} of {len(eligible)} in-scope URLs "
+                                  f"were not tested; this check's share of the {ctx.config.max_urls} URL "
+                                  f"budget is {target_budget(tc)} targets across "
+                                  f"{len(ctx.config.test_cases)} selected checks"})
             if not case_targets:
                 # Selected, and nothing to run it against. Saying nothing here
                 # made the case indistinguishable from one that ran and found
@@ -486,7 +527,15 @@ class CatalogueAdapter(BaseAdapter):
                                "see inventory.executable_test_cases")})
                 result.metadata["catalogue"].append(case_id)
                 continue
-            for target in case_targets:
+            for position, target in enumerate(case_targets):
+                if time.monotonic() > deadline:
+                    result.status = "partial"
+                    result.reason = "stage time budget reached mid-check"
+                    result.observations.append({
+                        "type": "test_case_truncated", "test_case_id": case_id, "url": None, "steps": [],
+                        "reason": f"{len(case_targets) - position} of {len(case_targets)} targets were not "
+                                  f"reached before the stage budget ran out"})
+                    break
                 target = {**target, "scope": ctx.config.scope.model_dump()}
                 if case_id == "WSTG-INPV-19":
                     if not collector:
