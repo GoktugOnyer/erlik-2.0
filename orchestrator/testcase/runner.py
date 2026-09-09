@@ -278,6 +278,20 @@ def _blind_controls(ev: Evaluator, prior_steps: list[StepResult] | None):
     return steps
 
 
+def _attributable(ev: Evaluator, step_result: StepResult,
+                  prior_steps: list[StepResult] | None) -> bool:
+    """Did THIS step's payload cause the difference, or was it already there?
+
+    A step that never ran, or came back empty, cannot answer the question — and
+    the safe answer to an unanswerable question here is to leave the finding
+    alone rather than to suppress it silently.
+    """
+    other = {s.step: s for s in (prior_steps or [])}.get(ev.differs_from or "")
+    if other is None or not other.output:
+        return True
+    return _comparable(step_result.output) != _comparable(other.output)
+
+
 def _first_difference(a: str, b: str, window: int = 120) -> str:
     """The neighbourhood of the first character where two responses part.
 
@@ -338,6 +352,13 @@ async def _run_evaluator(
             produced = _harvest(ev, step_result.output, flags, target, pattern)
             matched = bool(produced) or bool(
                 re.search(pattern, step_result.output, flags))
+            if matched and ev.differs_from:
+                # ATTRIBUTION. The pattern says the evidence is there; this says
+                # the payload put it there. A page that carries the signature
+                # before the payload was sent carries it for its own reasons.
+                matched = _attributable(ev, step_result, prior_steps)
+                if not matched:
+                    produced = {}
 
     elif ev.type == "status_code" and ev.expect is not None:
         # The tool's real exit code, or no answer at all. Inferring it from the

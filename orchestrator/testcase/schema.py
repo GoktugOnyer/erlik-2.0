@@ -115,7 +115,21 @@ class Evaluator(BaseModel):
     # the same shape as WSTG-AUTHZ-04's anonymous probe: a control that says
     # when the test itself is invalid.
     control: Optional[list[str]] = None
-    # The step whose response this one must DIFFER from (boolean_differential).
+    # The step whose response this one must DIFFER from.
+    #
+    # For `boolean_differential` the difference IS the verdict. For `regex` it
+    # is an ATTRIBUTION check on a verdict the pattern already reached: the
+    # evidence has to have been caused by this step's payload, not merely be
+    # present on the page. Measured against real MySQL 8.0 on an unquoted
+    # numeric sink, which is the most exploitable shape there is: a benign
+    # value already produces `Unknown column 'x' in 'where clause'` and the
+    # payload produces `You have an error in your SQL syntax`. A check that
+    # asked "is the signature present at baseline" would suppress that
+    # parameter; asking "did the response CHANGE" reports it, and still drops
+    # the documentation page that carries the same signature either way.
+    #
+    # A named step that did not run or came back empty is treated as differing,
+    # so a failed baseline request never silently suppresses a finding.
     differs_from: Optional[str] = None
     # How much slower than every control this step must be, in milliseconds,
     # before a delay counts as caused (timing).

@@ -68,6 +68,25 @@ consumed the whole URL budget and starved the targeted probes, an empty
 discovery stage reported `completed`, and the catalogue's per-request cost is a
 container start. All four are fixed in the same branch.
 
+### The error-based signature, re-measured — 2026-09-09
+
+[measurements/2026-09-09-sql-error-signatures.md](measurements/2026-09-09-sql-error-signatures.md).
+An adversarial round said the error-based detector was weaker than its own tests
+claimed. It was, and re-measuring found more than the round did: 71 real error
+bodies and 122 benign pages now stand behind the pattern, against the eleven
+benign pages the previous version was certified on.
+
+Two results are worth pulling out. A bare `sqlite3\.\w+Error` reported a
+duplicate email at signup as HIGH-severity SQL injection. And the lab's own
+Juice Shop answers the case's payload with a real HTTP 500 SQLite error that the
+case reported nothing for — because SQLite has two answers to a lone quote and
+the pattern only knew one.
+
+The baseline step that came out of it is a comparison, not a gate: measured
+against real MySQL, stopping when the signature is merely PRESENT drops an
+unquoted numeric sink — the easiest injection there is to exploit — silently and
+without chaining it to sqlmap.
+
 ### Blind injection — 2026-09-09
 
 [measurements/2026-09-09-blind-injection.md](measurements/2026-09-09-blind-injection.md)

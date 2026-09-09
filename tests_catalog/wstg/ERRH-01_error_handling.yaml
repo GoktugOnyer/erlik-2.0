@@ -19,11 +19,13 @@ steps:
       bash -c "curl -s -b \"{{cookie}}\" -H \"{{auth_header}}\" \"{{url}}/%ff%fe\"; echo; curl -s -b \"{{cookie}}\" -H \"{{auth_header}}\" \"{{url}}/'\\\"\"; echo; curl -s -b \"{{cookie}}\" -H \"{{auth_header}}\" \"{{url}}?id[]=1\""
     evaluators:
       - type: regex
-        pattern: >-
-          stack trace|Traceback \(most recent call last\)|Exception in|at java\.|at org\.[\w.]+|
-          \.java:\d+|node_modules|/usr/local/lib|/var/www|ORA-\d+|SQLSTATE|
-          Warning:.*on line \d+|Fatal error:|Werkzeug Debugger|DEBUG = True|
-          Microsoft \.NET|System\.\w+Exception
+        # ONE physical line, deliberately. A folded `>-` scalar joins wrapped
+        # lines with a SPACE, so every alternative that began a new line was
+        # loaded as ` \.java:\d+`, ` Warning:.*on line \d+` and ` Microsoft \.NET`
+        # — three checks that could only match text with a leading space in
+        # front of them. The YAML looked right and the pattern was not.
+        pattern: |-
+          stack trace|Traceback \(most recent call last\)|Exception in|at java\.|at org\.[\w.]+|\.java:\d+|node_modules|/usr/local/lib|/var/www|ORA-\d+|SQLSTATE|Warning:.*on line \d+|Fatal error:|Werkzeug Debugger|DEBUG = True|Microsoft \.NET|System\.\w+Exception
         emit_finding:
           vuln_type: Verbose Error Message / Stack Trace Disclosure
           severity: low

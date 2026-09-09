@@ -50,18 +50,39 @@ steps:
     # Use a string likely to be present in a real table + single quote to
     # provoke a parse error (q=1' often returns empty data because '1' just
     # doesn't match any row). The follow-on probes broaden the payload set.
+    # ONE PAYLOAD, NOT TWO. `' OR '1'='1` used to be sent here as well, and it
+    # was worse than wasted. Measured across 7 sink shapes x 5 engines: there is
+    # no combination where it errors and `apple'` does not, and in 20 of the 35
+    # `apple'` errors where it does not — strict dominance, so it can never add
+    # a detection.
+    #
+    # What it CAN do is decide one. In a quoted sink — the common injectable
+    # shape — it is a boolean payload that succeeds, so the application returns
+    # its whole table into the same buffer the evaluator scans. That hands the
+    # target the bytes that decide a HIGH finding, which is the evidence-forgery
+    # shape this catalogue keeps having to close.
     command: >-
       bash -c 'S="{{submit}}"; C="{{cookie}}";
-      curl -s ${C:+-b "$C"} "{{url}}?{{parameter}}=apple%27${S:+&$S}"; echo;
-      curl -s ${C:+-b "$C"} "{{url}}?{{parameter}}=%27%20OR%20%271%27%3D%271${S:+&$S}"'
+      curl -s ${C:+-b "$C"} "{{url}}?{{parameter}}=apple%27${S:+&$S}"'
     evaluators:
       - type: regex
-        # Broad SQL-error signatures across MySQL, PG, Oracle, MSSQL, SQLite,
-        # plus generic ORM/driver wrappers seen in Node, Python, Ruby, .NET.
-        pattern: >-
-          SQL syntax|mysql_fetch|mysql_num_rows|You have an error in your SQL|ORA-\d+|PostgreSQL.*ERROR|
-          SQLITE_ERROR|sqlite3\.|SQLite3::|SQLSTATE|System\.Data\.SQLClient|ODBC SQL Server Driver|
-          Microsoft OLE DB Provider for SQL Server|Warning.*mysqli?_|Warning.*pg_|near.*syntax error
+        # THE SAME SIGNATURE AS WSTG-INPV-05.2, BYTE FOR BYTE. YAML anchors do
+        # not cross files, so it is duplicated here and
+        # test_both_sqli_cases_carry_the_identical_signature keeps the copies
+        # honest. The corpus, the rationale and the measured scores are all in
+        # INPV-05.2's header — do not edit this copy on its own.
+        #
+        # What was here before scored 31/66 recall and 38/113 false positives
+        # against that corpus, and two of its alternatives could not match
+        # ANYTHING: written as a folded `>-` scalar across four lines, YAML
+        # joined them with a space, so ` SQLITE_ERROR` and
+        # ` Microsoft OLE DB Provider for SQL Server` were loaded with a leading
+        # space nobody wrote. That is why the scalar below is `|-` on one line,
+        # and why test_no_catalogue_pattern_was_damaged_by_yaml_folding now
+        # fails on the shape instead of on the consequence.
+        case_insensitive: false
+        pattern: |-
+          You have an error in your SQL syntax; check the manual that (?:corresponds to|fits) your (?:MySQL|MariaDB|Drizzle|TiDB) server version for the right syntax to use near (?:'|&#0*39;|&#x0*27;|&apos;)(?!%s(?:'|&#0*39;|&#x0*27;|&apos;) at line)|ERROR:\s{1,2}(?:unterminated quoted string|syntax error) at or near (?:"|&quot;|&#0*34;|&#x0*22;)|(?:psycopg2?\.errors\.|asyncpg\.exceptions\.)\w*Error: (?:unterminated quoted string|syntax error) at or near (?:"|&quot;|&#0*34;|&#x0*22;)|"code"\s*:\s*"42601"[\s\S]{0,160}?"message"\s*:\s*"(?:unterminated quoted string|syntax error) at or near|unrecognized token: (?:"|&quot;|&#0*34;|&#x0*22;|\\")(?:'|&#0*39;|&#x0*27;|&apos;)(?!(?:"|&quot;|&#0*34;|&#x0*22;|\\"))|(?:SQLITE_ERROR|sqlite3?\.\w*Error|SQLite3?::\w*Exception|in prepare, )[^\n]{0,60}?near (?:"|&quot;|&#0*34;|&#x0*22;)[^"\n&]{0,60}?(?:"|&quot;|&#0*34;|&#x0*22;): syntax error|Unclosed quotation mark after the character string (?!'%\.\*ls')(?:'|&#0*39;|&#x0*27;|&apos;)[\s\S]{0,80}?(?:'|&#0*39;|&#x0*27;|&apos;)\.|Incorrect syntax near (?:'|&#0*39;|&#x0*27;|&apos;)[\s\S]{0,60}?(?:'|&#0*39;|&#x0*27;|&apos;)(?:'|&#0*39;|&#x0*27;|&apos;)|(?:System|Microsoft)\.Data\.SqlClient\.SqlException: Incorrect syntax near (?:'|&#0*39;|&#x0*27;|&apos;)|Microsoft OLE DB Provider for (?:SQL Server|ODBC Drivers) error '[0-9a-f]{8}'|ORA-(?:01756: quoted string not properly terminated|00933: SQL command not properly ended|00911: invalid character|00936: missing expression|00907: missing right parenthesis|00923: FROM keyword not found where expected|01789: query block has incorrect number of result columns)|DPY-2041: missing ending quote|SQLSTATE\[[0-9A-Z]{5}\]: Syntax error or access violation: \d+ |Unknown column (?:'|&#0*39;|&#x0*27;|&apos;)[^'\n&]{0,64}(?:'|&#0*39;|&#x0*27;|&apos;) in (?:'|&#0*39;|&#x0*27;|&apos;)(?:where clause|field list|SELECT|on clause|having clause|order clause|group statement)(?:'|&#0*39;|&#x0*27;|&apos;)|mysqli?_\w+\(\)[^\n]{0,60}(?:expects parameter|supplied (?:argument|resource) is not a valid)
         emit_finding:
           vuln_type: SQL Injection (error-based)
           severity: high
