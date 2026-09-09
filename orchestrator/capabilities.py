@@ -36,7 +36,7 @@ WSTG_DIR = ROOT / "tests_catalog" / "wstg"
 # detectors: `tool:rule` names from detection.py that can CONFIRM it
 CLASSES: list[dict] = [
     {"key": "sqli", "label": "SQL Injection", "owasp": "A03:2021 Injection",
-     "wstg": ["WSTG-INPV-05"],
+     "wstg": ["WSTG-INPV-05", "WSTG-INPV-05.2"],
      "detectors": ["sqlmap:_detect_sqlmap", "curl:_curl_sqli_login"]},
     {"key": "xss", "label": "Cross-Site Scripting", "owasp": "A03:2021 Injection",
      "wstg": ["WSTG-INPV-01", "WSTG-CLNT-04"],

@@ -1,0 +1,123 @@
+id: WSTG-INPV-05.2
+name: SQL Injection (error-based, single request)
+category: Input Validation
+attack_class: sqli
+severity: high
+references:
+  - https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/07-Input_Validation_Testing/05-Testing_for_SQL_Injection
+
+# WHY THIS EXISTS ALONGSIDE WSTG-INPV-05.
+# INPV-05 is the fuller SQL injection case and it runs `bash -c` and sqlmap, so
+# the assessment lane — whose executor accepts one curl per step and no shell —
+# cannot run it. The 2026-09-09 lab baseline recorded the consequence: the lane
+# reached DVWA's injectable `id` parameter, the application answered with
+# `Uncaught mysqli_sql_exception`, and NOTHING in the runnable set was looking
+# for a database error. It was reported only because a sibling case happened to
+# match PHP's `Fatal error` wrapper — the right answer for the wrong reason, and
+# only on a PHP target.
+#
+# This case is that detector: one request per payload, no shell, so it runs
+# where the finding actually is.
+#
+# WHAT IT CANNOT SEE. Blind SQL injection emits no error at all, and this lane
+# has neither timing nor boolean-differential capability. DVWA's own
+# `sqli_blind` module is discovered, probed by this case, and correctly reports
+# nothing — which is the honest outcome, not a gap to paper over. Use INPV-05
+# with sqlmap for that.
+
+target_schema:
+  required: [url, parameter]
+  optional: [cookie, auth_header]
+
+# THE PATTERN IS ANCHORED ON ERROR STRUCTURE, NOT ON THE WORD "SQL".
+#
+# The set in INPV-05 includes `SQL syntax`, `SQLSTATE` and `SQLITE_ERROR` as
+# bare alternatives. Measured against 902 real response documents captured from
+# Juice Shop and DVWA: `SQLITE_ERROR` fired ELEVEN times on Juice Shop's own
+# JavaScript bundle, which contains the string inside a challenge description
+# ("Did you spot the error message with the `SQLITE_ERROR` ..."). A `.js` file
+# is a discovered endpoint like any other, so that is a HIGH-severity finding
+# delivered for a request that proved nothing.
+#
+# Every alternative below carries punctuation, an error code, or a full
+# sentence that a page merely DISCUSSING databases does not reproduce. Same
+# corpus, this pattern: 4 matches, all of them DVWA's real error, none else.
+#
+# `.*` appears nowhere on purpose. An evaluator reads a whole response, so a
+# `Warning.*mysqli_` style alternative can join a warning in one place to a
+# driver name in another and call the pair an error. Where context IS needed it
+# is bounded and line-scoped — `[^\n]{0,60}` — so the two halves have to be
+# part of the same message.
+#
+# A BARE FUNCTION NAME IS NOT A SIGNATURE. `pg_query\(\)` on its own fired on
+# a changelog line, "Fixed: pg_query() calls are now parameterised (see #412)".
+# The driver functions therefore require the failure text that follows them in
+# a real warning, not merely their own name.
+#
+# THE DRIVER-WARNING ALTERNATIVE IS FOR LEGACY TARGETS ONLY, and is kept
+# knowingly. On PHP 8 a failing mysqli_query() no longer warns — it raises
+# mysqli_sql_exception, which is why `Uncaught mysqli_sql_exception` is the
+# alternative that actually fires on DVWA. The `expects parameter` form is
+# PHP 5/7 output; it still reaches a real response on an old target, and it
+# costs nothing to keep now that it requires the failure text rather than the
+# function name.
+#
+# NOR IS A BARE ERROR CODE. `ORA-\d{5}` fired on "See ORA-01756 in the Oracle
+# reference for quoting rules." Oracle's own format is code, colon, message —
+# `ORA-01756: quoted string not properly terminated` — so the colon is what
+# separates an error from a citation of one. A page quoting an Oracle error in
+# full is still indistinguishable from one leaking it, and no pattern resolves
+# that; this only removes the common case.
+
+steps:
+  - name: single_quote
+    tool: curl
+    # The classic: harmless to send, and it terminates a string literal in
+    # every engine below.
+    command: >-
+      curl -s -b "{{cookie}}" -H "{{auth_header}}" -G "{{url}}" --data-urlencode "{{parameter}}=erlik'probe"
+    evaluators:
+      - type: regex
+        pattern: >-
+          You have an error in your SQL syntax|Uncaught mysqli_sql_exception|mysqli?_\w+\(\)[^\n]{0,60}(?:expects parameter|supplied argument is not a valid)|Unknown column '[^']*' in 'where clause'|PG::\w*Error|psycopg2\.\w+Error|pg_query\(\)[^\n]{0,40}(?:Query failed|: ERROR)|unterminated quoted string at or near|syntax error at or near "|ORA-\d{5}:\s|quoted string not properly terminated|Unclosed quotation mark after the character string|Incorrect syntax near|System\.Data\.SqlClient\.SqlException|Microsoft OLE DB Provider for (?:SQL Server|ODBC Drivers)|SQLite3::\w*Exception|sqlite3\.\w+Error|unrecognized token: "|SQLSTATE\[[0-9A-Z]{5}\]|org\.hibernate\.exception\.\w+|java\.sql\.SQLException
+        emit_finding:
+          vuln_type: SQL Injection (error-based — the parameter reaches a database query)
+          severity: high
+        stop_after: true
+
+  - name: double_quote
+    tool: curl
+    when: no_finding_yet
+    # Some applications escape `'` and not `"`, and some engines quote
+    # identifiers with `"` — the same break, through the other delimiter.
+    command: >-
+      curl -s -b "{{cookie}}" -H "{{auth_header}}" -G "{{url}}" --data-urlencode "{{parameter}}=erlik\"probe"
+    evaluators:
+      - type: regex
+        pattern: >-
+          You have an error in your SQL syntax|Uncaught mysqli_sql_exception|mysqli?_\w+\(\)[^\n]{0,60}(?:expects parameter|supplied argument is not a valid)|Unknown column '[^']*' in 'where clause'|PG::\w*Error|psycopg2\.\w+Error|pg_query\(\)[^\n]{0,40}(?:Query failed|: ERROR)|unterminated quoted string at or near|syntax error at or near "|ORA-\d{5}:\s|quoted string not properly terminated|Unclosed quotation mark after the character string|Incorrect syntax near|System\.Data\.SqlClient\.SqlException|Microsoft OLE DB Provider for (?:SQL Server|ODBC Drivers)|SQLite3::\w*Exception|sqlite3\.\w+Error|unrecognized token: "|SQLSTATE\[[0-9A-Z]{5}\]|org\.hibernate\.exception\.\w+|java\.sql\.SQLException
+        emit_finding:
+          vuln_type: SQL Injection (error-based — the parameter reaches a database query)
+          severity: high
+        stop_after: true
+
+  - name: closing_paren
+    tool: curl
+    when: no_finding_yet
+    # `')` breaks out of a function call or an IN (...) list, which a bare
+    # quote inside those constructs does not.
+    command: >-
+      curl -s -b "{{cookie}}" -H "{{auth_header}}" -G "{{url}}" --data-urlencode "{{parameter}}=erlik')probe"
+    evaluators:
+      - type: regex
+        pattern: >-
+          You have an error in your SQL syntax|Uncaught mysqli_sql_exception|mysqli?_\w+\(\)[^\n]{0,60}(?:expects parameter|supplied argument is not a valid)|Unknown column '[^']*' in 'where clause'|PG::\w*Error|psycopg2\.\w+Error|pg_query\(\)[^\n]{0,40}(?:Query failed|: ERROR)|unterminated quoted string at or near|syntax error at or near "|ORA-\d{5}:\s|quoted string not properly terminated|Unclosed quotation mark after the character string|Incorrect syntax near|System\.Data\.SqlClient\.SqlException|Microsoft OLE DB Provider for (?:SQL Server|ODBC Drivers)|SQLite3::\w*Exception|sqlite3\.\w+Error|unrecognized token: "|SQLSTATE\[[0-9A-Z]{5}\]|org\.hibernate\.exception\.\w+|java\.sql\.SQLException
+        emit_finding:
+          vuln_type: SQL Injection (error-based — the parameter reaches a database query)
+          severity: high
+        stop_after: true
+
+chain:
+  on_finding:
+    # A parameter that reaches the query is worth the fuller treatment.
+    - WSTG-INPV-05

@@ -182,17 +182,24 @@ async def test_a_parameter_stored_before_the_rules_tightened_is_still_filtered(d
 def test_a_case_that_tests_a_parameter_runs_only_where_there_is_one():
     with_none = eligible_test_cases("https://app.test/s")
     with_one = eligible_test_cases("https://app.test/s", parameters=["q"])
-    assert set(with_one) - set(with_none) == {"WSTG-CLNT-04", "WSTG-INPV-11.2", "WSTG-INPV-18"}
-    for case_id in ("WSTG-CLNT-04", "WSTG-INPV-11.2", "WSTG-INPV-18"):
+    gained = set(with_one) - set(with_none)
+    assert gained == {c for c in executable_test_cases()
+                      if case_needs_parameter(find_by_id(c))}, (
+        "exactly the cases that interpolate a parameter, no more")
+    assert {"WSTG-CLNT-04", "WSTG-INPV-11.2", "WSTG-INPV-18", "WSTG-INPV-05.2"} <= gained
+    for case_id in gained:
         assert case_needs_parameter(find_by_id(case_id))
     for case_id in with_none:
         assert not case_needs_parameter(find_by_id(case_id))
 
 
-def test_the_three_cases_are_what_the_parameter_field_bought():
+def test_what_the_lane_can_run():
+    """Pinned so a catalogue edit that quietly removes a case from the lane —
+    a shell in one step, a field nothing supplies — fails here rather than
+    showing up as a quieter assessment."""
     assert set(executable_test_cases()) == {
         "WSTG-CLNT-04", "WSTG-CLNT-07", "WSTG-CLNT-07b", "WSTG-CONF-06", "WSTG-INFO-03",
-        "WSTG-INPV-07", "WSTG-INPV-11.2", "WSTG-INPV-18", "WSTG-SESS-02"}
+        "WSTG-INPV-05.2", "WSTG-INPV-07", "WSTG-INPV-11.2", "WSTG-INPV-18", "WSTG-SESS-02"}
 
 
 # --- end to end through the adapter -----------------------------------------
@@ -431,14 +438,14 @@ async def test_a_stage_that_runs_out_of_time_keeps_what_it_found(database, tmp_p
     own, short of the outer deadline, and returns what it has."""
     import time
     cfg = config(active=True, test_cases=["WSTG-SESS-02", "WSTG-INFO-03"],
-                 budget={"stage_seconds": 3})
+                 budget={"stage_seconds": 8})
     await database.persist_result("s", "discovery", StageResult(endpoints=[
         Endpoint(url=f"https://app.test/p{n}", source="katana", identity="anonymous")
-        for n in range(60)]))
+        for n in range(120)]))
 
     class SlowSandbox(Sandbox):
         async def run(self, argv, **kw):
-            time.sleep(0.1)                        # blocking, like a container start
+            time.sleep(0.12)                       # blocking, like a container start
             return await super().run(argv, **kw)
 
     sandbox = SlowSandbox(tmp_path, cfg.model_dump())

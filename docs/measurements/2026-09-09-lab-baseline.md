@@ -167,6 +167,61 @@ blind SQL injection emits no error, and this case looks for interpreter errors
 — and `xss_r`, `csrf` and `fi` were discovered but not reported by a case that
 does not test for their classes. No false positives.
 
+### Third pass — a SQL error detector
+
+The two findings above were reported by `WSTG-INPV-11.2`, the *generic*
+interpreter case, which matched them only because PHP wrapped the database
+error in `Fatal error`. Right answer, wrong reason, and only on a PHP target:
+nothing in the runnable set was looking for a database error, because the
+catalogue's SQL injection case (`WSTG-INPV-05`) runs `bash -c` and sqlmap and
+the lane cannot execute it.
+
+`WSTG-INPV-05.2` is that detector — one request per payload, no shell. Same
+target, same identity, same control:
+
+| security | parameters probed | findings |
+|---|---|---|
+| `low` | 8 | **2**, both `SQL Injection (error-based)`, HIGH |
+| `impossible` | 7 | **0** |
+
+| endpoint | parameter | verdict |
+|---|---|---|
+| `/vulnerabilities/sqli/?Submit=Submit` | `id` | **found** |
+| `/vulnerabilities/brute/?Login=Login` | `username` | **found** |
+| `/vulnerabilities/sqli_blind/?Submit=Submit` | `id` | clean — blind SQLi emits no error |
+| `csrf`, `fi`, `xss_r` (4 parameters) | — | clean — not SQL |
+
+Correct classification now rather than "unclassified injection", and the blind
+module is the precision control: discovered, probed, and reporting nothing,
+which is the honest answer for an error-based detector.
+
+### The pattern, and what it cost to make it safe
+
+The existing set in `INPV-05` was measured against the **902 real response
+documents** captured across every run in this report. `SQLITE_ERROR` fired
+**eleven times on Juice Shop's own JavaScript bundle**, which contains the
+string inside a challenge description — "Did you spot the error message with
+the `SQLITE_ERROR` …". A `.js` file is a discovered endpoint like any other, so
+that would be a HIGH-severity finding for a request that proved nothing.
+
+Three tightenings, each forced by a control that failed:
+
+| alternative | fired on | tightened to |
+|---|---|---|
+| `SQLITE_ERROR`, `SQL syntax`, `SQLSTATE` | a JS bundle, a tutorial, a JSON field | full sentences, `SQLSTATE[…]` with its brackets |
+| `pg_query()` | a changelog: "pg_query() calls are now parameterised" | requires `Query failed` on the same line |
+| `ORA-\d{5}` | a docs page: "See ORA-01756 in the Oracle reference" | requires Oracle's `code: message` form |
+
+`.*` appears nowhere: an evaluator reads a whole response, so `Warning.*mysqli_`
+can join a warning in one place to a driver name in another and call the pair
+an error. Where context is needed it is bounded and line-scoped.
+
+Final pattern against the same 902 documents: **4 matches, all of them DVWA's
+genuine error, nothing else.** Against `tests/fixtures/sql_error_pages.py` —
+14 real error strings across MySQL, PostgreSQL, Oracle, MSSQL, SQLite, PDO,
+JDBC and Hibernate, plus 11 benign lookalikes — **14 detected, 0 false
+positives.**
+
 ### What made the difference
 
 **The companion fields.** DVWA answers `?id=<payload>` with nothing and
@@ -230,13 +285,18 @@ this branch:
 - **Form extraction closed the largest gap.** DVWA went from 0 parameters and
   an untestable surface to 2 true positives under a working control.
 - The ranked next steps this measurement now supports:
-  1. a SQL-error detector — the runnable set has none, and INPV-11.2 caught
-     DVWA's SQLi only because PHP happened to raise a fatal error,
-  3. katana's silence on DVWA, or accepting the browser crawler as the
-     fallback and giving it depth beyond forms.
+  1. katana's silence on DVWA, or accepting the browser crawler as the fallback
+     and giving it depth beyond forms,
+  2. whether the catalogue scope guard should be able to tell a payload from a
+     destination — the only thing now standing between WSTG-CLNT-04 and two
+     more validator classes,
+  3. blind injection of any kind. This lane has no timing and no
+     boolean-differential capability, so DVWA's `sqli_blind` — discovered,
+     probed, and correctly silent — stays out of reach until it does. That is
+     the largest remaining category of real SQL injection.
 
 None of these is a scanner integration. The five integrations are in and
-verified; what limits findings now is payload breadth and detector coverage.
+verified; what limits findings now is discovery reach and detection technique.
 
 ## Reproducing this
 
