@@ -13,6 +13,7 @@ from orchestrator.testcase.schema import TestCase, TestStep, Evaluator
 from orchestrator.testcase.scope import Scope, ScopeViolation, check_command, from_target
 from orchestrator.tool_executor import execute_tool
 from orchestrator.testcase.schema import endpoint_of
+from urllib.parse import urlsplit
 
 
 class Finding(BaseModel):
@@ -86,6 +87,24 @@ def _render(template: str, ctx: dict[str, Any]) -> str:
                 cur = getattr(cur, part, "")
         return str(cur if cur is not None else "")
     return _TEMPLATE_RX.sub(repl, template)
+
+
+def _origin_fields(endpoint: str) -> dict[str, str]:
+    """`origin` and `origin_host` for a target, derived from its own endpoint.
+
+    Computed here rather than imported from orchestrator.integrations: that
+    package imports this one, so reaching back into it makes a cycle — and the
+    runner has no business depending on one lane's contracts to render a
+    catalogue case.
+    """
+    if not endpoint:
+        return {"origin": "", "origin_host": ""}
+    parts = urlsplit(endpoint)
+    host = (parts.hostname or "").lower().rstrip(".")
+    if not host:
+        return {"origin": "", "origin_host": ""}
+    port = parts.port or (443 if parts.scheme == "https" else 80)
+    return {"origin": f"{parts.scheme.lower()}://{host}:{port}", "origin_host": host}
 
 
 def _eval_when(when: str | None, findings: list[Finding], last: StepResult | None) -> bool:
@@ -436,7 +455,16 @@ async def run_test_case(
             if not _eval_when(step.when, result.findings, last_step):
                 continue
 
-            ctx: dict[str, Any] = {**target, "step": {s.step: s for s in result.steps}}
+            # DERIVED from the endpoint, so every caller has them without
+            # having to know they exist. WSTG-CLNT-04 needs the target's own
+            # origin to build a bypass that carries an allow-listed string:
+            # a naive validator asking "does the target contain our host" is
+            # satisfied by `//marker/?x=<our origin>`, which redirects to the
+            # marker. Deriving here rather than in one lane's adapter keeps the
+            # case runnable from the sweep and the Test Lab too.
+            derived = _origin_fields(endpoint_of(target))
+            ctx: dict[str, Any] = {**derived, **target,
+                                   "step": {s.step: s for s in result.steps}}
             if tc.id == "WSTG-BUSL-04":
                 ctx["parallel_n"] = max(2, min(20, int(target.get("parallel_n", 2) or 2)))
             cmd = _render(step.command, ctx)

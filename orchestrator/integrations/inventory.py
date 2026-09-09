@@ -54,6 +54,10 @@ COLLECTOR_CASES = ("WSTG-INPV-19",)
 # is not the command its author wrote.
 IDENTITY_FIELDS = frozenset({"cookie", "auth_header"})
 
+# Derived by run_test_case from the endpoint itself, so a case referencing one
+# is never waiting on something a caller forgot to supply.
+DERIVED_FIELDS = frozenset({"origin", "origin_host"})
+
 _PROBE_URL = "https://erlik-capability-probe.invalid/"
 _PROBE_PARAMETER = "erlikprobe"
 
@@ -71,7 +75,7 @@ def unfilled_fields(command: str, target: dict) -> list[str]:
     from orchestrator.testcase.runner import _TEMPLATE_RX
     missing = []
     for field in _TEMPLATE_RX.findall(command):
-        if field.startswith("step.") or field in IDENTITY_FIELDS:
+        if field.startswith("step.") or field in IDENTITY_FIELDS or field in DERIVED_FIELDS:
             continue
         if not str(target.get(field, "") or "").strip():
             missing.append(field)

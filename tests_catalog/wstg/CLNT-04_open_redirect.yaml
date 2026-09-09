@@ -72,6 +72,60 @@ steps:
 
   # Redirects that never use a Location header (meta refresh, or a scripted
   # navigation built from the query string) need the body inspected instead.
+  # Bypasses that carry an ALLOW-LISTED STRING. Measured against
+  # tests/fixtures/open_redirect_validators.py, which implements one naive
+  # check per route, written independently of these payloads:
+  #
+  #                              startswith  contains  scheme-block  leading-//
+  #   //marker/  (above)              -          -        BYPASS         -
+  #   //marker/?x=<origin>            -       BYPASS      BYPASS         -
+  #   //<origin host>@marker/         -       BYPASS      BYPASS         -
+  #
+  # TWO CLASSES ARE NOT REACHED, on purpose:
+  #
+  #   startswith / leading-// need a payload whose FIRST characters are a
+  #   scheme'd URL or a backslash — `<origin>@marker/`, `/\/marker`. Both name
+  #   a host outside scope in a shape check_command recognises, so the guard
+  #   refuses the step. The guard is right: it cannot tell a payload from a
+  #   destination, and `.test` resolves to localhost in many dev setups, so
+  #   widening it for a marker would be an SSRF hole. Reaching those classes is
+  #   a scope-model decision, not a payload one.
+  #
+  #   "contains one of a hardcoded REMOTE allowlist" — Juice Shop's shape — is
+  #   defeated by NONE of these and cannot be: a scanner cannot guess the list.
+  - name: allowlisted_string_in_query
+    tool: curl
+    when: no_finding_yet
+    # A validator asking "does the target mention our own site" is satisfied by
+    # a query parameter, while the authority the browser resolves is the
+    # marker. --data, not --data-urlencode: the payload must stay a literal
+    # `//host/`.
+    command: >-
+      curl -s -b "{{cookie}}" -H "{{auth_header}}" -D - -o /dev/null -G "{{url}}" --data "{{parameter}}=//erlik-redir.oast.test/?x={{origin}}"
+    evaluators:
+      - type: regex
+        pattern: '^Location:[ \t]*(?:https?:)?//erlik-redir\.oast\.test'
+        emit_finding:
+          vuln_type: Open Redirect via Allow-listed String Elsewhere in the URL
+          severity: medium
+        stop_after: true
+
+  - name: allowlisted_host_in_userinfo
+    tool: curl
+    when: no_finding_yet
+    # The same trick against a validator that looks for the host rather than
+    # the origin: everything before the `@` is userinfo, which browsers and
+    # curl discard when choosing where to connect.
+    command: >-
+      curl -s -b "{{cookie}}" -H "{{auth_header}}" -D - -o /dev/null -G "{{url}}" --data "{{parameter}}=//{{origin_host}}@erlik-redir.oast.test/"
+    evaluators:
+      - type: regex
+        pattern: '^Location:[ \t]*(?:https?:)?//[^/\s]*@erlik-redir\.oast\.test'
+        emit_finding:
+          vuln_type: Open Redirect via Authority Confusion (allow-listed host in userinfo)
+          severity: medium
+        stop_after: true
+
   - name: client_side_sink_review
     tool: curl
     when: no_finding_yet

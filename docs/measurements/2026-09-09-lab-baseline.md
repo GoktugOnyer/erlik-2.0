@@ -64,10 +64,37 @@ an allow-listed string in the query rather than at the start:
   -> 302 Location: http://evil.test/?x=https://github.com/juice-shop/juice-shop
 ```
 
-`WSTG-CLNT-04` sends `//erlik-redir.oast.test/` and an encoded variant, and
-neither has that shape. This is a genuine miss of a known vulnerability on a
-parameter the lane **did** discover and **did** probe — a case-payload gap, not
-a discovery or plumbing gap. It is the clearest single improvement available.
+`WSTG-CLNT-04` sent `//erlik-redir.oast.test/` and an encoded variant, and
+neither has that shape. A genuine miss of a known vulnerability on a parameter
+the lane **did** discover and **did** probe — a case-payload gap, not a
+discovery or plumbing gap.
+
+**Addressed, but not for Juice Shop.** Two allow-listed-string payloads were
+added and measured against `tests/fixtures/open_redirect_validators.py`, which
+implements one naive validator per route, written independently of the
+payloads:
+
+| payload | startswith | contains | scheme-block | leading-`//` |
+|---|---|---|---|---|
+| `//marker/` (existing) | – | – | **bypass** | – |
+| `//marker/?x=<origin>` (new) | – | **bypass** | **bypass** | – |
+| `//<origin host>@marker/` (new) | – | **bypass** | **bypass** | – |
+
+So the case now covers a validator class it could not reach before. Two classes
+stay out of reach on purpose: `startswith` and leading-`//` need a payload
+beginning with a scheme'd URL or a backslash, and `check_command` refuses any
+step naming an out-of-scope host in a shape it recognises. The guard is right —
+it cannot tell a payload from a destination, and `.test` resolves to localhost
+in many development setups, so widening it for a marker would be an SSRF hole.
+Reaching those classes is a scope-model decision, not a payload one.
+
+And Juice Shop's own shape — "contains one of a hardcoded REMOTE allowlist" —
+is defeated by none of them and cannot be: only its
+`https://github.com/juice-shop/juice-shop` entry is accepted, and neither the
+app's own origin nor any of the three off-site links it publishes
+(`owasp-juice.shop`, `owasp.org`, a YouTube URL) is on the list. A scanner
+cannot guess it. Re-measured after the change: still **0 findings on Juice
+Shop, and no false positive**, which is the correct result.
 
 `WSTG-SESS-02` was truncated to its 30-URL share of the budget and said so.
 
@@ -203,9 +230,7 @@ this branch:
 - **Form extraction closed the largest gap.** DVWA went from 0 parameters and
   an untestable surface to 2 true positives under a working control.
 - The ranked next steps this measurement now supports:
-  1. an allow-list-bypass payload for `WSTG-CLNT-04` (the one known
-     vulnerability reached and missed on payload shape),
-  2. a SQL-error detector — the runnable set has none, and INPV-11.2 caught
+  1. a SQL-error detector — the runnable set has none, and INPV-11.2 caught
      DVWA's SQLi only because PHP happened to raise a fatal error,
   3. katana's silence on DVWA, or accepting the browser crawler as the
      fallback and giving it depth beyond forms.
