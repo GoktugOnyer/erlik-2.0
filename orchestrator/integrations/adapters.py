@@ -13,7 +13,7 @@ from urllib.parse import urlsplit, urljoin, urlencode, parse_qsl, urlunsplit
 import yaml
 
 from .contracts import (AssessmentConfig, Endpoint, IntegrationFinding, StageResult,
-                        fingerprint, parameter_names)
+                        fingerprint, form_endpoint, parameter_names)
 from .runtime import Sandbox, IMAGES, JobOutput
 from .security import SecretStore, secret_values, redact
 from . import persistence as db
@@ -288,13 +288,29 @@ class KatanaAdapter(BaseAdapter):
             for request in browser["requests"]:
                 browser_endpoints.append(Endpoint(url=request["url"], method=request["method"], source="playwright",
                                                   identity=ctx.identity_id, parameters=parameter_names(request["url"])))
+            for form in browser.get("forms") or []:
+                built = form_endpoint(form, browser.get("url") or ctx.target)
+                if not built:
+                    continue
+                url, names = built
+                browser_endpoints.append(Endpoint(url=url, method="GET", source="form",
+                                                  identity=ctx.identity_id, parameters=names))
             seeds = [ctx.target, *browser["links"], *[e.url for e in browser_endpoints]]
             from .egress_policy import EgressPolicy
             seeds = [u for u in dict.fromkeys(seeds) if EgressPolicy(sandbox.policy).check(u)[0]][:ctx.config.max_urls]
             seed_path = sandbox.write("seeds.txt", "\n".join(seeds))
             argv[1:3] = ["-list", seed_path]
-        if ctx.config.headless:
-            argv += ["-headless", "-no-sandbox", "-system-chrome", "-headless-options", "disable-quic,proxy-bypass-list=<-loopback>"]
+        # katana is NOT asked to launch its own browser, even in headless mode.
+        # Its headless path extracts a `leakless` helper into /tmp and execs it,
+        # and the job tmpfs is mounted noexec — which is correct for a sandbox
+        # running scanners against a hostile target, and not something to
+        # weaken for a crawler's convenience. Measured: katana exits 1 with
+        # "fork/exec /tmp/leakless-…: permission denied" and the whole stage
+        # fails, discarding a crawl that had otherwise worked.
+        #
+        # Nothing is lost. The rendered pass is Playwright's, above, and katana
+        # is seeded with everything it found; katana's own browser would be a
+        # second renderer doing the same work.
         output = await sandbox.run(argv)
         result = StageResult(endpoints=browser_endpoints, metadata={"version": "1.2.2", "depth": ctx.config.crawl_depth})
         seen = {(e.url, e.method) for e in browser_endpoints}

@@ -53,6 +53,14 @@ def main():
                     files={"file": ("erlik.json", json.dumps(config["report"]), "application/json")})
             print(json.dumps({"status": response.status_code, "body": response.text}))
     elif action == "browser":
+        FORM_SCRIPT = """() => Array.from(document.querySelectorAll('form')).slice(0, 25).map(f => ({
+            action: f.action || '',
+            method: (f.getAttribute('method') || 'GET').toUpperCase(),
+            controls: Array.from(f.elements).slice(0, 40)
+                .filter(e => e.name)
+                .map(e => ({name: e.name,
+                            type: (e.type || '').toLowerCase(),
+                            value: typeof e.value === 'string' ? e.value.slice(0, 200) : ''}))}))"""
         from playwright.sync_api import sync_playwright
         with sync_playwright() as pw:
             browser = pw.chromium.launch(executable_path="/usr/bin/chromium", headless=True,
@@ -65,7 +73,34 @@ def main():
             page.on("request", lambda r: observed.append({"url": r.url, "method": r.method}))
             page.goto(config["url"], wait_until="networkidle", timeout=30000)
             links = page.locator("a[href]").evaluate_all("nodes => nodes.map(n => n.href)")
-            print(json.dumps({"requests": observed, "links": links, "url": page.url}))
+            # Form controls, because an input the crawler cannot see is an input
+            # nothing can test. `f.action` is already absolute in the DOM (the
+            # browser resolves action="#" to the page URL), and f.elements covers
+            # input, select, textarea and button alike. Values come along because
+            # a form's OTHER fields are usually required for its handler to run
+            # at all — DVWA's SQLi page returns nothing for ?id=<payload> and the
+            # rows for ?id=<payload>&Submit=Submit.
+            forms = page.evaluate(FORM_SCRIPT)
+            # One level deeper, for FORMS only. A single-page crawl finds the
+            # forms on the landing page, and applications keep their inputs one
+            # click in — DVWA's menu is all links and every injectable form is
+            # behind one. Bounded, same-origin, and every request still goes
+            # through the proxy, which refuses anything out of scope.
+            origin = page.url.split("/")[0] + "//" + page.url.split("/")[2] if "//" in page.url else ""
+            seen_pages = {page.url}
+            for href in links:
+                if len(seen_pages) > int(config.get("form_pages", 20)):
+                    break
+                if not href.startswith(origin) or href in seen_pages:
+                    continue
+                seen_pages.add(href)
+                try:
+                    page.goto(href, wait_until="domcontentloaded", timeout=15000)
+                    forms += page.evaluate(FORM_SCRIPT)
+                except Exception:
+                    continue                       # an unreachable link is not a failure
+            print(json.dumps({"requests": observed, "links": links, "forms": forms,
+                              "pages_visited": len(seen_pages), "url": config["url"]}))
             browser.close()
     elif action == "baseline_browser":
         # Execute the repository's original crawler with transport-only shims:

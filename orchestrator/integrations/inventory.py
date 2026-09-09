@@ -198,20 +198,27 @@ async def parameters_by_url(context, policy) -> dict[str, list[str]]:
     anonymous stage — the same separation seeds() keeps for URLs.
     """
     rows = await db.rows(
-        "SELECT url,parameters FROM integration_endpoints "
+        "SELECT url,parameters,sources FROM integration_endpoints "
         "WHERE session_id=? AND identity_id=? ORDER BY url",
         (context.session_id, context.identity_id))
     # The operator's own target is a candidate here for the same reason seeds()
     # treats it as one: if they pointed the assessment at
     # https://app.test/search?q=… they named a parameter, and waiting for a
     # crawler to rediscover it would be perverse.
-    candidates = [{"url": context.target, "parameters": json.dumps(parameter_names(context.target))}, *rows]
+    candidates = [{"url": context.target, "sources": "[]",
+                   "parameters": json.dumps(parameter_names(context.target))}, *rows]
     checker, found, dropped = EgressPolicy(policy), {}, 0
     for row in candidates:
         names = [n for n in json.loads(row["parameters"] or "[]") if PARAMETER_NAME.match(n)]
         if not names:
             continue
-        url = base_url(row["url"])
+        # A FORM endpoint keeps its query: that query is the form's companion
+        # fields, which its handler usually requires, and it deliberately holds
+        # none of the names about to be tested — so appending one cannot
+        # duplicate it. A crawler-derived URL is stripped, because there the
+        # query holds the very names being tested and their sample values.
+        from_form = "form" in json.loads(row.get("sources") or "[]")
+        url = row["url"] if from_form else base_url(row["url"])
         # Re-checked, because stripping the query produced a URL that was never
         # itself discovered or approved.
         if looks_injectable(url) or not checker.check(url, "GET")[0]:

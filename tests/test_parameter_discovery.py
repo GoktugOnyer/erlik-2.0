@@ -468,3 +468,75 @@ async def test_a_crawler_that_finds_nothing_does_not_report_success(database, tm
     assert result.endpoints == []
     assert result.status == "partial", "an empty inventory is not a clean result"
     assert "no endpoints" in (result.reason or "")
+
+
+class TestFormControlsBecomeTestableParameters:
+    """An input the crawler cannot see is an input nothing can test. DVWA's
+    injectable fields are all behind GET forms, which is why the lane found
+    nothing there in the 2026-09-09 baseline."""
+
+    DVWA_SQLI = {"action": "http://dvwa/vulnerabilities/sqli/", "method": "GET", "controls": [
+        {"name": "id", "type": "text", "value": ""},
+        {"name": "Submit", "type": "submit", "value": "Submit"},
+        {"name": "user_token", "type": "hidden", "value": "98185e14d0ebc2fd25e0691270fce03f"},
+    ]}
+
+    def test_the_companion_fields_ride_along(self):
+        """Measured on the running application: `?id=<payload>` returns nothing
+        and `?id=<payload>&Submit=Submit` returns the rows. A discovery that
+        reported `id` alone would hand every case a probe that cannot reach the
+        handler — an input discovered and untestable, reported as tested."""
+        from orchestrator.integrations.contracts import form_endpoint
+        url, names = form_endpoint(self.DVWA_SQLI, "http://dvwa/vulnerabilities/sqli/")
+        assert names == ["id"], "only the control an operator would type into"
+        assert "Submit=Submit" in url and "user_token=" in url
+        assert "id=" not in url, "the name under test must not already be in the query"
+
+    def test_a_post_form_is_not_a_query_parameter_source(self):
+        """Its controls are BODY parameters; probing them as query parameters is
+        the same category error as trusting ZAP's `param`."""
+        from orchestrator.integrations.contracts import form_endpoint
+        assert form_endpoint({**self.DVWA_SQLI, "method": "POST"}, "http://dvwa/") is None
+
+    @pytest.mark.parametrize("controls,why", [
+        ([{"name": "go", "type": "submit", "value": "Go"}], "nothing an operator would type into"),
+        ([{"name": "a#b", "type": "text", "value": ""}], "the name is not a parameter name"),
+        ([], "no controls at all"),
+    ])
+    def test_a_form_with_nothing_to_test_produces_no_endpoint(self, controls, why):
+        from orchestrator.integrations.contracts import form_endpoint
+        assert form_endpoint({"action": "http://a.test/", "method": "GET", "controls": controls},
+                             "http://a.test/") is None, why
+
+    def test_a_companion_value_cannot_break_out_of_the_query(self):
+        """Companion values are target-controlled text going into a URL."""
+        from orchestrator.integrations.contracts import form_endpoint
+        url, names = form_endpoint({"action": "http://a.test/s", "method": "GET", "controls": [
+            {"name": "q", "type": "text", "value": ""},
+            {"name": "t", "type": "hidden", "value": "a&b=c#d /x?y"}]}, "http://a.test/s")
+        assert names == ["q"]
+        assert url == "http://a.test/s?t=a%26b%3Dc%23d+%2Fx%3Fy"
+        curl_request(f'curl -s -G "{url}" --data "q=probe"')     # must still parse
+
+    def test_every_parameter_case_joins_a_companion_query_correctly(self):
+        """WSTG-CLNT-04 used `"{{url}}?{{parameter}}=…"`, which against a form
+        endpoint produces `?Submit=Submit?id=…` — one parameter whose value
+        contains a question mark, silently probing nothing."""
+        from orchestrator.testcase.runner import _render
+        form_url = "http://dvwa/vulnerabilities/sqli/?Submit=Submit&user_token=abc"
+        for case_id in ("WSTG-CLNT-04", "WSTG-INPV-11.2", "WSTG-INPV-18"):
+            for step in find_by_id(case_id).steps:
+                _, url, _ = curl_request(_render(step.command, {"url": form_url, "parameter": "id"}))
+                assert url.count("?") == 1, f"{case_id}/{step.name}: {url}"
+                assert "Submit=Submit" in url, f"{case_id}/{step.name} dropped the companion"
+
+    async def test_a_form_endpoint_keeps_its_query_a_crawled_one_does_not(self, database):
+        await database.persist_result("s", "discovery", StageResult(endpoints=[
+            Endpoint(url="https://app.test/f?Submit=Submit", source="form",
+                     identity="reader", parameters=["id"]),
+            Endpoint(url="https://app.test/c?q=hello", source="katana",
+                     identity="reader", parameters=["q"]),
+        ]))
+        found = await parameters_by_url(Ctx(), POLICY)
+        assert found == {"https://app.test/f?Submit=Submit": ["id"],
+                         "https://app.test/c": ["q"]}

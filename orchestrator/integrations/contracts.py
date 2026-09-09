@@ -5,7 +5,7 @@ import hashlib
 import json
 from typing import Literal
 import re
-from urllib.parse import parse_qsl, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from orchestrator.testcase.scope import Scope, check_url
@@ -219,6 +219,58 @@ def parameter_names(url: str, *extra: str) -> list[str]:
             seen.add(name)
             out.append(name)
     return out
+
+
+# Control types whose value the OPERATOR would type. Everything else named on a
+# form — submit buttons, hidden tokens, checkboxes — is a COMPANION: not worth
+# probing, and usually required for the form's handler to run at all.
+TESTABLE_CONTROLS = frozenset({"", "text", "search", "url", "email", "tel", "number",
+                               "password", "textarea", "date", "datetime-local"})
+
+# Bounds on target-controlled text that becomes part of a URL.
+MAX_FORM_PARAMETERS = 10
+MAX_COMPANION_QUERY = 512
+
+
+def form_endpoint(form: dict, page_url: str) -> tuple[str, list[str]] | None:
+    """A GET form as (url carrying its companion fields, names worth testing).
+
+    GET only. A POST form's controls are BODY parameters, and probing them as
+    query parameters is the same category error as trusting ZAP's `param` —
+    the name is real, the location is invented.
+
+    The companion query is why this is worth doing at all. DVWA's SQLi page
+    answers `?id=<payload>` with nothing and `?id=<payload>&Submit=Submit` with
+    the rows, so a discovery that reported `id` alone would hand every case a
+    probe that cannot reach the handler — an input discovered and untestable,
+    reported as tested. The submit button and hidden token ride along; the
+    testable controls do not, so a case appending its own value cannot collide
+    with one already in the query.
+    """
+    if (form.get("method") or "GET").upper() != "GET":
+        return None
+    action = (form.get("action") or page_url or "").strip()
+    if not action or urlsplit(action).scheme not in ("http", "https"):
+        return None
+    testable, companions = [], []
+    for control in form.get("controls") or []:
+        name = (control.get("name") or "").strip()
+        if not name or not PARAMETER_NAME.match(name):
+            continue
+        if (control.get("type") or "") in TESTABLE_CONTROLS:
+            if name not in testable:
+                testable.append(name)
+        else:
+            companions.append((name, str(control.get("value") or "")))
+    if not testable:
+        return None
+    parts = urlsplit(action)
+    # urlencode, because a companion VALUE is target-controlled text going into
+    # a URL. The form's own query is dropped: `action` may repeat what the
+    # controls already say, and the controls are the authoritative version.
+    query = urlencode(companions)[:MAX_COMPANION_QUERY].rstrip("&")
+    url = urlunsplit((parts.scheme, parts.netloc, parts.path, query, ""))
+    return url, testable[:MAX_FORM_PARAMETERS]
 
 
 class Endpoint(StrictModel):

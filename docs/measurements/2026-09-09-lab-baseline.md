@@ -71,7 +71,7 @@ a discovery or plumbing gap. It is the clearest single improvement available.
 
 `WSTG-SESS-02` was truncated to its 30-URL share of the budget and said so.
 
-## Target B — DVWA
+## Target B — DVWA, first pass (before form extraction)
 
 | | |
 |---|---|
@@ -103,9 +103,64 @@ Note DVWA sets `HttpOnly; SameSite=Strict` on both `PHPSESSID` and `security`,
 so `WSTG-SESS-02` reporting nothing there is a correct negative on the one
 endpoint it did reach.
 
+## Target B — DVWA, second pass (with form extraction)
+
+Form-control extraction was added to the browser crawler in response to the
+first pass, along with one bounded level of depth for forms only. Same target,
+same cases, same identity but for one cookie:
+
+| | first pass | second pass |
+|---|---|---|
+| endpoints | 6 | **36–37** |
+| parameters | **0** | **7–8** |
+| findings at `security=low` | 0 | **2** |
+| findings at `security=impossible` | 0 | **0** |
+
+Parameters found are DVWA's actual attack surface: `id` on `sqli` and
+`sqli_blind`, `name` on `xss_r`, `username` on `brute`, the password fields on
+`csrf`, and `page` on `fi`.
+
+### The two findings, and why they are real
+
+Both are `WSTG-INPV-11.2`, HIGH, `suspected`:
+
+| Finding | Ground truth at `low` | at `impossible` |
+|---|---|---|
+| `/vulnerabilities/sqli/?Submit=Submit`, param `id` | `Fatal error: Uncaught mysqli_sql_exception` | no error |
+| `/vulnerabilities/brute/?Login=Login`, param `username` | `Fatal error: Uncaught mysqli_sql_exception` | no error |
+
+Same session, same endpoints, same case — the only difference is the `security`
+cookie. Both findings vanish at `impossible`, so they track the vulnerability
+rather than the application. That is the differential this lab exists to
+provide, and it is the first time the lane has produced a true positive under
+it.
+
+Precision held: `sqli_blind` was discovered and probed and **not** reported —
+blind SQL injection emits no error, and this case looks for interpreter errors
+— and `xss_r`, `csrf` and `fi` were discovered but not reported by a case that
+does not test for their classes. No false positives.
+
+### What made the difference
+
+**The companion fields.** DVWA answers `?id=<payload>` with nothing and
+`?id=<payload>&Submit=Submit` with the rows, so a discovery that reported `id`
+alone would have handed every case a probe that cannot reach the handler. Form
+endpoints therefore carry the form's submit button and hidden token in their
+query, and the testable controls are kept out of it so a case appending its own
+value cannot collide.
+
+**One catalogue pattern was dead.** `WSTG-INPV-11.2` looked for
+`PHP (Parse|Fatal) error`, which is PHP's *log* format. Its HTTP output is
+`<b>Fatal error</b>:` with no `PHP ` prefix, and every case in this lane reads
+the HTTP response — so that alternative could never match. Widened to
+`(?:PHP )?(Parse|Fatal) error`, which matched **0 of 796** evidence documents
+collected across every measurement run in this report, and matches DVWA's
+actual response. Without it the lane reached the vulnerability and did not
+report it.
+
 ## What measuring found that the fixture could not
 
-Four defects, each invisible on a one- or two-URL fixture and each fixed in
+Five defects, each invisible on a one- or two-URL fixture and each fixed in
 this branch:
 
 1. **A stage that ran out of time discarded everything it had found.**
@@ -128,6 +183,13 @@ this branch:
    120 URLs × 5 cases × 3 steps ≈ 1800 requests ≈ 8.8 minutes against a default
    180s stage budget. The share-based cap keeps a run inside its budget, but
    the per-request cost is the reason breadth is expensive here.
+5. **The lane asked katana to launch a browser its own sandbox forbids.** With
+   `headless`, katana extracts a `leakless` helper into `/tmp` and execs it;
+   the job tmpfs is `noexec`, so katana exits 1 and the whole stage failed,
+   discarding a crawl that had otherwise worked. A non-executable `/tmp` is
+   correct for a sandbox running scanners against a hostile target, so the
+   flag went rather than the hardening — Playwright already provides the
+   rendered pass and seeds katana with what it found.
 
 ## Honest summary
 
@@ -138,12 +200,32 @@ this branch:
 - **Recall is the weak side, and it is not the plumbing.** One known
   vulnerability was reached and missed on payload shape; a whole target was
   never reached at all.
-- The ranked next steps this measurement supports, in order of expected value:
-  1. form-control extraction in the browser crawler (unblocks DVWA-shaped apps
-     entirely — the code already exists in `scripts/pw-crawl.js`),
-  2. an allow-list-bypass payload for `WSTG-CLNT-04`,
-  3. diagnosing katana's silence on DVWA, or accepting the browser crawler as
-     the fallback and giving it depth.
+- **Form extraction closed the largest gap.** DVWA went from 0 parameters and
+  an untestable surface to 2 true positives under a working control.
+- The ranked next steps this measurement now supports:
+  1. an allow-list-bypass payload for `WSTG-CLNT-04` (the one known
+     vulnerability reached and missed on payload shape),
+  2. a SQL-error detector — the runnable set has none, and INPV-11.2 caught
+     DVWA's SQLi only because PHP happened to raise a fatal error,
+  3. katana's silence on DVWA, or accepting the browser crawler as the
+     fallback and giving it depth beyond forms.
 
 None of these is a scanner integration. The five integrations are in and
-verified; what limits findings now is discovery reach and payload breadth.
+verified; what limits findings now is payload breadth and detector coverage.
+
+## Reproducing this
+
+`docker compose up -d juice-shop dvwa dvwa-db`, then point the lane at
+`http://juice-shop:3000` or `http://dvwa/index.php` with
+`ERLIK_INTEGRATION_EGRESS_NETWORK=erlik-20_pentest-net`. DVWA needs
+`setup.php` run once, a login, and BOTH cookies in the identity — its security
+level comes from the `security` cookie and defaults to `impossible` when that
+cookie is absent, which silently turns the vulnerable target into a hardened
+one.
+
+One caveat on this run: the worker image could not be rebuilt from
+`Dockerfile.worker` here, because the build stalls fetching registry metadata
+for its base images and this environment has no registry access. The updated
+`worker.py` was applied to the existing image with `docker cp` + `docker
+commit`, and verified byte-identical to the source file in the repository. CI
+should build it the normal way.

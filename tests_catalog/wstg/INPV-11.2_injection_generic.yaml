@@ -40,7 +40,7 @@ steps:
       curl -s -b "{{cookie}}" -H "{{auth_header}}" -G "{{url}}" --data-urlencode "{{parameter}}=erlik'probe"
     evaluators:
       - type: regex
-        pattern: 'XPathException|javax\.xml\.xpath|SpelEvaluationException|ognl\.OgnlException|jakarta\.el|javax\.el\.ELException|Traceback \(most recent call last\)|PHP (Parse|Fatal) error|System\.Data\.\w+Exception|NoMethodError|Elixir\.\w+Error'
+        pattern: 'XPathException|javax\.xml\.xpath|SpelEvaluationException|ognl\.OgnlException|jakarta\.el|javax\.el\.ELException|Traceback \(most recent call last\)|(?:PHP )?(Parse|Fatal) error|System\.Data\.\w+Exception|NoMethodError|Elixir\.\w+Error'
         emit_finding:
           vuln_type: Parameter reaches an interpreter (unclassified injection — quote)
           severity: high
@@ -53,7 +53,7 @@ steps:
       curl -s -b "{{cookie}}" -H "{{auth_header}}" -G "{{url}}" --data-urlencode "{{parameter}}=erlik\"|]}$(){}"
     evaluators:
       - type: regex
-        pattern: 'XPathException|javax\.xml\.xpath|SpelEvaluationException|ognl\.OgnlException|jakarta\.el|javax\.el\.ELException|Traceback \(most recent call last\)|PHP (Parse|Fatal) error|System\.Data\.\w+Exception|NoMethodError'
+        pattern: 'XPathException|javax\.xml\.xpath|SpelEvaluationException|ognl\.OgnlException|jakarta\.el|javax\.el\.ELException|Traceback \(most recent call last\)|(?:PHP )?(Parse|Fatal) error|System\.Data\.\w+Exception|NoMethodError'
         emit_finding:
           vuln_type: Parameter reaches an interpreter (unclassified injection — metacharacters)
           severity: high

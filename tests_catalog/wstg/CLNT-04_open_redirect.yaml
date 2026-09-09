@@ -12,6 +12,15 @@ target_schema:
   optional: [parameter, cookie, auth_header]
 
 steps:
+  # `-G ... --data` rather than "{{url}}?{{parameter}}=…": the URL may already
+  # carry a query. A form-derived endpoint arrives with its companion fields in
+  # one (DVWA's SQLi page needs `Submit=Submit` before its handler runs at all),
+  # and appending a literal "?" to that produces `?Submit=Submit?id=…` — one
+  # parameter whose value contains a question mark, silently probing nothing.
+  # curl joins with "?" or "&" as appropriate. --data, not --data-urlencode,
+  # because this payload must stay a raw `//host/` to be a scheme-relative
+  # redirect; the encoded variant is a separate step below.
+  #
   # Detection only: -D - dumps the response headers, -o /dev/null discards the
   # body, and no -L is used, so the redirect is NEVER followed and the marker
   # host is never contacted. A scheme-relative //host payload defeats naive
@@ -19,7 +28,7 @@ steps:
   - name: declared_parameter_probe
     tool: curl
     command: >-
-      curl -s -b "{{cookie}}" -H "{{auth_header}}" -D - -o /dev/null "{{url}}?{{parameter}}=//erlik-redir.oast.test/"
+      curl -s -b "{{cookie}}" -H "{{auth_header}}" -D - -o /dev/null -G "{{url}}" --data "{{parameter}}=//erlik-redir.oast.test/"
     evaluators:
       - type: regex
         # Only a Location that STARTS with the marker host is off-site; the
@@ -35,7 +44,7 @@ steps:
     tool: curl
     when: no_finding_yet
     command: >-
-      curl -s -b "{{cookie}}" -H "{{auth_header}}" -D - -o /dev/null "{{url}}?redirect=//erlik-redir.oast.test/&next=//erlik-redir.oast.test/&url=//erlik-redir.oast.test/&returnUrl=//erlik-redir.oast.test/&dest=//erlik-redir.oast.test/&continue=//erlik-redir.oast.test/"
+      curl -s -b "{{cookie}}" -H "{{auth_header}}" -D - -o /dev/null -G "{{url}}" --data "redirect=//erlik-redir.oast.test/&next=//erlik-redir.oast.test/&url=//erlik-redir.oast.test/&returnUrl=//erlik-redir.oast.test/&dest=//erlik-redir.oast.test/&continue=//erlik-redir.oast.test/"
     evaluators:
       - type: regex
         pattern: '^Location:[ \t]*(?:https?:)?//erlik-redir\.oast\.test'
@@ -53,7 +62,7 @@ steps:
     tool: curl
     when: no_finding_yet
     command: >-
-      curl -s -b "{{cookie}}" -H "{{auth_header}}" -D - -o /dev/null "{{url}}?{{parameter}}=%2f%2ferlik-redir.oast.test/"
+      curl -s -b "{{cookie}}" -H "{{auth_header}}" -D - -o /dev/null -G "{{url}}" --data "{{parameter}}=%2f%2ferlik-redir.oast.test/"
     evaluators:
       - type: regex
         pattern: '^Location:[ \t]*(?:https?:)?//erlik-redir\.oast\.test'
@@ -67,7 +76,7 @@ steps:
     tool: curl
     when: no_finding_yet
     command: >-
-      curl -s -b "{{cookie}}" -H "{{auth_header}}" "{{url}}?{{parameter}}=//erlik-redir.oast.test/"
+      curl -s -b "{{cookie}}" -H "{{auth_header}}" -G "{{url}}" --data "{{parameter}}=//erlik-redir.oast.test/"
     evaluators:
       - type: llm
         instruction: >-
