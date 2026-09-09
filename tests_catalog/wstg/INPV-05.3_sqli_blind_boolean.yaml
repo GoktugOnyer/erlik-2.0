@@ -1,0 +1,128 @@
+id: WSTG-INPV-05.3
+name: SQL Injection (blind, boolean differential)
+category: Input Validation
+attack_class: sqli
+severity: high
+references:
+  - https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/07-Input_Validation_Testing/05-Testing_for_SQL_Injection
+
+# THE CASE THAT INPV-05.2 SAYS IT CANNOT BE.
+# The error-based case documents its own blind spot: an injection that emits no
+# error is invisible to anything reading one response. DVWA's `sqli_blind`
+# module is discovered by the lane, probed by INPV-05.2, and correctly reports
+# nothing. This is the detector for it.
+#
+# THE VERDICT IS A COMPARISON, NOT A MATCH. Two payloads of identical length
+# differing in ONE character — `'1'='1` and `'1'='2` — are sent. On an endpoint
+# that concatenates the parameter into a query, the first is SQL-true and
+# returns the row, the second is SQL-false and returns nothing. On an endpoint
+# that does not, both are the same meaningless string and the responses are
+# identical.
+#
+# WHY THE CONTROLS DECIDE WHETHER THE TEST IS VALID AT ALL, MEASURED.
+# The comparison means nothing on an endpoint that reflects its input, or whose
+# page simply changes between requests. `control_a` and `control_b` carry two
+# different benign values of the same length; if their responses differ, the
+# evaluator reports NOTHING rather than reading that instability as a finding.
+# Same shape as WSTG-AUTHZ-04's anonymous probe: a control that says when the
+# result is not admissible.
+#
+# This is not hypothetical. Juice Shop's 404 handler renders the request path
+# into the page — `<title>Error: Unexpected path: /rest/track-order?id=...` —
+# so EVERY probe differs from every other, and the difference this case looks
+# for is there with no injection behind it. Without the control pair that is a
+# HIGH-severity SQL injection finding on every unmatched route of the
+# application. Measured against Juice Shop v17.1.1: the controls disagreed, the
+# case declined, and nothing was reported.
+#
+# WHY `warm_up` EXISTS. Measured against DVWA: the first request after login
+# carries a one-shot flash — "You have logged in as 'admin'" — and every
+# request after it is byte-stable. Without a discarded first request the
+# controls disagreed on a target that is KNOWN vulnerable, and the case
+# reported nothing. One-shot banners are not a DVWA quirk, so the warm-up is
+# structural rather than a workaround.
+#
+# WHY `1` AND NOT AN ARBITRARY VALUE. The true condition has to return a row
+# for the difference to exist, so the payload is built on a seed that the
+# application plausibly has. `1` covers numeric identifiers, which is what the
+# lane discovers most of. A parameter whose valid values are not guessable is
+# out of reach for this case, and time-based (WSTG-INPV-05.4) is the answer
+# there.
+#
+# WHY TWO FAMILIES. `1' AND '1'='1` closes a quoted literal; `1 AND 2=2` needs
+# an unquoted numeric context. Measured on DVWA, whose `user_id` is quoted but
+# integer-typed: the numeric family returns the row for BOTH conditions because
+# MySQL coerces `'1 AND 2=3'` to 1, so it correctly reports nothing and the
+# string family carries the finding. On an unquoted integer parameter the
+# reverse holds.
+
+target_schema:
+  required: [url, parameter]
+  optional: [cookie, auth_header]
+
+steps:
+  - name: warm_up
+    tool: curl
+    # Discarded on purpose. Absorbs any one-shot content — a login flash, a
+    # first-visit banner — that would otherwise land on control_a alone and
+    # invalidate the whole comparison.
+    command: >-
+      curl -s -b "{{cookie}}" -H "{{auth_header}}" -G "{{url}}" --data-urlencode "{{parameter}}=erlikprobezzz"
+
+  - name: control_a
+    tool: curl
+    command: >-
+      curl -s -b "{{cookie}}" -H "{{auth_header}}" -G "{{url}}" --data-urlencode "{{parameter}}=erlikprobeaaa"
+
+  - name: control_b
+    tool: curl
+    # A DIFFERENT value of the same length. Identical responses prove the
+    # endpoint neither reflects the parameter nor varies on its own.
+    command: >-
+      curl -s -b "{{cookie}}" -H "{{auth_header}}" -G "{{url}}" --data-urlencode "{{parameter}}=erlikprobebbb"
+
+  - name: false_string
+    tool: curl
+    command: >-
+      curl -s -b "{{cookie}}" -H "{{auth_header}}" -G "{{url}}" --data-urlencode "{{parameter}}=1' AND '1'='2"
+
+  - name: true_string
+    tool: curl
+    # Byte-for-byte the same length as false_string, differing in one
+    # character. Any difference in the response is caused by that character
+    # being read as SQL.
+    command: >-
+      curl -s -b "{{cookie}}" -H "{{auth_header}}" -G "{{url}}" --data-urlencode "{{parameter}}=1' AND '1'='1"
+    evaluators:
+      - type: boolean_differential
+        control: [control_a, control_b]
+        differs_from: false_string
+        emit_finding:
+          vuln_type: SQL Injection (blind — the parameter is evaluated as a SQL condition)
+          severity: high
+        stop_after: true
+
+  - name: false_numeric
+    tool: curl
+    when: no_finding_yet
+    command: >-
+      curl -s -b "{{cookie}}" -H "{{auth_header}}" -G "{{url}}" --data-urlencode "{{parameter}}=1 AND 2=3"
+
+  - name: true_numeric
+    tool: curl
+    when: no_finding_yet
+    command: >-
+      curl -s -b "{{cookie}}" -H "{{auth_header}}" -G "{{url}}" --data-urlencode "{{parameter}}=1 AND 2=2"
+    evaluators:
+      - type: boolean_differential
+        control: [control_a, control_b]
+        differs_from: false_numeric
+        emit_finding:
+          vuln_type: SQL Injection (blind — the parameter is evaluated as a SQL condition)
+          severity: high
+        stop_after: true
+
+chain:
+  on_finding:
+    # A parameter that evaluates SQL is worth sqlmap's full treatment.
+    - WSTG-INPV-05

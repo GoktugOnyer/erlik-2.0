@@ -73,10 +73,18 @@ class Evaluator(BaseModel):
       - cors: an attacker origin was reflected AND credentials are allowed
       - idor: the low-priv response matches the privileged BASELINE
       - cookie_attributes: a session cookie lacks HttpOnly/SameSite/Secure
+
+    ...and two BLIND ones, which read no content at all. A blind injection
+    changes nothing a pattern can match, so the verdict comes from comparing
+    steps: `boolean_differential` from two responses that should be the same
+    and are not, `timing` from a delay that tracks the one that was asked for.
+    Both take a `control` pair that decides whether the comparison is even
+    valid — see the fields below.
     """
     type: Literal[
         "regex", "status_code", "llm",
         "count", "cors", "idor", "cookie_attributes",
+        "boolean_differential", "timing",
     ]
 
     # Conditional execution. Supported names (kept tiny on purpose):
@@ -95,6 +103,23 @@ class Evaluator(BaseModel):
 
     # llm evaluator — the model is asked to return JSON
     instruction: Optional[str] = None
+
+    # blind evaluators — a verdict made by COMPARING steps rather than by
+    # reading one response, because a blind injection changes nothing a regex
+    # can see.
+    #
+    # `control` names two steps that MUST come back the same. They carry
+    # different benign values, so if their responses differ the endpoint
+    # reflects or is simply unstable, and no comparison downstream means
+    # anything — the evaluator reports nothing rather than guessing. This is
+    # the same shape as WSTG-AUTHZ-04's anonymous probe: a control that says
+    # when the test itself is invalid.
+    control: Optional[list[str]] = None
+    # The step whose response this one must DIFFER from (boolean_differential).
+    differs_from: Optional[str] = None
+    # How much slower than every control this step must be, in milliseconds,
+    # before a delay counts as caused (timing).
+    delay_ms: Optional[int] = None
 
     # What to do on a positive match
     emit_finding: Optional[dict[str, Any]] = None

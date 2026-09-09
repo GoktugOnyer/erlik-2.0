@@ -247,6 +247,51 @@ def _render_pattern(pattern: str, target: dict[str, Any]) -> str | None:
     return None if missing else rendered
 
 
+_VOLATILE_RX = re.compile(r"[0-9a-f]{32}")
+
+
+def _comparable(output: str) -> str:
+    """A response reduced to what should be stable between two probes.
+
+    A 32-hex CSRF token and reformatted whitespace change on every request, so
+    without stripping them no two responses ever match and every comparison
+    reports a difference. This is the same normalisation WSTG-AUTHZ-04 applies
+    before hashing, and it is deliberately narrow: it cannot mask a difference
+    in the DATA, which is the whole thing being compared.
+    """
+    # Whitespace runs collapse to ONE space rather than vanishing: it is just
+    # as stable against reformatting, and it keeps the evidence readable when
+    # the difference is quoted back into the report.
+    return _VOLATILE_RX.sub("", " ".join(output.split()))
+
+
+def _blind_controls(ev: Evaluator, prior_steps: list[StepResult] | None):
+    """The named control steps, or None when the comparison cannot be made.
+
+    Returns None if a step is missing or produced nothing — a comparison
+    against an empty response is not a weaker verdict, it is no verdict.
+    """
+    by_name = {s.step: s for s in (prior_steps or [])}
+    steps = [by_name.get(name) for name in (ev.control or [])]
+    if not steps or any(s is None or not s.output for s in steps):
+        return None
+    return steps
+
+
+def _first_difference(a: str, b: str, window: int = 120) -> str:
+    """The neighbourhood of the first character where two responses part.
+
+    A blind finding's proof is the DIFFERENCE, and a reader handed the raw
+    true-condition response sees an ordinary page with no way to tell why it
+    was reported. This puts the two sides next to each other.
+    """
+    limit = min(len(a), len(b))
+    i = next((n for n in range(limit) if a[n] != b[n]), limit)
+    start = max(0, i - window // 4)
+    return (f"    false: ...{a[start:start + window]}...\n"
+            f"    true : ...{b[start:start + window]}...")
+
+
 def _http_status_ok(output: str) -> bool:
     """True when the captured response line is a 2xx."""
     return bool(re.search(r"^HTTP/\S+\s+2\d\d", output, re.MULTILINE))
@@ -272,6 +317,12 @@ async def _run_evaluator(
     """Apply one evaluator. Returns (finding_or_none, chain_to, stop, produced)."""
     matched = False
     produced: dict[str, list[str]] = {}
+    # A blind evaluator's proof is a COMPARISON, not a response — the true
+    # condition on its own is an ordinary page. These let those branches say
+    # what they actually saw instead of handing a reader the raw body.
+    evidence: str | None = None
+    confidence: str | None = None
+    basis: str | None = None
 
     if ev.type == "regex" and ev.pattern:
         # MULTILINE so anchors (^ $) work line-by-line — tool output is almost
@@ -348,6 +399,77 @@ async def _run_evaluator(
                         or (is_https and not cookie["secure"])):
                     matched = True
 
+    elif ev.type in ("boolean_differential", "timing") and not (
+            step_result.success and step_result.output):
+        # A step that timed out is the one input that turns BOTH blind
+        # evaluators into false positives, and it does so in the confident
+        # direction: curl's --max-time makes duration_ms the whole budget, so
+        # a hung request looks exactly like a successful SLEEP(20); and its
+        # empty body differs from every control, so it looks exactly like a
+        # true condition. Neither is a measurement. Both branches are skipped.
+        pass
+
+    elif ev.type == "boolean_differential":
+        # A blind injection leaves nothing to match, so the verdict is that two
+        # responses which SHOULD be identical are not. The controls carry
+        # different benign values: if they disagree the endpoint reflects its
+        # input or is simply unstable, and no comparison downstream means
+        # anything — so the evaluator reports nothing rather than reading noise
+        # as a finding.
+        controls = _blind_controls(ev, prior_steps)
+        other = {s.step: s for s in (prior_steps or [])}.get(ev.differs_from or "")
+        if controls and len(controls) >= 2 and other is not None and other.output:
+            baseline = {_comparable(c.output) for c in controls}
+            false_side, true_side = _comparable(other.output), _comparable(step_result.output)
+            matched = len(baseline) == 1 and true_side != false_side
+            if matched:
+                # The FULL claim is that the false condition is
+                # indistinguishable from a value that simply matches no row,
+                # and the true condition is not. When the false side also sits
+                # on the baseline, the injection is not merely suspected from a
+                # difference — the whole boolean pair behaved as SQL.
+                confidence = "confirmed" if false_side in baseline else "suspected"
+                grade = ("both conditions behaved as SQL" if false_side in baseline
+                         else "the false condition did not match the baseline")
+                basis = (f"blind boolean: {len(controls)} controls agreed, "
+                         f"{step_result.step} differs from {ev.differs_from} — {grade}")
+                evidence = (
+                    "blind boolean differential\n"
+                    + "".join(f"    {c.step:<16} {len(c.output):>6} bytes  (control)\n"
+                              for c in controls)
+                    + f"    {other.step:<16} {len(other.output):>6} bytes  (false condition)\n"
+                    + f"    {step_result.step:<16} {len(step_result.output):>6} bytes  DIFFERS\n"
+                    + "  first difference:\n"
+                    # The NORMALISED forms, because those are what the verdict
+                    # was made on. Diffing the raw bodies pointed at the CSRF
+                    # token — the one thing normalisation exists to ignore.
+                    + _first_difference(false_side, true_side))
+
+    elif ev.type == "timing":
+        # The delay has to be CAUSED, not merely observed. The controls include
+        # a probe asking for a SHORTER sleep, so the step must beat the one
+        # that already carries part of the delay — a target that is uniformly
+        # slow, or slow only while these probes run, moves the controls too.
+        #
+        # What one measurement cannot rule out is a single spike on this step
+        # alone. That is why a timing finding is never graded `confirmed`, and
+        # why the case chains to sqlmap, which retries.
+        controls = _blind_controls(ev, prior_steps)
+        if controls and ev.delay_ms:
+            slowest = max(controls, key=lambda c: c.duration_ms)
+            margin = step_result.duration_ms - slowest.duration_ms
+            matched = margin >= ev.delay_ms
+            if matched:
+                basis = (f"blind timing: {step_result.duration_ms}ms against "
+                         f"{slowest.duration_ms}ms for {slowest.step}, a {margin}ms "
+                         f"margin over the required {ev.delay_ms}ms — ONE measurement")
+                evidence = (
+                    "blind timing differential\n"
+                    + "".join(f"    {c.step:<16} {c.duration_ms:>6} ms  (control)\n"
+                              for c in controls)
+                    + f"    {step_result.step:<16} {step_result.duration_ms:>6} ms  "
+                      f"{margin}ms slower than {slowest.step}\n")
+
     elif ev.type == "llm" and ev.instruction:
         # The target dict and the raw response both carry credentials, and this
         # is the one place in the runner where they would leave the process.
@@ -396,12 +518,11 @@ async def _run_evaluator(
             # scope-audited, and rendered as N/A in the client report.
             url=target.get("url") or target.get("url_template"),
             parameter=target.get("parameter"),
-            evidence=step_result.output[:1500],
-            # Only the differential evaluator compared two identities and saw the
-            # same private object twice. Everything else read one response and
-            # inferred — which is a lead, not a proof.
-            confidence="confirmed" if ev.type == "idor" else "suspected",
-            basis=f"{ev.type} evaluator matched captured tool output",
+            evidence=(evidence or step_result.output)[:1500],
+            # Only the differential evaluators compared steps rather than
+            # reading one response and inferring — which is a lead, not a proof.
+            confidence=confidence or ("confirmed" if ev.type == "idor" else "suspected"),
+            basis=basis or f"{ev.type} evaluator matched captured tool output",
         )
     return finding, ev.chain_to or [], ev.stop_after, produced
 

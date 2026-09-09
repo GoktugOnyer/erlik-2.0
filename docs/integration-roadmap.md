@@ -67,3 +67,24 @@ timing-out stage discarded everything it had found, the first broad case
 consumed the whole URL budget and starved the targeted probes, an empty
 discovery stage reported `completed`, and the catalogue's per-request cost is a
 container start. All four are fixed in the same branch.
+
+### Blind injection — 2026-09-09
+
+[measurements/2026-09-09-blind-injection.md](measurements/2026-09-09-blind-injection.md)
+covers the two cases added for the gap the baseline named: an injection that
+emits no error was invisible to a lane whose evaluators all read one response.
+`WSTG-INPV-05.3` decides from a boolean differential and `WSTG-INPV-05.4` from
+a caused delay, both against a control pair that says when the comparison is
+admissible at all.
+
+That control is not ceremony. Juice Shop's 404 handler renders the request path
+into the page, so any two probes differ — a differential without a validity
+control reports SQL injection on every unmatched route of the application.
+Measured: DVWA's `sqli_blind` fires both cases at `security=low` and neither at
+`impossible`; ninety requests across five Juice Shop endpoints produced nothing.
+
+The payload set is bounded by what could be run against a real engine. There is
+no `OR` payload because one was measured sleeping once per row — five sleeps
+for a five-row table — which against a real table is a denial of service
+delivered by a scanner. There is no MSSQL or Oracle payload because the lab has
+neither to validate against.

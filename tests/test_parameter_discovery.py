@@ -199,7 +199,8 @@ def test_what_the_lane_can_run():
     showing up as a quieter assessment."""
     assert set(executable_test_cases()) == {
         "WSTG-CLNT-04", "WSTG-CLNT-07", "WSTG-CLNT-07b", "WSTG-CONF-06", "WSTG-INFO-03",
-        "WSTG-INPV-05.2", "WSTG-INPV-07", "WSTG-INPV-11.2", "WSTG-INPV-18", "WSTG-SESS-02"}
+        "WSTG-INPV-05.2", "WSTG-INPV-05.3", "WSTG-INPV-05.4",
+        "WSTG-INPV-07", "WSTG-INPV-11.2", "WSTG-INPV-18", "WSTG-SESS-02"}
 
 
 # --- end to end through the adapter -----------------------------------------
