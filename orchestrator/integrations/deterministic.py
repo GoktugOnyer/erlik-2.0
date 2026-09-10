@@ -14,6 +14,11 @@ from .inventory import (seeds, eligible_test_cases, form_urls, parameters_by_url
                         case_needs_parameter, parameter_can_forge)
 from .runtime import JobOutput
 from .security import redact
+
+# A finding's evidence is target-controlled text that travels into a report and
+# into a client's issue tracker. The runner already caps it; this is the bound on
+# the other side of the seam.
+MAX_EVIDENCE_CHARS = 1500
 from . import persistence as db
 
 
@@ -623,6 +628,12 @@ class CatalogueAdapter(BaseAdapter):
                         title=finding.vuln_type or tc.name, url=target["url"], rule=rule, source="testcase",
                         identity=ctx.identity_id, parameter=probed,
                         severity=finding.severity, confidence=finding.confidence, basis=finding.basis or "Deterministic catalogue evaluator matched the captured HTTP response",
+                        # The proof, carried rather than discarded. Redacted
+                        # with ctx.known because a response body is where an
+                        # identity's own cookie comes back at us, and bounded
+                        # again here because the field is target-controlled and
+                        # the runner's cap is on the other side of a seam.
+                        evidence=redact(finding.evidence, ctx.known)[:MAX_EVIDENCE_CHARS],
                         methodology=[case_id], evidence_ids=[evidence_id]))
                 # A CASE THAT RECEIVED NOTHING DID NOT TEST ANYTHING.
                 #

@@ -239,4 +239,9 @@ async def report(session_id):
             "statistics": {"findings": len(findings)},
             "findings": [{"id": f["fingerprint"], "fingerprint": f["fingerprint"], "title": f["title"], "severity": f["severity"],
                 "affected_url": f["url"], "description": f["basis"], "confidence": f["confidence"], "cwe": f["cwe"],
+                # Separate from `description` on purpose: this is the
+                # application's own bytes, and a consumer rendering it has to
+                # escape it. .get() because findings persisted before the field
+                # existed have no key.
+                "evidence": f.get("evidence", ""),
                 "evidence_ids": f["evidence_ids"], "source": f["source"]} for f in findings]}

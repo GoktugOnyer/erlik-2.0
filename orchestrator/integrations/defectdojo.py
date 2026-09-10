@@ -84,9 +84,33 @@ def matches_remote(item, expected):
     return not remote_mismatches(item, expected)
 
 
+def _quoted(evidence: str) -> str:
+    """Target bytes, indented into a markdown code block.
+
+    INDENTATION, not a fence. DefectDojo renders a description as markdown, and
+    the content here is chosen by the application under test — so a fence can be
+    closed from inside it with three backticks and whatever follows is rendered
+    as markup in the client's own issue tracker. Four leading spaces cannot be
+    escaped by anything the content contains.
+
+    Carriage returns go too: a lone CR rewinds a line in some renderers, which
+    is how quoted evidence gets to hide what it actually says.
+    """
+    lines = evidence.replace("\r", "").split("\n")
+    return "\n".join("    " + line for line in lines)
+
+
 def finding_payload(finding):
     triage = finding.get("triage_state", "open")
     description = finding["basis"]
+    # THE PROOF TRAVELS WITH THE CLAIM. Without this the description was one
+    # sentence — "regex evaluator matched captured tool output" — and a client
+    # could not check a HIGH-severity finding against anything. Labelled as the
+    # application's own output, because that is what a reader needs to know
+    # about it before trusting a single character.
+    if finding.get("evidence"):
+        description += ("\n\nEvidence — captured from the application's own response, "
+                        "with known credentials redacted:\n\n" + _quoted(finding["evidence"]))
     if finding.get("triage_note"):
         description += "\n\nErlik triage: " + finding["triage_note"]
     payload = {"title": finding["title"], "description": description,

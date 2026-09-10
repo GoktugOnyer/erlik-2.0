@@ -294,7 +294,24 @@ class IntegrationFinding(StrictModel):
     identity: str = "anonymous"
     severity: str = "medium"
     confidence: Literal["suspected", "likely", "confirmed"] = "suspected"
+    # WHY THE CLAIM WAS MADE — lane-authored, and safe to render as-is.
     basis: str
+    # WHAT THE APPLICATION ACTUALLY SENT — the bytes the claim rests on.
+    #
+    # These are two different things and they used to be one. `basis` said
+    # "regex evaluator matched captured tool output" and the proof never left the
+    # process: the blind evaluators build a byte-level comparison (control sizes,
+    # then the first differing window quoting `User ID is MISSING` against `User
+    # ID exists`) and it reached the evidence blob and stopped there. Measured on
+    # 2026-09-10: a client reading a HIGH-severity SQL injection got one sentence
+    # and a list of ids.
+    #
+    # It stays SEPARATE from basis because its provenance is different. This is
+    # target-controlled text — an application chooses what it puts here — so
+    # every consumer has to treat it as data: redacted on the way in, bounded,
+    # and never interpolated anywhere it could be read as markup. basis never
+    # needs that care and evidence always does.
+    evidence: str = ""
     evidence_ids: list[str] = Field(default_factory=list)
     cwe: str | None = None
     triage_state: Literal["open", "false_positive", "fixed"] = "open"

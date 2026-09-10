@@ -278,6 +278,31 @@ def _blind_controls(ev: Evaluator, prior_steps: list[StepResult] | None):
     return steps
 
 
+MAX_EVIDENCE = 1500
+
+
+def _around(output: str, at: int, span: int = MAX_EVIDENCE) -> str:
+    """The neighbourhood of the MATCH, not the head of the response.
+
+    Evidence used to be `output[:1500]`, which is the proof only when the thing
+    that matched happens to be near the top. Measured: DVWA prints PHP's fatal
+    error before the page, so it was — and a 2957-character body with the same
+    error rendered at offset 2788, which is what an ordinary framework does,
+    produced 1500 characters of page furniture proving nothing. A finding is
+    worse for carrying evidence that does not contain its own match: it looks
+    checkable and is not.
+
+    The offset is named because the full response is stored separately, and a
+    reader who wants the rest needs to know where this came from.
+    """
+    if len(output) <= span:
+        return output
+    start = max(0, at - span // 4)
+    end = min(len(output), start + span)
+    head = f"[excerpt of {len(output)} bytes, from offset {start}]\n" if start else ""
+    return head + output[start:end] + ("…" if end < len(output) else "")
+
+
 def _attributable(ev: Evaluator, step_result: StepResult,
                   prior_steps: list[StepResult] | None) -> bool:
     """Did THIS step's payload cause the difference, or was it already there?
@@ -350,8 +375,10 @@ async def _run_evaluator(
             # `bool(re.search(...))` — so every capture group a case wrote was
             # thrown away to keep a yes/no. Harvest first, then decide matched.
             produced = _harvest(ev, step_result.output, flags, target, pattern)
-            matched = bool(produced) or bool(
-                re.search(pattern, step_result.output, flags))
+            hit = re.search(pattern, step_result.output, flags)
+            matched = bool(produced) or bool(hit)
+            if hit:
+                evidence = _around(step_result.output, hit.start())
             if matched and ev.differs_from:
                 # ATTRIBUTION. The pattern says the evidence is there; this says
                 # the payload put it there. A page that carries the signature
@@ -378,9 +405,13 @@ async def _run_evaluator(
         # What matters is the server reflecting OUR origin back.
         headers = _response_headers(step_result.output)
         origin = str(target.get("test_origin", "") or "https://evil.oast.test")
+        reflected = re.search(r"(?im)^Access-Control-Allow-Origin:\s*" + re.escape(origin) + r"\s*$", headers)
         matched = bool(
-            re.search(r"(?im)^Access-Control-Allow-Origin:\s*" + re.escape(origin) + r"\s*$", headers)
-            and re.search(r"(?im)^Access-Control-Allow-Credentials:\s*true\s*$", headers))
+            reflected and re.search(r"(?im)^Access-Control-Allow-Credentials:\s*true\s*$", headers))
+        if matched:
+            # The headers, not the body: the claim is about two header lines and
+            # the body is irrelevant to it.
+            evidence = _around(headers, reflected.start())
 
     elif ev.type == "idor":
         # An IDOR is a DIFFERENTIAL claim, and the low-privilege response alone
@@ -416,9 +447,21 @@ async def _run_evaluator(
             for name, cookie in parsed.items():
                 if not re.search(r"session|sid|token|jwt|auth", name, re.I):
                     continue
-                if (not cookie["httponly"] or not cookie["samesite"]
-                        or (is_https and not cookie["secure"])):
+                missing = [a for a in ("HttpOnly", "SameSite") if not cookie[a.lower()]]
+                if is_https and not cookie["secure"]:
+                    missing.append("Secure")
+                if missing:
                     matched = True
+                    # THE LINE THAT WAS JUDGED, and which attribute is absent.
+                    # The whole header block was never the point, and a reader
+                    # given it has to re-derive the judgement; a reader given
+                    # this can check it. The cookie VALUE is redacted downstream
+                    # and the attributes are not, which is why this is worth
+                    # quoting at all.
+                    evidence = (f"Set-Cookie: {value}\n\n"
+                                f"cookie `{name}` reads as a session cookie and is missing: "
+                                f"{', '.join(missing)}"
+                                + (" (the endpoint is https, so Secure applies)" if is_https else ""))
 
     elif ev.type in ("boolean_differential", "timing") and not (
             step_result.success and step_result.output):
@@ -539,7 +582,7 @@ async def _run_evaluator(
             # scope-audited, and rendered as N/A in the client report.
             url=target.get("url") or target.get("url_template"),
             parameter=target.get("parameter"),
-            evidence=(evidence or step_result.output)[:1500],
+            evidence=(evidence or step_result.output)[:MAX_EVIDENCE],
             # Only the differential evaluators compared steps rather than
             # reading one response and inferring — which is a lead, not a proof.
             confidence=confidence or ("confirmed" if ev.type == "idor" else "suspected"),

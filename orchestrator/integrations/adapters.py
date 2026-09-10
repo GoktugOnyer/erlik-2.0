@@ -60,6 +60,20 @@ async def rpc(sandbox, request):
     return json.loads(output.stdout)
 
 
+# A finding's evidence is target-controlled text that travels into a report and
+# into a client's issue tracker. Bounded here as well as at the runner seam.
+MAX_EVIDENCE_CHARS = 1500
+
+
+def _marker_window(body: str, marker: str, window: int = 200) -> str:
+    """The neighbourhood of the forbidden content, not the whole response."""
+    at = body.find(marker)
+    if at < 0:
+        return ""
+    start = max(0, at - window // 4)
+    return body[start:start + window]
+
+
 async def record(context, sandbox, output, result, accepted_codes=(0,)):
     result.exit_code = output.code
     result.metadata["images"] = sandbox.images
@@ -158,7 +172,14 @@ def parse_zap(document, ctx):
                     title=alert.get("name", alert.get("alert", rule)), url=url, rule=rule, source="zap", method=method,
                     parameter=parameter, identity=ctx.identity_id,
                     severity={"0": "informational", "1": "low", "2": "medium", "3": "high"}.get(str(alert.get("riskcode")), "medium"),
-                    confidence="suspected", basis="ZAP alert; " + str(item.get("evidence", "")),
+                    confidence="suspected", basis="ZAP alert " + rule,
+                    # ZAP's own evidence used to be concatenated onto `basis`,
+                    # which is how the two got conflated in the first place: the
+                    # grounds for the claim and the target's own bytes in one
+                    # string, so a consumer could render neither safely. It is
+                    # the same kind of thing as a catalogue evaluator's proof and
+                    # belongs in the same field.
+                    evidence=redact(str(item.get("evidence", "")), ctx.known)[:MAX_EVIDENCE_CHARS],
                     cwe=str(alert["cweid"]) if alert.get("cweid") else None,
                     methodology={"89": ["WSTG-INPV-05"], "79": ["WSTG-INPV-01"], "352": ["WSTG-SESS-05"]}.get(str(alert.get("cweid")), [])))
     return result
@@ -430,6 +451,10 @@ class SchemathesisAdapter(BaseAdapter):
                 result.findings.append(IntegrationFinding(fingerprint=fingerprint(ctx.target, rule, "GET", assertion.request.url, identity=ctx.identity_id),
                     title=assertion.description, url=assertion.request.url, rule=rule, source="schemathesis", identity=ctx.identity_id,
                     confidence="confirmed", basis="Explicit forbidden-content assertion reproduced with the configured identity", severity="high",
+                    # The marker's neighbourhood, so the reader can see the
+                    # forbidden content rather than be told it was there.
+                    evidence=redact(_marker_window(response["body"], assertion.forbidden_marker),
+                                    ctx.known)[:MAX_EVIDENCE_CHARS],
                     methodology=["WSTG-AUTHZ-04"]))
         return await record(ctx, sandbox, output, result, accepted_codes=(0, 1))
 

@@ -73,7 +73,26 @@ def redact(value, known: tuple[str, ...] = ()):
         # evidence fidelity and is an operator's call, not a silent one.
         if secret and len(secret) >= 4:
             value = value.replace(secret, "[REDACTED]")
-    value = re.sub(r"(?im)((?:authorization|cookie|set-cookie|x-api-key)\s*:\s*)[^\r\n]+", r"\1[REDACTED]", value)
+    # A cookie header loses its VALUES and keeps everything else, because the
+    # rest of the line is frequently the finding.
+    #
+    # This used to replace the whole line with [REDACTED]. A finding carries its
+    # evidence to the client now, and WSTG-SESS-02's entire claim is "this
+    # session cookie lacks HttpOnly / SameSite / Secure" — proved by a
+    # Set-Cookie line whose attributes were being erased along with the secret.
+    # The finding said the attributes were missing and the evidence said
+    # `Set-Cookie: [REDACTED]`, which is unverifiable and indistinguishable from
+    # a cookie that had every attribute set.
+    #
+    # The credential still never travels: the value is what is secret, and an
+    # attribute name is not. Authorization and X-Api-Key keep the blanket rule —
+    # there is no structure in them worth preserving.
+    value = re.sub(r"(?im)^(set-cookie\s*:\s*)([^=;\r\n]{1,256})=[^;\r\n]*",
+                   r"\1\2=[REDACTED]", value)
+    value = re.sub(r"(?im)^(cookie\s*:\s*)([^\r\n]+)",
+                   lambda m: m.group(1) + re.sub(r"([^=;\s]{1,256})=[^;]*", r"\1=[REDACTED]",
+                                                m.group(2)), value)
+    value = re.sub(r"(?im)((?:authorization|x-api-key)\s*:\s*)[^\r\n]+", r"\1[REDACTED]", value)
     value = re.sub(r"(?i)(Bearer\s+)[\w.~+/=-]+", r"\1[REDACTED]", value)
     value = re.sub(r"\beyJ[\w-]+\.[\w-]+\.[\w-]+", "[REDACTED]", value)
     value = re.sub(r'(?i)(["\']?(?:password|access_token|token|api_key|secret)["\']?\s*[:=]\s*["\']?)[^\s&"\'<>]+', r"\1[REDACTED]", value)
