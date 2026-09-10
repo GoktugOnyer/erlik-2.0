@@ -41,7 +41,12 @@ def test_basis_and_evidence_stay_separate():
     from orchestrator.integrations import adapters
     source = inspect.getsource(adapters.parse_zap)
     assert 'basis="ZAP alert; "' not in source, "the target's bytes are back in basis"
-    assert 'evidence=safe_evidence(redact(str(item.get("evidence", ""))' in source
+    # ZAP's three fields now go through a named builder, which also carries the
+    # payload it sent — parsed and discarded until 2026-09-10.
+    assert "evidence=_zap_evidence(rule, item, ctx)" in source
+    from orchestrator.integrations.adapters import _zap_evidence
+    built = inspect.getsource(_zap_evidence)
+    assert "safe_evidence(redact(" in built and '"attack"' in built
 
 
 # ------------------------------------------------- it arrives safe

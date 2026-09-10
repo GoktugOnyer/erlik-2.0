@@ -38,6 +38,9 @@ steps:
     tool: curl
     command: >-
       curl -s -b "{{cookie}}" -H "{{auth_header}}" -G "{{url}}" --data-urlencode "{{parameter}}=erlik'probe"
+    # The same payload WSTG-INPV-05.2 sends; when that case classified the
+    # error as SQL, this step's 'unclassified' account of it is noise.
+    subsumed_by: [WSTG-INPV-05.2]
     evaluators:
       - type: regex
         pattern: 'XPathException|javax\.xml\.xpath|SpelEvaluationException|ognl\.OgnlException|jakarta\.el|javax\.el\.ELException|Traceback \(most recent call last\)|(?:PHP )?(Parse|Fatal) error|System\.Data\.\w+Exception|NoMethodError|Elixir\.\w+Error'

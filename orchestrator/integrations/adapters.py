@@ -139,6 +139,35 @@ def json_lines(text):
     return entries
 
 
+def _zap_evidence(rule: str, item: dict, ctx) -> str:
+    """Everything ZAP says about one instance, not just its `evidence` field.
+
+    ZAP hands over `attack` — the payload it sent — and `otherinfo`, which is
+    often where the actual reasoning is. Both were parsed and discarded, so a
+    client reading a ZAP SQL-injection finding got the string
+    `ZAP alert zap:40018` and nothing else, while the instance in hand held
+    `attack="1' AND '1'='1' -- "`. The payload is the one thing that makes a
+    scanner finding replayable.
+
+    `attack` is ZAP's own text; `evidence` and `otherinfo` are quoted from the
+    application. All three are treated as target-controlled, because separating
+    them per field buys nothing and assuming wrongly costs a leak.
+    """
+    # The payload is quoted with repr() because its whitespace is significant and
+    # invisible: MySQL's `-- ` comment needs its trailing space, and a reader
+    # replaying a stripped payload gets a different query. The other two rows are
+    # prose quoted from the application and read better plain.
+    rows = [("payload sent", repr(str(item.get("attack", "")))
+             if str(item.get("attack", "")).strip() else ""),
+            ("matched", str(item.get("evidence", "")).strip()),
+            ("reported by ZAP", str(item.get("otherinfo", "")).strip())]
+    body = "\n".join(f"    {label:<16} {value}" for label, value in rows if value)
+    if not body:
+        return ""
+    header = f"ZAP {rule}" + (f" on parameter {item['param']}" if item.get("param") else "")
+    return safe_evidence(redact(header + "\n" + body, ctx.known))[:MAX_EVIDENCE_CHARS]
+
+
 def parse_zap(document, ctx):
     result = StageResult()
     for site in document.get("site", []):
@@ -179,7 +208,7 @@ def parse_zap(document, ctx):
                     # string, so a consumer could render neither safely. It is
                     # the same kind of thing as a catalogue evaluator's proof and
                     # belongs in the same field.
-                    evidence=safe_evidence(redact(str(item.get("evidence", "")), ctx.known))[:MAX_EVIDENCE_CHARS],
+                    evidence=_zap_evidence(rule, item, ctx),
                     cwe=str(alert["cweid"]) if alert.get("cweid") else None,
                     methodology={"89": ["WSTG-INPV-05"], "79": ["WSTG-INPV-01"], "352": ["WSTG-SESS-05"]}.get(str(alert.get("cweid")), [])))
     return result

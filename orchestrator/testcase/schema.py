@@ -169,6 +169,24 @@ class TestStep(BaseModel):
     when: Optional[str] = None
     evaluators: list[Evaluator] = Field(default_factory=list)
 
+    # Cases that describe this step's finding BETTER. When one of them reported
+    # on the same (url, parameter), this step's finding is the vaguer account of
+    # the same thing and is dropped.
+    #
+    # WSTG-INPV-11.2 exists to catch an interpreter error nothing has classified,
+    # and its `single_quote` step sends the same payload to the same parameter as
+    # WSTG-INPV-05.2's. Measured on 2026-09-10: every DVWA run shipped both, two
+    # HIGH findings with byte-identical proof, one of them titled "unclassified
+    # injection" while the other simultaneously classified it as SQL. A client
+    # triages that twice and trusts it less for the contradiction.
+    #
+    # Declared per STEP, not per case: 11.2's XPath, CRLF and metacharacter steps
+    # are not subsumed by anything, and a case-level flag would have dropped them
+    # too. The step keeps running and keeps emitting — suppression happens at the
+    # end, so a run where the more specific case was never selected, or never
+    # fired, still reports this.
+    subsumed_by: list[str] = Field(default_factory=list)
+
 
 class ChainRule(BaseModel):
     """Test cases to schedule after this one, conditional on outcome."""

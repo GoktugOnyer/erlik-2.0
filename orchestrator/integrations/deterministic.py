@@ -666,6 +666,39 @@ class CatalogueAdapter(BaseAdapter):
                 if any(not s.success and not s.skipped for s in run.steps):
                     result.status, result.reason = "partial", "one or more catalogue checks could not complete"
             result.metadata["catalogue"].append(case_id)
+        # ONE VULNERABILITY, ONE FINDING. A step that declares `subsumed_by`
+        # produces the vaguer account of something another case described better;
+        # drop it once that other case has actually reported on the same
+        # (endpoint, parameter). Measured on 2026-09-10: every DVWA run shipped
+        # WSTG-INPV-11.2's "unclassified injection" alongside WSTG-INPV-05.2's
+        # "SQL Injection (error-based)" for the same request, with byte-identical
+        # proof — two HIGH findings to triage, contradicting each other about
+        # whether the injection was classified.
+        #
+        # Done at the END rather than by not running the step, so a run where the
+        # more specific case was not selected, or did not fire, still reports it.
+        reported = {(f.url, f.parameter, f.rule.partition(":")[0]) for f in result.findings}
+        kept, subsumed = [], []
+        for finding in result.findings:
+            case_id, _, step_name = finding.rule.partition(":")
+            case = find_by_id(case_id)
+            step = next((st for st in (case.steps if case else []) if st.name == step_name), None)
+            better = [other for other in (getattr(step, "subsumed_by", None) or [])
+                      if (finding.url, finding.parameter, other) in reported]
+            if better:
+                subsumed.append((finding, better))
+            else:
+                kept.append(finding)
+        if subsumed:
+            result.findings = kept
+            for finding, better in subsumed:
+                result.observations.append({
+                    "type": "finding_subsumed", "test_case_id": finding.rule.partition(":")[0],
+                    "url": finding.url, "parameter": finding.parameter or None, "steps": [],
+                    "reason": f"{', '.join(better)} reported on the same parameter and describes it "
+                              f"more precisely, so this check's vaguer account of the same response "
+                              f"was not reported: {finding.title}"})
+
         if not result.metadata["executed_checks"] and result.status == "completed":
             result.status, result.reason = "skipped", "no applicable selected checks"
         return await record(ctx, sandbox, JobOutput(0, json.dumps(redact(result.observations, ctx.known)), ""), result)

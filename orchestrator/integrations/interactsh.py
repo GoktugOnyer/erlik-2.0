@@ -10,7 +10,36 @@ from orchestrator.testcase.scope import check_url
 from .adapters import Context, rpc, record, json_lines
 from .contracts import StageResult, IntegrationFinding, fingerprint
 from .runtime import Sandbox, JobOutput
-from .security import SecretStore
+from .security import SecretStore, redact, safe_evidence
+
+
+# The callback record is written by whatever made the callback — the target, or
+# anything the target's request reached. Same provenance as a response body.
+MAX_EVIDENCE_CHARS = 1500
+
+
+def _callback_evidence(host, probe, protocol, event, context) -> str:
+    """What a reader needs to believe an out-of-band interaction happened.
+
+    The unique probe host is the whole argument: it appears in one request erlik
+    sent and nowhere else, so a lookup of it could only have come from something
+    that parsed that request. The host is quoted for exactly that reason — a
+    reader who cannot see it cannot check the uniqueness the claim rests on.
+    """
+    lines = [
+        "callback correlated to a probe host only this assessment knew",
+        f"    probe host     {host}",
+        f"    reached via    {probe.get('parameter')} on {probe.get('url')}",
+        f"    protocol       {protocol}",
+        f"    first seen     {event.get('timestamp')}",
+    ]
+    for label, key in (("from", "remote-address"), ("resolved by", "unique-id")):
+        if event.get(key):
+            lines.append(f"    {label:<14} {event[key]}")
+        
+    raw = json.dumps(event, sort_keys=True, indent=1)[:800]
+    lines += ["", "raw callback record:", raw]
+    return safe_evidence(redact("\n".join(lines), context.known))[:MAX_EVIDENCE_CHARS]
 
 
 def correlate(events, payloads: dict, context):
@@ -38,7 +67,16 @@ def correlate(events, payloads: dict, context):
             fingerprint=fingerprint(context.target, rule, "GET", probe["url"], probe["parameter"], context.identity_id),
             title="Out-of-band interaction observed", url=probe["url"], parameter=probe["parameter"], rule=rule,
             source="interactsh", identity=context.identity_id, confidence="likely", severity="medium",
-            basis=f"Correlated {protocol} callback to a unique probe; callback alone does not prove SSRF impact", methodology=["WSTG-INPV-19"]))
+            basis=f"Correlated {protocol} callback to a unique probe; callback alone does not prove SSRF impact",
+            # THE CALLBACK IS THE PROOF, and it used to reach nothing but the
+            # evidence blob. An out-of-band finding is the hardest kind for a
+            # reader to reconstruct — there is no response body to look at, and
+            # the whole claim rests on something arriving at a host only this
+            # assessment knew about. Without the host, the protocol and the time,
+            # a client is told an interaction happened and given no way to
+            # believe it.
+            evidence=_callback_evidence(match, probe, protocol, event, context),
+            methodology=["WSTG-INPV-19"]))
     return result
 
 
