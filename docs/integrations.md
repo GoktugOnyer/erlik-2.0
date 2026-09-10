@@ -168,6 +168,31 @@ token with HTTP 200 and 389 bytes of PHP warnings, so the lane's
 `test_case_unreachable` observation — which fires when every executed step came back
 empty — does not fire on a refusal.
 
+### When the rendered pass runs
+
+Discovery has two halves: katana, which fetches, and a Playwright pass, which
+renders. The rendered pass is the only thing that finds **forms**, and therefore the
+only thing that finds the parameters a case can inject into — on DVWA every one of
+the injectable pairs comes from it.
+
+It runs when the assessment **names any identity**, or when `headless: true` is set.
+An anonymous assessment that asked for neither gets neither, because the pass starts
+Chromium and nobody should pay for that unasked.
+
+The decision is made per **assessment**, never per identity. That is deliberate: if
+it depended on what each identity carries, an anonymous arm would have no rendered
+surface while its authenticated siblings did, the arms would disagree about what
+exists, and `compare_arms` would refuse every differential drawn from the run. A
+gate on discovery has to answer the same for every arm or it becomes the thing it
+was guarding against.
+
+You do **not** need a `storage_state` for this. The egress proxy injects an
+identity's headers and cookies on every in-scope request, so a plain cookie session
+is enough — measured on DVWA, a cookie-only identity renders 31 links and 13 forms
+where an anonymous one gets the login page. Supply `storage_state` when the
+application needs client-side state the proxy cannot inject, such as a token in
+`localStorage`.
+
 ### Choosing a second identity
 
 Two principals at the **same** configuration, not two configurations. DVWA's

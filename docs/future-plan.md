@@ -545,25 +545,56 @@ Every arm of a differential has to carry the same configuration material, with t
 identity as the only variable. Fixing this is a prerequisite for E-027's scoring
 to mean anything.
 
-### E-029: an identity with plain cookies gets no form discovery at all
+### E-029: an identity with plain cookies got no form discovery at all — CLOSED
 
-`adapters.py` gates the entire browser pass — the only producer of `source="form"`
+`adapters.py` gated the entire browser pass — the only producer of `source="form"`
 and `source="playwright"` endpoints — on
-`ctx.config.headless or (ctx.identity or {}).get("storage_state")`. The proxy
-injects `identity.headers`, `identity.cookies` AND `storage_state.cookies` on
-every in-scope request, so an identity authenticated by plain cookies is fully
-authenticated and discovers nothing.
+`ctx.config.headless or (ctx.identity or {}).get("storage_state")`, while the proxy
+injects `identity.headers`, `identity.cookies` AND `storage_state.cookies` on every
+in-scope request. So an identity authenticated by plain cookies was fully
+authenticated and discovered nothing.
 
-This gates E-008 directly. Its matrix starts at "anonymous, two ordinary users in
-different tenants, and one privileged lab identity", and on this code path three of
-those four arms would have no surface — which makes the isolation comparison either
-fail or, worse, pass vacuously on two empty sets. All 8 of DVWA's measured
-(url, parameter) pairs come from the browser pass.
+**The premise had to be measured first**, because the browser context is created
+with `storage_state=None` for such an identity — Chromium itself holds no cookies,
+and only the proxy makes the requests authenticated. If that were not enough, the
+fix would have enabled a pass that renders LOGGED-OUT pages while labelling the
+endpoints with an authenticated identity, which is worse than not running it.
+Measured against real DVWA, real worker image, real proxy, `storage_state=None` in
+both arms and only the identity differing:
 
-The condition should be "the identity carries material the proxy would inject",
-not "storage_state exists". Left unchanged here deliberately: it changes when
-Chromium runs, which is an execution-policy change, and §3 says to keep at most one
-of those in progress at a time.
+    anonymous             1342 bytes (the login page)   1 link    1 form
+    cookie-only identity  6436 bytes                   31 links  13 forms
+
+and the 13 are DVWA's own module forms. So proxy-injected cookies do authenticate
+the rendered pass; it simply was not being run.
+
+**The decision is now asked of the ASSESSMENT, not the arm** —
+`adapters.wants_rendered_pass(config)`, which takes the config alone and therefore
+cannot branch on an identity. The obvious repair ("run it when THIS identity carries
+material") is itself a fork generator: E-008's matrix starts at "anonymous, two
+ordinary users in different tenants, and one privileged lab identity", an operator
+may name `anonymous` alongside real handles, and under a per-arm test that arm alone
+would have no rendered surface — so the arms could never agree and `compare_arms`
+would refuse every differential on the assessment. An assessment that selected no
+identity and did not ask for a rendered crawl still gets none, because the pass
+launches Chromium.
+
+End to end through the real lane against real DVWA, `headless=False`, cookie-only
+identity, changing only whether the assessment names an identity:
+
+    before   60 endpoints, all katana,              0 form (module, parameter) pairs
+    after   127 endpoints, 5 form + 122 playwright, 7 form (module, parameter) pairs
+             brute/username, brute/password, csrf/password_new, csrf/password_conf,
+             sqli/id, sqli_blind/id, xss_r/name
+
+Three harness errors of mine were caught on the way there, and all three were the
+same kind — a detector that could only say "no": a link check written with a leading
+slash that DVWA's relative hrefs never match; a header lookup written
+case-sensitively when the proxy writes `cookie` in lower case; and a login through
+Python's `http.cookiejar`, which silently drops cookies for dotless hosts like
+`localhost` and left every "unauthenticated" reading unauthenticated for the wrong
+reason. The verified precondition in the final script — assert the session is live
+before trusting anything downstream of it — is what turned the result over.
 
 ### E-030: fork points an operation-level identity does not absorb
 

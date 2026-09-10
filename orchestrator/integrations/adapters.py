@@ -347,6 +347,42 @@ class ZapAdapter(BaseAdapter):
         return await record(ctx, sandbox, output, result, accepted_codes=(0, 2))
 
 
+def wants_rendered_pass(config) -> bool:
+    """Should this ASSESSMENT run the rendered (Playwright) discovery pass?
+
+    It is the only producer of `source="form"` and `source="playwright"` endpoints,
+    and on DVWA every one of the eight (url, parameter) pairs the lane finds comes
+    from it.
+
+    This used to be asked per stage, as
+    `ctx.config.headless or (ctx.identity or {}).get("storage_state")`. Two things
+    were wrong with that. The proxy injects `identity.headers`, `identity.cookies`
+    AND `storage_state.cookies` on every in-scope request, so an identity
+    authenticated by plain cookies was fully authenticated and discovered nothing —
+    measured against real DVWA with the browser context created as
+    `storage_state=None` in both arms:
+
+        anonymous             1342 bytes (the login page)   1 link    1 form
+        cookie-only identity  6436 bytes                   31 links  13 forms
+
+    And the obvious repair — "run it when THIS identity carries material" — is
+    itself a fork generator. E-008's matrix starts at "anonymous, two ordinary users
+    in different tenants, and one privileged lab identity", and an operator may name
+    `anonymous` alongside real handles; under a per-arm test that arm alone would
+    have no rendered surface, the arms could never agree, and `compare_arms` would
+    refuse every differential drawn from the assessment. §3 moved identity isolation
+    into R0 precisely to stop that.
+
+    So the question is asked of the ASSESSMENT, and takes the config alone — it
+    cannot see an identity, so it cannot branch on one. Every arm answers the same.
+
+    An assessment that selected no identity and did not ask for a rendered crawl
+    still gets none: the pass launches Chromium, and nobody should pay for it
+    unasked.
+    """
+    return bool(config.headless or config.identity_ids)
+
+
 class KatanaAdapter(BaseAdapter):
     name = "katana"
 
@@ -355,7 +391,7 @@ class KatanaAdapter(BaseAdapter):
                 "-c", str(ctx.config.budget.concurrency), "-rl", str(max(1, int(ctx.config.budget.requests_per_second))),
                 "-proxy", sandbox.proxy_url, "-cs", re.escape(ctx.target.rstrip("/")) + ".*", "-duc"]
         browser_endpoints = []
-        if ctx.config.headless or (ctx.identity or {}).get("storage_state"):
+        if wants_rendered_pass(ctx.config):
             browser = await rpc(sandbox, {"action": "browser", "url": ctx.target, "storage_state": (ctx.identity or {}).get("storage_state")})
             for request in browser["requests"]:
                 browser_endpoints.append(Endpoint(url=request["url"], method=request["method"], source="playwright",
