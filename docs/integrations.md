@@ -127,15 +127,185 @@ callback establishes interaction, not access to sensitive internal resources.
 
 ## DefectDojo
 
-Create a test in your self-hosted DefectDojo engagement using Generic Findings
-Import. POST `/api/integrations/sessions/{id}/defectdojo` with `server`, `secret_id`
-and `test_id`. Export is always explicit. Stable fingerprints replace report-local
-IDs; unchanged successful exports are not resent. `close_old_findings` is always
-false in v1, including for complete scans. Erlik does not import remote triage.
+Export is always explicit — no stage writes to DefectDojo on its own. Findings are
+matched by a stable fingerprint rather than a report-local ID, so a second export
+updates what it already sent instead of duplicating it. `close_old_findings` is
+always false in v1, including for complete scans, and Erlik never imports remote
+triage: the local review state is authoritative and is pushed outward, never read
+back.
 
-An uncertain remote write is never automatically retried: inspect the remote test
-and the export record before deciding how to reconcile it. A 202 response is
-uncertain until the external import has been checked, not claimed successful.
+The server must be an explicit HTTPS **origin** — scheme, host and optional port,
+nothing else. A `http://` URL, a path (`https://dojo.example.com/dojo`), a query,
+or credentials in the URL are all refused at validation. `:443` is accepted and
+normalised away; any other port is kept, so a DefectDojo on `https://dojo:8443`
+needs no fronting (that is what the project's own live acceptance test uses).
+
+### Registering the API token
+
+The token never travels in the export body. Store it once and refer to it by
+handle:
+
+```sh
+curl -sX POST http://127.0.0.1:8002/api/integrations/secrets \
+  -H "X-API-Token: $ERLIK_API_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"token":"<DefectDojo API v2 key>"}'
+# -> {"id":"e9082a26d4a1e8d1b923316f2e884ccb"}   a 32-character handle
+#    Use it as secret_id below. The token itself is never echoed back, never
+#    stored in the export record, and is redacted from the audit evidence.
+```
+
+### First import
+
+A first import creates the test inside an engagement that already exists. It needs
+`engagement_id` and `test_title`, and must **not** carry a `test_id`:
+
+```json
+{
+  "server": "https://dojo.lab.internal",
+  "secret_id": "e9082a26d4a1e8d1b923316f2e884ccb",
+  "action": "import",
+  "engagement_id": 7,
+  "test_title": "Erlik assessment 2026-09-10"
+}
+```
+
+```sh
+curl -sX POST http://127.0.0.1:8002/api/integrations/sessions/$SESSION/defectdojo \
+  -H "X-API-Token: $ERLIK_API_TOKEN" -H 'Content-Type: application/json' \
+  --data @first-import.json
+```
+
+`action` defaults to `reimport`, so **omitting it on a first import is refused**,
+not silently treated as one:
+
+| Body | Result |
+|------|--------|
+| `action: "import"` + `engagement_id` + `test_title` | accepted |
+| `engagement_id` + `test_title`, no `action` | `reimport requires an existing test_id, without engagement_id or test_title` |
+| `action: "import"` + `engagement_id` + `test_title` + `test_id` | `initial import requires an existing engagement_id and test_title, without test_id` |
+| `action: "reimport"` + `test_id` | accepted |
+| `action: "reimport"` + `test_id` + `engagement_id` | `reimport requires an existing test_id, without engagement_id or test_title` |
+
+The engagement must already exist: `auto_create_context` is sent as `false`, so
+Erlik will not conjure a product or engagement to import into.
+
+### Re-exporting the same session
+
+**The same body works again.** A successful import records the destination it
+reached together with the remote test ID, so a repeat export of that destination
+resolves the remote test from that record and reimports into it — the operator
+does not have to rewrite the configuration after the first run. Only fingerprints
+the remote test does not already hold are sent to the importer; everything else is
+compared field by field and PATCHed by remote ID only where it actually differs.
+
+If the report is byte-identical to the last completed export to that destination,
+nothing is sent at all and the previous export record is returned.
+
+To reimport into a test whose ID you know — one created by hand, or one from a
+different session — address it directly:
+
+```json
+{
+  "server": "https://dojo.lab.internal",
+  "secret_id": "e9082a26d4a1e8d1b923316f2e884ccb",
+  "action": "reimport",
+  "test_id": 42
+}
+```
+
+### Reconciling an uncertain export
+
+What the status means:
+
+| Status | Meaning | What to do |
+|--------|---------|------------|
+| `completed` | Every field Erlik reads back is present remotely | nothing |
+| `failed` | Nothing was written, and the destination is not blocked | fix the body or the token and export again |
+| `uncertain` | The outcome of a write is unknown — **or the export failed locally before sending anything** | reconcile, or see below |
+
+`completed` is about the fields that are read back, which is not all of them: a
+finding's `endpoints` are never compared after the import, and `title` is matched
+case-insensitively against its first 511 characters because DefectDojo titlecases
+and truncates it. So `completed` does not by itself tell you the URL a finding is
+about arrived intact.
+
+`uncertain` also covers a failure that sent **nothing** — the sandbox not starting
+because Docker is down, or a cancelled run. The row records
+`Check the remote test before retrying`, and it blocks that destination like any
+other uncertain row. Reconciliation cannot clear it: there is no remote write to
+verify, so it answers `Remote state differs from intended export` and the row
+stays blocked. Such a row has to be inspected and cleared directly. This is a
+known sharp edge rather than intended design — it is recorded in
+`docs/future-plan.md`.
+
+A 202 is uncertain, not successful: the import was queued, and nothing has
+confirmed it landed. Treating it as a failure would invite a retry that silently
+imports twice.
+
+#### What "blocks" actually covers
+
+An uncertain write is never retried automatically, and it blocks further exports —
+but the block is narrower than it sounds, and the gap is in the case this section
+exists for.
+
+It matches an export whose destination is the same, or whose remote test ID is the
+same on that server. **An import whose response was lost never learned a test ID**,
+so its row carries `remote_test_id = NULL` and only a repeat of the identical body
+is blocked. Do what the rest of this section advises — find the test in the
+DefectDojo UI and address it directly with `action: "reimport"` and its `test_id` —
+and that export is *not* blocked. It will write, over a write nobody established.
+
+**Reconcile the uncertain row before addressing the test directly.** Measured, not
+inferred: `test_a_lost_first_import_does_not_block_a_direct_reimport` in
+`tests/test_defectdojo_completion.py` pins it, and `docs/future-plan.md` carries it
+as E-026.
+
+`failed` is narrower than "the remote said no", and the difference is worth
+knowing before you wait on a reconcile you do not need:
+
+- A **read** that fails — the inventory GET, say — wrote nothing, so the export
+  is `failed` and you can simply export again.
+- A **first import** whose POST is rejected 4xx is also `failed`: that POST was
+  the first request made, so nothing preceded it.
+- A **reimport** whose POST is rejected 4xx is `uncertain`, even though a 4xx
+  means nothing was written. A reimport reads the remote inventory before
+  writing, and once any request has gone out the lane stops inferring from a
+  status code the remote chose that no partial processing happened. It blocks
+  until someone looks. This asymmetry is deliberate; both sides are pinned in
+  `tests/test_defectdojo_completion.py`.
+
+Reconciliation is **read-only**. It lists the remote test's findings, compares
+them against the evidence recorded for that export, and marks the export completed
+only if every intended finding is present and matching. No request is replayed.
+
+It requires the remote test ID explicitly, even when the original export was an
+`import` — supply the ID you can see in the DefectDojo UI:
+
+```sh
+curl -sX POST http://127.0.0.1:8002/api/integrations/exports/$EXPORT_ID/reconcile \
+  -H "X-API-Token: $ERLIK_API_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"server":"https://dojo.lab.internal","secret_id":"e9082a26d4a1e8d1b923316f2e884ccb",
+       "action":"reimport","test_id":42}'
+```
+
+The server must match the original export's, and if the export record already
+knows a remote test ID, the one supplied must equal it. Two outcomes:
+
+- `Remote state verified; no requests replayed` — status becomes `completed`, the
+  fingerprint→remote-ID map is filled in, and exports to that test are unblocked.
+- `Remote state differs from intended export; no requests replayed` — the status
+  stays `uncertain`. Inspect the remote test yourself; reconciliation will not
+  guess which side is right.
+
+Two remote findings sharing one fingerprint is refused —
+`Multiple remote findings share one fingerprint; reconcile the remote test`. On
+export that lands as the row's `detail`; reconciling returns **502** with the same
+message, because the remote is what did not cooperate. It usually means the
+importer's own deduplication merged or split findings, and it has to be settled in
+DefectDojo before Erlik can map them.
+
+Every export and every reconciliation writes an audit record to the session's
+evidence store, with the API token redacted.
 
 ## Results and validation
 
@@ -148,11 +318,52 @@ required note. Reports include open findings; explicit exports carry the local
 review state. Review actions are retained as evidence.
 
 ```sh
-pytest -m 'not docker'
-ERLIK_DOCKER_TESTS=1 pytest tests/test_integration_docker.py
+pytest -m 'not docker'                              # network-free, no containers
+ERLIK_DOCKER_TESTS=1 pytest -m docker               # every container-backed suite
 ERLIK_DOCKER_TESTS=1 ERLIK_BENCHMARK_OUTPUT=/tmp/discovery-comparison.json \
   pytest tests/test_integration_docker.py -k baseline_comparison
 ```
+
+`-m docker` is the marker, not a filename: the container-backed suites live in
+several files, and selecting them by path is how a new one ends up never running.
+
+### Opt-in variables
+
+Every one of these defaults to off. A suite that cannot reach what it needs skips
+with a reason rather than failing — missing coverage is not a defect in the code,
+and must not be reported as one.
+
+| Variable | Effect |
+|----------|--------|
+| `ERLIK_DOCKER_TESTS=1` | Run the local container suites. Needs the lane images built. |
+| `ERLIK_REAL_INTERACTSH_TESTS=1` | Register against a real self-hosted Interactsh server instead of the protocol fixture. Set it **together with** `ERLIK_DOCKER_TESTS=1` — on its own it skips. Build the lab first: `docker build -t erlik-interactsh-lab:1 docker/interactsh-lab`. |
+| `ERLIK_DEFECTDOJO_LIVE_TESTS=1` | Run the export flow against a real DefectDojo, brought up from `docker/defectdojo-lab/`. Sufficient on its own — unlike the Interactsh gate above, it does not also need `ERLIK_DOCKER_TESTS`. No credentials either: the fixture mints the lab's own database password, secret key, AES key and admin password per run and writes them to a compose env-file. It also needs `openssl` on PATH, for the lab's TLS certificate. |
+| `ERLIK_COVERAGE_REPORT=<path>` | Write the baseline-vs-integrated benchmark report. Written before the *metric* assertions, so a run that regresses still leaves its numbers behind — but the report is assembled from both arms, so a run that fails because a stage never completed produces none. |
+| `ERLIK_BENCHMARK_OUTPUT=<path>` | Write the Katana-vs-browser-crawler discovery comparison. |
+| `ERLIK_ACTUAL_SERVICE_TESTS` | Repository **variable** (not an env var) gating the CI job that starts real services. Must be `true`, and the run must be a release or a manual dispatch. |
+
+### Runtime variables
+
+| Variable | Effect |
+|----------|--------|
+| `ERLIK_API_TOKEN` | Required to reach `/api/integrations/*` at all — these routes are refused without it whether or not the rest of the API is protected. |
+| `ERLIK_INTEGRATION_EGRESS_NETWORK` | The Docker network the MITM proxy joins to reach the target. Defaults to `bridge`. |
+| `ERLIK_INTEGRATION_CA_FILE` | A PEM bundle to trust for an internal PKI. Upstream TLS verification stays on. |
+| `ERLIK_INTEGRATION_DATA` | Where the lane keeps secrets, proxy CAs and evidence. Gitignored; never put it in a tracked path. |
+
+### Pinning a build
+
+`scripts/release_manifest.py` records the image IDs, the versions of the tools
+*inside* the worker image, and the commit — the things a benchmark report is
+meaningless without six months later:
+
+```sh
+python scripts/release_manifest.py --out build-manifest.json
+python scripts/release_manifest.py --skip-tools   # skip the in-image probe
+```
+
+It reads no configuration, contacts no service, and never touches the evidence
+store. An image it cannot find is recorded as absent rather than omitted.
 
 The Docker tests create and remove their own target and recording server. They
 check redirect refusal, direct-egress denial, authentication isolation, actual

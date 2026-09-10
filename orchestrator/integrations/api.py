@@ -8,7 +8,7 @@ from .contracts import Identity, AssessmentConfig
 from typing import Literal
 from .security import SecretStore, runtime_root
 from .runtime import availability
-from .defectdojo import ExportConfig, export, reconcile
+from .defectdojo import ExportConfig, RemoteError, export, reconcile
 from . import persistence as db
 
 router = APIRouter(prefix="/api/integrations", tags=["integrations"])
@@ -133,3 +133,11 @@ async def reconcile_defectdojo(export_id: str, body: ExportConfig):
         return await reconcile(export_id, body)
     except (ValueError, FileNotFoundError, KeyError) as exc:
         raise HTTPException(422, str(exc)) from exc
+    # `export()` catches RemoteError itself and records it on the export row, so
+    # only reconciliation lets one reach a caller. RemoteError is a RuntimeError,
+    # so it fell through to a bare 500 with no body — and the condition it most
+    # often carries is the actionable one: "Multiple remote findings share one
+    # fingerprint; reconcile the remote test", which the operator can only act on
+    # if they are told. 502, because the remote is what did not cooperate.
+    except RemoteError as exc:
+        raise HTTPException(502, str(exc)) from exc

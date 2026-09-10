@@ -120,22 +120,31 @@ jobs:
       # -m docker selects exactly the suites that need a container. The
       # actual-service tests inside them stay skipped: they need their own
       # opt-in variables, which the job below supplies.
+      #
+      # TWO reports, not one, and they are different measurements: the coverage
+      # report is the baseline-vs-integrated benchmark, and the discovery
+      # comparison is katana against the original browser crawler on a fixed
+      # fixture. Setting only the first captured half the release evidence.
       - name: Local Docker suites
         env:
           ERLIK_DOCKER_TESTS: "1"
-          ERLIK_COVERAGE_REPORT: benchmark-report.json
+          ERLIK_COVERAGE_REPORT: coverage-report.json
+          ERLIK_BENCHMARK_OUTPUT: discovery-comparison.json
         run: python -m pytest -m docker -q --junitxml=junit-docker.xml
 
-      # "produce release evidence" — the benchmark report is the artifact a
-      # release is judged on, and it is worthless if nobody can find the run
-      # that produced it.
+      # "produce release evidence" — these reports are what a release is judged
+      # on, and they are worthless if nobody can find the run that produced
+      # them. build-manifest.json is what makes the other three legible later:
+      # it names the image digests and in-image tool versions they were measured
+      # against.
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: release-evidence
           path: |
             junit-docker.xml
-            benchmark-report.json
+            coverage-report.json
+            discovery-comparison.json
             build-manifest.json
 
   # ----------------------------------------------------------- actual services
@@ -178,18 +187,28 @@ jobs:
           ERLIK_REAL_INTERACTSH_TESTS: "1"
         run: python -m pytest tests/test_interactsh_completion.py -q --junitxml=junit-interactsh.xml
 
-      # DefectDojo brings up its own compose stack and needs secrets of its own.
-      # Skipped rather than failed when they are absent, because an absent
-      # credential is missing coverage and not a defect in the code.
+      # No secrets, and no gate. Both were mine, and both were wrong.
+      #
+      # The fixture in tests/test_defectdojo_live.py mints every credential the
+      # lab needs with `secrets.token_hex` and writes them to a compose
+      # --env-file of its own; NOTHING reads ERLIK_DOJO_* from the process
+      # environment. So the four repository secrets this step used to require
+      # had no effect on anything.
+      #
+      # So the gate `if: env.ERLIK_DOJO_SECRET != ''` asked whether someone had
+      # configured a secret that changes nothing, and skipped real acceptance
+      # coverage when they had not — the exact defect E-005 exists to fix, which
+      # I reintroduced one job below while fixing it. (It is also reading a
+      # step's own `env:` from that step's `if:`, which is at best fragile; the
+      # gate is removed rather than corrected, because there is nothing to gate
+      # on.)
+      #
+      # It needs openssl (for the lab's TLS cert) and Docker. Both are on
+      # ubuntu-latest.
       - name: Live DefectDojo acceptance
-        if: ${{ env.ERLIK_DOJO_SECRET != '' }}
         env:
           ERLIK_DOCKER_TESTS: "1"
           ERLIK_DEFECTDOJO_LIVE_TESTS: "1"
-          ERLIK_DOJO_SECRET: ${{ secrets.ERLIK_DOJO_SECRET }}
-          ERLIK_DOJO_AES_KEY: ${{ secrets.ERLIK_DOJO_AES_KEY }}
-          ERLIK_DOJO_DB_PASSWORD: ${{ secrets.ERLIK_DOJO_DB_PASSWORD }}
-          ERLIK_DOJO_ADMIN_PASSWORD: ${{ secrets.ERLIK_DOJO_ADMIN_PASSWORD }}
         run: python -m pytest tests/test_defectdojo_live.py -q --junitxml=junit-defectdojo.xml
 
       # Client evidence must never reach a public CI artifact (§11). These

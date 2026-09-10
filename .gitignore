@@ -66,6 +66,26 @@ docs/THESIS_RECOMPUTE_PATCH.md
 docs/THESIS_UPDATE_COMPLETE.md
 docs/THREE_TASK_PLAN.md
 
+# --- Generated release evidence ---
+# Written by the CI jobs and by scripts/release_manifest.py, and regenerated
+# every run. Leading slash on purpose: these are repo-ROOT artifacts, and an
+# unanchored pattern would also ignore a same-named file in any subdirectory.
+# (It would NOT have caught docs/integration-discovery-comparison.json, the
+# recorded measurement integration-roadmap.md cites — gitignore matches whole
+# path components, not substrings, so that basename never matched. Anchoring is
+# right for the reason above, not for that one.)
+#
+# These are ignored for a stronger reason than tidiness. Given a bare filename —
+# which is how CI and the documented invocations pass it — ERLIK_COVERAGE_REPORT
+# lands next to the checkout, and if that run was pointed at a client rather
+# than the lab, the report carries finding metadata. An untracked-but-not-ignored
+# artifact is one `git add -A` away from being published.
+/build-manifest.json
+/coverage-report.json
+/discovery-comparison.json
+/junit.xml
+/junit-*.xml
+
 # Credential encryption key — never commit. Losing it makes stored
 # credentials unreadable; committing it makes them plaintext.
 data/.secret_key

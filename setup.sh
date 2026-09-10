@@ -35,8 +35,21 @@ fi
 
 pip install -r requirements.txt
 
+# Compose v2 is a `docker` subcommand; the standalone `docker-compose` binary is
+# v1 and is absent from a plugin-only install. This script runs under `set -e`,
+# so calling the missing one aborts setup before a single container starts —
+# and the README documents `docker compose`, so the two had drifted apart.
+if docker compose version > /dev/null 2>&1; then
+    COMPOSE="docker compose"
+elif command -v docker-compose > /dev/null 2>&1; then
+    COMPOSE="docker-compose"
+else
+    echo "[!] No Docker Compose found — install Docker Desktop or the compose plugin." >&2
+    exit 1
+fi
+
 echo "[+] Starting Docker containers..."
-docker-compose up -d
+$COMPOSE up -d
 
 echo "[+] Waiting for Juice Shop to start..."
 for i in $(seq 1 30); do
@@ -58,3 +71,8 @@ else
 fi
 
 echo "[+] Setup complete!"
+echo
+echo "    Tests:           pip install -r requirements-dev.txt && pytest"
+echo "    Assessment lane: $COMPOSE -f docker-compose.integrations.yml \\"
+echo "                       --profile integrations build   (see docs/integrations.md)"
+echo "    Start:           ./run.sh"

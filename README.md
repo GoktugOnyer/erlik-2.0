@@ -51,17 +51,46 @@ docs/                Methodology + evaluation documentation
 
 ## WSTG test-case catalogue
 
-| ID | Test |
-|----|------|
-| WSTG-INFO-02 | Fingerprint web server |
-| WSTG-INFO-03 | Review webserver metafiles |
-| WSTG-CONF-07 | Transport-layer security / HSTS |
-| WSTG-ATHN-01 | Credentials over encrypted channel |
-| WSTG-SESS-10 | JSON Web Token flaws |
-| WSTG-AUTHZ-04 | Insecure Direct Object Reference |
-| WSTG-INPV-05 | SQL injection |
-| WSTG-INPV-19 | Server-Side Request Forgery |
-| WSTG-BUSL-04 | Process timing / race condition |
+32 cases. The **Lane** column is not maintained by hand — it is what
+`inventory.executable_test_cases` answers when asked, and a case earns a `yes`
+only if *every* one of its steps runs inside the assessment lane's sandbox (see
+[Status](#status) for why a partly-runnable case is excluded outright). A case
+without one still runs through the agent lane and the CLI.
+
+| ID | Test | Lane |
+|----|------|------|
+| WSTG-ATHN-01 | Credentials Transported over Encrypted Channel | — |
+| WSTG-AUTHZ-01 | Directory Traversal / Local File Include | — |
+| WSTG-AUTHZ-04 | Insecure Direct Object References | — |
+| WSTG-AUTHZ-05 | OAuth Authorisation Flow Weaknesses | — |
+| WSTG-BUSL-04 | Process Timing / Race Condition | — |
+| WSTG-BUSL-09 | Unrestricted File Upload | — |
+| WSTG-CLNT-04 | Client-side URL Redirect (Open Redirect) | yes |
+| WSTG-CLNT-07 | Cross Origin Resource Sharing | yes |
+| WSTG-CLNT-07b | CORS null Origin Trust (GET and preflight) | yes |
+| WSTG-CLNT-09 | Clickjacking Protection Headers | — |
+| WSTG-CONF-02 | Platform Debug and Diagnostic Endpoint Exposure | — |
+| WSTG-CONF-04 | Unreferenced Backup, VCS and Build Artifacts | — |
+| WSTG-CONF-06 | HTTP Methods | yes |
+| WSTG-CONF-07 | Transport Layer Security | — |
+| WSTG-ERRH-01 | Improper Error Handling | — |
+| WSTG-INFO-02 | Fingerprint Web Server | — |
+| WSTG-INFO-03 | Review Webserver Metafiles | yes |
+| WSTG-INPV-01 | Reflected Cross-Site Scripting | — |
+| WSTG-INPV-05 | SQL Injection | — |
+| WSTG-INPV-05.2 | SQL Injection (error-based, single request) | yes |
+| WSTG-INPV-05.3 | SQL Injection (blind, boolean differential) | yes |
+| WSTG-INPV-05.4 | SQL Injection (blind, time-based) | yes |
+| WSTG-INPV-05.6 | NoSQL Operator Injection | — |
+| WSTG-INPV-06 | LDAP Injection | — |
+| WSTG-INPV-07 | XML External Entity | yes |
+| WSTG-INPV-11 | Insecure Deserialization | — |
+| WSTG-INPV-11.2 | Injection — unclassified (interpreter error signatures) | yes |
+| WSTG-INPV-15 | Hop-by-Hop Header Handling | — |
+| WSTG-INPV-18 | Server-Side Template Injection | yes |
+| WSTG-INPV-19 | Server-Side Request Forgery | via collector |
+| WSTG-SESS-02 | Cookie Attributes | yes |
+| WSTG-SESS-10 | JSON Web Token Flaws | — |
 
 ## Prerequisites
 
@@ -109,6 +138,31 @@ See [SECURITY.md](SECURITY.md).
 > the Kali base image and installs the toolset (nmap, sqlmap, nuclei, dalfox,
 > jwt_tool, …). This needs internet and takes a while; later runs start instantly.
 
+### The assessment lane (optional)
+
+The steps above do **not** build it. The assessment lane is a second execution
+path that runs ZAP, Schemathesis, Katana, Interactsh and a DefectDojo export as
+isolated Docker jobs behind a scope-checking egress proxy. It has its own compose
+profile and its own images:
+
+```bash
+docker compose -f docker-compose.integrations.yml --profile integrations build
+docker pull ghcr.io/zaproxy/zaproxy:2.16.1
+export ERLIK_API_TOKEN='replace-with-a-long-random-token'
+./run.sh                    # dashboard at /integrations
+```
+
+`/api/integrations/*` and `/ws/integrations/*` are refused **whether or not**
+`ERLIK_API_TOKEN` is set — unlike the base API there is no unauthenticated mode,
+because these routes expose credential handles and client evidence. So setting the
+token is necessary but not sufficient: every call must also carry it, as
+`X-API-Token`, as a bearer token, or as the cookie the dashboard gets from
+`POST /api/auth`.
+
+See **[docs/integrations.md](docs/integrations.md)** for scope configuration,
+identities, the DefectDojo import and reconcile examples, and every `ERLIK_*`
+variable the lane reads.
+
 ## Tests
 
 `pytest` is **not** in `requirements.txt` — the runtime install stays lean. The test
@@ -119,20 +173,63 @@ pip install -r requirements-dev.txt
 pytest                      # must be run from the repo root
 ```
 
-The suite pins the behaviour of the functions every thesis metric derives from —
-the programmatic finding detector, the finding↔ground-truth matcher, and the
-scope guard — so a refactor that would move a number in the results turns a test
-red first. Neither Docker nor Ollama is needed to run it; it exercises the Python
-layer directly, in about a minute.
+Neither Docker nor Ollama is needed to run it; it exercises the Python layer
+directly, in about a minute.
+
+What it covers has shifted as the project has. A core of it still pins the
+functions the published evaluation's numbers derive from — the finding detector,
+the finding↔ground-truth matcher, the scope guard — so a refactor that would move
+a number in those results turns a test red first. The bulk of it now pins product
+behaviour instead: the curl dialect the assessment lane will and will not execute,
+the redaction boundary between a target's bytes and a finding's evidence, the
+credential store, and the authorisation gates. Those exist because this codebase's
+characteristic defect is not a crash but a confident result from a path that did
+nothing — so most of these tests are written to fail if the thing they check stops
+happening silently.
 
 Run it from the repository root: `conftest.py` anchors the working directory
 there, and `orchestrator.main` builds its Jinja2 template path relative to the
 CWD.
 
-A clean checkout currently reports **1674 passed, 31 skipped**. Every skip is
-`corpus present but empty` — those tests replay recorded session data from
-`runs/`, which is excluded by `.gitignore` (see `docs/REPRODUCIBILITY.md`), so
-they are structurally unrunnable from a fresh clone rather than broken.
+A **fresh clone** reports **2167 passed, 68 skipped** on its first run, and
+2169 passed / 66 skipped on every run after — measured 2026-09-10 against this
+commit by cloning and running it, three times, not quoted from a developer's tree.
+
+> Re-measure this after any change under `tests/`. The first draft of this
+> paragraph was taken before the same commit finished adding tests, which is
+> exactly the staleness it was written to correct.
+
+Every skip is structural rather than broken, and the 68 account for themselves:
+
+| Count | Reason |
+|-------|--------|
+| 33 | need `data/pentest.db`, the recorded corpus — `.gitignore` excludes `data/` because it holds real client findings (see `docs/REPRODUCIBILITY.md` and `tests/corpus.py`) |
+| 32 | container suites, behind `ERLIK_DOCKER_TESTS=1` |
+| 3 | need a real external service (Interactsh, DefectDojo) |
+
+A developer's tree reports **2199 passed, 35 skipped** instead, and the 33-test
+gap is entirely that corpus: 31 tests report `corpus present but empty`, and 2
+more inspect the live database directly — one for a plaintext credential on disk,
+the other for leftover fixture rows. Those two are hygiene checks on a real machine, so skipping
+where there is no live database is the right answer; it is also why they stop
+skipping from the second run onward, once the suite has created one.
+
+The 32 container suites skip on a developer's machine too. They gate on
+`ERLIK_DOCKER_TESTS=1` being set, **not** on whether Docker is available — having
+the daemon running does not opt you in.
+
+The Docker-gated suites are selected by a marker rather than by filename:
+
+```bash
+ERLIK_DOCKER_TESTS=1 pytest -m docker          # the assessment lane's container tests
+pytest -m 'not docker'                         # everything else
+```
+
+CI runs the network-free suite on 3.10, 3.12 and 3.14, and the `-m docker` suites
+on everything except a plain push — pull requests, manual dispatches and releases. `scripts/ci_assert_suite_ran.py` fails a run in
+which the suite collapsed to a handful of tests or silently skipped itself — a
+green run where nothing executed is the one failure mode a test suite cannot
+report on its own.
 
 See `tests/README.md` for what each module covers and for the coverage command.
 
@@ -206,7 +303,8 @@ DefectDojo export, each running as a Docker job behind a scope-checking egress
 proxy. It does not change the existing toolset presets; the dashboard is at
 `/integrations`.
 
-The sandboxed executor runs **9 of the 29** catalogue cases. Which nine is
+The sandboxed executor runs **12 of the 32** catalogue cases, and a thirteenth
+(`WSTG-INPV-19`) through the Interactsh collector instead. Which twelve is
 derived from the parser itself (`inventory.executable_test_cases`), not written
 down: a case qualifies only when every one of its steps parses as a single
 curl request AND interpolates nothing the lane cannot supply, so a case that
@@ -228,18 +326,22 @@ planted `<a href="/search?219359=1">` makes an application that merely echoes
 unknown field names report critical template injection. The schema is the one
 source without that property, because the operator supplied it. A case that tests
 a parameter runs once per (endpoint, parameter) pair and only against a URL the
-parameter was actually observed on. That field is what makes WSTG-CLNT-04,
-WSTG-INPV-11.2 and WSTG-INPV-18 runnable; before it, discovery produced
-endpoints and every injection case sat idle for want of somewhere to inject.
+parameter was actually observed on. That field is what **half the runnable
+catalogue** depends on: 6 of the 12 interpolate `{{parameter}}` — WSTG-CLNT-04,
+the three WSTG-INPV-05.x injection cases, WSTG-INPV-11.2 and WSTG-INPV-18.
+Before it, discovery produced endpoints and every injection case sat idle for
+want of somewhere to inject.
 
-Of the 20 cases still out of reach: 6 run a shell pipeline or a tool that is
-not curl, 4 need a target field discovery still does not produce (`login_url`,
-`host`, `jwt`, `request_template`/`success_marker` — one case each), 4
-interpolate a field nothing supplies (three want a form `submit` control, and
-all three are shell cases regardless), 4 hit a dialect refusal, 1 needs
-credentials the lane cannot choose between, and 1 runs through the Interactsh
-collector instead. There is no longer a single change worth several cases —
-the remaining blockers are one-offs.
+Of the 20 cases still out of reach: 6 run a shell pipeline or a tool that is not
+curl, 4 need a target field discovery does not produce (`login_url`, `host`,
+`jwt`, `request_template`/`success_marker` — one case each), 4 interpolate a
+field nothing supplies (three want a form `submit` control, and all three are
+shell cases regardless), 4 hit a dialect refusal, 1 needs credentials the lane
+cannot choose between — WSTG-AUTHZ-04, whose `required_any` names a
+high-privilege and a low-privilege identity, and which also wants a
+`url_template` nothing supplies — and 1 runs through the Interactsh collector
+instead. There is no longer a single change worth several cases — the remaining
+blockers are one-offs.
 
 The dialect is deliberately narrower than "safe": `-w` and `-e` were allowed
 and then removed because ablation showed they bought zero runnable cases while

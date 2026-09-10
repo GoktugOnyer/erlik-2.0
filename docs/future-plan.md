@@ -144,8 +144,8 @@ change and one independent product workstream in progress.
 | E-002 | Restore callback capability after credential replacement | A paused run resumes pending SSRF checks with fresh correlation IDs; previously issued probes are not silently replayed; interrupted collection remains explicitly incomplete | `service.py`, `interactsh.py` | **CLOSED** `639c32e`. The pause erased its own resume marker: the sweep persisted `partial` over the `needs_auth` the stage had just been given, and `run()` only selects `queued`/`needs_auth`. Note the status column was too generous — `issued_payloads` is in-memory and does NOT survive a resume; what prevents reuse is that payloads are minted per client start |
 | E-003 | Separate catalogue detection from workflow mutations | V1 catalogue follow-up refuses all mutation steps, or an explicit per-case fixture/cleanup wrapper handles them; no leftover probe artifact in the lab | `deterministic.py`, catalogue runner | **CLOSED** `7f45f06`, taking the plan's first branch: refuse. The gate deferred to the egress policy, which says yes once `state_changing` is selected — measured, `PUT /erlik_put_test.txt` ran. Cost: `WSTG-INPV-07` loses ALL detection (every step is POST) until E-012 builds the wrapper |
 | E-004 | Correct evidence completeness validation | Every referenced artifact exists and passes its digest check; each finding has substantive supporting evidence; empty diagnostic files are valid attachments | benchmark, evidence persistence | **CLOSED** `e78c257`, after being marked closed too early. The digest was write-only state — nothing recomputed it, and the benchmark read `size` from the database row, comparing it against itself. An empty diagnostic FILE was also dropped rather than retained. Benchmark now passes against the stricter validator: 17/17 substantive, 80/80 intact |
-| E-005 | Expand CI and produce release evidence | Unit and local Docker jobs cover lifecycle, inventory, benchmark and parser tests; dedicated actual-service jobs run on release or manual dispatch with explicit opt-in variables | `.github/workflows/tests.yml` | Partly stale, one live defect: CI installs a bare `pytest` while `pytest.ini` sets `asyncio_mode = auto`, so **the async suite cannot be collected**. One-line fix (`pip install -r requirements-dev.txt`) is written but unpushed — the credential in use lacks GitHub's `workflow` scope |
-| E-006 | Package and document the integration release | Separate reviewable milestone commits, current setup instructions, initial-import/reconcile examples, pinned build manifest, no unrelated operator files included | docs, Git review series | Open |
+| E-005 | Expand CI and produce release evidence | Unit and local Docker jobs cover lifecycle, inventory, benchmark and parser tests; dedicated actual-service jobs run on release or manual dispatch with explicit opt-in variables | `.github/workflows/tests.yml` | **CLOSED** `eedb7e3`. The collection defect was the smaller half: CI had also never executed a single one of the 35 Docker-gated tests, so the lane's whole execution boundary was covered only on a developer's machine. Now three jobs — unit on 3.10/3.12/3.14, `-m docker` off-push, actual-services behind a repository variable — plus `ci_assert_suite_ran.py`, because a run where everything skipped is green and worthless. **Still unpushed:** the credential lacks GitHub's `workflow` scope |
+| E-006 | Package and document the integration release | Separate reviewable milestone commits, current setup instructions, initial-import/reconcile examples, pinned build manifest, no unrelated operator files included | docs, Git review series | **CLOSED**. Manifest in `eedb7e3`; docs and packaging here. The setup instructions were verified by following them from a fresh clone rather than by reading them, which is how two of my own figures turned out wrong — see below |
 
 Run collector fault-injection tests, real scanner cancellation, actual process
 crash recovery, mid-stage credential expiry, redirects, external schema references,
@@ -452,6 +452,45 @@ Design delivery as at-least-once: side-effecting scan stages must not be blindly
 retried after lease loss. A remotely lost worker means interrupted/unknown until
 its execution has been accounted for.
 
+### E-025: an uncertain export can block a destination that was never written to
+
+Found while writing the E-006 export documentation, and pinned by
+`test_a_local_failure_before_any_request_is_uncertain_and_blocks`.
+
+`export()` marks the row `uncertain` from `except (Exception, CancelledError)`,
+which fires for failures raised before a single request leaves the machine — the
+sandbox not starting because Docker is down, a cancelled run. The row then blocks
+that destination like any other uncertain write, and reconciliation cannot clear
+it: reconcile verifies the intended findings against the remote test, and a remote
+that never received them answers `Remote state differs`. Every later export to
+that destination is a permanent no-op, so an operator whose Docker daemon hiccuped
+is locked out of exporting that assessment with no documented way back.
+
+The narrow fix is to distinguish "no request was ever issued" from "a write may
+have landed" — `export()` already tracks `wrote`, and the local-failure branch
+does not consult it. `failed` is the honest status when nothing was sent. Worth
+confirming there is no path where a request escapes without `wrote` being set
+before changing it; the conservative default exists for a reason.
+
+### E-026: the uncertainty block misses the case it most needs to cover
+
+Found alongside E-025, pinned by
+`test_a_lost_first_import_does_not_block_a_direct_reimport`.
+
+The block matches an export by destination, or by `remote_test_id` on that
+server. A first `import` whose response was lost — the 202, the timeout, the
+cancellation — never learns a test ID, so its row carries `remote_test_id = NULL`
+and only the byte-identical body is blocked. The operator who does what the
+documentation advises (find the test in the DefectDojo UI, then reimport into it
+by ID) is not blocked, and writes a changed report over a write whose outcome
+nobody established. That is the exact papering-over the block exists to prevent,
+in the exact scenario it was written for.
+
+A destination-level guard would cover it: an uncertain row for engagement E should
+block exports to any test under E for that session, not only to the destination
+hash. Note this interacts with E-025 — fix that first, or the wider block will
+lock out more operators, not fewer.
+
 ## 10. Shared technical contracts
 
 Prefer additive schema migrations and small services with explicit interfaces.
@@ -528,11 +567,46 @@ of that case's detection), and E-002's status in this plan credited
 `issued_payloads` with a guarantee it does not provide. Reproductions are worth
 delegating; conclusions are worth checking.
 
-**Increment 2 — make the release repeatable:** E-005 and E-006. Start with the CI
-collection defect, which is one line and currently hides the async suite from every
-CI run. Then run the pinned actual services, regenerate the corrected benchmark
-report, update setup/API docs, and prepare the separate review series. The
-repository requires human review and merge for scope/execution changes; no
+**Increment 2 — make the release repeatable: DONE** (`eedb7e3`, plus the docs and
+packaging commit). The CI collection defect was one line, as expected, and it was
+not the important one: CI had never executed a single Docker-gated test, so the
+lane's entire execution boundary — the sandbox, the egress proxy, the container
+lifecycle — was verified only on one developer's machine. A one-line fix to a job
+that was never going to run the tests anyway would have looked like progress.
+
+E-006 produced the same lesson from the other direction. Every stale figure in it
+had been written by someone who read the code instead of running it, so the
+instructions were checked by following them from a **fresh clone with a fresh
+virtualenv**, and two of my own new numbers were wrong within the hour:
+
+- I quoted "a clean checkout reports 2167 passed, 35 skipped" from my working
+  tree. A genuine fresh clone reports **2134 / 68** — the working tree has the
+  gitignored `runs/` corpus and Docker, and a new operator has neither. The CI
+  ratio guard had been calibrated against the wrong figure for the same reason.
+- I then broke the skip breakdown down into categories summing to 44 under a
+  total of 68, having counted distinct skip *locations* instead of summing the
+  `SKIPPED [n]` counts pytest prints.
+
+Both are now guarded by tests rather than by care: `tests/test_release_tooling.py`
+asserts the README's breakdown sums to its own total, that its lane coverage
+figure matches what `executable_test_cases` answers, and that no case marked
+runnable in the catalogue table is one the parser refuses. The stale numbers this
+increment corrected — `9 of the 29`, `1674 passed` — went stale precisely because
+nothing ever asked them a question.
+
+One further gap closed under "no unrelated operator files": the release evidence
+E-005 introduced was untracked but **not ignored**, and `ERLIK_COVERAGE_REPORT`
+given a bare filename lands next to the checkout. A local `pytest -m docker`
+pointed at a client rather than the lab would have left a report carrying finding
+metadata one `git add -A` from being published.
+
+The audit found no operator or client data, no secrets, and nothing sensitive
+anywhere in history. It did find ~36 tracked research artifacts (fine-tuning
+scripts, training logs, recomputed statistics) that are evidence for the
+evaluation rather than product; whether they ship is a decision for the owner,
+not a packaging defect, and nothing was removed.
+
+The repository requires human review and merge for scope/execution changes; no
 automated self-merge is part of this plan.
 
 **Increment 3 — demonstrate the next product benefit:** a vertical slice of E-007,
