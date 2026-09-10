@@ -270,3 +270,54 @@ async def test_a_cookie_finding_quotes_the_line_it_judged_and_names_what_is_miss
     assert "Set-Cookie: SESSIONID=abc123def456; Path=/" in evidence
     assert "HttpOnly" in evidence and "SameSite" in evidence, "it must name what is absent"
     assert "Secure" not in evidence, "the endpoint is http, so Secure does not apply"
+
+
+# ------------------------------------------------- it survives the plumbing
+
+async def test_a_rerun_with_no_proof_does_not_strip_the_proof_already_stored():
+    """A fingerprint covers (case, step, url, parameter, identity), so two writes
+    are two runs of the same probe and the later proof is as good as the earlier
+    — except when it is empty. An empty artifact is not evidence."""
+    import orchestrator.database as database
+    from orchestrator.integrations import persistence as db
+    from orchestrator.integrations.contracts import StageResult
+
+    await database.init_db()
+    await db.migrate()
+    session = "evidence-merge-test"
+
+    def result(evidence):
+        return StageResult(findings=[_finding(fingerprint="same", evidence=evidence)])
+
+    await db.persist_result(session, "one", result("the proof: User ID exists"))
+    await db.persist_result(session, "two", result(""))
+    rows = await db.rows("SELECT payload FROM integration_findings WHERE session_id=? AND fingerprint=?",
+                         (session, "same"))
+    assert json.loads(rows[0]["payload"])["evidence"] == "the proof: User ID exists"
+
+    await db.persist_result(session, "three", result("a better proof"))
+    rows = await db.rows("SELECT payload FROM integration_findings WHERE session_id=? AND fingerprint=?",
+                         (session, "same"))
+    assert json.loads(rows[0]["payload"])["evidence"] == "a better proof", (
+        "a later run with real proof must be able to replace the earlier one")
+
+
+async def test_a_user_cannot_write_the_evidence_field_through_triage():
+    """The field is the application's bytes. If a reviewer could set it, it stops
+    being that and becomes free text, which defeats the point of having it."""
+    import orchestrator.database as database
+    from orchestrator.integrations import api, persistence as db
+    from orchestrator.integrations.contracts import StageResult
+
+    assert set(api.TriageInput.model_fields) == {"state", "note"}, (
+        "the triage body accepts a new field; check it cannot be `evidence`")
+
+    await database.init_db()
+    await db.migrate()
+    session = "evidence-triage-test"
+    await db.persist_result(session, "one", StageResult(
+        findings=[_finding(fingerprint="t1", evidence="the application's own bytes")]))
+    updated = await api.triage(session, "t1",
+                               api.TriageInput(state="false_positive", note="reviewed by hand"))
+    assert updated["triage_state"] == "false_positive"
+    assert updated["evidence"] == "the application's own bytes", "triage rewrote the proof"

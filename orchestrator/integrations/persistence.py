@@ -140,4 +140,11 @@ async def persist_result(session_id, stage_id, result):
             finding.evidence_ids = sorted(set(prior.get("evidence_ids", []) + finding.evidence_ids))
             finding.triage_state = prior.get("triage_state", "open")
             finding.triage_note = prior.get("triage_note", "")
+            # A fingerprint covers (case, step, url, parameter, identity), so two
+            # writes are two runs of the SAME probe and the later proof is as
+            # good as the earlier — except when it is empty. An empty artifact is
+            # not evidence and must not replace one that exists: a re-run whose
+            # window came back blank would otherwise silently strip a finding of
+            # the only thing that made it checkable.
+            finding.evidence = finding.evidence or prior.get("evidence", "")
         await execute("INSERT OR REPLACE INTO integration_findings VALUES(?,?,?)", (session_id, finding.fingerprint, finding.model_dump_json()))
