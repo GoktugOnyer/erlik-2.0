@@ -158,6 +158,28 @@ class TestChainsDoNotInheritPins:
         cc.pop("skills_pin", None)
         assert "skills_pin" not in cc and cc["skills_max_chars"] == 20000
 
+    def test_the_first_phase_is_stripped_too(self):
+        """_create_chain_session() is what builds EVERY phase including recon,
+        so a chain drops the pin from all of them — not from phases 2+ only.
+        Worth pinning down: the panel's note tells operators exactly this."""
+        from pathlib import Path
+        src = (Path(__file__).resolve().parents[1] / "orchestrator" / "main.py").read_text()
+        assert '_create_chain_session(chain_id, chain, "recon", 0)' in src, (
+            "the first chain phase no longer goes through the stripping path")
+
+    def test_the_panel_tells_the_operator(self):
+        """The pin control sits next to a preview that shows the pin taking.
+        Without the note, a chain operator reads a preview that no phase of
+        their run will match."""
+        from pathlib import Path
+        h = (Path(__file__).resolve().parents[1]
+             / "dashboard" / "templates" / "index.html").read_text()
+        note = h[h.index('id="rc-skills-pin"'):][:900].lower()
+        assert "chain" in note, "the pin control does not mention chains"
+        assert "every phase" in note and "first" in note, (
+            "the note must say the FIRST phase is dropped too — 'chains drop "
+            "pins' alone reads as 'later phases only'")
+
 
 class TestUiCarriesOnlyWhatWasMeasured:
     @staticmethod
@@ -206,3 +228,75 @@ class TestUiCarriesOnlyWhatWasMeasured:
         """Emitting a default would overwrite a value the chosen preset pinned."""
         h = self._html(client)
         assert "Number.isFinite(n) ? n : null" in h
+
+
+class TestTheRunReceivesWhatThePreviewShowed:
+    """The preview and the run must read the SAME controls.
+
+    `tuningConfig()` is what `doPreviewTuning()` posts to
+    /api/library/routing/explain. For most of this panel's life
+    `buildRunConfig()` — the payload that actually starts a session — omitted
+    all three keys, so an operator could pin a sheet, watch the preview change
+    to prove the pin took, start the run, and get a run that never received it.
+    Nothing failed; the UI simply reported a configuration the run did not use.
+    """
+
+    TUNABLES = ("skills_pin", "skills_exclude", "skills_max_chars")
+
+    @staticmethod
+    def _js(name: str) -> str:
+        """The body of a JS function declaration, by brace matching."""
+        from pathlib import Path
+        src = (Path(__file__).resolve().parents[1]
+               / "dashboard" / "templates" / "index.html").read_text()
+        i = src.index(f"function {name}(")
+        start = src.index("{", i)
+        depth, k = 0, start
+        while True:
+            depth += (src[k] == "{") - (src[k] == "}")
+            if depth == 0:
+                return src[start:k + 1]
+            k += 1
+
+    def _emitted_keys(self) -> set:
+        """The keys tuningConfig()'s returned object literal carries."""
+        import re
+        body = self._js("tuningConfig")
+        return set(re.findall(r"^\s*(\w+):", body[body.index("return {"):], re.M))
+
+    def test_preview_posts_the_tuning_controls(self):
+        assert "tuningConfig()" in self._js("doPreviewTuning")
+
+    def test_the_run_payload_carries_the_same_builder(self):
+        """Not "buildRunConfig mentions skills_pin" — it must call the same
+        function, because a second reader of the same inputs is free to drift
+        from the first one key at a time."""
+        assert "tuningConfig()" in self._js("buildRunConfig"), (
+            "buildRunConfig() no longer sources the tunables from "
+            "tuningConfig(); the preview and the run can now disagree")
+
+    def test_both_paths_carry_every_tunable(self):
+        """Guards the direction that fails silently: a knob added to the panel
+        and wired to the preview only."""
+        assert self._emitted_keys() == set(self.TUNABLES), self._emitted_keys()
+
+    def test_every_emitted_key_survives_resolve(self):
+        """resolve() has an explicit whitelist, so a key the UI sends but the
+        whitelist omits vanishes without a word."""
+        sent = {"skills_pin": ["hunt-ssrf.md"], "skills_exclude": ["a.md"],
+                "skills_max_chars": 20000}
+        assert set(sent) == self._emitted_keys(), (
+            "the panel gained a knob this test does not check")
+        r = resolve(sent)
+        assert r["skills_pin"] == ["hunt-ssrf.md"]
+        assert r["skills_exclude"] == ["a.md"]
+        assert r["skills_max_chars"] == 20000
+        assert r["run_config_warnings"] == []
+
+    def test_a_blank_panel_changes_nothing(self):
+        """Untouched controls post null. Null has to stay inert, or shipping
+        these keys in every run payload would overwrite what the preset chose
+        for anyone who never opened the panel."""
+        base = {"preset": "guided_ai"}
+        blank = dict(base, **{k: None for k in self.TUNABLES})
+        assert resolve(blank) == resolve(base)

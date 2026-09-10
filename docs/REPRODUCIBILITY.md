@@ -16,7 +16,7 @@ repository by re-running the recompute scripts and comparing hashes.
 |---|---|---|---|---|
 | `docs/recomputed_all_experiments.csv` | `de6330e88c18e42aec58fa209447ee5d4bad5ca1f48a4d75c839a1a212577b02` | ~3 KB | `scripts/recompute_all_thesis_tables.py` | yes |
 | `docs/recomputed_all_experiments.json` | `fc3f7e211fb9d9c0c11f4c6d3af4e61668de21756fc676c8b45216c1295c260f` | ~15 KB | `scripts/recompute_all_thesis_tables.py` | yes |
-| `docs/statistical_tests.json` | `c7cba2b7a4a3cab90b6c44eb2c7e5b465a72a599f48f771cb9b85f2ae993267a` | ~3 KB | ad-hoc scipy analysis — **no tracked script regenerates this**, see below | yes |
+| `docs/statistical_tests.json` | `c7cba2b7a4a3cab90b6c44eb2c7e5b465a72a599f48f771cb9b85f2ae993267a` | ~3 KB | `scripts/recompute_statistical_tests.py` (+ scipy) — partially reproducible, see below | yes |
 | `training_data/juicy3_train.jsonl` | `5f2f394469700015dc94c0b5ce9399da02ef61e54fb793ab1d697ac7582a35ed` | 41 MB | `scripts/assemble_juicy3_dataset.py` | **no — see below** |
 | `training_data/juicy3_val.jsonl` | `320099585c0dac63cda470d17c325574108b95efccfef095b51775cadf136081` | 1.7 MB | `scripts/assemble_juicy3_dataset.py` | **no — see below** |
 
@@ -34,13 +34,26 @@ ones backing every number in the results chapter.
 
 ### Caveat on `statistical_tests.json`
 
-This file holds scipy hypothesis-test output (`primary_comparison`, `alpha`,
-`mcnemar_per_gt`, `wilcoxon_per_session`, `fisher_per_category_bh`). No script
-in `scripts/` writes it — it was produced by an ad-hoc scipy session over the
-recomputed coverage data. Its hash therefore pins the artefact but does **not**
-pin a reproducible pipeline: a reader can confirm the file is unmodified, but
-cannot currently regenerate it from source. Committing the analysis as a tracked
-script is outstanding work.
+This file holds the significance tests for the primary Apr 17 baseline-7B vs
+FT-v3-7B comparison. `scripts/recompute_statistical_tests.py` regenerates it and
+reproduces the pinned hash byte-for-byte, but only two of its three tests are
+recomputed from repository-tracked data:
+
+| Test | Reproducible from a clean clone? | Source |
+|---|---|---|
+| `mcnemar_per_gt` | yes | `gt_hit_ids` sets in `docs/recomputed_gt_coverage.json` |
+| `fisher_per_category_bh` | yes | the same sets, mapped onto `JUICE_SHOP_GROUND_TRUTH` in `orchestrator/main.py` |
+| `wilcoxon_per_session` | **no** | needs the per-session findings vector, which exists only in `runs/*/pentest.db` |
+
+`runs/` is gitignored, so a clean clone cannot recompute the Wilcoxon. Run
+without arguments, the script carries the committed Wilcoxon values forward and
+prints `wilcoxon: CARRIED FORWARD` to say so; supply the paired per-session
+counts with `--wilcoxon-pairs` to recompute it.
+
+`--check` recomputes everything and asserts the result is byte-identical to the
+committed file, writing nothing. This is the useful verification for a reader:
+it confirms the McNemar and Fisher figures follow from the tracked coverage data
+rather than having been entered by hand.
 
 ## Regeneration commands
 
@@ -48,8 +61,13 @@ script is outstanding work.
 # GT coverage for all thesis experiments (results table)
 python3 scripts/recompute_all_thesis_tables.py
 
-# Statistical tests for the primary baseline-vs-fine-tuned comparison
+# GT coverage for the primary baseline-vs-fine-tuned comparison
 python3 scripts/recompute_gt_coverage.py
+
+# Significance tests for that comparison
+# (needs scipy: pip install -r requirements-analysis.txt)
+python3 scripts/recompute_statistical_tests.py --check   # verify, write nothing
+python3 scripts/recompute_statistical_tests.py           # regenerate
 
 # Verify against pinned hashes (the three repo-tracked outputs)
 sha256sum -c <<'EOF'

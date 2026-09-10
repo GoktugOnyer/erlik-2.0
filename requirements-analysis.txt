@@ -1,0 +1,12 @@
+# Dependencies for the thesis analysis / recomputation scripts only.
+# The orchestrator does not import these — install them just to reproduce the
+# reported figures:
+#
+#   pip install -r requirements-analysis.txt
+#   python3 scripts/recompute_statistical_tests.py --check
+#
+# Minimum versions, matching the convention in requirements.txt.
+
+scipy>=1.7    # stats.binomtest (added in 1.7), fisher_exact, wilcoxon
+              # used by scripts/recompute_statistical_tests.py
+              #     and scripts/power_analysis.py

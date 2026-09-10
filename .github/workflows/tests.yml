@@ -18,11 +18,17 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Exactly the versions the suite was actually run on before this
-        # workflow was committed — 3.12 and 3.14, both clean. Pinning a version
-        # nobody has executed is the same defect this project keeps finding:
-        # a confident green from a path that was never exercised.
-        python-version: ["3.12", "3.14"]
+        # Every version here has actually been run green before being added —
+        # pinning a version nobody has executed is the same defect this project
+        # keeps finding: a confident green from a path that was never exercised.
+        #
+        # 3.10 is the floor README.md and setup.sh promise, and it was the gap
+        # that mattered: two f-strings using PEP 701 syntax (3.12+ only) made
+        # orchestrator/main.py raise SyntaxError at import on 3.10 and 3.11, so
+        # the whole application failed to start on a supported interpreter —
+        # and a 3.12/3.14 matrix could never see it. Verified on 3.10.20 before
+        # adding: 1690 passed, 31 skipped.
+        python-version: ["3.10", "3.12", "3.14"]
 
     steps:
       - uses: actions/checkout@v4
