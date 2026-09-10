@@ -68,6 +68,12 @@ consumed the whole URL budget and starved the targeted probes, an empty
 discovery stage reported `completed`, and the catalogue's per-request cost is a
 container start. All four are fixed in the same branch.
 
+## Where this goes next
+
+[future-plan.md](future-plan.md) proposes the sequence beyond this roadmap — R0
+(finish the current implementation) through R5 (optional integrations) — with the
+2026-09-10 measurements folded into its baseline and its release gates.
+
 ### The whole lane — 2026-09-10
 
 [measurements/2026-09-10-full-lane.md](measurements/2026-09-10-full-lane.md):
