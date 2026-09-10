@@ -369,6 +369,52 @@ def curl_request(command):
 class CatalogueAdapter(BaseAdapter):
     name = "testcases"
 
+    # Methods that read. Everything else changes something on the target, and
+    # V1 of this lane does not do that — see _v1_step_policy.
+    SAFE_METHODS = ("GET", "HEAD", "OPTIONS")
+
+    @staticmethod
+    def _v1_step_policy(policy_config, step, command):
+        """Refuse a catalogue step that would write to the target. V1 rule.
+
+        docs/future-plan.md E-003: "V1 catalogue follow-up refuses all mutation
+        steps, or an explicit per-case fixture/cleanup wrapper handles them; no
+        leftover probe artifact in the lab."
+
+        This used to defer to the egress policy — refusing only when the policy
+        said no. But the policy governs SCOPE, and once an operator selects
+        `state_changing` with a matching operation route it says yes. Measured:
+        WSTG-CONF-06's put_probe then ran and wrote `erlik_put_test.txt` to the
+        client's server, and nothing recorded the write or undid it.
+
+        Nine catalogue steps use a non-safe method; two of the cases carrying
+        them run in this lane. What refusing costs is stated rather than hidden,
+        and pinned by tests/test_catalogue_mutations.py:
+
+          WSTG-CONF-06  keeps its medium detection from the Allow header and
+                        loses the high confirmation that writes the file.
+          WSTG-INPV-07  loses EVERYTHING. All four of its steps are POST and all
+                        four emit findings, so XXE is undetectable in this lane
+                        until a fixture and cleanup wrapper exists (E-012).
+
+        That is a real recall loss and it is the deliberate trade: erlik cannot
+        name what a POSTed XML document created on someone's server, so it cannot
+        declare the undo, so it does not make the request.
+        """
+        from orchestrator.integrations.egress_policy import EgressPolicy
+        try:
+            _, url, method = curl_request(command)
+        except ScopeViolation:
+            return None  # The checker reports unsupported paths as a failure.
+        if method.upper() in CatalogueAdapter.SAFE_METHODS:
+            return None
+        permitted = EgressPolicy(policy_config).check(url, method)[0]
+        return ("skipped: this step would mutate the target with " + method.upper()
+                + (", which the scope policy permits, but the catalogue lane cannot "
+                   "declare an undo for a write it did not define — see E-003"
+                   if permitted else
+                   ", and a state-changing operation was not selected"))
+
     async def run(self, ctx, sandbox, collector=None):
         started_at = time.monotonic()
         result = StageResult(metadata={"catalogue": [], "executed_checks": 0})
@@ -422,9 +468,7 @@ class CatalogueAdapter(BaseAdapter):
                 _, url, method = curl_request(command)
             except ScopeViolation:
                 return None  # The checker reports unsupported paths as a failure.
-            if method not in ("GET", "HEAD", "OPTIONS") and not policy.check(url, method)[0]:
-                return "skipped: state-changing operation not selected"
-            return None
+            return CatalogueAdapter._v1_step_policy(sandbox.policy, step, command)
 
         async def execute(command, **kwargs):
             argv, _, _ = curl_request(command)
