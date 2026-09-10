@@ -148,7 +148,25 @@ async def run(session_id, notify=None):
                                 try:
                                     if stage["adapter"] == "interactsh":
                                         collector = await Collector(ctx).start()
-                                        result = await collector.probe(sandbox)
+                                        # OWNERSHIP CROSSES A BOUNDARY THAT CAN FAIL.
+                                        #
+                                        # `start()` returns a collector that owns
+                                        # an entered Sandbox and a running
+                                        # interactsh-client task, and everything
+                                        # that later closes one iterates
+                                        # `collectors` — so a failure before the
+                                        # append leaks both. Neither handler below
+                                        # covers it: asyncio.TimeoutError is caught
+                                        # by a branch that does not close, and
+                                        # asyncio.CancelledError inherits from
+                                        # BaseException so `except Exception` never
+                                        # sees it. start() already self-closes on
+                                        # BaseException; this is the other boundary.
+                                        try:
+                                            result = await collector.probe(sandbox)
+                                        except BaseException:
+                                            await collector.close()
+                                            raise
                                         collectors.append((collector, stage))
                                         result.status = "running"
                                     elif stage["adapter"] == "testcases":

@@ -238,11 +238,18 @@ class Collector:
         return await record(self.ctx, self.sandbox, JobOutput(0, json.dumps(events), ""), result)
 
     async def close(self):
+        """Release the sandbox and the client task. Safe to call more than once.
+
+        Two paths can now reach it for the same collector — the local guard at
+        the ownership boundary in service.run(), and the sweep over registered
+        collectors — and exiting a Sandbox twice is not a defined operation.
+        """
         if self.task and not self.task.done():
             self.task.cancel()
             try:
                 await self.task
             except asyncio.CancelledError:
                 pass
-        if self.sandbox:
-            await self.sandbox.__aexit__(None, None, None)
+        sandbox, self.sandbox = self.sandbox, None
+        if sandbox:
+            await sandbox.__aexit__(None, None, None)
