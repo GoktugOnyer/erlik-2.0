@@ -73,6 +73,7 @@ class Evaluator(BaseModel):
       - cors: an attacker origin was reflected AND credentials are allowed
       - idor: the low-priv response matches the privileged BASELINE
       - cookie_attributes: a session cookie lacks HttpOnly/SameSite/Secure
+      - ownership: the response ASSERTS an owner, and it is not the caller
 
     ...and two BLIND ones, which read no content at all. A blind injection
     changes nothing a pattern can match, so the verdict comes from comparing
@@ -83,7 +84,7 @@ class Evaluator(BaseModel):
     """
     type: Literal[
         "regex", "status_code", "llm",
-        "count", "cors", "idor", "cookie_attributes",
+        "count", "cors", "idor", "cookie_attributes", "ownership",
         "boolean_differential", "timing",
     ]
 
@@ -97,6 +98,32 @@ class Evaluator(BaseModel):
 
     # status_code evaluator
     expect: Optional[list[int]] = None
+
+    # ownership evaluator (E-011, object-level authorization)
+    #
+    # The field in the response body that names the object's owner, as a dotted
+    # path: Juice Shop answers GET /rest/basket/1 with
+    # {"status":"success","data":{"id":1,"UserId":1,...}}, so this is
+    # "data.UserId". Measured, not assumed — see
+    # tests/test_object_authorization.py.
+    #
+    # This is the ONE thing the target supplies to the verdict, and it is only
+    # ever compared against an id the OPERATOR declared. A target that invents an
+    # owner can therefore make the lane say "this is not yours", never "this is
+    # yours", and the corroboration and anonymous clauses below remove even that.
+    owner_field: Optional[str] = None
+
+    # The step that re-reads the same object AS THE DECLARED OWNER. Without it a
+    # target can name any owner it likes and the lane believes the claim. With
+    # it, the named owner has to be able to read the object too.
+    owner_step: Optional[str] = None
+
+    # The step that requests the same object with NO credentials. This is the
+    # clause that separates a leak from a publication: content the application
+    # serves to anonymous callers is not a finding however it is attributed, and
+    # a fixture written to forge ownership for everyone is refused here. It is
+    # load-bearing — see test_a_target_that_forges_ownership_is_refused.
+    anonymous_step: Optional[str] = None
 
     # count evaluator — how many occurrences of the marker constitute a hit
     min_count: int = 2

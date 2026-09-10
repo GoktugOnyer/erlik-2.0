@@ -491,6 +491,128 @@ block exports to any test under E for that session, not only to the destination
 hash. Note this interacts with E-025 — fix that first, or the wider block will
 lock out more operators, not fewer.
 
+### E-027: the shipped AUTHZ-04 check has measured false positives
+
+Found while starting Increment 3, by running the case's own bash command against
+the live lab rather than reading it. Scored over 26 requests on Juice Shop and
+DVWA: **7 false positives out of 19 negative controls, and 1 false negative out of
+7 real violations.** A four-clause marker differential scored 1 and 0 on the same
+requests.
+
+The check hashes a normalised whole body for three arms and concludes
+`low == high` is an IDOR. That fires on anything two identities legitimately see
+the same: `GET /api/Cards` returns `{"data":[]}` to both, `/rest/wallet/balance`
+returns `{"data":0}`, `/rest/basket/99999` returns `{"data":null}`. It misses
+DVWA's real function-level flaw at `security=low`, because DVWA prints the
+username in the page chrome so the two arms' hashes differ and it reports OK.
+
+Four clauses were proposed. An adversarial pass reproduced the 7/1 scoring
+independently and then ablated them, which the original scoring script never did:
+**only two of the four are supported by the corpus.** Dropping the anonymous clause
+costs 7 more false positives (1 -> 8); dropping the liveness clause and dropping
+the denial-marker half both leave the score unchanged at 1 and 0. So the
+load-bearing pair is: the owner arm must carry the declared marker, and the
+anonymous arm must not.
+
+The other two are still probably right and are simply not yet *measured* — the
+corpus passes `live` on only 7 of 26 rows, so it cannot exercise that clause. The
+denial marker is real regardless: DVWA denies with **HTTP 200** and
+`{"result":"fail","error":"Access denied"}`, measured as gordonb at `impossible`,
+so a 2xx gate is not enough for any check that relies on status.
+
+Two implementation blockers the same pass found, both of which change the shape of
+the fix: WSTG-AUTHZ-04 **cannot run in the assessment lane at all** — its step is
+`bash -c`, which the curl dialect refuses — and every JSON marker the proposal uses
+is rejected by the declaration gate, because `"` is a shell metacharacter and
+declared values are validated for safe rendering into a `bash -c` template. A
+marker-based fix therefore needs a non-shell step shape first.
+
+The `ownership` evaluator added in Increment 3 covers the object-level half for
+APIs that assert an owner, and by construction refuses four of those seven false
+positives. It does not replace the body-hash case for applications that assert no
+ownership anywhere, which is what this item is for.
+
+### E-028: AUTHZ-04's anonymous control arm runs at a different configuration
+
+The same defect as the 2026-09-10 arm divergence, inside the case meant to be the
+control. DVWA's security level travels in a cookie, and the case's anonymous fetch
+is `curl -s "$U"` with no `-b` — so on DVWA the anonymous arm is evaluated at a
+different application configuration from the two authenticated arms. Measured:
+same PHPSESSID, `security=low` returns the full user table, `security` absent
+returns `Access denied`.
+
+Every arm of a differential has to carry the same configuration material, with the
+identity as the only variable. Fixing this is a prerequisite for E-027's scoring
+to mean anything.
+
+### E-029: an identity with plain cookies gets no form discovery at all
+
+`adapters.py` gates the entire browser pass — the only producer of `source="form"`
+and `source="playwright"` endpoints — on
+`ctx.config.headless or (ctx.identity or {}).get("storage_state")`. The proxy
+injects `identity.headers`, `identity.cookies` AND `storage_state.cookies` on
+every in-scope request, so an identity authenticated by plain cookies is fully
+authenticated and discovers nothing.
+
+This gates E-008 directly. Its matrix starts at "anonymous, two ordinary users in
+different tenants, and one privileged lab identity", and on this code path three of
+those four arms would have no surface — which makes the isolation comparison either
+fail or, worse, pass vacuously on two empty sets. All 8 of DVWA's measured
+(url, parameter) pairs come from the browser pass.
+
+The condition should be "the identity carries material the proxy would inject",
+not "storage_state exists". Left unchanged here deliberately: it changes when
+Chromium runs, which is an execution-policy change, and §3 says to keep at most one
+of those in progress at a time.
+
+### E-030: fork points an operation-level identity does not absorb
+
+From the same audit, and recorded because each is a measured string rather than a
+worry. The operation key added in Increment 3 absorbs the
+companion-value family entirely — the arms move from **1 of 8 shared
+(url, parameter) pairs to 6 of 8**, and both residuals are genuine application
+differences. These are what remains:
+
+- **The form's method changes with state.** `/vulnerabilities/brute/` is a GET form
+  at `low` and a POST form at `impossible`, so `form_endpoint` returns None in one
+  arm and the brute-force surface does not exist there. A genuine difference, but
+  the inventory cannot yet say "same operation, the method moved".
+- **The control set changes with state.** `/vulnerabilities/csrf/` gains a
+  `password_current` input at `impossible`; `/vulnerabilities/csp/` loses its only
+  named input. Genuine, and E-008 asks that expected and unexpected differences be
+  distinguishable rather than normalised away.
+- **`MAX_FORM_PARAMETERS` is applied in DOM order**, so a control inserted at the
+  front in one arm pushes a different one off the end. No DVWA form has 11
+  testable controls, so this did not fire; it is a cap interacting with render
+  order, not a property of the application.
+- **A companion-free form URL collides with the crawled page URL**, and the row
+  key has no `source` column, so the two merge and `sources` becomes a union — in
+  one arm only. The token's ABSENCE forks the reading arms in the opposite
+  direction from its presence.
+- **A state-dependent PATH survives normalisation.** Measured:
+  `/vulnerabilities/csp/source/impossible.js` exists in one arm only, and
+  `base_url` strips only the query. Locale prefixes, tenant prefixes and per-user
+  ids are the general class.
+- **Nothing refuses a session-destroying link** except the proxy's
+  `excluded_paths` prefix match, default `['/logout','/signout']`. `/users/sign_out`
+  and `/Account/LogOff` are visited, and an arm whose session dies mid-crawl
+  discovers only login forms afterwards.
+- **The page-visit cap hides arm asymmetry rather than merely truncating.** The
+  first audit concluded the 20-page cap "did not fire on DVWA" because both arms
+  publish identical menus. An adversarial pass measured the opposite with the
+  ordinary crawl root `/` rather than `/index.php`: the cap lands one link later,
+  `/vulnerabilities/cryptography/` IS visited, and at `impossible` it is a GET form
+  whose only control is a `token` textarea — a second impossible-only operation
+  that the first measurement's root spelling hid. The cap firing identically in
+  both arms is the worse case, not the benign one, because the asymmetry it
+  conceals is real.
+- **Schema-derived operations are not fork-free either.** `SchemaInput` accepts a
+  URL as well as inline content, and `schema_file` fetches that document through
+  the egress proxy — which injects the identity's headers and cookies on every
+  request to the target origin. A target serving a different OpenAPI document per
+  role forks the schema-derived operations exactly as a rendered form does. Only
+  an operator-supplied inline `content` is genuinely identity-independent.
+
 ## 10. Shared technical contracts
 
 Prefer additive schema migrations and small services with explicit interfaces.
@@ -615,6 +737,112 @@ API operation, sees its coverage, reproduces a seeded authorization flaw, and op
 its evidence. The identity-isolation half of E-008 belongs in Increment 1 or 2
 instead — §3 explains why it gates R0. Expand browser journeys and business
 workflows after this works.
+
+**Increment 3, first part — the R0 isolation gate and object-level authorization.**
+
+`contracts.operation_key` keys an operation on **what can be injected into it** —
+origin, path, method and the testable parameter names — and deliberately not on the
+companion query. That query is where DVWA's single-use `user_token` lived, and it
+was the whole of the measured divergence. `inventory.operations()` groups the
+endpoint rows beneath their operation without discarding any, and
+`inventory.compare_arms()` is the comparison E-008 asks for.
+
+**The gate is not met by normalisation, and an independent pass is why this
+paragraph does not say it is.** Making the arms agree about the operation set was
+my first answer and it is only half of one: agreeing about what exists is not
+having tested it. A live run was measured scoring a perfect shared-surface fraction
+of **1.0 while all eight probe sets received zero bytes** — the arms agreed
+completely and neither reached anything. So `compare_arms` refuses four things
+rather than reporting set equality, each because a run gave a wrong answer without
+it: the two arms being one identity; an operation only one arm saw; an operation
+both arms saw **at different concrete URLs**; and no shared operations at all.
+
+That third clause is the one the operation key itself introduces, and it refuses
+the historical DVWA pair: the arms now agree about the operation and still issued
+different requests, because the hardened arm carried a token. Companion values are
+withheld from the output — the divergence is reported as the differing query
+FIELDS, since a value is target-controlled text.
+
+`comparable` therefore means "these two arms describe the same surface", and the
+returned record says so in as many words. Reach is a property of execution that
+this function cannot see, and §E-030 records that the lane's own emptiness detector
+does not fire on a refusal either: a DVWA probe refused for want of a token answers
+HTTP 200 with 389 bytes of PHP warnings, which is not empty and is not an answer.
+
+Measured independently, with real Chromium in the worker image against real DVWA
+under two logged-in sessions differing only in the `security` cookie: the arms move
+from **1 of 8 shared (url, parameter) pairs to 6 of 8**, and both residuals are
+genuine application differences rather than artifacts (§E-030).
+
+Three measurements decided the design, and none of them is what reading the code
+would suggest:
+
+- DVWA's token is **single-use, and a consumed one is answered with zero bytes** —
+  4757 bytes on first use, 0 on the second. That is the cause of the 156-of-208
+  empty steps on the hardened arm, and it means the fix is not "refresh the token"
+  but "do not put the value in the identity at all".
+- **No token at all returns 389 bytes of PHP warning**, not zero. So omitting a
+  volatile companion makes the failure visible rather than invisible — a real
+  improvement, because the lane can then report `test_case_unreachable` instead of
+  clean — but it does NOT make the hardened arm testable. Neither request reaches
+  the SQL.
+- Therefore **DVWA's `security` cookie is the wrong second identity for an
+  authorization differential**, whatever it is worth for a surface comparison: the
+  hardened arm's zero findings are vacuous, because it never executed the code
+  being compared. Two principals at one level are the right pair — measured, admin
+  and gordonb both at `security=low` produce `/vulnerabilities/sqli/?Submit=Submit`
+  byte for byte, so the only variable is who made the request.
+
+E-011's object-level half is a new `ownership` evaluator, built on that last point.
+It asks whether the application ITSELF attributes the object to somebody other than
+the caller, which is a sharper question than the existing `idor` evaluator's body
+comparison can ask of an API — every JSON response carries ids and timestamps, so
+two identities never produce identical bytes and a hash differential is noise.
+
+Four clauses, each verified load-bearing by removing it and watching its own tests
+fail: the caller gets the object and an owner IS asserted; that owner is not the
+caller's **operator-declared** id; the declared owner can read it too; and an
+anonymous request is refused. The asymmetry is the safety property — who the caller
+is comes from the operator, the asserted owner comes from the target, so a target
+can cost itself coverage and cannot manufacture a finding.
+
+Validated against Juice Shop v17.1.1 with two seeded principals, and against a
+fixture written to forge ownership:
+
+    jim (2) reads admin's basket 1     FINDING     anon refused 401
+    admin (1) reads jim's basket 2     FINDING     anon refused 401
+    each reading their OWN basket      no finding  caller owns it
+    GET /rest/basket/99999             no finding  200 + {"data":null}
+    GET /api/Products                  no finding  asserts no owner
+    a fixture asserting UserId 1 to
+      everyone, anonymous included     no finding  published, not leaked
+
+That last row is the clause that stops a target choosing its own finding. Without
+it the lane reports a critical authorization leak on content the application
+publishes deliberately.
+
+**Two live defects fixed on the way, both the same shape as ones already fixed:**
+
+- `inventory.seeds()` applied no source filter, and `ZapAdapter.run` passes its
+  output into a ZAP **requestor** job — a list of URLs ZAP is told to GET. So
+  `/vulnerabilities/csrf/?Change=Change`, which sets DVWA's admin password to the
+  md5 of an empty string, was still reachable. It had been fixed twice, at the two
+  call sites known about; the guard now lives in the producer, so a fourth caller
+  is safe by default and has to ask to be unsafe.
+- The typed `idor` evaluator compared `low_priv_token != high_priv_token`. On a
+  cookie-authenticated application both are None, `None != None` is False, and the
+  evaluator could never fire on the one lab target the project measures against.
+  Same bearer-only assumption AUTHZ-04's YAML case was already corrected for — the
+  fix had reached the case and not the code beside it.
+- `form_endpoint` bounded its companion query with a character slice, which cut the
+  last pair mid-value and dropped the submit control entirely. A 700-byte hidden
+  field produced a probe carrying a value the application never emitted, unable to
+  reach the handler. Bounded by whole pairs now, submit control first.
+
+**Not done, and deliberately:** E-007's full schema (operations, observations and
+coverage tables with attempted/verified/blocked states), E-010's preview, and the
+function-level half of E-011. E-027 to E-030 record what the audit found and did
+not fix, with the measurements.
 
 ## 13. Decisions to revisit before expansion
 

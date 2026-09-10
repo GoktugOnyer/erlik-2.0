@@ -499,7 +499,11 @@ class CatalogueAdapter(BaseAdapter):
             return {"success": output.code == 0, "output": output.stdout,
                     "exit_code": output.code, "error": output.stderr or None}
 
-        targets = await seeds(ctx, sandbox.policy)
+        # include_form_actions=True: this is the ONE caller that needs them, and
+        # it needs them in order to report the surface it will not touch. seeds()
+        # withholds them by default so no other stage can fetch one — see
+        # tests/test_form_action_never_reaches_a_scanner.py.
+        targets = await seeds(ctx, sandbox.policy, include_form_actions=True)
         # Parameter names discovered on this identity's endpoints. A case that
         # interpolates {{parameter}} runs once per (endpoint, parameter) pair
         # and ONLY against a URL the parameter was actually observed on —

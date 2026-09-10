@@ -375,6 +375,51 @@ def _first_difference(a: str, b: str, window: int = 120) -> str:
             f"    true : ...{b[start:start + window]}...")
 
 
+def _asserted_owner(output: str, field: str):
+    """The owner the TARGET claims, read from a JSON body, or None.
+
+    `field` is a dotted path the OPERATOR supplies — "data.UserId" for Juice
+    Shop. None means "this response asserts no owner", which is not a finding and
+    must never be confused with "the owner is someone else":
+
+      - GET /rest/basket/99999 answers HTTP 200 with {"data":null}. No object, no
+        owner. Measured; a status-code check calls this a critical flaw.
+      - GET /api/Products answers 200 with a list and no ownership field at all.
+        Public content.
+
+    Deliberately narrow. It parses the LAST JSON document in the output, because
+    the lane's curl steps prepend response headers, and it walks only plain
+    dicts, so a list or a string at any point in the path is "no assertion"
+    rather than a guess. A container is never an owner: returning the owner of
+    one element of a list the caller is allowed to see would invent a claim.
+    """
+    if not field:
+        return None
+    text = output or ""
+    # The body is whatever follows the last blank line when headers are present.
+    for separator in ("\r\n\r\n", "\n\n"):
+        if separator in text:
+            text = text.rsplit(separator, 1)[1]
+            break
+    start = min((i for i in (text.find("{"), text.find("[")) if i >= 0), default=-1)
+    if start < 0:
+        return None
+    try:
+        document = json.loads(text[start:])
+    except (ValueError, TypeError):
+        return None
+    node = document
+    for part in field.split("."):
+        if not isinstance(node, dict) or part not in node:
+            return None
+        node = node[part]
+    # Only a scalar identifies a principal. A dict or list here means the path
+    # named a container, and treating that as an owner would be a fabrication.
+    if isinstance(node, (dict, list)) or node is None or isinstance(node, bool):
+        return None
+    return node
+
+
 def _http_status_ok(output: str) -> bool:
     """True when the captured response line is a 2xx."""
     return bool(re.search(r"^HTTP/\S+\s+2\d\d", output, re.MULTILINE))
@@ -468,6 +513,75 @@ async def _run_evaluator(
             # the body is irrelevant to it.
             evidence = _around(headers, reflected.start())
 
+    elif ev.type == "ownership":
+        # OBJECT-LEVEL AUTHORIZATION (E-011). The existing `idor` evaluator asks
+        # whether two identities got the SAME BYTES; this one asks whether the
+        # application itself says the object belongs to someone else.
+        #
+        # That is a sharper question on an API, where `idor`'s body comparison
+        # cannot work: every JSON response carries timestamps and ids, so two
+        # identities never produce identical bytes and a hash differential is
+        # noise. Measured on Juice Shop, GET /rest/basket/1 as user 2 returns
+        # 200 with {"data":{"id":1,"UserId":1,...}} — the target naming an owner
+        # who is not the caller, which is the finding, stated by the application.
+        #
+        # E-011: "Compare ownership assertions and sensitive response markers,
+        # not merely HTTP 200, response length, or a changed numeric ID." The
+        # nonexistent-object case is why: Juice Shop answers
+        # GET /rest/basket/99999 with HTTP 200 and {"data":null}, so a status-code
+        # check reports a critical authorization flaw on an object that does not
+        # exist.
+        #
+        # FOUR CLAUSES, ALL REQUIRED.
+        #   1. the caller got the object, and the response ASSERTS an owner
+        #   2. that owner is not the caller's own operator-declared id
+        #   3. the declared owner can read it too, so the claim is corroborated
+        #   4. an anonymous request is REFUSED, so it is not published content
+        #
+        # Clause 4 is what stops a target choosing its own finding. A fixture
+        # that asserts one owner to every caller, anonymous included, is
+        # published content however it is attributed; without this clause the
+        # lane reports it as a critical leak. Clause 3 catches the other forgery:
+        # an owner named who cannot actually read the object.
+        #
+        # The asymmetry is deliberate. `subject_id` — who the caller IS — comes
+        # from the OPERATOR; the asserted owner comes from the TARGET. A target
+        # can therefore push the lane towards "not yours" and never towards
+        # "yours", so it can cost itself coverage and cannot manufacture a
+        # finding. Both values coming from the target would be the forgery
+        # primitive this codebase has shipped before.
+        owner_field = str(ev.owner_field or "")
+        subject = target.get("subject_id")
+        owner_step = next((st for st in (prior_steps or []) if st.step == str(ev.owner_step or "")), None)
+        anon_step = next((st for st in (prior_steps or []) if st.step == str(ev.anonymous_step or "")), None)
+
+        asserted = _asserted_owner(step_result.output, owner_field) if owner_field else None
+        corroborated = (owner_step is not None
+                        and _http_status_ok(owner_step.output)
+                        and _asserted_owner(owner_step.output, owner_field) == asserted)
+        # "Refused" means refused. An anonymous 200 is publication, and an
+        # anonymous step that never ran tells us nothing — neither is a finding.
+        anonymous_refused = anon_step is not None and not _http_status_ok(anon_step.output)
+
+        matched = bool(
+            owner_field and subject not in (None, "")
+            and _http_status_ok(step_result.output)
+            and asserted not in (None, "")
+            and str(asserted) != str(subject)
+            and corroborated and anonymous_refused)
+        if matched:
+            evidence = (
+                "erlik compared an ownership claim the application made against the "
+                "identity it was\nmade to. The quoted fragments are the application's.\n"
+                f"  the caller is declared to be:  {subject!r} (operator-supplied)\n"
+                f"  the response attributes it to: {asserted!r} (read from {owner_field!r})\n"
+                f"  {(owner_step.step if owner_step else '?'):<24} the declared owner could read it too\n"
+                f"  {(anon_step.step if anon_step else '?'):<24} anonymous was refused, so it is not published\n\n"
+                "the caller's response:\n"
+                + _around(step_result.output, 0, 600)
+                + "\n\nthe declared owner's response, for comparison:\n"
+                + _around(owner_step.output, 0, 600))
+
     elif ev.type == "idor":
         # An IDOR is a DIFFERENTIAL claim, and the low-privilege response alone
         # cannot make it. Three things have to hold together: the privileged
@@ -479,12 +593,29 @@ async def _run_evaluator(
             (st for st in (prior_steps or [])
              if st.step == str(target.get("baseline_step", "") or "fetch_as_high_priv")),
             None)
-        low, high = target.get("low_priv_token"), target.get("high_priv_token")
+        # WHAT COUNTS AS AN IDENTITY. This read `low_priv_token` and
+        # `high_priv_token` only, so on DVWA — and on most PHP, Rails and Django
+        # applications, where the session is a cookie — both were None,
+        # `None != None` was False, and this evaluator could never fire at all.
+        #
+        # It is the same bearer-only assumption AUTHZ-04's YAML case was already
+        # corrected for via `required_any`; the fix reached the case and not the
+        # code beside it. `credentials.auth_inputs` offers `{role}_priv_token` OR
+        # `{role}_priv_cookie` according to what the session actually is, and a
+        # cookie authenticates exactly as much as a bearer token.
+        #
+        # The comparison itself stays, because an "IDOR" whose two arms carried
+        # the SAME credential is one request reported twice. Both arms must also
+        # have carried SOMETHING: two unauthenticated fetches agreeing proves the
+        # page is public, which is the one thing the old `None != None`
+        # accidentally got right.
+        low = (target.get("low_priv_token"), target.get("low_priv_cookie"))
+        high = (target.get("high_priv_token"), target.get("high_priv_cookie"))
         matched = bool(
             marker and baseline is not None
             and _http_status_ok(baseline.output) and _http_status_ok(step_result.output)
             and marker in baseline.output and marker in step_result.output
-            and low != high)
+            and any(low) and any(high) and low != high)
         if matched:
             # A DIFFERENTIAL claim needs BOTH sides. This is the only evaluator
             # hard-graded `confirmed`, which sets `verified` on a client's

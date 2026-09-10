@@ -252,7 +252,7 @@ def form_endpoint(form: dict, page_url: str) -> tuple[str, list[str]] | None:
     action = (form.get("action") or page_url or "").strip()
     if not action or urlsplit(action).scheme not in ("http", "https"):
         return None
-    testable, companions = [], []
+    testable, companions, submit_name = [], [], None
     for control in form.get("controls") or []:
         name = (control.get("name") or "").strip()
         if not name or not PARAMETER_NAME.match(name):
@@ -261,6 +261,8 @@ def form_endpoint(form: dict, page_url: str) -> tuple[str, list[str]] | None:
             if name not in testable:
                 testable.append(name)
         else:
+            if (control.get("type") or "") == "submit" and submit_name is None:
+                submit_name = name
             companions.append((name, str(control.get("value") or "")))
     if not testable:
         return None
@@ -268,9 +270,96 @@ def form_endpoint(form: dict, page_url: str) -> tuple[str, list[str]] | None:
     # urlencode, because a companion VALUE is target-controlled text going into
     # a URL. The form's own query is dropped: `action` may repeat what the
     # controls already say, and the controls are the authoritative version.
-    query = urlencode(companions)[:MAX_COMPANION_QUERY].rstrip("&")
+    #
+    # BOUNDED BY WHOLE PAIRS, never by characters. This was
+    # `urlencode(companions)[:MAX_COMPANION_QUERY]`, which cut the last pair
+    # mid-value: with one 700-byte hidden field (ASP.NET's __VIEWSTATE is
+    # routinely kilobytes) the probe carried a PARTIAL value the application never
+    # emitted, and the submit control — the entire reason companions are in the
+    # URL at all — fell off the end. Two arms differing only in that value kept
+    # different fragments, so they forked as well.
+    #
+    # The submit control goes first, because it is the one the handler needs: a
+    # probe that reaches nothing is worse than a probe missing a hidden field.
+    # Anything that does not fit is dropped WHOLE. A request the lane did not
+    # intend to make is the defect being avoided here, and it is the same reason a
+    # parameter name containing `#` is refused outright.
+    ordered = sorted(companions, key=lambda pair: pair[0] != submit_name)
+    kept, used = [], 0
+    for name, value in ordered:
+        encoded = urlencode([(name, value)])
+        # +1 for the "&" this pair needs once it is not the first.
+        cost = len(encoded) + (1 if kept else 0)
+        if used + cost > MAX_COMPANION_QUERY:
+            continue
+        kept.append((name, value))
+        used += cost
+    # Back into the order the form declared them, so the URL still reads like the
+    # form it came from.
+    order = {name: index for index, (name, _) in enumerate(companions)}
+    query = urlencode(sorted(kept, key=lambda pair: order[pair[0]]))
     url = urlunsplit((parts.scheme, parts.netloc, parts.path, query, ""))
     return url, testable[:MAX_FORM_PARAMETERS]
+
+
+def operation_key(url: str, method: str = "GET", parameters=()) -> str:
+    """What makes two observations the same OPERATION.
+
+    E-007 asks for an inventory of operations with concrete URLs as observations
+    beneath them, and E-008 requires that "two identities testing the same
+    operation must produce the same operation set". Those two are the same
+    requirement seen from different ends, and this function is where they meet.
+
+    An operation is identified by **what can be injected into it**, not by what
+    rides along to reach the handler:
+
+        origin + path + method + the testable parameter names
+
+    The companion query is deliberately absent. Measured on DVWA, same session,
+    only the `security` cookie changed:
+
+        low         controls: id (text), Submit (submit)
+        impossible  controls: id (text), Submit (submit), user_token (hidden)
+
+    `form_endpoint` puts companion NAME=VALUE pairs into the URL, so the hardened
+    arm's URL carries a token DVWA regenerates on every observation of the page.
+    Keying on the URL string made one form into two operations, the two arms
+    shared one of eight (url, parameter) pairs, and the differential compared two
+    surfaces instead of one variable.
+
+    Keying on companion NAMES would not have fixed it either: the hardened arm
+    genuinely has an extra field. Keying on the testable set does, because that
+    set is `id` in both arms — which is the honest answer, since `id` is the
+    input either arm would inject.
+
+    WHAT THIS MUST NOT MERGE, and why each is kept:
+      - methods, because a POST form's controls are body parameters and probing
+        them as query parameters invents a location;
+      - origins and paths, for the obvious reason;
+      - different testable sets, because two forms on one path with different
+        injectable inputs are two operations and merging them would hide one;
+      - identities and tenants, which are NOT part of this key at all — they key
+        the observation. Two identities observing one operation is the entire
+        point; merging their findings is not.
+
+    The cost is accepted deliberately: two forms differing only in a hidden field
+    the target varies — `?mode=simple` against `?mode=advanced` — become one
+    operation with two observations. Nothing is lost, because every distinct
+    companion set is kept on the observations beneath it, and execution can use
+    whichever actually reaches the handler. Today those are two unrelated rows
+    with no stated relationship at all.
+
+    A target cannot choose this key. It is computed from the path the target
+    served and the input NAMES on its own form — never from a value, which is the
+    part a target rotates, and the part that forged the divergence.
+    """
+    parts = urlsplit(url)
+    origin = canonical_origin(url)
+    path = parts.path or "/"
+    # Sorted and de-duplicated: discovery order is not a property of the
+    # operation, and two arms need not enumerate a form's inputs in one order.
+    names = ",".join(sorted({str(name) for name in parameters if str(name)}))
+    return f"{method.upper()} {origin}{path} [{names}]"
 
 
 class Endpoint(StrictModel):

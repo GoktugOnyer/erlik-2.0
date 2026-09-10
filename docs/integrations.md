@@ -125,6 +125,114 @@ Nuclei sends generated GET probes using per-probe payloads, with its automatic
 Interactsh registration disabled. No public-service fallback is permitted. A DNS
 callback establishes interaction, not access to sensitive internal resources.
 
+## Operations, and comparing two identities
+
+The lane records the concrete URLs it discovered, and groups them into
+**operations**. An operation is identified by what can be injected into it — origin,
+path, method and the testable parameter names — and *not* by the rest of the query.
+
+That distinction is not cosmetic. DVWA puts a single-use `user_token` in its forms
+at `security=impossible`, and discovery bakes companion fields into the URL, so the
+same form produced a different URL string on every observation. Two identities
+therefore produced two unrelated rows for one form, and a differential between them
+compared two surfaces rather than one variable. Keyed on the injectable surface,
+both arms resolve to one operation while `GET` and `POST`, two paths, and two
+different input sets all stay separate.
+
+Nothing is discarded: every concrete URL stays as an observation beneath its
+operation, tagged with the identity that saw it, so the token one arm was served is
+still visible.
+
+### Comparing two arms
+
+`inventory.compare_arms(session_id, first, second)` answers whether two identities
+describe the same surface. It reports the operations only one arm saw, and refuses
+four situations outright:
+
+| Refusal | Meaning |
+|---|---|
+| `arms_share_one_identity` | an identity compared with itself agrees perfectly and proves nothing |
+| `different_operations` | one arm reached something the other never did |
+| `per_arm_value_in_operation` | both arms reached the operation, at **different URLs** — each issued its own request |
+| `no_shared_operations` | two arms that discovered nothing agree vacuously |
+
+**What a pass establishes, and what it does not.** `comparable: true` means the two
+arms describe the same surface. It says nothing about whether either arm *reached*
+it. A live run was measured scoring a perfect shared-surface fraction while all
+eight of its probe sets received zero bytes, so treating surface agreement as
+differential validity reproduces the defect this comparison exists to catch. The
+returned record states this in its `establishes` field.
+
+Relatedly: a refused probe is not an empty one. DVWA answers a request missing its
+token with HTTP 200 and 389 bytes of PHP warnings, so the lane's
+`test_case_unreachable` observation — which fires when every executed step came back
+empty — does not fire on a refusal.
+
+### Choosing a second identity
+
+Two principals at the **same** configuration, not two configurations. DVWA's
+`security` cookie is a security level rather than a principal, and at `impossible`
+its forms require a single-use token the lane does not refresh, so that arm never
+reaches the code being compared and its zero findings are vacuous. Measured: admin
+and gordonb, both at `security=low`, produce `/vulnerabilities/sqli/?Submit=Submit`
+byte for byte — so the only variable is who made the request.
+
+## Object-level authorization
+
+The `ownership` evaluator asks whether the application itself attributes an object
+to somebody other than the caller. On an API that is a sharper question than
+comparing response bodies: every JSON response carries ids and timestamps, so two
+identities never produce identical bytes and a body differential is noise.
+
+A case declares it like this:
+
+```yaml
+evaluators:
+  - type: ownership
+    owner_field: data.UserId      # where the response names the owner
+    owner_step: read_as_owner     # the step that re-reads it as that owner
+    anonymous_step: read_anonymously
+    emit_finding:
+      vuln_type: Broken Object Level Authorization
+      severity: high
+```
+
+and the operator supplies `subject_id` — who the caller *is* — in the target. All
+four clauses must hold for a finding:
+
+1. the caller got the object, and the response **asserts** an owner;
+2. that owner is not the caller's declared `subject_id`;
+3. the declared owner can read the object too, so the claim is corroborated;
+4. an anonymous request is **refused**, so the content is not published.
+
+The asymmetry is the safety property. `subject_id` comes from the operator; the
+asserted owner comes from the target. A target can therefore push the lane towards
+"this is not yours" and never towards "this is yours" — it can cost itself coverage
+and cannot manufacture a finding. Clause 4 closes the remaining gap: a page that
+asserts one owner to every caller, anonymous included, is published content however
+it is attributed, and without that clause the lane would report it as a critical
+leak.
+
+Validated against Juice Shop v17.1.1 and against a fixture written to forge
+ownership:
+
+| Request | Verdict |
+|---|---|
+| `GET /rest/basket/1` as user 2 | **finding** — attributed to user 1, anonymous refused 401 |
+| `GET /rest/basket/2` as user 2 | no finding — the caller owns it |
+| `GET /rest/basket/99999` | no finding — HTTP 200 with `{"data":null}`, no object |
+| `GET /api/Products` | no finding — asserts no owner |
+| a fixture asserting one owner to everyone | no finding — published, not leaked |
+
+The third row is why E-011 says "not merely HTTP 200": a nonexistent object answers
+200, and a status-code check calls that a critical flaw.
+
+**Limits.** It needs the application to name an owner in the response. Indirect
+ownership — Juice Shop's `/api/BasketItems/9` names a `BasketId` and no user — is
+not covered, nor is function-level authorization, where there is no object to
+attribute. A caller whose session has expired asserts no owner either, so it
+produces no finding rather than an explicit "could not test".
+
 ## DefectDojo
 
 Export is always explicit — no stage writes to DefectDojo on its own. Findings are

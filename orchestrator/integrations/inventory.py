@@ -9,9 +9,35 @@ from . import persistence as db
 from .egress_policy import EgressPolicy
 
 
-async def seeds(context, policy):
+async def seeds(context, policy, include_form_actions: bool = False):
+    """URLs a stage may FETCH, for this identity.
+
+    `include_form_actions` defaults to False, and the default is the point. A URL
+    that exists only because a GET form was found is not a page: requesting it
+    performs the form's action. On DVWA a bare GET of
+    `/vulnerabilities/csrf/?Change=Change` sets the admin password to the md5 of
+    an empty string.
+
+    That was fixed twice before, at the two call sites known about at the time —
+    the crawler seed and the catalogue adapter's read-only cases. It was not
+    fixed here, so `ZapAdapter.run` kept handing the whole list to a ZAP
+    **requestor** job, which is ZAP being told to GET each URL. Three paths, two
+    guarded, and the guard was in the consumers rather than in the producer.
+
+    So it lives here now. A caller that genuinely needs these URLs asks for them,
+    and the only one that does is the catalogue adapter — which wants them in
+    order to REPORT the surface it declined to touch, as a `form_url_withheld`
+    observation. Withholding must not become silence.
+
+    Parameter probes are unaffected: they come from `parameters_by_url`, which
+    reads the endpoint rows directly and deliberately keeps a form's companion
+    query, because that query is what the form's handler requires.
+    """
     rows = await db.rows("SELECT url,method FROM integration_endpoints WHERE session_id=? AND identity_id=? ORDER BY url,method",
                          (context.session_id, context.identity_id))
+    if not include_form_actions:
+        actions = await form_urls(context)
+        rows = [row for row in rows if row["url"] not in actions]
     candidates = [{"url": context.target, "method": "GET"}, *rows]
     selected, seen = [], set()
     for item in candidates:
@@ -270,6 +296,151 @@ async def form_urls(context) -> set[str]:
         (context.session_id, context.identity_id))
     return {row["url"] for row in rows
             if "form" in json.loads(row.get("sources") or "[]")}
+
+
+async def operations(session_id, identity_id=None) -> dict[str, dict]:
+    """The session's OPERATIONS, with the concrete observations beneath each.
+
+    E-007 asks for an operation inventory where "concrete URLs [are kept] as
+    observations beneath the operation". The rows in integration_endpoints ARE
+    those observations — keyed (session_id, url, method, identity_id) — and this
+    groups them by what `contracts.operation_key` says they are.
+
+    Nothing is discarded. Each operation lists the identities that observed it,
+    the discovery sources, the union of parameter names, and every distinct URL,
+    so a reader can still see the token DVWA baked into one arm's copy. What
+    changes is that those two URLs now sit under ONE operation instead of being
+    two rows with no stated relationship.
+
+    `identity_id` narrows to one arm, which is how the comparison below gets its
+    two sides.
+    """
+    from .contracts import operation_key
+
+    query = "SELECT * FROM integration_endpoints WHERE session_id=?"
+    args = [session_id]
+    if identity_id is not None:
+        query += " AND identity_id=?"
+        args.append(identity_id)
+    found: dict[str, dict] = {}
+    for row in await db.rows(query + " ORDER BY url,method", tuple(args)):
+        names = json.loads(row["parameters"] or "[]")
+        key = operation_key(row["url"], row["method"], names)
+        entry = found.setdefault(key, {
+            "operation": key, "method": row["method"],
+            "parameters": [], "identities": [], "sources": [], "observations": [],
+        })
+        for name in names:
+            if name not in entry["parameters"]:
+                entry["parameters"].append(name)
+        if row["identity_id"] not in entry["identities"]:
+            entry["identities"].append(row["identity_id"])
+        for source in json.loads(row["sources"] or "[]"):
+            if source not in entry["sources"]:
+                entry["sources"].append(source)
+        entry["observations"].append({"url": row["url"], "identity": row["identity_id"],
+                                      "sources": json.loads(row["sources"] or "[]")})
+    for entry in found.values():
+        entry["parameters"].sort()
+        entry["identities"].sort()
+        entry["sources"].sort()
+    return found
+
+
+async def compare_arms(session_id, first_identity, second_identity) -> dict:
+    """Do two identities describe the same surface? The R0 exit gate.
+
+    §3 of docs/future-plan.md moved "identity isolation demonstrated" into R0
+    because a differential run reported nine findings on a vulnerable DVWA level
+    and one on a hardened one while the two arms shared ONE of eight
+    (url, parameter) pairs. E-008: "a run that proves this by comparing arm
+    surfaces is the demonstration R0 needs."
+
+    WHAT THIS DOES NOT ESTABLISH, stated here because it is the trap: surface
+    agreement is not differential validity. An independent pass measured a live
+    run scoring a perfect shared-surface fraction of 1.0 in which **all eight
+    probe sets received zero bytes** — the arms agreed about what existed and
+    neither tested any of it. So `comparable` means "these two arms describe the
+    same surface", never "a difference between their findings is about the
+    application". Reach is a property of execution, which this function cannot
+    see, and §E-030 records that the lane's own emptiness detector does not fire
+    on a refusal either: a DVWA probe refused for want of a token answers HTTP 200
+    with 389 bytes of PHP warnings.
+
+    It refuses four things it CAN see, each because a run produced a wrong answer
+    without it:
+
+      - the two arms are one identity. Comparing an identity with itself agrees
+        perfectly and proves nothing.
+      - an operation only one arm saw. The original defect.
+      - an operation both arms saw at DIFFERENT concrete URLs. This is the one the
+        operation key introduces: keying on the injectable surface is what makes
+        the DVWA arms agree, and it also means each arm may still have issued a
+        different request — the hardened arm's carrying a single-use token that
+        was stale by the time it ran. The URLs are reported with their values
+        MASKED, because a companion value is target-controlled text and the
+        divergence is in the field, not the secret.
+      - no shared operations at all. Two arms that discovered nothing agree
+        vacuously, and an empty intersection is the commonest way this gate gets
+        reported as passed.
+    """
+    from urllib.parse import parse_qsl, urlsplit
+
+    def shape(url: str) -> tuple:
+        """A URL's query FIELDS, values discarded. What differs, not the secret."""
+        return tuple(sorted(name for name, _ in parse_qsl(urlsplit(url).query)))
+
+    left = await operations(session_id, first_identity)
+    right = await operations(session_id, second_identity)
+    only_left = sorted(set(left) - set(right))
+    only_right = sorted(set(right) - set(left))
+    shared = sorted(set(left) & set(right))
+
+    # Same operation, different request. Reported per operation, with the fields
+    # that differ named and every value withheld.
+    per_arm_value = []
+    for key in shared:
+        first_urls = {o["url"] for o in left[key]["observations"]}
+        second_urls = {o["url"] for o in right[key]["observations"]}
+        if first_urls == second_urls:
+            continue
+        fields = sorted({f for url in first_urls ^ second_urls for f in shape(url)})
+        per_arm_value.append({
+            "operation": key,
+            "differing_query_fields": fields,
+            "detail": ("both arms reached this operation but not at the same URL; "
+                       "each arm issued its own request, so a difference between "
+                       "their results may be about the request and not the target"),
+        })
+
+    reasons = []
+    if first_identity == second_identity:
+        reasons.append("arms_share_one_identity")
+    if only_left or only_right:
+        reasons.append("different_operations")
+    if per_arm_value:
+        reasons.append("per_arm_value_in_operation")
+    if not shared:
+        reasons.append("no_shared_operations")
+
+    return {
+        "identities": [first_identity, second_identity],
+        "shared": shared,
+        "only_in_first": only_left,
+        "only_in_second": only_right,
+        "per_arm_value_in_operation": per_arm_value,
+        "comparable": not reasons,
+        "refused_because": reasons,
+        # Stated as a fraction because that is how the original defect was
+        # reported — "one of eight" — and a reader should be able to see the same
+        # shape improve rather than read a boolean.
+        "summary": (f"{len(shared)} of {len(set(left) | set(right))} "
+                    f"operations seen by both"),
+        # Not a disclaimer. A caller that treats surface agreement as differential
+        # validity reproduces the defect measured above.
+        "establishes": "that the two arms describe the same surface, and nothing "
+                       "about whether either arm reached it",
+    }
 
 
 def eligible_test_cases(url, method="GET", parameters=()):

@@ -191,8 +191,8 @@ Run it from the repository root: `conftest.py` anchors the working directory
 there, and `orchestrator.main` builds its Jinja2 template path relative to the
 CWD.
 
-A **fresh clone** reports **2167 passed, 68 skipped** on its first run, and
-2169 passed / 66 skipped on every run after — measured 2026-09-10 against this
+A **fresh clone** reports **2219 passed, 68 skipped** on its first run, and
+2221 passed / 66 skipped on every run after — measured 2026-09-10 against this
 commit by cloning and running it, three times, not quoted from a developer's tree.
 
 > Re-measure this after any change under `tests/`. The first draft of this
@@ -207,7 +207,7 @@ Every skip is structural rather than broken, and the 68 account for themselves:
 | 32 | container suites, behind `ERLIK_DOCKER_TESTS=1` |
 | 3 | need a real external service (Interactsh, DefectDojo) |
 
-A developer's tree reports **2199 passed, 35 skipped** instead, and the 33-test
+A developer's tree reports **2252 passed, 35 skipped** instead, and the 33-test
 gap is entirely that corpus: 31 tests report `corpus present but empty`, and 2
 more inspect the live database directly — one for a plaintext credential on disk,
 the other for leftover fixture rows. Those two are hygiene checks on a real machine, so skipping
