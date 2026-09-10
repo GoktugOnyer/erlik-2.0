@@ -55,12 +55,14 @@ The September 10 review observed:
   cleanup wrapper. **Still open; see E-001 to E-003 for current status.**
 - ~~The benchmark recovered its expected findings but rejected evidence because it
   required every attached artifact, including empty stderr, to be nonempty.~~
-  **Closed in `c761b76`.** `record()` no longer stores an empty artifact, so a
-  scanner that exits cleanly with nothing on stderr stops attaching a zero-byte
-  file to each of its findings — it was doing so to 22 of them.
+  **Closed, in two parts.** `c761b76` stopped `record()` attaching a zero-byte
+  stderr to each finding — it was doing so to 22 of them. `e78c257` then found
+  that the fix had overshot the clause and that a second clause had never been
+  met at all; see E-004.
 - ~~14 WSTG catalogue files.~~ **32 catalogue files, 32 cases, 12 of them runnable
   in the assessment lane.** The twenty that are not runnable are not a defect but
-  they are untested coverage, and the lane says so per case.
+  they are untested coverage, and the lane says so per case. Two of the twelve —
+  `WSTG-CONF-06` and `WSTG-INPV-07` — carry mutating steps that E-003 now refuses.
 - CI runs `pytest tests/ -q`, i.e. every acceptance file, with the Docker and
   live-service suites gated by environment variables — so "CI does not yet run all
   new acceptance files" is **stale**. It has a different and live defect instead:
@@ -138,10 +140,10 @@ change and one independent product workstream in progress.
 
 | ID | Work | Acceptance criterion | Primary code area | Status |
 |---|---|---|---|---|
-| E-001 | Make collector ownership exception-safe | Cancellation and timeout at every awaited startup/probe boundary close all owned jobs; evidence remains available | `integrations/service.py`, `interactsh.py`, `runtime.py` | Open. `CancelledError` is handled and the sandbox is exited, but not at every awaited boundary |
-| E-002 | Restore callback capability after credential replacement | A paused run resumes pending SSRF checks with fresh correlation IDs; previously issued probes are not silently replayed; interrupted collection remains explicitly incomplete | `service.py`, `interactsh.py` | **Open, and the largest R0 item.** `issued_payloads` already prevents silent replay; there is no resume path at all |
-| E-003 | Separate catalogue detection from workflow mutations | V1 catalogue follow-up refuses all mutation steps, or an explicit per-case fixture/cleanup wrapper handles them; no leftover probe artifact in the lab | `deterministic.py`, catalogue runner | Open. The refusal gate exists (`state-changing operation not selected`); the cleanup wrapper for selected mutations does not |
-| E-004 | Correct evidence completeness validation | Every referenced artifact exists and passes its digest check; each finding has substantive supporting evidence; empty diagnostic files are valid attachments | benchmark, evidence persistence | **Closed.** Empty artifacts in `c761b76`; substantive per-finding evidence in `8321ff0`…`6c9b0d9`. Re-run the benchmark to confirm end to end |
+| E-001 | Make collector ownership exception-safe | Cancellation and timeout at every awaited startup/probe boundary close all owned jobs; evidence remains available | `integrations/service.py`, `interactsh.py`, `runtime.py` | **CLOSED** `7723090`. Two leaks: the `asyncio.TimeoutError` branch did not close, and `CancelledError` is a `BaseException` so `except Exception` never saw it. `probe()` is now guarded and `close()` is idempotent |
+| E-002 | Restore callback capability after credential replacement | A paused run resumes pending SSRF checks with fresh correlation IDs; previously issued probes are not silently replayed; interrupted collection remains explicitly incomplete | `service.py`, `interactsh.py` | **CLOSED** `639c32e`. The pause erased its own resume marker: the sweep persisted `partial` over the `needs_auth` the stage had just been given, and `run()` only selects `queued`/`needs_auth`. Note the status column was too generous — `issued_payloads` is in-memory and does NOT survive a resume; what prevents reuse is that payloads are minted per client start |
+| E-003 | Separate catalogue detection from workflow mutations | V1 catalogue follow-up refuses all mutation steps, or an explicit per-case fixture/cleanup wrapper handles them; no leftover probe artifact in the lab | `deterministic.py`, catalogue runner | **CLOSED** `7f45f06`, taking the plan's first branch: refuse. The gate deferred to the egress policy, which says yes once `state_changing` is selected — measured, `PUT /erlik_put_test.txt` ran. Cost: `WSTG-INPV-07` loses ALL detection (every step is POST) until E-012 builds the wrapper |
+| E-004 | Correct evidence completeness validation | Every referenced artifact exists and passes its digest check; each finding has substantive supporting evidence; empty diagnostic files are valid attachments | benchmark, evidence persistence | **CLOSED** `e78c257`, after being marked closed too early. The digest was write-only state — nothing recomputed it, and the benchmark read `size` from the database row, comparing it against itself. An empty diagnostic FILE was also dropped rather than retained. Benchmark now passes against the stricter validator: 17/17 substantive, 80/80 intact |
 | E-005 | Expand CI and produce release evidence | Unit and local Docker jobs cover lifecycle, inventory, benchmark and parser tests; dedicated actual-service jobs run on release or manual dispatch with explicit opt-in variables | `.github/workflows/tests.yml` | Partly stale, one live defect: CI installs a bare `pytest` while `pytest.ini` sets `asyncio_mode = auto`, so **the async suite cannot be collected**. One-line fix (`pip install -r requirements-dev.txt`) is written but unpushed — the credential in use lacks GitHub's `workflow` scope |
 | E-006 | Package and document the integration release | Separate reviewable milestone commits, current setup instructions, initial-import/reconcile examples, pinned build manifest, no unrelated operator files included | docs, Git review series | Open |
 
@@ -509,10 +511,22 @@ when comparing durations. Publish raw metric definitions beside summarized chart
 
 ## 12. First three implementation increments
 
-**Increment 1 — close the review defects:** E-001 through E-003, each with a failing
-regression first, then the smallest fix. E-004 is closed; re-run the benchmark to
-confirm it end to end rather than reopening it. Run the existing scope/lifecycle
-suite after the execution changes. Keep implementation and review evidence together.
+**Increment 1 — close the review defects: DONE** (`7723090`, `639c32e`, `7f45f06`,
+`e78c257`). E-001 through E-003 each got a failing regression first and then the
+smallest fix. E-004 did NOT survive confirmation: re-running the benchmark end to
+end showed two of its three clauses unmet, so it was reopened and closed properly
+— which is the outcome this increment was for. The scope/lifecycle suite passed
+against the real scanners after each execution change (22 passed), and the
+benchmark — the one failing acceptance check in §2 — now passes against a
+stricter validator.
+
+Method note worth keeping: three of the four items were reproduced by agents
+working only from the code, and two of their analyses needed correcting on
+material points. E-003's recommendation understated the cost (it called
+`WSTG-INPV-07`'s mutating steps "four of nine" without noting they are the whole
+of that case's detection), and E-002's status in this plan credited
+`issued_payloads` with a guarantee it does not provide. Reproductions are worth
+delegating; conclusions are worth checking.
 
 **Increment 2 — make the release repeatable:** E-005 and E-006. Start with the CI
 collection defect, which is one line and currently hides the async suite from every
