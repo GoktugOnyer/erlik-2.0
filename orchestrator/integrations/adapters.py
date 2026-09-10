@@ -15,7 +15,7 @@ import yaml
 from .contracts import (AssessmentConfig, Endpoint, IntegrationFinding, StageResult,
                         fingerprint, form_endpoint, parameter_names)
 from .runtime import Sandbox, IMAGES, JobOutput
-from .security import SecretStore, secret_values, redact
+from .security import SecretStore, secret_values, redact, safe_evidence
 from . import persistence as db
 
 
@@ -179,7 +179,7 @@ def parse_zap(document, ctx):
                     # string, so a consumer could render neither safely. It is
                     # the same kind of thing as a catalogue evaluator's proof and
                     # belongs in the same field.
-                    evidence=redact(str(item.get("evidence", "")), ctx.known)[:MAX_EVIDENCE_CHARS],
+                    evidence=safe_evidence(redact(str(item.get("evidence", "")), ctx.known))[:MAX_EVIDENCE_CHARS],
                     cwe=str(alert["cweid"]) if alert.get("cweid") else None,
                     methodology={"89": ["WSTG-INPV-05"], "79": ["WSTG-INPV-01"], "352": ["WSTG-SESS-05"]}.get(str(alert.get("cweid")), [])))
     return result
@@ -453,8 +453,8 @@ class SchemathesisAdapter(BaseAdapter):
                     confidence="confirmed", basis="Explicit forbidden-content assertion reproduced with the configured identity", severity="high",
                     # The marker's neighbourhood, so the reader can see the
                     # forbidden content rather than be told it was there.
-                    evidence=redact(_marker_window(response["body"], assertion.forbidden_marker),
-                                    ctx.known)[:MAX_EVIDENCE_CHARS],
+                    evidence=safe_evidence(redact(_marker_window(response["body"], assertion.forbidden_marker),
+                                    ctx.known))[:MAX_EVIDENCE_CHARS],
                     methodology=["WSTG-AUTHZ-04"]))
         return await record(ctx, sandbox, output, result, accepted_codes=(0, 1))
 

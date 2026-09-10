@@ -279,9 +279,20 @@ def _blind_controls(ev: Evaluator, prior_steps: list[StepResult] | None):
 
 
 MAX_EVIDENCE = 1500
+# Cut the evidence window this much wider than it will finally be, so a
+# credential is scrubbed BEFORE the window is trimmed to its final size.
+#
+# Truncating first breaks the scrub: a secret is removed by substring
+# replacement, so cutting through the middle of one leaves a partial run that no
+# longer matches the value being searched for. Produced live: a 32-character
+# session id straddling the cut left a 30-character contiguous prefix of itself
+# in evidence bound for a client's issue tracker. The margin covers any
+# credential shorter than itself; the scrub happens in _scrub_for_storage and
+# the trim happens after it.
+SECRET_MARGIN = 1024
 
 
-def _around(output: str, at: int, span: int = MAX_EVIDENCE) -> str:
+def _around(output: str, at: int, span: int = MAX_EVIDENCE + 2 * SECRET_MARGIN) -> str:
     """The neighbourhood of the MATCH, not the head of the response.
 
     Evidence used to be `output[:1500]`, which is the proof only when the thing
@@ -301,6 +312,39 @@ def _around(output: str, at: int, span: int = MAX_EVIDENCE) -> str:
     end = min(len(output), start + span)
     head = f"[excerpt of {len(output)} bytes, from offset {start}]\n" if start else ""
     return head + output[start:end] + ("…" if end < len(output) else "")
+
+
+def _caused_occurrence(pattern, flags, step_result, ev, prior_steps):
+    """The first match of `pattern` whose neighbourhood is NOT in the baseline."""
+    other = {x.step: x for x in (prior_steps or [])}.get(ev.differs_from or "")
+    if other is None or not other.output:
+        return None
+    baseline = _comparable(other.output)
+    for candidate in re.finditer(pattern, step_result.output, flags):
+        window = _comparable(step_result.output[candidate.start():candidate.end() + 120])
+        if window and window not in baseline:
+            return candidate
+    return None
+
+
+def _payload_of(command: str) -> str:
+    """The value a step sent, lifted out of its rendered command.
+
+    Without this the blind comparisons name their rows `control_a`,
+    `false_string`, `mysql_quoted_short` — and a reader cannot replay any of
+    them. The command carries credential HANDLES rather than secrets, so the
+    payload is safe to quote; it is the one part of the request the reader needs
+    and the only part that was missing.
+    """
+    found = re.findall(r"--data-urlencode\s+\"[^\"=]{1,64}=([^\"]{0,160})\"", command)
+    return found[-1] if found else ""
+
+
+def _sent(steps: list[StepResult]) -> str:
+    """`step -> payload` for each step a comparison rests on."""
+    lines = [f"    {s.step:<22} sent {_payload_of(s.command)!r}" for s in steps
+             if _payload_of(s.command)]
+    return "  requests:\n" + "\n".join(lines) + "\n" if lines else ""
 
 
 def _attributable(ev: Evaluator, step_result: StepResult,
@@ -378,6 +422,17 @@ async def _run_evaluator(
             hit = re.search(pattern, step_result.output, flags)
             matched = bool(produced) or bool(hit)
             if hit:
+                # THE OCCURRENCE THE PAYLOAD CAUSED, not the leftmost one.
+                #
+                # Attribution is decided over the WHOLE response, so a page that
+                # already prints one database error — a debug banner, a legacy
+                # query notice — is still reported when a second, caused error
+                # appears. But the window was cut at the FIRST match, which on
+                # such a page is the permanent one: the client got 1500 bytes the
+                # benign baseline returns too, which is the exact failure the
+                # window was introduced to close, and it invites a reader to
+                # dismiss a real finding.
+                hit = _caused_occurrence(pattern, flags, step_result, ev, prior_steps) or hit
                 evidence = _around(step_result.output, hit.start())
             if matched and ev.differs_from:
                 # ATTRIBUTION. The pattern says the evidence is there; this says
@@ -430,6 +485,25 @@ async def _run_evaluator(
             and _http_status_ok(baseline.output) and _http_status_ok(step_result.output)
             and marker in baseline.output and marker in step_result.output
             and low != high)
+        if matched:
+            # A DIFFERENTIAL claim needs BOTH sides. This is the only evaluator
+            # hard-graded `confirmed`, which sets `verified` on a client's
+            # tracker, and it was falling through to the head of the
+            # low-privilege response — one side of a two-sided claim, with the
+            # privileged baseline named nowhere and the marker itself often past
+            # the cut. A reader could not tell what crossed between identities.
+            evidence = ("erlik comparison of two identities — the quoted fragments are the "
+                        "application's\n"
+                        f"  the private object is identified by: {marker!r}\n"
+                        f"  {baseline.step:<26} as the privileged identity, "
+                        f"{len(baseline.output)} bytes\n"
+                        f"  {step_result.step:<26} as the low-privilege identity, "
+                        f"{len(step_result.output)} bytes\n"
+                        "  both returned it, and the two identities differ\n\n"
+                        "privileged response, around the object:\n"
+                        + _around(baseline.output, baseline.output.index(marker), 600)
+                        + "\n\nlow-privilege response, around the same object:\n"
+                        + _around(step_result.output, step_result.output.index(marker), 600))
 
     elif ev.type == "cookie_attributes":
         # Structure, not a regex: a session cookie missing HttpOnly is the claim,
@@ -498,7 +572,10 @@ async def _run_evaluator(
                 basis = (f"blind boolean: {len(controls)} controls agreed, "
                          f"{step_result.step} differs from {ev.differs_from} — {grade}")
                 evidence = (
-                    "blind boolean differential\n"
+                    "erlik comparison of four responses — the quoted fragments are the "
+                    "application's\n"
+                    + _sent(controls + [other, step_result])
+                    + "blind boolean differential\n"
                     + "".join(f"    {c.step:<16} {len(c.output):>6} bytes  (control)\n"
                               for c in controls)
                     + f"    {other.step:<16} {len(other.output):>6} bytes  (false condition)\n"
@@ -528,7 +605,9 @@ async def _run_evaluator(
                          f"{slowest.duration_ms}ms for {slowest.step}, a {margin}ms "
                          f"margin over the required {ev.delay_ms}ms — ONE measurement")
                 evidence = (
-                    "blind timing differential\n"
+                    "erlik comparison of four responses — the durations are measured, not quoted\n"
+                    + _sent(controls + [step_result])
+                    + "blind timing differential\n"
                     + "".join(f"    {c.step:<16} {c.duration_ms:>6} ms  (control)\n"
                               for c in controls)
                     + f"    {step_result.step:<16} {step_result.duration_ms:>6} ms  "
@@ -582,7 +661,7 @@ async def _run_evaluator(
             # scope-audited, and rendered as N/A in the client report.
             url=target.get("url") or target.get("url_template"),
             parameter=target.get("parameter"),
-            evidence=(evidence or step_result.output)[:MAX_EVIDENCE],
+            evidence=(evidence or _around(step_result.output, 0)),
             # Only the differential evaluators compared steps rather than
             # reading one response and inferring — which is a lead, not a proof.
             confidence=confidence or ("confirmed" if ev.type == "idor" else "suspected"),
@@ -604,14 +683,19 @@ def _scrub_for_storage(result: RunResult, secrets: tuple[str, ...]) -> None:
     handles rather than secrets, and the RunResult is returned, persisted and
     reported only after it.
     """
-    if not secrets:
-        return
     for step in result.steps:
-        step.output = _CRED.scrub(step.output, secrets)
-        step.error = _CRED.scrub(step.error, secrets) if step.error else step.error
+        if secrets:
+            step.output = _CRED.scrub(step.output, secrets)
+            step.error = _CRED.scrub(step.error, secrets) if step.error else step.error
     for finding in result.findings:
-        finding.evidence = _CRED.scrub(finding.evidence, secrets)
-        finding.basis = _CRED.scrub(finding.basis, secrets)
+        if secrets:
+            finding.evidence = _CRED.scrub(finding.evidence, secrets)
+            finding.basis = _CRED.scrub(finding.basis, secrets)
+        # TRIM LAST, and never silently: a partial quote presented as a whole one
+        # lets the target choose where the reader's view ends.
+        if len(finding.evidence) > MAX_EVIDENCE:
+            finding.evidence = (finding.evidence[:MAX_EVIDENCE]
+                                + f"\n[truncated at {MAX_EVIDENCE} characters]")
 
 
 async def run_test_case(

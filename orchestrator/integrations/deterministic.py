@@ -13,7 +13,7 @@ from .egress_policy import EgressPolicy
 from .inventory import (seeds, eligible_test_cases, form_urls, parameters_by_url,
                         case_needs_parameter, parameter_can_forge)
 from .runtime import JobOutput
-from .security import redact
+from .security import redact, safe_evidence
 
 # A finding's evidence is target-controlled text that travels into a report and
 # into a client's issue tracker. The runner already caps it; this is the bound on
@@ -633,7 +633,7 @@ class CatalogueAdapter(BaseAdapter):
                         # identity's own cookie comes back at us, and bounded
                         # again here because the field is target-controlled and
                         # the runner's cap is on the other side of a seam.
-                        evidence=redact(finding.evidence, ctx.known)[:MAX_EVIDENCE_CHARS],
+                        evidence=safe_evidence(redact(finding.evidence, ctx.known))[:MAX_EVIDENCE_CHARS],
                         methodology=[case_id], evidence_ids=[evidence_id]))
                 # A CASE THAT RECEIVED NOTHING DID NOT TEST ANYTHING.
                 #

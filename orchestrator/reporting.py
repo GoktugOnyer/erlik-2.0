@@ -49,6 +49,19 @@ def _policy_note(f: dict) -> str:
     return f"NOT SUBMITTABLE — marked informational by {rule}"
 
 
+def _evidence_block(f: dict) -> str:
+    """The bytes a finding rests on, as plain text for a non-HTML renderer.
+
+    Every deliverable has to carry it or none should: the HTML report is the one
+    an operator prints and sends, and it was the one rendering a HIGH-severity
+    claim with nothing behind it while report.json carried the proof.
+    """
+    evidence = (f.get("evidence") or "").strip()
+    if not evidence:
+        return ""
+    return "Evidence (the application's own output, credentials redacted):\n" + evidence
+
+
 def report_to_html(report: dict) -> str:
     eng = report.get("engagement", {}) or {}
     stats = report.get("statistics", {}) or {}
@@ -90,6 +103,14 @@ def report_to_html(report: dict) -> str:
                 sections.append(f'<h4>Impact</h4><p>{_e(f["impact"])}</p>')
             if f.get("remediation"):
                 sections.append(f'<h4>Remediation</h4><p>{_e(f["remediation"])}</p>')
+            # ESCAPED, and in a <pre>: this is the only field on a finding whose
+            # content the target chose, so it is the only one that could be
+            # markup. _e is html.escape.
+            if (f.get("evidence") or "").strip():
+                sections.append('<h4>Evidence</h4>'
+                                '<p class="muted">Captured from the application, '
+                                'credentials redacted.</p>'
+                                f'<pre class="evidence">{_e(f["evidence"])}</pre>')
             if refs:
                 items = "".join(f'<li>{_e(r)}</li>' for r in refs)
                 sections.append(f'<h4>References</h4><ul>{items}</ul>')
@@ -167,7 +188,8 @@ def report_to_sarif(report: dict, session_id: str = "") -> dict:
             }
         props = {k: f.get(k) for k in
                  ("severity", "cvss_score", "cvss_vector", "cwe", "owasp",
-                  "confidence", "remediation", "id", "submittable", "policy_rule")
+                  "confidence", "remediation", "id", "submittable", "policy_rule",
+                  "evidence", "parameter")
                  if f.get(k) is not None}
         # SARIF is read by CI gates, which act on `level`. A finding the policy
         # says must not be submitted is downgraded to "note" so an automated
@@ -226,8 +248,8 @@ def report_to_defectdojo(report: dict) -> dict:
         sev = _sev(f)
         out.append({
             "title": f.get("title") or "Finding",
-            "description": ((f.get("description") or "")
-                            + (("\n\n" + _policy_note(f)) if _policy_note(f) else "")),
+            "description": "\n\n".join(x for x in (
+                f.get("description") or "", _policy_note(f), _evidence_block(f)) if x),
             "severity": _DD_SEV.get(sev, "Info"),
             "cwe": _cwe_int(f.get("cwe")),
             "cvssv3": f.get("cvss_vector") or None,
@@ -262,6 +284,8 @@ def report_to_jira_csv(report: dict) -> str:
         parts = [f.get("description") or ""]
         if _policy_note(f):
             parts.append(_policy_note(f))
+        if _evidence_block(f):
+            parts.append(_evidence_block(f))
         if f.get("impact"):
             parts.append("Impact: " + f["impact"])
         if f.get("remediation"):

@@ -108,9 +108,22 @@ def finding_payload(finding):
     # could not check a HIGH-severity finding against anything. Labelled as the
     # application's own output, because that is what a reader needs to know
     # about it before trusting a single character.
-    if finding.get("evidence"):
-        description += ("\n\nEvidence — captured from the application's own response, "
-                        "with known credentials redacted:\n\n" + _quoted(finding["evidence"]))
+    # WHERE the finding is, not just which URL. A client told that a blind SQL
+    # injection exists at a URL and never told which parameter cannot act on it.
+    where = ", ".join(x for x in (
+        ("parameter " + finding["parameter"]) if finding.get("parameter") else "",
+        ("detector " + finding["rule"]) if finding.get("rule") else "") if x)
+    if where:
+        description += "\n\n" + where
+    # The banner says only what is true of EVERY evidence value. It used to claim
+    # "captured from the application's own response", and for the differential and
+    # cookie evaluators the field is erlik's own comparison with the target's
+    # fragments quoted inside it — so for half the findings in the 2026-09-10 run
+    # the banner attributed erlik's words to the client's application. The
+    # evidence now opens by saying which it is.
+    if finding.get("evidence", "").strip():
+        description += ("\n\nEvidence (credentials redacted):\n\n"
+                        + _quoted(finding["evidence"]))
     if finding.get("triage_note"):
         description += "\n\nErlik triage: " + finding["triage_note"]
     payload = {"title": finding["title"], "description": description,
