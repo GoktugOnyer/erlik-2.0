@@ -2,7 +2,7 @@
 import json
 from pathlib import Path
 from fastapi import APIRouter, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, Field
 from .contracts import Identity, AssessmentConfig
 from typing import Literal
@@ -107,11 +107,16 @@ async def triage(session_id: str, fingerprint: str, body: TriageInput):
 
 @router.get("/evidence/{evidence_id}")
 async def evidence_file(evidence_id: str):
-    rows = await db.rows("SELECT * FROM integration_evidence WHERE id=?", (evidence_id,))
-    if not rows:
+    try:
+        content = await db.evidence_bytes(evidence_id)
+    except KeyError:
         raise HTTPException(404, "evidence not found")
-    path = runtime_root() / "evidence" / rows[0]["id"]
-    return FileResponse(path, media_type="text/plain", filename=evidence_id + ".txt")
+    except db.EvidenceIntegrityError as exc:
+        # Serving bytes that no longer match what was recorded is worse than
+        # serving nothing: a reader would check a finding against them.
+        raise HTTPException(404, str(exc))
+    return Response(content, media_type="text/plain",
+                    headers={"Content-Disposition": f'attachment; filename="{evidence_id}.txt"'})
 
 
 @router.post("/sessions/{session_id}/defectdojo")

@@ -63,7 +63,17 @@ async def metrics(session_id, duration, stages):
         if e["kind"] == "requests":
             audit.extend(json.loads(line) for line in (runtime_root() / "evidence" / e["id"]).read_text().splitlines())
     requested = {urlsplit(e["url"]).path for e in audit if "allowed" in e and e["allowed"] and e.get("method") == "GET"}
-    existing = {e["id"] for e in evidence if e["size"] > 0 and (runtime_root() / "evidence" / e["id"]).is_file()}
+    # INTACT, not merely present. This read `size` from the DATABASE ROW and
+    # called that a resolvable reference — the row compared against itself, so a
+    # truncated or substituted artifact scored as evidence-complete. And the
+    # `size > 0` conjunct contradicted the clause about empty diagnostic files:
+    # once record() retains a zero-byte scanner log, that conjunct would score it
+    # dangling and drive the metric straight back to "0 of 17".
+    def _intact(row):
+        path = runtime_root() / "evidence" / row["id"]
+        return path.is_file() and hashlib.sha256(path.read_bytes()).hexdigest() == row["sha256"]
+
+    existing = {e["id"] for e in evidence if _intact(e)}
     supported = sum(bool(f["evidence_ids"]) and all(key in existing for key in f["evidence_ids"]) for f in findings)
     # "0 of 17" is not a finding anyone can act on. A finding that cited NO
     # evidence and one that cited an id which does not resolve are different
@@ -76,10 +86,10 @@ async def metrics(session_id, duration, stages):
         row = by_id.get(key)
         if row is None:
             why[key] = "no evidence row for this id"
-        elif row["size"] == 0:
-            why[key] = f"stored empty (kind={row['kind']}, stage={row['stage_id']})"
         elif not (runtime_root() / "evidence" / key).is_file():
             why[key] = f"row present but artifact missing (kind={row['kind']})"
+        elif not _intact(row):
+            why[key] = f"artifact failed its digest check (kind={row['kind']}, stage={row['stage_id']})"
         else:
             why[key] = "unknown"
     return {"duration_seconds": duration, "endpoints": sorted({i["url"] for i in inventory}),
@@ -89,6 +99,8 @@ async def metrics(session_id, duration, stages):
         "false_positives_in_scored_rules": sorted(predictions - EXPECTED), "unscored_scanner_findings": unscored,
         "recall_in_scored_rules": len(predictions & EXPECTED) / len(EXPECTED),
         "evidence_completeness": {"findings_with_nonempty_resolvable_evidence": supported, "total_findings": len(findings),
+            "findings_without_substantive_evidence": sorted(
+                f["rule"] for f in findings if not (f.get("evidence") or "").strip()),
             "findings_citing_no_evidence": sorted(set(uncited)), "unresolvable_evidence_ids": sorted(dangling),
             "unresolvable_reasons": sorted(set(why.values())),
             "stored_evidence_rows": len(evidence), "resolvable_evidence_rows": len(existing)},
@@ -151,3 +163,9 @@ async def test_integrated_coverage_and_finding_benchmark(benchmark_lab):
     assert arms["integrated"]["recall_in_scored_rules"] > arms["baseline"]["recall_in_scored_rules"]
     counts = arms["integrated"]["evidence_completeness"]
     assert counts["total_findings"] > 0 and counts["findings_with_nonempty_resolvable_evidence"] == counts["total_findings"], counts
+    # SUBSTANTIVE, not merely cited. The clause is "each finding has substantive
+    # supporting evidence", and this metric only ever asked whether the ids
+    # resolved. A real run from before findings carried their proof —
+    # lane10-final-low, 2026-09-10 — had 9 of 9 findings with an EMPTY evidence
+    # field and every id resolvable, so it would have scored 100% complete.
+    assert counts["findings_without_substantive_evidence"] == [], counts

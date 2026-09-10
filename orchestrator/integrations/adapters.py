@@ -85,8 +85,17 @@ async def record(context, sandbox, output, result, accepted_codes=(0,)):
     # benchmark, which then reported 0 of 17 findings as evidence-backed. The
     # stage still records that it ran — exit_code, metadata and the audit log
     # all survive — but a finding now points only at bytes that exist.
-    async def keep(kind: str, content: str):
-        if content:
+    async def keep(kind: str, content: str, *, artifact: bool = False):
+        # An empty FILE is a valid attachment — an empty STREAM is not.
+        #
+        # A scanner that wrote a zero-byte log did write one, and the fact that
+        # it had nothing to say is worth keeping. A scanner that printed nothing
+        # on stderr produced no artifact at all, and attaching one was the
+        # original defect: 22 findings each citing a zero-byte
+        # `erlik-job-<id>.stderr`, which then made every one of them read as
+        # unsupported. The clause asks for empty diagnostic FILES to be valid
+        # attachments, not for empty streams to become files.
+        if content or artifact:
             result.evidence_ids.append(
                 await db.evidence(context.session_id, context.stage_id, kind, content, context.known))
 
@@ -94,7 +103,7 @@ async def record(context, sandbox, output, result, accepted_codes=(0,)):
     await keep("stderr", output.stderr)
     for path in sorted(sandbox.output.rglob("*")):
         if path.is_file() and not path.is_symlink():
-            await keep(path.name, path.read_text(errors="replace"))
+            await keep(path.name, path.read_text(errors="replace"), artifact=True)
     audit = sandbox.directory / "audit" / "requests.jsonl"
     if audit.exists():
         audit_text = audit.read_text()

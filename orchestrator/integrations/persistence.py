@@ -107,6 +107,37 @@ async def rows(sql, args=()):
         await db.close()
 
 
+class EvidenceIntegrityError(Exception):
+    """A stored artifact is missing, or no longer the bytes that were stored."""
+
+
+async def evidence_bytes(evidence_id: str) -> bytes:
+    """An artifact, checked against the digest recorded when it was written.
+
+    The digest was write-only state: computed here, stored, and never consulted
+    again. The download route fetched the row only to prove the id was known and
+    then streamed whatever was on disk; defectdojo.reconcile reads an artifact
+    and DECIDES from its contents whether a remote export matches, which is the
+    sharper risk of the two; and the benchmark's own resolvable-evidence check
+    read `size` from the database row rather than the file, so it compared the
+    row against itself.
+
+    A missing artifact and an unknown id are different answers on purpose: one
+    is an integrity failure, the other is a caller asking for something that was
+    never stored.
+    """
+    entries = await rows("SELECT * FROM integration_evidence WHERE id=?", (evidence_id,))
+    if not entries:
+        raise KeyError(evidence_id)
+    path = runtime_root() / "evidence" / evidence_id
+    if not path.is_file():
+        raise EvidenceIntegrityError("evidence artifact is missing")
+    content = path.read_bytes()
+    if hashlib.sha256(content).hexdigest() != entries[0]["sha256"]:
+        raise EvidenceIntegrityError("evidence artifact failed its digest check")
+    return content
+
+
 async def evidence(session_id: str, stage_id: str, kind: str, content: str, known=()) -> str:
     cleaned = redact(content, known).encode()
     key = uuid.uuid4().hex
