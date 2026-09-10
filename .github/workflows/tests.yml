@@ -3,6 +3,12 @@ name: tests
 on:
   push:
   pull_request:
+  # E-005: "dedicated actual-service jobs run on release or manual dispatch with
+  # explicit opt-in variables". Both triggers exist for the jobs below; the
+  # opt-in is a repository variable, so a dispatch cannot start them by accident.
+  workflow_dispatch:
+  release:
+    types: [published]
 
 # A second push to the same branch cancels the first: the older run's verdict
 # is about code nobody is looking at any more.
@@ -11,6 +17,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # ---------------------------------------------------------------- unit
+  # Network-free, no Docker, every supported interpreter. Runs on everything.
   pytest:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -63,21 +71,132 @@ jobs:
       # output from a path that did nothing" the product guards against.
       - name: Assert the suite actually ran
         if: always()
-        run: |
-          python - <<'PY'
-          import sys, xml.etree.ElementTree as ET
-          r = ET.parse("junit.xml").getroot()
-          suite = r if r.tag == "testsuite" else r.find("testsuite")
-          total = int(suite.get("tests", 0))
-          skipped = int(suite.get("skipped", 0))
-          ran = total - skipped
-          print(f"{ran} ran, {skipped} skipped, {total} collected")
-          if ran < 1200:
-              sys.exit(f"only {ran} tests ran — the suite is not exercising the codebase")
-          PY
+        run: python scripts/ci_assert_suite_ran.py junit.xml
 
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: junit-${{ matrix.python-version }}
           path: junit.xml
+
+  # -------------------------------------------------------------- local Docker
+  # E-005: "Unit and local Docker jobs cover lifecycle, inventory, benchmark and
+  # parser tests". These 35 tests SKIP without ERLIK_DOCKER_TESTS=1, so until
+  # this job existed CI had never executed one of them — the lane's entire
+  # execution boundary was covered only on a developer's machine.
+  #
+  # Not on every push: the worker image builds three Go tools and Chromium.
+  # §11 of docs/future-plan.md says "isolated scanner tests on relevant pull
+  # requests", which is what this is.
+  docker:
+    if: github.event_name != 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      # The assessment lane runs every job in a container off an internal
+      # network, so the images have to exist before any of it can be exercised.
+      - name: Build the lane images
+        run: docker compose -f docker-compose.integrations.yml --profile integrations build
+
+      - name: Pull the pinned scanner image
+        run: docker pull ghcr.io/zaproxy/zaproxy:2.16.1
+
+      - name: Record what was pinned
+        run: python scripts/release_manifest.py --out build-manifest.json
+
+      # -m docker selects exactly the suites that need a container. The
+      # actual-service tests inside them stay skipped: they need their own
+      # opt-in variables, which the job below supplies.
+      - name: Local Docker suites
+        env:
+          ERLIK_DOCKER_TESTS: "1"
+          ERLIK_COVERAGE_REPORT: benchmark-report.json
+        run: python -m pytest -m docker -q --junitxml=junit-docker.xml
+
+      # "produce release evidence" — the benchmark report is the artifact a
+      # release is judged on, and it is worthless if nobody can find the run
+      # that produced it.
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: release-evidence
+          path: |
+            junit-docker.xml
+            benchmark-report.json
+            build-manifest.json
+
+  # ----------------------------------------------------------- actual services
+  # E-005: "dedicated actual-service jobs run on release or manual dispatch with
+  # explicit opt-in variables".
+  #
+  # A mock service test does not substitute for pinned-service acceptance, and
+  # these start a real Interactsh server and a real DefectDojo. They are opt-in
+  # by repository VARIABLE rather than by trigger alone, so neither a dispatch
+  # nor a release can start them unless someone has said so out of band.
+  actual-services:
+    if: >-
+      (github.event_name == 'workflow_dispatch' || github.event_name == 'release')
+      && vars.ERLIK_ACTUAL_SERVICE_TESTS == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Build the lane images
+        run: docker compose -f docker-compose.integrations.yml --profile integrations build
+
+      - name: Build the Interactsh lab
+        run: docker build -t erlik-interactsh-lab:1 docker/interactsh-lab
+
+      - name: Real Interactsh acceptance
+        env:
+          ERLIK_DOCKER_TESTS: "1"
+          ERLIK_REAL_INTERACTSH_TESTS: "1"
+        run: python -m pytest tests/test_interactsh_completion.py -q --junitxml=junit-interactsh.xml
+
+      # DefectDojo brings up its own compose stack and needs secrets of its own.
+      # Skipped rather than failed when they are absent, because an absent
+      # credential is missing coverage and not a defect in the code.
+      - name: Live DefectDojo acceptance
+        if: ${{ env.ERLIK_DOJO_SECRET != '' }}
+        env:
+          ERLIK_DOCKER_TESTS: "1"
+          ERLIK_DEFECTDOJO_LIVE_TESTS: "1"
+          ERLIK_DOJO_SECRET: ${{ secrets.ERLIK_DOJO_SECRET }}
+          ERLIK_DOJO_AES_KEY: ${{ secrets.ERLIK_DOJO_AES_KEY }}
+          ERLIK_DOJO_DB_PASSWORD: ${{ secrets.ERLIK_DOJO_DB_PASSWORD }}
+          ERLIK_DOJO_ADMIN_PASSWORD: ${{ secrets.ERLIK_DOJO_ADMIN_PASSWORD }}
+        run: python -m pytest tests/test_defectdojo_live.py -q --junitxml=junit-defectdojo.xml
+
+      # Client evidence must never reach a public CI artifact (§11). These
+      # suites run against lab fixtures only, and the junit files carry test
+      # names and durations — not captured responses.
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: actual-service-evidence
+          path: junit-*.xml
