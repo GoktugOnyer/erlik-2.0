@@ -78,7 +78,39 @@ DECLARABLE = (
     "url", "url_template", "login_url", "parameter", "submit", "method",
     "username_field", "password_field", "object_ids", "client_id",
     "collaborator_host", "auth_header_name",
+    # `config_cookie` is application CONFIGURATION rather than identity, and every
+    # arm of a differential carries it — the anonymous one included. DVWA's security
+    # level lives in a cookie and `dvwaSecurityLevelGet` falls back to `impossible`
+    # when it is absent, so an anonymous arm sending nothing was not the same
+    # application with nobody logged in; it was a hardened one. It is not a secret,
+    # and it IS rendered into a command, so it keeps the shell metacharacter rule.
+    "config_cookie",
+    # `private_object_marker` is what WSTG-AUTHZ-04's verdict rests on: the fragment
+    # that identifies the privileged object, which the evaluator looks for in each
+    # arm's response. It was absent from this list, so nothing could supply it and
+    # the check could not run at all.
+    #
+    # It is the one declarable field never RENDERED INTO A COMMAND — see
+    # EVALUATOR_ONLY below, and tests/test_marker_is_declarable.py, which asserts
+    # that premise against the catalogue rather than assuming it.
+    "private_object_marker",
 )
+
+# Fields an EVALUATOR reads and no command interpolates.
+#
+# `looks_injectable` refuses `"` `'` `` ` `` `$` and `\` because a declared value is
+# substituted into a shell-quoted argument, where those characters change the
+# command. That is right where it applies — and it makes the markers that actually
+# identify an object in a JSON API undeclarable: `"UserId":1`,
+# `"email":"admin@juice-sh.op"`. A marker is compared in Python as a substring and
+# reaches no command line, so it is held to the rule that does apply to it: bounded
+# length, and nothing that cannot be compared or displayed safely.
+EVALUATOR_ONLY = ("private_object_marker",)
+
+# Rejected in an evaluator-only value. Narrower than _SHELL_META and for a different
+# reason: a newline or a NUL in a marker is a mistake worth naming, and a control
+# character would corrupt the evidence the finding quotes.
+_UNCOMPARABLE = set("\n\r\x00\x1b")
 
 # Values for these are stored as a PATH and rendered under the operator's base
 # URL. A declaration therefore cannot name a host at all — structurally
@@ -105,6 +137,12 @@ def validate(field: str, value: Any) -> str:
         return "is empty"
     if len(v) > MAX_VALUE:
         return f"is longer than {MAX_VALUE} characters"
+    if field in EVALUATOR_ONLY:
+        offending = sorted(_UNCOMPARABLE & set(v))
+        if offending:
+            return ("contains a control character: "
+                    + " ".join(repr(c) for c in offending))
+        return ""
     bad = looks_injectable(v)
     if bad:
         return bad

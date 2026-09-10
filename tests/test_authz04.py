@@ -50,11 +50,28 @@ class TestTheCaseAcceptsEitherMaterial:
 
     def test_the_command_sends_each_shape_correctly(self, case):
         """A cookie in a Bearer header authenticates nothing, so the two are
-        never conflated — the step sends whichever it was actually given."""
-        cmd = case["steps"][0]["command"]
-        assert 'Authorization: Bearer $HT' in cmd
-        assert 'Authorization: Bearer $LT' in cmd
-        assert '-b "$HC"' in cmd and '-b "$LC"' in cmd
+        never conflated — each step sends whichever its role was actually given.
+
+        The arms are separate steps now, because the evaluator reads them
+        individually; the conditional `${HT:+...}` shape is what still lets one
+        command carry either material.
+        """
+        commands = {step["name"]: step["command"] for step in case["steps"]}
+        high = commands["fetch_as_high_priv"]
+        low = commands["fetch_as_low_priv"]
+        assert 'Authorization: Bearer $HT' in high and '-b "$HC"' in high
+        assert 'Authorization: Bearer $LT' in low and '-b "$LC"' in low
+        # The control arm carries no IDENTITY material. It does carry the
+        # application's CONFIGURATION — `config_cookie` — because an arm that
+        # differed from the others in two respects was not a control at all; see
+        # tests/test_every_arm_shares_the_configuration.py. So this checks the
+        # identity fields by name rather than using `-b` as a proxy for them.
+        anonymous = commands["fetch_anonymously"]
+        for fragment in ("$HT", "$HC", "$LT", "$LC", "Authorization",
+                         "high_priv", "low_priv"):
+            assert fragment not in anonymous, (
+                f"the anonymous arm carries {fragment!r}, so it is not anonymous")
+        assert "{{config_cookie}}" in anonymous
 
     def test_the_broken_first_evaluator_is_gone(self, case):
         """`^[45]\\d\\d` against a body, under previous_failure, on step one."""
@@ -70,22 +87,42 @@ class TestTheCaseAcceptsEitherMaterial:
         emitters = [ev for s in case["steps"] for ev in (s.get("evaluators") or [])
                     if ev.get("emit_finding")]
         assert emitters, "the case emits nothing at all"
-        assert all(ev["type"] == "regex" for ev in emitters), (
+        # By type, not by allow-listing `regex`: the verdict is a typed `idor`
+        # evaluator now, and the requirement was never "must be a regex" — it was
+        # "must not need a model to be reachable".
+        assert all(ev["type"] != "llm" for ev in emitters), (
             "a finding still depends on an llm evaluator")
 
 
 class TestTheThreeWayDifferential:
-    """`low == high` alone is not a finding — a public asset is identical for
-    everyone. `low != high` alone is not a clean bill of health either — on any
-    app with a per-session CSRF token, EVERY page differs. The anonymous fetch
-    is what separates them.
+    """The comparison is still three-way; what it compares changed.
 
-    These run the case's REAL command with a stub `curl` on PATH, so the shell
-    logic and the normalisation are exercised, not a paraphrase of them.
+    It used to hash three normalised bodies and call `low == high` an IDOR. That
+    fires on anything two identities legitimately see the same, and measured over
+    3 seeded violations and 11 negative controls on Juice Shop it reported FIVE
+    false positives — two absent objects, the low identity's own basket, a public
+    review list, and a pair of identical 400 denials read as a shared secret.
+
+    The verdict is now the typed `idor` evaluator: did the privileged object, named
+    by a marker the OPERATOR supplies, reach the low arm while not reaching an
+    anonymous one? The same six intents are checked, and two of them get stronger —
+    CSRF normalisation is no longer needed at all, because a token that differs
+    between arms cannot affect whether a marker is present.
+
+    These still run the case's REAL commands with a stub `curl` on PATH, so the
+    shell logic is exercised rather than paraphrased; only the verdict is read from
+    the evaluator instead of from a canary on stdout.
     """
 
+    MARKER = "PRIVILEGED DATA"
+
     @staticmethod
-    def _run(case, high_body, low_body, anon_body):
+    def _run(case, high_body, low_body, anon_body, marker=None):
+        import asyncio
+
+        from orchestrator.testcase.runner import _run_evaluator, StepResult
+        from orchestrator.testcase.schema import Evaluator, TestCase as _Case, TestStep as _Step
+
         stub = pathlib.Path(os.environ["PYTEST_TMP"])
         (stub / "curl").write_text(
             "#!/bin/bash\n"
@@ -95,20 +132,34 @@ class TestTheThreeWayDifferential:
             "done\n"
             "echo -n \"$A_BODY\"\n")
         (stub / "curl").chmod(0o755)
-        cmd = case["steps"][0]["command"]
-        for k, v in (("{{high_priv_token}}", ""), ("{{high_priv_cookie}}", "HIGHMAT"),
-                     ("{{low_priv_token}}", ""), ("{{low_priv_cookie}}", "LOWMAT"),
-                     ("{{url_template}}", "http://t.example/x")):
-            cmd = cmd.replace(k, v)
         env = {**os.environ, "PATH": f"{stub}:{os.environ['PATH']}",
                "H_BODY": high_body, "L_BODY": low_body, "A_BODY": anon_body}
-        out = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True,
-                             env=env, timeout=30).stdout
-        for verdict in ("ERLIK-AUTHZ-IDOR", "ERLIK-AUTHZ-INCONCLUSIVE",
-                        "ERLIK-AUTHZ-OK"):
-            if verdict in out:
-                return verdict, out
-        return None, out
+
+        outputs = {}
+        for step in case["steps"]:
+            cmd = step["command"]
+            for k, v in (("{{high_priv_token}}", ""), ("{{high_priv_cookie}}", "HIGHMAT"),
+                         ("{{low_priv_token}}", ""), ("{{low_priv_cookie}}", "LOWMAT"),
+                         ("{{url_template}}", "http://t.example/x")):
+                cmd = cmd.replace(k, v)
+            done = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True,
+                                  env=env, timeout=30)
+            outputs[step["name"]] = StepResult(step=step["name"], command=cmd, success=True,
+                                               duration_ms=1, exit_code=done.returncode,
+                                               output="HTTP/1.1 200 OK\r\n\r\n" + done.stdout)
+
+        last = case["steps"][-1]
+        evaluator = Evaluator(**last["evaluators"][0])
+        prior = [outputs[name] for name in outputs if name != last["name"]]
+        finding, _, _, _ = asyncio.run(_run_evaluator(
+            evaluator, outputs[last["name"]],
+            _Case(id=case["id"], name=case["name"], category="Authorization",
+                  steps=[_Step(name=last["name"], tool="curl", command="x")]),
+            {"url_template": "http://t.example/x",
+             "private_object_marker": marker or TestTheThreeWayDifferential.MARKER,
+             "high_priv_cookie": "HIGHMAT", "low_priv_cookie": "LOWMAT"},
+            None, None, prior))
+        return finding, {k: v.output for k, v in outputs.items()}
 
     @pytest.fixture(autouse=True)
     def _tmp(self, tmp_path, monkeypatch):
@@ -117,43 +168,63 @@ class TestTheThreeWayDifferential:
     def test_low_sees_the_privileged_response(self, case):
         """POSITIVE. Measured on DVWA at security=low against
         /vulnerabilities/authbypass/get_user_data.php."""
-        v, out = self._run(case, "PRIVILEGED DATA", "PRIVILEGED DATA", "login page")
-        assert v == "ERLIK-AUTHZ-IDOR", out
+        finding, out = self._run(case, "PRIVILEGED DATA", "PRIVILEGED DATA", "login page")
+        assert finding is not None, out
 
     def test_a_public_resource_is_not_an_idor(self, case):
-        """NEGATIVE, and the trap this exists for. All three identical means
-        the resource is public, not that access control failed. Measured on
-        /dvwa/css/main.css."""
-        v, out = self._run(case, "body{}", "body{}", "body{}")
-        assert v == "ERLIK-AUTHZ-INCONCLUSIVE", out
+        """NEGATIVE, and the trap this exists for. All three identical means the
+        resource is public, not that access control failed. Measured on
+        /dvwa/css/main.css, and on Juice Shop's /rest/products/1/reviews — which
+        publishes every reviewer's email address to anyone who asks."""
+        finding, out = self._run(case, "PRIVILEGED DATA", "PRIVILEGED DATA",
+                                 "PRIVILEGED DATA")
+        assert finding is None, out
 
     def test_a_low_session_treated_as_anonymous_concludes_nothing(self, case):
-        """NEGATIVE. Measured on DVWA at security=high, where the low user gets
-        the anonymous response — the test cannot conclude from that."""
-        v, out = self._run(case, "PRIVILEGED DATA", "login page", "login page")
-        assert v == "ERLIK-AUTHZ-INCONCLUSIVE", out
+        """NEGATIVE. Measured on DVWA at security=high, where the low user gets the
+        anonymous response. The marker never reached the low arm, so nothing
+        crossed."""
+        finding, out = self._run(case, "PRIVILEGED DATA", "login page", "login page")
+        assert finding is None, out
 
-    def test_discrimination_is_reported_as_ok(self, case):
-        v, out = self._run(case, "PRIVILEGED DATA", "your own data", "login page")
-        assert v == "ERLIK-AUTHZ-OK", out
+    def test_discrimination_is_reported_as_clean(self, case):
+        finding, out = self._run(case, "PRIVILEGED DATA", "your own data", "login page")
+        assert finding is None, out
 
     def test_a_csrf_token_alone_does_not_look_like_access_control(self, case):
-        """Without normalisation every page of a CSRF-bearing app differs, and
-        the case would report OK everywhere. Verified against DVWA: all seven
-        pages checked differed byte-for-byte between two users purely because
-        of the per-session token."""
-        v, out = self._run(
-            case,
-            'DATA <input name="user_token" value="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa">',
-            'DATA <input name="user_token" value="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb">',
-            "login page")
-        assert v == "ERLIK-AUTHZ-IDOR", out
+        """The intent survives, and the mechanism it needed is gone.
 
-    def test_normalisation_cannot_mask_a_difference_in_the_data(self, case):
-        """The control on the control: it strips tokens and whitespace, not
-        content."""
-        v, out = self._run(case, "user_id=1,2,3", "user_id=1", "login page")
-        assert v == "ERLIK-AUTHZ-OK", out
+        Normalisation existed because every page of a CSRF-bearing app differs
+        between two sessions, so a hash comparison reported OK everywhere. A marker
+        comparison is simply indifferent to it: the token can differ freely and the
+        question — is the privileged object in this response — is unaffected. The
+        case no longer strips 32-hex strings at all.
+        """
+        finding, out = self._run(
+            case,
+            'PRIVILEGED DATA <input name="user_token" value="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa">',
+            'PRIVILEGED DATA <input name="user_token" value="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb">',
+            "login page")
+        assert finding is not None, out
+
+    def test_two_identical_denials_are_not_a_shared_secret(self, case):
+        """The fifth false positive, as a test.
+
+        Measured on Juice Shop: GET /api/Addresss/1 answers 400 "Malicious activity
+        detected" to BOTH identities. A hash comparison sees `low == high` and
+        reports a critical authorization failure on an endpoint that refused
+        everyone. A marker comparison sees that the object is in neither arm.
+        """
+        finding, out = self._run(case, "Malicious activity detected",
+                                 "Malicious activity detected", "please log in")
+        assert finding is None, out
+
+    def test_an_absent_object_is_not_a_finding(self, case):
+        """The first and second false positives: `200 {"data":null}` and
+        `404 Not Found`, identical for both identities."""
+        for body in ('{"status":"success","data":null}', '{"message":"Not Found"}'):
+            finding, out = self._run(case, body, body, "please log in")
+            assert finding is None, out
 
 
 class TestPerRoleCookiesArePlumbed:

@@ -230,6 +230,32 @@ reaches the code being compared and its zero findings are vacuous. Measured: adm
 and gordonb, both at `security=low`, produce `/vulnerabilities/sqli/?Submit=Submit`
 byte for byte — so the only variable is who made the request.
 
+## Authorization differentials: identity against configuration
+
+An authorization differential only says something about identity if identity is the
+only thing that varies. Two fields keep that true, and they are not the same kind of
+thing:
+
+| Field | Kind | Carried by |
+|---|---|---|
+| `high_priv_token` / `high_priv_cookie`, `low_priv_token` / `low_priv_cookie` | identity — secret, resolved from the credential store at execution | the arm it belongs to |
+| `config_cookie` | application configuration — not secret, operator-declared | **every** arm, the anonymous one included |
+
+They used to be one field, and a differential cannot be one variable while that is
+so. DVWA's security level travels in a cookie and its
+`dvwaSecurityLevelGet` falls back to `impossible` when the cookie is absent — so an
+anonymous control arm that sent nothing was not the same application with nobody
+logged in, it was a hardened one. Measured on
+`/vulnerabilities/authbypass/get_user_data.php` at `security=low`, where the endpoint
+has no access control at all: all three identities and an anonymous caller *carrying
+the level* get the full user table, while an anonymous caller sending nothing gets
+`Access denied`. With the bare arm the check reported HIGH on data the application
+publishes to anyone.
+
+Set `config_cookie` when the application's behaviour depends on a cookie that is not
+a credential — a security level, a locale, a feature flag, a tenant selector. Leave
+it unset otherwise and nothing changes; Juice Shop needs none.
+
 ## Object-level authorization
 
 The `ownership` evaluator asks whether the application itself attributes an object

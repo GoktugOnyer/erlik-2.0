@@ -227,6 +227,18 @@ def build_target(case: dict[str, Any], base: str,
         if not isinstance(v, str):
             return None, (f"target field {k!r} must be text, not "
                           f"{type(v).__name__}")
+        # An EVALUATOR-ONLY field reaches no command, so the rule above does not
+        # apply to it — and applying it anyway made WSTG-AUTHZ-04 unrunnable, since
+        # the markers that identify an object in a JSON API all contain a double
+        # quote. One list, consulted here and in `declared.validate`, so the two
+        # cannot drift; `tests/test_marker_is_declarable.py` holds the premise by
+        # asserting that no catalogue command interpolates such a field.
+        from orchestrator.testcase.declared import EVALUATOR_ONLY, validate
+        if k in EVALUATOR_ONLY:
+            bad = validate(k, v)
+            if bad:
+                return None, f"target field {k!r} {bad}"
+            continue
         bad = looks_injectable(v)
         if bad:
             return None, f"target field {k!r} {bad}"

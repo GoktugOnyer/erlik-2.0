@@ -611,11 +611,36 @@ async def _run_evaluator(
         # accidentally got right.
         low = (target.get("low_priv_token"), target.get("low_priv_cookie"))
         high = (target.get("high_priv_token"), target.get("high_priv_cookie"))
+
+        # THE ANONYMOUS ARM. "The low-privilege identity read the object" is only a
+        # finding if reading it required BEING somebody. Without this clause the
+        # evaluator reports public content as a critical authorization failure: on
+        # Juice Shop, GET /rest/products/1/reviews returns the same reviews — author
+        # addresses included — to admin, to jim and to nobody at all.
+        #
+        # Measured over 3 seeded violations and 11 negative controls:
+        #
+        #     the shipped body-hash verdict   5 false positives, 0 false negatives
+        #     marker + this clause            0 false positives, 0 false negatives
+        #     marker without this clause      3 false positives, 0 false negatives
+        #
+        # A case that declares no `anonymous_step` keeps the old behaviour, so this
+        # is additive. A case that DOES declare one and whose step is missing gets no
+        # finding: a clause nobody ran is not a clause that passed — the same rule
+        # the `ownership` evaluator applies to its own arms.
+        anonymous = next((st for st in (prior_steps or [])
+                          if st.step == str(ev.anonymous_step or "")), None)
+        if ev.anonymous_step:
+            anonymous_excluded = anonymous is not None and marker not in anonymous.output
+        else:
+            anonymous_excluded = True
+
         matched = bool(
             marker and baseline is not None
             and _http_status_ok(baseline.output) and _http_status_ok(step_result.output)
             and marker in baseline.output and marker in step_result.output
-            and any(low) and any(high) and low != high)
+            and any(low) and any(high) and low != high
+            and anonymous_excluded)
         if matched:
             # A DIFFERENTIAL claim needs BOTH sides. This is the only evaluator
             # hard-graded `confirmed`, which sets `verified` on a client's
@@ -630,7 +655,10 @@ async def _run_evaluator(
                         f"{len(baseline.output)} bytes\n"
                         f"  {step_result.step:<26} as the low-privilege identity, "
                         f"{len(step_result.output)} bytes\n"
-                        "  both returned it, and the two identities differ\n\n"
+                        "  both returned it, and the two identities differ\n"
+                        + (f"  {anonymous.step:<26} anonymous did NOT receive it, so it "
+                           f"is not public\n" if ev.anonymous_step and anonymous else "")
+                        + "\n"
                         "privileged response, around the object:\n"
                         + _around(baseline.output, baseline.output.index(marker), 600)
                         + "\n\nlow-privilege response, around the same object:\n"

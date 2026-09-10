@@ -1,7 +1,7 @@
 """Pydantic schema for YAML-defined test cases."""
 
 from typing import Literal, Optional, Any
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, model_validator, field_validator
 
 
 class TargetSchema(BaseModel):
@@ -181,6 +181,29 @@ class Evaluator(BaseModel):
     # evaluators only; an evaluator without `produces` behaves identically to
     # before.
     produces: Optional[dict[str, int]] = None
+
+    @model_validator(mode="after")
+    def _no_evaluator_only_field_is_harvested(self):
+        """A target must never be able to choose an evaluator-only value.
+
+        `produces` lifts a value out of the TARGET'S OWN OUTPUT and carries it
+        forward as a target field. The safety property of the authorization check is
+        that `private_object_marker` is OURS while the responses are the target's —
+        a target that could name the marker could name something it returns to
+        everybody and so choose its own finding.
+
+        Refused here rather than left to whoever writes the next case, because this
+        codebase has shipped a target-chooses-the-evidence defect before.
+        """
+        from orchestrator.testcase.declared import EVALUATOR_ONLY
+
+        harvested = sorted(set(self.produces or {}) & set(EVALUATOR_ONLY))
+        if harvested:
+            raise ValueError(
+                "these fields are read by an evaluator and must never be harvested "
+                "from a response, or the target chooses the verdict: "
+                + ", ".join(harvested))
+        return self
 
     @field_validator("pattern")
     @classmethod

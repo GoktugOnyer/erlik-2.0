@@ -20,6 +20,7 @@ Two properties follow, and both are tested here:
 
 import warnings
 
+import json
 import pytest
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
@@ -87,8 +88,24 @@ class TestSkipsAreNamedNeverSilent:
         cases = _cases(client)
         before = {s["id"] for s in S.plan_sweep(cases, BASE, "juiceshop")["skipped"]}
         assert "WSTG-AUTHZ-04" in before
+
+        # Credentials alone are no longer enough, and that is the E-027 contract
+        # change rather than a regression. The case's verdict used to come from
+        # hashing three bodies, which needed no operator input and reported five
+        # false positives on clean Juice Shop endpoints — two absent objects, the
+        # caller's own basket, a public review list, and a pair of identical
+        # denials. It now compares a marker that names the privileged object, and
+        # only an operator can say what that is.
+        credentials_only = S.plan_sweep(cases, BASE, "juiceshop",
+                                        extra={"low_priv_token": "a", "high_priv_token": "b"})
+        still_skipped = {s["id"]: s for s in credentials_only["skipped"]}
+        assert "WSTG-AUTHZ-04" in still_skipped
+        assert "private_object_marker" in json.dumps(still_skipped["WSTG-AUTHZ-04"]), (
+            "the skip must NAME the missing input, not just skip")
+
         after = S.plan_sweep(cases, BASE, "juiceshop",
-                             extra={"low_priv_token": "a", "high_priv_token": "b"})
+                             extra={"low_priv_token": "a", "high_priv_token": "b",
+                                    "private_object_marker": '"UserId":1'})
         assert "WSTG-AUTHZ-04" not in {s["id"] for s in after["skipped"]}
 
 

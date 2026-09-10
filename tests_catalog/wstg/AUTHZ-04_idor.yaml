@@ -60,45 +60,89 @@ references:
 # clause correctly refuses to call a public asset an IDOR.
 
 target_schema:
-  required: [url_template]
+  required: [url_template, private_object_marker]
   # Either material satisfies a role. They are NOT interchangeable — a cookie
   # in a Bearer header authenticates nothing — so the step is written to send
   # whichever it was actually given.
   required_any:
     - [high_priv_token, high_priv_cookie]
     - [low_priv_token, low_priv_cookie]
-  optional: [object_ids]
+  optional: [object_ids, config_cookie]
+
+# WHY THE VERDICT MOVED OFF THE BODY HASH.
+#
+# The three fetches were normalised, hashed, and compared: `low == high` meant
+# IDOR. That fires on anything two identities legitimately see the same, which on
+# a real API is a large class. Measured over 3 seeded violations and 11 negative
+# controls on Juice Shop v17.1.1:
+#
+#     the body hash                  5 false positives, 0 false negatives
+#     the marker + anonymous arm     0 false positives, 0 false negatives
+#     the marker, anonymous arm off  3 false positives, 0 false negatives
+#
+# The five it reported on clean endpoints:
+#
+#     GET /rest/basket/99999         200 {"data":null} to both    — absent object
+#     GET /api/Users/99999           404 Not Found to both        — absent object
+#     GET /rest/basket/2             the low identity's OWN basket
+#     GET /rest/products/1/reviews   public, identical to everyone
+#     GET /api/Addresss/1            400 "Malicious activity" to both
+#
+# The last one is the sharpest: a hash comparison cannot tell "both identities were
+# REFUSED" from "both identities got the object", because both are `low == high`.
+# Two identical denials were reported as a shared secret.
+#
+# So the verdict is now the typed `idor` evaluator, which asks a different
+# question: did the privileged object — named by a marker the OPERATOR supplies —
+# reach the low-privilege arm, while not reaching an anonymous one? The asymmetry is
+# the safety property: the marker is ours and the responses are the target's, so a
+# target can cost itself a finding and cannot manufacture one.
+#
+# The fetches stay in `bash -c`. The case is not lane-runnable regardless — its
+# `required_any` credential alternatives are something the assessment lane has
+# nothing to choose between — and a conditional `${HT:+-H ...}` is what lets one
+# command send a bearer token or a cookie according to which the role actually has.
 
 steps:
-  - name: compare_privilege_levels
+  - name: fetch_as_high_priv
     tool: curl
-    # One step, because the comparison is the test. Three fetches, normalised
-    # and hashed, and the verdict is printed as a canary a regex can match —
-    # the same shape BUSL-09 uses for its upload canary, and deterministic, so
-    # it does not depend on a model being reachable.
+    # The baseline. If the privileged identity cannot see the object either, there
+    # is no privileged object here and nothing to compare — which is how four of
+    # the five false positives above are refused.
     command: >-
       bash -c 'HT="{{high_priv_token}}"; HC="{{high_priv_cookie}}";
-      LT="{{low_priv_token}}"; LC="{{low_priv_cookie}}"; U="{{url_template}}";
-      norm() { sed -E "s/[0-9a-f]{32}//g" | tr -d "[:space:]" | md5sum | cut -c1-32; };
-      H=$(curl -s ${HT:+-H "Authorization: Bearer $HT"} ${HC:+-b "$HC"} "$U" | norm);
-      L=$(curl -s ${LT:+-H "Authorization: Bearer $LT"} ${LC:+-b "$LC"} "$U" | norm);
-      A=$(curl -s "$U" | norm);
-      echo "high=$H low=$L anon=$A";
-      if [ "$L" = "$A" ]; then
-        echo "ERLIK-AUTHZ-INCONCLUSIVE: the low-privilege session got the same
-        response as an anonymous request, so it was not authenticated here and
-        this says nothing about access control";
-      elif [ "$L" = "$H" ]; then
-        echo "ERLIK-AUTHZ-IDOR: the low-privilege session received the same
-        response as the high-privilege one, and a different response from an
-        anonymous request";
-      else
-        echo "ERLIK-AUTHZ-OK: the low-privilege session received a different
-        response from the high-privilege one";
-      fi'
+      CC="{{config_cookie}}";
+      curl -s -i ${HT:+-H "Authorization: Bearer $HT"} ${HC:+-b "$HC"}
+      ${CC:+-b "$CC"} "{{url_template}}"'
+
+  - name: fetch_anonymously
+    tool: curl
+    # The control that separates a leak from a publication. Content the application
+    # serves to nobody-at-all is public however it is attributed, and without this
+    # arm the check reports `/rest/products/1/reviews` — every reviewer's email
+    # address, readable by anyone — as a critical authorization failure.
+    # It carries the CONFIGURATION and no identity. On DVWA the security level is a
+    # cookie, and an arm that sent nothing was evaluated against a hardened
+    # application rather than the one the other two arms saw — so the marker was
+    # absent for the wrong reason and the case reported a HIGH finding on data DVWA
+    # publishes to anyone. curl merges multiple -b options, so this rides alongside
+    # an identity cookie in the arms that have one.
+    command: >-
+      bash -c 'CC="{{config_cookie}}";
+      curl -s -i ${CC:+-b "$CC"} "{{url_template}}"'
+
+  - name: fetch_as_low_priv
+    tool: curl
+    # Last, because the evaluator reads the two arms above from the prior steps.
+    command: >-
+      bash -c 'LT="{{low_priv_token}}"; LC="{{low_priv_cookie}}";
+      CC="{{config_cookie}}";
+      curl -s -i ${LT:+-H "Authorization: Bearer $LT"} ${LC:+-b "$LC"}
+      ${CC:+-b "$CC"} "{{url_template}}"'
     evaluators:
-      - type: regex
-        pattern: 'ERLIK-AUTHZ-IDOR'
+      - type: idor
+        baseline_step: fetch_as_high_priv
+        anonymous_step: fetch_anonymously
         emit_finding:
           vuln_type: Broken Access Control (low-privilege session reads privileged data)
           severity: high

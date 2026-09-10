@@ -491,59 +491,122 @@ block exports to any test under E for that session, not only to the destination
 hash. Note this interacts with E-025 — fix that first, or the wider block will
 lock out more operators, not fewer.
 
-### E-027: the shipped AUTHZ-04 check has measured false positives
+### E-027: the shipped AUTHZ-04 check reported findings on clean endpoints — CLOSED
 
-Found while starting Increment 3, by running the case's own bash command against
-the live lab rather than reading it. Scored over 26 requests on Juice Shop and
-DVWA: **7 false positives out of 19 negative controls, and 1 false negative out of
-7 real violations.** A four-clause marker differential scored 1 and 0 on the same
-requests.
+Its verdict was a body-hash differential: normalise three responses, strip 32-hex
+and whitespace, and conclude `low == high` is an IDOR. That fires on anything two
+identities legitimately see the same, which on a real API is a large class.
 
-The check hashes a normalised whole body for three arms and concludes
-`low == high` is an IDOR. That fires on anything two identities legitimately see
-the same: `GET /api/Cards` returns `{"data":[]}` to both, `/rest/wallet/balance`
-returns `{"data":0}`, `/rest/basket/99999` returns `{"data":null}`. It misses
-DVWA's real function-level flaw at `security=low`, because DVWA prints the
-username in the page chrome so the two arms' hashes differ and it reports OK.
+**Measured before and after**, over 3 seeded violations and 11 negative controls on
+Juice Shop v17.1.1 — the second figure from the rewritten case driven through the
+real `run_test_case`, not a reimplementation of its logic:
 
-Four clauses were proposed. An adversarial pass reproduced the 7/1 scoring
-independently and then ablated them, which the original scoring script never did:
-**only two of the four are supported by the corpus.** Dropping the anonymous clause
-costs 7 more false positives (1 -> 8); dropping the liveness clause and dropping
-the denial-marker half both leave the score unchanged at 1 and 0. So the
-load-bearing pair is: the owner arm must carry the declared marker, and the
-anonymous arm must not.
+    the shipped body hash          5 false positives, 0 false negatives
+    the rewritten case             0 false positives, 0 false negatives
+    the rewritten case, anonymous
+      clause removed               3 false positives, 0 false negatives
 
-The other two are still probably right and are simply not yet *measured* — the
-corpus passes `live` on only 7 of 26 rows, so it cannot exercise that clause. The
-denial marker is real regardless: DVWA denies with **HTTP 200** and
-`{"result":"fail","error":"Access denied"}`, measured as gordonb at `impossible`,
-so a 2xx gate is not enough for any check that relies on status.
+The five it reported on clean endpoints:
 
-Two implementation blockers the same pass found, both of which change the shape of
-the fix: WSTG-AUTHZ-04 **cannot run in the assessment lane at all** — its step is
-`bash -c`, which the curl dialect refuses — and every JSON marker the proposal uses
-is rejected by the declaration gate, because `"` is a shell metacharacter and
-declared values are validated for safe rendering into a `bash -c` template. A
-marker-based fix therefore needs a non-shell step shape first.
+    GET /rest/basket/99999        200 {"data":null} to both     — absent object
+    GET /api/Users/99999          404 Not Found to both         — absent object
+    GET /rest/basket/2            the low identity's OWN basket — expected access
+    GET /rest/products/1/reviews  public, identical to everyone — published content
+    GET /api/Addresss/1           400 "Malicious activity" to both
 
-The `ownership` evaluator added in Increment 3 covers the object-level half for
-APIs that assert an owner, and by construction refuses four of those seven false
-positives. It does not replace the body-hash case for applications that assert no
-ownership anywhere, which is what this item is for.
+The last is the sharpest, and it is the one reading the code would not predict: a
+hash comparison cannot tell **"both identities were refused"** from "both identities
+got the object", because both are `low == high`. Two identical denials were reported
+as a shared secret.
 
-### E-028: AUTHZ-04's anonymous control arm runs at a different configuration
+**The verdict is now the typed `idor` evaluator**, which had existed, unwired, since
+it was written. It asks a different question: did the privileged object — named by a
+marker the OPERATOR supplies — reach the low-privilege arm while not reaching an
+anonymous one? The asymmetry is the safety property, the same one the `ownership`
+evaluator rests on: the marker is ours and the responses are the target's, so a
+target can cost itself a finding and cannot manufacture one.
+
+The evaluator was missing the anonymous arm entirely, which the ablation above shows
+is worth three of the five. A case that declares no `anonymous_step` keeps the old
+behaviour, so the clause is additive; a case that declares one whose step is missing
+gets no finding, because a clause nobody ran is not a clause that passed.
+
+**Three gates had to be reconciled, and they are not the same gate.** `private_object_marker`
+was absent from `declared.DECLARABLE`, so nothing could supply it — and
+`looks_injectable` refuses `"`, so every marker that identifies an object in a JSON
+API (`"UserId":1`, `"email":"admin@juice-sh.op"`) would have been refused even once
+listed. That rule exists because a declared value is **rendered into a command**,
+where a quote closes an argument. A marker is compared in Python as a substring and
+reaches no command line, so it is now held to the rule that does apply: bounded
+length, no control characters. `declared.EVALUATOR_ONLY` is the single list, consulted
+by both `declared.validate` and the sweep's own gate so the two cannot drift, and a
+catalogue-wide test asserts the premise — that no step interpolates the field —
+rather than assuming it.
+
+The third gate was left alone deliberately, and then tightened. `_harvest` applies
+`looks_injectable` to values lifted out of a TARGET'S OWN OUTPUT, and that must stay:
+a marker the target chose is a finding the target chose. `Evaluator.produces` now
+**refuses** an evaluator-only field outright, so the forgery is structurally
+impossible rather than left to whoever writes the next case.
+
+**What the rewrite does not do.** The case is still not runnable in the assessment
+lane: its `required_any` credential alternatives are something the lane has nothing
+to choose between (see `inventory.LANE_TARGET_FIELDS`), and the fetches are still
+`bash -c` because a conditional `${HT:+-H ...}` is what lets one command carry either
+a bearer token or a cookie. Making it lane-runnable needs per-role credential
+plumbing the lane does not have, and is not what a precision fix is for. It runs in
+the sweep and the CLI, where it previously produced five false positives.
+
+Supplying credentials alone no longer makes the case run — the operator must also
+name the private object, and the skip says so. That is the contract change: the old
+verdict needed no operator input, and needing none is where the false positives came
+from.
+
+The 0-and-0 above is on Juice Shop, which keeps no application state in a cookie. On
+DVWA the rewritten case was still wrong until E-028 was fixed with it, because there
+the security level travels in the cookie and the control arm was running against a
+different application. The two were entangled, and closing one without the other
+would have left a measured false positive in place.
+
+### E-028: the control arm ran at a different application configuration — CLOSED
 
 The same defect as the 2026-09-10 arm divergence, inside the case meant to be the
-control. DVWA's security level travels in a cookie, and the case's anonymous fetch
-is `curl -s "$U"` with no `-b` — so on DVWA the anonymous arm is evaluated at a
-different application configuration from the two authenticated arms. Measured:
-same PHPSESSID, `security=low` returns the full user table, `security` absent
-returns `Access denied`.
+control. A differential is only about identity if identity is the only thing that
+varies, and AUTHZ-04's anonymous arm was `curl -s "$U"` carrying nothing at all —
+while on DVWA the application's SECURITY LEVEL travels in a cookie, with
+`dvwaSecurityLevelGet` falling back to `impossible` when it is absent. So "anonymous"
+was not the authenticated arms' application with nobody logged in. It was a
+different, hardened application with nobody logged in.
 
-Every arm of a differential has to carry the same configuration material, with the
-identity as the only variable. Fixing this is a prerequisite for E-027's scoring
-to mean anything.
+Measured on `/vulnerabilities/authbypass/get_user_data.php`:
+
+    admin (high), security=low      273 bytes — the full user table
+    gordonb (low), security=low     273 bytes — the full user table
+    anonymous WITH security=low     273 bytes — the full user table
+    anonymous, NO cookie             41 bytes — {"result":"fail","error":"Access denied"}
+
+The endpoint has no access control at that level, so the honest verdict is "public,
+not an identity boundary" — and with a bare anonymous arm the marker was absent from
+it for the wrong reason, every clause passed, and the case reported HIGH on data DVWA
+hands to anyone who asks.
+
+`config_cookie` is the fix: a non-secret, operator-declared cookie carried by EVERY
+arm including the anonymous one. curl merges multiple `-b` options (`-b "a=1" -b
+"b=2"` sends `a=1;b=2` — verified), so it rides alongside an identity cookie instead
+of replacing it, and `${CC:+-b "$CC"}` expands to nothing for an application that
+needs none, which is why Juice Shop is unaffected.
+
+Measured through the real runner, all four arrangements, every arm returning real
+bytes:
+
+    security=low,        anonymous arm CONFIGURED   no finding   correct (public here)
+    security=low,        anonymous arm bare (old)   FINDING      FALSE POSITIVE
+    security=impossible, anonymous arm CONFIGURED   no finding   correct (enforced)
+    security=impossible, anonymous arm bare (old)   no finding   correct (enforced)
+
+The distinction this introduces is worth more than the one case. Identity material is
+per-arm and secret; configuration material is shared by every arm and is not. They
+were the same field, and a differential cannot be one variable while they are.
 
 ### E-029: an identity with plain cookies got no form discovery at all — CLOSED
 
