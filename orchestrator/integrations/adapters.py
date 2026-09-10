@@ -91,7 +91,20 @@ async def record(context, sandbox, output, result, accepted_codes=(0,)):
         if any(e.get("reason") in ("request budget exhausted", "URL budget exhausted") for e in events):
             result.status, result.reason = "partial", "request or URL budget exhausted"
     for finding in result.findings:
-        finding.evidence_ids = sorted(set(finding.evidence_ids + result.evidence_ids))
+        # A finding that already cites its OWN evidence keeps ONLY that. The
+        # union is for scanner findings, which arrive citing nothing and have
+        # only the stage's report to point at — ZAP's and the security
+        # assertions' both do.
+        #
+        # Measured on the 2026-09-10 lane run: the catalogue attaches exactly
+        # one evidence id per finding, the id of the run that produced it, and
+        # this loop then unioned the whole stage onto it. All nine DVWA findings
+        # came out citing the SAME 772 ids, so a client reading the report could
+        # not tell which of 772 captured responses proved a given HIGH-severity
+        # SQL injection. Precise attribution is the whole value of per-case
+        # evidence, and it was being averaged away at the last step.
+        if not finding.evidence_ids:
+            finding.evidence_ids = sorted(result.evidence_ids)
     if output.timed_out:
         result.status, result.reason = "partial", "stage timed out; available evidence retained"
     elif output.code not in accepted_codes and result.status == "completed":
@@ -295,7 +308,24 @@ class KatanaAdapter(BaseAdapter):
                 url, names = built
                 browser_endpoints.append(Endpoint(url=url, method="GET", source="form",
                                                   identity=ctx.identity_id, parameters=names))
-            seeds = [ctx.target, *browser["links"], *[e.url for e in browser_endpoints]]
+            # A form-synthesised URL is NOT a page, and must never be crawled.
+            #
+            # form_endpoint builds `/vulnerabilities/csrf/?Change=Change` so a
+            # parameter probe can reach the form's handler. Handing it to katana
+            # as a seed makes katana FETCH it, and fetching it submits the form
+            # with every field blank. Measured on DVWA, 2026-09-10, in a run
+            # declaring state_changing: false: that one crawl request set the
+            # admin password to md5(""), because the handler runs on
+            # `isset($_GET['Change'])` and compares two absent fields, NULL to
+            # NULL. The lane changed the target's credentials while merely
+            # enumerating it.
+            #
+            # These URLs stay in result.endpoints — that is how the catalogue
+            # finds the parameters on them, which is the whole point of form
+            # discovery and produced the run's only true positives. They simply
+            # are not pages to visit.
+            crawlable = [e.url for e in browser_endpoints if e.source != "form"]
+            seeds = [ctx.target, *browser["links"], *crawlable]
             from .egress_policy import EgressPolicy
             seeds = [u for u in dict.fromkeys(seeds) if EgressPolicy(sandbox.policy).check(u)[0]][:ctx.config.max_urls]
             seed_path = sandbox.write("seeds.txt", "\n".join(seeds))

@@ -10,7 +10,7 @@ from orchestrator.testcase.scope import ScopeViolation, check_url
 from .adapters import BaseAdapter, record
 from .contracts import StageResult, IntegrationFinding, fingerprint
 from .egress_policy import EgressPolicy
-from .inventory import (seeds, eligible_test_cases, parameters_by_url,
+from .inventory import (seeds, eligible_test_cases, form_urls, parameters_by_url,
                         case_needs_parameter, parameter_can_forge)
 from .runtime import JobOutput
 from .security import redact
@@ -375,7 +375,33 @@ class CatalogueAdapter(BaseAdapter):
             if not permitted:
                 raise ScopeViolation(reason)
 
+        # The target the loop below is currently on, so step_policy can ask what
+        # this step is supposed to be probing.
+        current: dict = {}
+
         def step_policy(step, command):
+            # A STEP THAT DOES NOT SET THE PARAMETER IT WAS GIVEN, on a URL that
+            # exists only because a GET form was found, SUBMITS THAT FORM BLANK.
+            #
+            # Measured on DVWA, 2026-09-10, in a run declaring
+            # state_changing: false. WSTG-CLNT-04's `common_parameter_sweep`
+            # appends six GUESSED redirect names — `redirect`, `next`, `url`,
+            # `returnUrl`, `dest`, `continue` — and none of the form's own. So
+            # `/vulnerabilities/csrf/?Change=Change&redirect=…` reached the
+            # password-change handler with `password_new` and `password_conf`
+            # both undefined, NULL == NULL compared equal, and the admin
+            # password became md5(""). One request, and the lane had changed the
+            # target's credentials.
+            #
+            # The other five steps of that same case carry {{parameter}} and are
+            # harmless; this is not about the case, it is about the shape.
+            url, probing = current.get("url", ""), current.get("parameter")
+            if url in submit_urls and probing and f"{probing}=" not in command:
+                return ("skipped: this step does not set the parameter it was given, and this "
+                        "URL exists only because a GET form was found — so the request would "
+                        "submit that form with its fields blank, which is an action and not a "
+                        "read. Measured on DVWA: it sets the admin password to md5(\"\")")
+            
             # A step whose ONLY evaluator is `llm` decides nothing here: this
             # lane runs with allow_llm=False for reproducibility, and the runner
             # skips those evaluators silently. WSTG-CLNT-04's
@@ -431,6 +457,15 @@ class CatalogueAdapter(BaseAdapter):
         # pairing them any other way would test a parameter somewhere it was
         # never seen, and report the result against the URL.
         parameters = await parameters_by_url(ctx, sandbox.policy)
+        # A URL that exists only because a GET form was found is not a page to
+        # read; requesting it performs the form's action. See
+        # inventory.form_urls for the measurement — on DVWA a bare GET, HEAD or
+        # OPTIONS of `/vulnerabilities/csrf/?Change=Change` sets the admin
+        # password to the md5 of an empty string, while a parameter probe of the
+        # same URL changes nothing. So these URLs are kept for the cases that
+        # probe a PARAMETER on them and withheld from the ones that would merely
+        # fetch them, which gain nothing by doing so.
+        submit_urls = await form_urls(ctx)
         # NO CASE MAY STARVE ANOTHER.
         #
         # The proxy spends config.max_urls on distinct (method, URL) across the
@@ -506,7 +541,19 @@ class CatalogueAdapter(BaseAdapter):
                                   f"{len(tc.steps)} of the {ctx.config.max_urls} URL budget)"})
             else:
                 eligible = [{"url": url} for url in targets
-                            if case_id in eligible_test_cases(url)]
+                            if case_id in eligible_test_cases(url)
+                            and url not in submit_urls]
+                withheld = sorted(u for u in targets
+                                  if u in submit_urls and case_id in eligible_test_cases(u))
+                if withheld:
+                    result.observations.append({
+                        "type": "form_url_withheld", "test_case_id": case_id, "url": None, "steps": [],
+                        "urls": withheld,
+                        "reason": "this check reads a URL rather than probing a parameter on it, and "
+                                  "these URLs exist only because a GET form was found — requesting "
+                                  "one performs the form's action. Measured on DVWA: a bare GET, "
+                                  "HEAD or OPTIONS of /vulnerabilities/csrf/?Change=Change sets the "
+                                  "admin password to md5(\"\")"})
                 case_targets = eligible[:target_budget(tc)]
                 if len(eligible) > len(case_targets):
                     result.observations.append({
@@ -528,6 +575,8 @@ class CatalogueAdapter(BaseAdapter):
                 result.metadata["catalogue"].append(case_id)
                 continue
             for position, target in enumerate(case_targets):
+                current.clear()
+                current.update(target)
                 if time.monotonic() > deadline:
                     result.status = "partial"
                     result.reason = "stage time budget reached mid-check"
@@ -575,6 +624,34 @@ class CatalogueAdapter(BaseAdapter):
                         identity=ctx.identity_id, parameter=probed,
                         severity=finding.severity, confidence=finding.confidence, basis=finding.basis or "Deterministic catalogue evaluator matched the captured HTTP response",
                         methodology=[case_id], evidence_ids=[evidence_id]))
+                # A CASE THAT RECEIVED NOTHING DID NOT TEST ANYTHING.
+                #
+                # curl exits 0 on an empty body, so a target that refuses every
+                # request — a 302 to a login form, a rejected CSRF token — comes
+                # back success=True with zero bytes, every evaluator matches
+                # nothing, and the case reads exactly like a clean probe.
+                #
+                # Measured on 2026-09-10. DVWA at security=impossible puts a
+                # SINGLE-USE user_token in its forms, form_endpoint bakes it into
+                # the discovered URL as a companion, and it is stale by the time
+                # the cases run. 156 of the 208 injection-case steps in that run
+                # received zero bytes — every probe of sqli, sqli_blind, xss_r
+                # and csrf — and the stage reported `completed` with no findings.
+                # That zero was then read as "the hardened application is
+                # clean", which is the one thing it cannot mean.
+                #
+                # One step with bytes is enough to say the target answered; all
+                # of them empty means it did not.
+                ran = [s for s in run.steps if not s.skipped]
+                if ran and not any(s.output for s in ran):
+                    result.observations.append({
+                        "type": "test_case_unreachable", "test_case_id": case_id,
+                        "url": target["url"], "parameter": probed or None, "steps": [],
+                        "reason": f"all {len(ran)} executed steps received an empty response, so this "
+                                  f"check tested nothing here; a zero from it is untested coverage, "
+                                  f"not a clean result"})
+                    result.status = "partial"
+                    result.reason = "one or more catalogue checks never reached their target"
                 if any(not s.success and not s.skipped for s in run.steps):
                     result.status, result.reason = "partial", "one or more catalogue checks could not complete"
             result.metadata["catalogue"].append(case_id)

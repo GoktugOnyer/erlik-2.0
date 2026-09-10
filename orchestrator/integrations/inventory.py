@@ -242,6 +242,36 @@ async def parameters_by_url(context, policy) -> dict[str, list[str]]:
     return found
 
 
+async def form_urls(context) -> set[str]:
+    """URLs that exist only because a GET FORM was found, for THIS identity.
+
+    A URL like `/vulnerabilities/csrf/?Change=Change` was synthesised by
+    form_endpoint: the query is the form's companion fields, including its
+    SUBMIT control. Requesting it does not read a page — it performs the form's
+    action.
+
+    Measured against DVWA on 2026-09-10, and the reason this function exists:
+
+        GET     /vulnerabilities/csrf/?Change=Change                  -> password changed
+        HEAD    /vulnerabilities/csrf/?Change=Change                  -> password changed
+        OPTIONS /vulnerabilities/csrf/?Change=Change                  -> password changed
+        GET     /vulnerabilities/csrf/?Change=Change&password_new=x   -> no change
+        GET     /vulnerabilities/csrf/                               -> no change
+
+    The module's handler runs on `isset($_GET['Change'])` and compares
+    `$_GET['password_new']` with `$_GET['password_conf']`; with neither present
+    both are NULL, NULL == NULL, and the admin password is set to md5("").
+    So the mutation comes from the PARAMETER-FREE fetch, by the three methods a
+    scope gate trusts most — and a parameter probe, the thing the lane is
+    actually for, does not mutate at all.
+    """
+    rows = await db.rows(
+        "SELECT url,sources FROM integration_endpoints WHERE session_id=? AND identity_id=?",
+        (context.session_id, context.identity_id))
+    return {row["url"] for row in rows
+            if "form" in json.loads(row.get("sources") or "[]")}
+
+
 def eligible_test_cases(url, method="GET", parameters=()):
     """Catalogue checks with a supported deterministic HTTP execution path.
 

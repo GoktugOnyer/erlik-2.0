@@ -68,6 +68,37 @@ consumed the whole URL budget and starved the targeted probes, an empty
 discovery stage reported `completed`, and the catalogue's per-request cost is a
 container start. All four are fixed in the same branch.
 
+### The whole lane — 2026-09-10
+
+[measurements/2026-09-10-full-lane.md](measurements/2026-09-10-full-lane.md):
+every runnable case (12 of 32), both lab targets, after a week of added
+detection. DVWA goes from 2 findings to 9, including `sqli_blind`, which the
+baseline recorded as a blind spot.
+
+The headline is not the count. **The lane changed DVWA's admin password while
+declaring `state_changing: false`** — form discovery bakes a form's submit
+control into the URL so a parameter probe can reach the handler, and that makes
+the URL an action rather than a page, which the scope gate could not see because
+it trusts GET. Three separate paths fetched it; each hid the next. And the
+hardened control was vacuous: 156 of 208 probes received zero bytes from a stale
+single-use token, and the stage reported `completed` with no findings.
+
+Both are fixed, the guards cost no findings, and the lane now reports a case that
+received nothing as untested coverage rather than as clean. Two smaller defects
+went with them: every finding cited the whole stage's 772 evidence ids instead of
+its own, and two redaction layers used two different length rules, one of which
+let a credential value disable detection outright.
+
+It also corrected a claim I had made from the lane's own output — the two DVWA
+arms share 1 of 8 (url, parameter) pairs, so they are not a one-variable
+differential. The control that is runs by hand: same session, same 8 pairs, only
+the cookie changed, 8 findings to 0, no empty responses on either side.
+
+Measured conclusion: **discovery is now the binding constraint.** Juice Shop's
+error-based SQL injection is reported HIGH in 21 seconds when the endpoint is
+handed over and never found by the crawler, and the parameter is one JS-body
+extractor away from the inventory.
+
 ### The error-based signature, re-measured — 2026-09-09
 
 [measurements/2026-09-09-sql-error-signatures.md](measurements/2026-09-09-sql-error-signatures.md).

@@ -57,7 +57,21 @@ def redact(value, known: tuple[str, ...] = ()):
             if "\n" in value:
                 return "\n".join(redact(line, known) for line in value.splitlines())
     for secret in sorted(set(known), key=len, reverse=True):
-        if secret:
+        # The SAME length guard orchestrator.credentials.scrub applies. Two
+        # layers redacting the same values by two different rules is the defect:
+        # this one had no guard, so a three-character identity value shredded
+        # ordinary text. Measured on the 2026-09-10 lane run, where a DVWA
+        # identity carrying `security=low` stored the application's own
+        # robots.txt as `Disal[REDACTED]: /` — evidence that no longer matches
+        # the bytes the application sent.
+        #
+        # A value this short is not protectable by substring search anyway, and
+        # the header-level rules below catch the realistic leak path (a Cookie or
+        # Authorization line) whatever its length. What remains, knowingly: a
+        # 4-to-7 character secret that is a substring of ordinary prose still
+        # rewrites that prose. Raising the threshold trades secret coverage for
+        # evidence fidelity and is an operator's call, not a silent one.
+        if secret and len(secret) >= 4:
             value = value.replace(secret, "[REDACTED]")
     value = re.sub(r"(?im)((?:authorization|cookie|set-cookie|x-api-key)\s*:\s*)[^\r\n]+", r"\1[REDACTED]", value)
     value = re.sub(r"(?i)(Bearer\s+)[\w.~+/=-]+", r"\1[REDACTED]", value)

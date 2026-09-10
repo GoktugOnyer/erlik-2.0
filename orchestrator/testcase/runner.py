@@ -548,6 +548,29 @@ async def _run_evaluator(
     return finding, ev.chain_to or [], ev.stop_after, produced
 
 
+def _scrub_for_storage(result: RunResult, secrets: tuple[str, ...]) -> None:
+    """Redact resolved credentials from everything that leaves this function.
+
+    One pass, at the end, rather than per step as the output arrives — because
+    the evaluators have to read what the application actually sent. A credential
+    is removed by substring replacement, so scrubbing before evaluation made
+    detection depend on the identity's secret values: a value of `SQL`, `error`
+    or `near` disabled the error-based SQL injection case outright.
+
+    Nothing has left the process before this runs: the command strings carry
+    handles rather than secrets, and the RunResult is returned, persisted and
+    reported only after it.
+    """
+    if not secrets:
+        return
+    for step in result.steps:
+        step.output = _CRED.scrub(step.output, secrets)
+        step.error = _CRED.scrub(step.error, secrets) if step.error else step.error
+    for finding in result.findings:
+        finding.evidence = _CRED.scrub(finding.evidence, secrets)
+        finding.basis = _CRED.scrub(finding.basis, secrets)
+
+
 async def run_test_case(
     tc: TestCase,
     target: dict[str, Any],
@@ -590,6 +613,9 @@ async def run_test_case(
 
     result = RunResult(test_case_id=tc.id, target=target)
     last_step: StepResult | None = None
+    # Every secret any step resolved. Collected so the single redaction pass at
+    # the end covers a value a later step never saw.
+    resolved_secrets: list[str] = []
     chain_set: list[str] = []
     scope = from_target(target)
     try:
@@ -667,6 +693,7 @@ async def run_test_case(
                     result.stopped_early = True
                     break
                 live_cmd, secret_values = await _CRED.resolve(db, cmd)
+                resolved_secrets.extend(secret_values)
                 if _CRED.has_handle(live_cmd):
                     # A session was revoked, unverified, or deleted between
                     # planning and running. Sending the request anyway would
@@ -697,9 +724,17 @@ async def run_test_case(
                 step=step.name,
                 command=cmd,                       # handles, never the secret
                 success=bool(raw.get("success")),
-                output=_CRED.scrub(raw.get("output", "") or "", secret_values),
+                # RAW, deliberately. Redaction happens once at the end, over
+                # everything that leaves this function — see _scrub_for_storage.
+                # Scrubbing here meant the EVALUATOR read the redacted text, and
+                # a credential is a substring match: an identity whose secret
+                # value was `SQL`, `error` or `near` silently turned every real
+                # SQL injection into a clean result. Measured on the 2026-09-10
+                # lane run, where `security=low` rewrote DVWA's robots.txt as
+                # `Disal[REDACTED]: /`. Detection must not depend on redaction.
+                output=raw.get("output", "") or "",
                 duration_ms=int((time.time() - t0) * 1000),
-                error=_CRED.scrub(raw.get("error") or "", secret_values) or None,
+                error=raw.get("error") or None,
                 exit_code=raw.get("exit_code"),
             )
             result.steps.append(sr)
@@ -746,5 +781,6 @@ async def run_test_case(
         if saved_provider is not None:
             llm_client.PROVIDER = saved_provider
 
+    _scrub_for_storage(result, tuple(dict.fromkeys(resolved_secrets)))
     result.duration_ms = int((time.time() - started) * 1000)
     return result
