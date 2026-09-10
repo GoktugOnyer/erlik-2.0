@@ -200,7 +200,25 @@ async def run(session_id, notify=None):
             for collector, stage in collectors:
                 result = await collector.finish(wait=status != "needs_auth")
                 if status == "needs_auth":
-                    result.status, result.reason = "partial", "callback observation interrupted by authentication expiry"
+                    # THE STAGE ROW IS THE RESUME MARKER, and this sweep used to
+                    # erase it. A pause sets the stage to `needs_auth` and breaks
+                    # the loop; this then persists the SAME stage id again, and
+                    # persist_result's UPDATE is unconditional — so `partial`
+                    # overwrote `needs_auth`. run() picks up work with
+                    # `status IN ('queued','needs_auth')`, and POST /start permits
+                    # a resume only while the assessment says one of those and
+                    # then 409s, so the single resume the API allows found nothing
+                    # to select and the check could never run on that session.
+                    #
+                    # Staying `needs_auth` costs nothing: the reason still says
+                    # the observation was cut short, and the findings this sweep
+                    # collected are persisted either way — a callback that DID
+                    # arrive before the pause is a real finding and survives,
+                    # because persist_result merges findings by fingerprint.
+                    result.status = "needs_auth"
+                    result.reason = ("callback observation interrupted by authentication expiry; "
+                                     "a resume re-registers the collector and re-issues the pending "
+                                     "probe with a fresh correlation ID")
                 await db.persist_result(session_id, stage["id"], result)
                 await publish({"stage": "interactsh", "status": result.status, "reason": result.reason})
             outcomes = await db.rows("SELECT status FROM integration_stages WHERE session_id=?", (session_id,))
