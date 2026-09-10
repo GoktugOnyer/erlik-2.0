@@ -306,8 +306,27 @@ class ZapAdapter(BaseAdapter):
 
     def plan(self, ctx, schema_path=None, inventory=None):
         target = ctx.target
-        context = {"name": "erlik", "urls": [target], "includePaths": [re.escape(target.rstrip("/")) + ".*"],
-                   "excludePaths": [re.escape(target.rstrip("/")) + re.escape(p) + ".*" for p in ctx.config.excluded_paths]}
+        base = re.escape(target.rstrip("/"))
+        # ZAP runs its own spider, and the operator's excluded_paths are prefixes —
+        # so nothing told it about `/users/sign_out` or `/Account/LogOff`. The proxy
+        # refuses those (egress_policy.ends_the_session) and the session survives
+        # either way, but ZAP spent a request discovering that. Telling it the same
+        # thing saves the budget.
+        #
+        # Matched per WHOLE segment, the same rule the proxy applies, so the two
+        # layers agree about one list rather than approximating each other: the
+        # segment must start right after a slash AND end at a slash, a query or the
+        # end of the path. `/blog/how-to-logout-safely` and `/docs/signout-api` are
+        # pages and stay crawlable.
+        #
+        # `(?i)` because ASP.NET MVC ships `/Account/LogOff` — understood by both
+        # Java's regex engine, which is ZAP's, and Python's, which is the test's.
+        from .egress_policy import SESSION_ENDING_SEGMENTS
+        excluded = [base + re.escape(p) + ".*" for p in ctx.config.excluded_paths]
+        excluded += ["(?i)" + base + ".*/" + re.escape(segment) + "(?:[/?].*)?"
+                     for segment in sorted(SESSION_ENDING_SEGMENTS)]
+        context = {"name": "erlik", "urls": [target], "includePaths": [base + ".*"],
+                   "excludePaths": excluded}
         jobs = []
         if inventory:
             jobs.append({"type": "requestor", "requests": [{"url": url, "method": "GET"} for url in inventory]})

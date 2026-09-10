@@ -596,53 +596,94 @@ Python's `http.cookiejar`, which silently drops cookies for dotless hosts like
 reason. The verified precondition in the final script — assert the session is live
 before trusting anything downstream of it — is what turned the result over.
 
-### E-030: fork points an operation-level identity does not absorb
+### E-030: fork points an operation-level identity does not absorb — PARTLY CLOSED
 
-From the same audit, and recorded because each is a measured string rather than a
-worry. The operation key added in Increment 3 absorbs the
-companion-value family entirely — the arms move from **1 of 8 shared
-(url, parameter) pairs to 6 of 8**, and both residuals are genuine application
-differences. These are what remains:
+The eight findings were not one defect. Some are genuine application differences
+that must stay VISIBLE — E-008 asks for differences to be distinguishable, not
+normalised away — and some are artifacts the lane manufactures, where a difference
+the tool invented is not a finding about anything. They need opposite treatment, and
+conflating them is what made this item read as a single problem.
 
-- **The form's method changes with state.** `/vulnerabilities/brute/` is a GET form
-  at `low` and a POST form at `impossible`, so `form_endpoint` returns None in one
-  arm and the brute-force surface does not exist there. A genuine difference, but
-  the inventory cannot yet say "same operation, the method moved".
-- **The control set changes with state.** `/vulnerabilities/csrf/` gains a
-  `password_current` input at `impossible`; `/vulnerabilities/csp/` loses its only
-  named input. Genuine, and E-008 asks that expected and unexpected differences be
-  distinguishable rather than normalised away.
-- **`MAX_FORM_PARAMETERS` is applied in DOM order**, so a control inserted at the
-  front in one arm pushes a different one off the end. No DVWA form has 11
-  testable controls, so this did not fire; it is a cap interacting with render
-  order, not a property of the application.
-- **A companion-free form URL collides with the crawled page URL**, and the row
-  key has no `source` column, so the two merge and `sources` becomes a union — in
-  one arm only. The token's ABSENCE forks the reading arms in the opposite
-  direction from its presence.
-- **A state-dependent PATH survives normalisation.** Measured:
-  `/vulnerabilities/csp/source/impossible.js` exists in one arm only, and
-  `base_url` strips only the query. Locale prefixes, tenant prefixes and per-user
-  ids are the general class.
-- **Nothing refuses a session-destroying link** except the proxy's
-  `excluded_paths` prefix match, default `['/logout','/signout']`. `/users/sign_out`
-  and `/Account/LogOff` are visited, and an arm whose session dies mid-crawl
-  discovers only login forms afterwards.
-- **The page-visit cap hides arm asymmetry rather than merely truncating.** The
-  first audit concluded the 20-page cap "did not fire on DVWA" because both arms
-  publish identical menus. An adversarial pass measured the opposite with the
-  ordinary crawl root `/` rather than `/index.php`: the cap lands one link later,
-  `/vulnerabilities/cryptography/` IS visited, and at `impossible` it is a GET form
-  whose only control is a `token` textarea — a second impossible-only operation
-  that the first measurement's root spelling hid. The cap firing identically in
-  both arms is the worse case, not the benign one, because the asymmetry it
-  conceals is real.
-- **Schema-derived operations are not fork-free either.** `SchemaInput` accepts a
-  URL as well as inline content, and `schema_file` fetches that document through
-  the egress proxy — which injects the identity's headers and cookies on every
-  request to the target origin. A target serving a different OpenAPI document per
-  role forks the schema-derived operations exactly as a rendered form does. Only
-  an operator-supplied inline `content` is genuinely identity-independent.
+**Artifacts, fixed.**
+
+- **A companion-free form URL collided with the crawled page URL.** DVWA's xss_r
+  form declares its submit control with no `name`, so at `security=low` it has no
+  named companions at all, `form_endpoint` yields the page's own URL with an empty
+  query, and the row key merges it with the page row — `sources` became
+  `["form","playwright"]` and withholding on "form in sources" hid a real PAGE from
+  every read-only case. At `impossible` the hidden `user_token` IS named, so the
+  action is its own row and the page survives: the token's ABSENCE forked the
+  reading arms in the opposite direction from its presence. `form_urls` now requires
+  a QUERY, which is what makes a form URL an action — its own measured table already
+  said so (`GET /vulnerabilities/csrf/` changed nothing; the same URL with
+  `?Change=Change` changed the password). With no named companion there is no
+  submission signal for a handler to fire on.
+- **`MAX_FORM_PARAMETERS` was applied in DOM order**, so a control the target
+  renders first in one arm — DVWA's csrf form puts `password_current` first at
+  `impossible` — pushed a different control off the end. Sorted before the cap, so
+  the kept set depends on the NAMES both arms agree about.
+- **Nothing refused a session-destroying link.** Measured against the default
+  `["/logout","/signout"]`: `/logout`, `/logout.php` and `/signout` refused;
+  `/users/sign_out` (Rails), `/accounts/logout/` (Django), `/Account/LogOff`
+  (ASP.NET), `/auth/logout`, `/api/v1/logout`, `/logoff` and `/sign-out` all
+  **visited**. An arm whose session dies mid-crawl then sees only login forms and
+  reports nothing, because every request still succeeds. `egress_policy` now has a
+  whole-segment, case-insensitive guard, as the lane's own rule rather than a
+  default in the operator's list — an operator replaces `excluded_paths` to ADD an
+  exclusion, and that must not be how they silently remove the rule protecting the
+  run from itself. ZAP's plan is given the same segment list so it does not spend
+  requests discovering what the proxy will refuse; both layers match per whole
+  segment, so `/blog/how-to-logout-safely` and `/docs/signout-api` stay crawlable.
+
+**Genuine differences, now named instead of listed.** `compare_arms` returns a
+`divergence` entry per one-sided operation, classified from the data: `method_changed`
+when both arms reached the endpoint by different methods, `parameters_changed` with
+the inputs that appeared or vanished, and `not_reached_by_other_arm` when there is
+genuinely nothing there — which must not be dressed up as either of the others,
+because that would imply the arm reached it.
+
+**Measured after the fixes**, both DVWA security levels driven through the real lane
+in one session, changing only the `security` cookie:
+
+    33 of 40 operations seen by both        (originally 1 of 8 (url, parameter) pairs)
+    withheld: 4 in each arm, structurally parallel — the csrf, sqli, sqli_blind and
+              brute/xss_r actions, with the hardened arm's copies carrying a token
+    offered to reading cases: 30 against 31, and the single extra is
+              /vulnerabilities/csp/source/impossible.js — a genuinely
+              state-dependent file, not an artifact
+
+    divergence, each named:
+      parameters_changed        /vulnerabilities/brute/, /csrf/, /cryptography/, /xss_r/
+      not_reached_by_other_arm  /vulnerabilities/csp/source/impossible.js
+
+**Still open, and why each is left.**
+
+- **The row key has no `source` column**, so a page row and a form row for one URL
+  cannot coexist — `INSERT OR REPLACE` keeps the last writer. That is what remains
+  at `/vulnerabilities/xss_r/`: the vulnerable arm collapses page and action into
+  one row while the hardened arm has two, so the arms still differ by one
+  operation there. The withholding asymmetry is gone; this is the schema half, and
+  it belongs to E-007's operations/observations tables rather than to a patch here.
+- **A state-dependent PATH survives normalisation** —
+  `/vulnerabilities/csp/source/impossible.js`, and in general locale prefixes,
+  tenant prefixes and per-user ids. Path templating is E-007's work; the comparison
+  now reports it as `not_reached_by_other_arm`, which is accurate.
+- **The page-visit cap.** Changing the crawl cap is an execution-policy change and
+  §3 says to keep at most one of those in progress. Worth recording that the first
+  audit called the cap benign because both arms truncate identically, and an
+  adversarial pass measured the opposite: with the ordinary crawl root `/` rather
+  than `/index.php` the cap lands one link later, `/vulnerabilities/cryptography/`
+  is visited, and it is a GET form at `impossible` — a second one-sided operation
+  the first measurement's root spelling hid. Identical truncation is the worse case,
+  because the asymmetry it conceals is real. The run above reached cryptography and
+  reported it.
+- **Schema-derived operations are not fork-free.** `SchemaInput` accepts a URL as
+  well as inline content, and `schema_file` fetches it through the egress proxy,
+  which injects the identity's headers and cookies — so a target serving a different
+  OpenAPI document per role forks the schema-derived operations exactly as a
+  rendered form does. Only an operator-supplied inline `content` is identity-
+  independent. Refusing a per-identity schema fetch, or fetching it once
+  anonymously and reusing it, is a configuration decision rather than a bug fix.
 
 ## 10. Shared technical contracts
 

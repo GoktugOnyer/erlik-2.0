@@ -299,7 +299,13 @@ def form_endpoint(form: dict, page_url: str) -> tuple[str, list[str]] | None:
     order = {name: index for index, (name, _) in enumerate(companions)}
     query = urlencode(sorted(kept, key=lambda pair: order[pair[0]]))
     url = urlunsplit((parts.scheme, parts.netloc, parts.path, query, ""))
-    return url, testable[:MAX_FORM_PARAMETERS]
+    # SORTED before the cap. `testable[:MAX_FORM_PARAMETERS]` was DOM order, so a
+    # control the target renders first in one arm — DVWA's csrf form puts
+    # `password_current` first at `impossible` — pushed a different control off the
+    # end, and the two arms disagreed about a parameter for a reason that has
+    # nothing to do with the application. Sorting makes the kept set depend on the
+    # NAMES, which both arms agree about.
+    return url, sorted(testable)[:MAX_FORM_PARAMETERS]
 
 
 def operation_key(url: str, method: str = "GET", parameters=()) -> str:

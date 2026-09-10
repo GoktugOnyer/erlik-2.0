@@ -427,3 +427,66 @@ def test_a_page_never_merges_with_that_path_s_form_action():
     assert operation_key(page, "GET", []) == operation_key(action, "GET", []), (
         "this assertion documents the REJECTED design — if it ever fails the "
         "comment above needs rewriting, not the code")
+
+
+# -------------------------------------------- naming the genuine differences
+
+async def test_a_method_that_moved_is_reported_as_a_method_change(store):
+    """E-008 asks that differences be DISTINGUISHABLE, not normalised away.
+
+    Measured on DVWA: `/vulnerabilities/brute/` is a GET form at `security=low` and
+    a POST form at `impossible`, so `form_endpoint` declines the hardened arm and
+    the brute-force surface does not exist there at all. That is a real property of
+    the application and must stay visible — but "an operation only one arm saw" is
+    the same sentence the lane prints when a crawl simply missed a page, and an
+    operator cannot act on the two the same way.
+    """
+    from orchestrator.integrations.inventory import compare_arms
+
+    brute = "http://app.test/vulnerabilities/brute/"
+    await observe(store, "low", brute + "?Login=Login", ["username", "password"])
+    await observe(store, "impossible", brute, ["username", "password"], method="POST")
+
+    result = await compare_arms("s", "low", "impossible")
+    assert not result["comparable"]
+    changes = {c["kind"] for c in result["divergence"]}
+    assert "method_changed" in changes, result["divergence"]
+    moved = next(c for c in result["divergence"] if c["kind"] == "method_changed")
+    assert moved["endpoint"].endswith("/vulnerabilities/brute/")
+    assert sorted(moved["methods"]) == ["GET", "POST"]
+
+
+async def test_a_control_that_appeared_is_reported_as_a_surface_change(store):
+    """`/vulnerabilities/csrf/` gains a `password_current` input at `impossible`.
+
+    The injectable surface genuinely grew, so the operations differ — and saying
+    WHICH input appeared is the difference between a diagnosis and a list.
+    """
+    from orchestrator.integrations.inventory import compare_arms
+
+    csrf = "http://app.test/vulnerabilities/csrf/?Change=Change"
+    await observe(store, "low", csrf, ["password_new", "password_conf"])
+    await observe(store, "impossible", csrf, ["password_new", "password_conf", "password_current"])
+
+    result = await compare_arms("s", "low", "impossible")
+    assert not result["comparable"]
+    change = next(c for c in result["divergence"] if c["kind"] == "parameters_changed")
+    assert change["only_in_second"] == ["password_current"]
+    assert change["only_in_first"] == []
+
+
+async def test_an_operation_the_other_arm_never_saw_is_not_dressed_up(store):
+    """The honest default. When there is nothing at that endpoint in the other arm,
+    the divergence is exactly what it looks like — and must not be reported as a
+    method or parameter change, which would imply the arm reached it."""
+    from orchestrator.integrations.inventory import compare_arms
+
+    await observe(store, "low", SQLI + "?Submit=Submit", ["id"])
+    await observe(store, "impossible", SQLI + "?Submit=Submit", ["id"])
+    await observe(store, "impossible", "http://app.test/admin/users", ["page"], sources=("katana",))
+
+    result = await compare_arms("s", "low", "impossible")
+    unseen = [c for c in result["divergence"] if c["kind"] == "not_reached_by_other_arm"]
+    assert len(unseen) == 1
+    assert unseen[0]["endpoint"].endswith("/admin/users")
+    assert {c["kind"] for c in result["divergence"]} == {"not_reached_by_other_arm"}

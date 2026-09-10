@@ -156,6 +156,34 @@ four situations outright:
 | `per_arm_value_in_operation` | both arms reached the operation, at **different URLs** — each issued its own request |
 | `no_shared_operations` | two arms that discovered nothing agree vacuously |
 
+Every one-sided operation also comes back classified, under `divergence`, because
+"an operation only one arm saw" is the same sentence whether the crawl missed a page
+or the application moved the surface — and an operator cannot act on those the same
+way:
+
+| `kind` | What it means |
+|---|---|
+| `method_changed` | both arms reached the endpoint, by different methods — a form that is GET for one identity and POST for another |
+| `parameters_changed` | both reached it with a different injectable surface; the entry names the inputs that appeared or vanished |
+| `not_reached_by_other_arm` | there is genuinely nothing at that endpoint in the other arm |
+
+### Links the crawler refuses
+
+A crawler that follows a sign-out link ends its own session, and everything it
+visits afterwards is a login form — so that arm's surface silently shrinks while
+every request still succeeds. Nothing reports it.
+
+Any URL with a path segment that spells logging out — `logout`, `logoff`,
+`sign_out`, `sign-out`, `signoff` and their variants, case-insensitively — is
+refused, and ZAP is told the same list so it does not spend requests discovering
+that. This is the lane's own rule, not a default in `excluded_paths`: replacing that
+list is how you ADD an exclusion, and it must not be how you silently remove the
+rule that protects a run from itself.
+
+Matching is per whole segment, so `/users/sign_out` and `/Account/LogOff` are
+refused while `/blog/how-to-logout-safely` and `/docs/signout-api` are still
+crawled. `excluded_paths` remains yours, matched as a prefix.
+
 **What a pass establishes, and what it does not.** `comparable: true` means the two
 arms describe the same surface. It says nothing about whether either arm *reached*
 it. A live run was measured scoring a perfect shared-surface fraction while all

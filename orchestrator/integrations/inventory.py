@@ -294,8 +294,23 @@ async def form_urls(context) -> set[str]:
     rows = await db.rows(
         "SELECT url,sources FROM integration_endpoints WHERE session_id=? AND identity_id=?",
         (context.session_id, context.identity_id))
+    # A QUERY is what makes a form URL an action, and the table above is the
+    # evidence: `GET /vulnerabilities/csrf/` changed nothing, while the same URL
+    # with `?Change=Change` changed the password. With no named companion there is
+    # no submission signal for a handler to fire on.
+    #
+    # Without that condition this withheld pages. DVWA's xss_r form declares its
+    # submit control with no `name`, so at `security=low` the form has no named
+    # companions at all, form_endpoint yields the page's own URL with an empty
+    # query, and the row key (session_id, url, method, identity_id) merges it with
+    # the crawled page row — `sources` becomes ["form","playwright"]. Every
+    # read-only case then skipped a real page. At `impossible` the hidden
+    # `user_token` IS a named companion, so the action is a separate row and the
+    # page survives: the token's ABSENCE forked the reading arms in the opposite
+    # direction from its presence, and the vulnerable arm read one URL FEWER.
     return {row["url"] for row in rows
-            if "form" in json.loads(row.get("sources") or "[]")}
+            if "form" in json.loads(row.get("sources") or "[]")
+            and urlsplit(row["url"]).query}
 
 
 async def operations(session_id, identity_id=None) -> dict[str, dict]:
@@ -326,8 +341,12 @@ async def operations(session_id, identity_id=None) -> dict[str, dict]:
     for row in await db.rows(query + " ORDER BY url,method", tuple(args)):
         names = json.loads(row["parameters"] or "[]")
         key = operation_key(row["url"], row["method"], names)
+        from .contracts import canonical_origin
         entry = found.setdefault(key, {
             "operation": key, "method": row["method"],
+            # origin + path, so a caller can ask "what else is at this endpoint?"
+            # without parsing the key back apart.
+            "endpoint": canonical_origin(row["url"]) + (urlsplit(row["url"]).path or "/"),
             "parameters": [], "identities": [], "sources": [], "observations": [],
         })
         for name in names:
@@ -413,6 +432,41 @@ async def compare_arms(session_id, first_identity, second_identity) -> dict:
                        "their results may be about the request and not the target"),
         })
 
+    # WHY an operation is one-sided, when the data can say. "An operation only one
+    # arm saw" is the sentence the lane prints both when a crawl missed a page and
+    # when the application genuinely moved the surface, and an operator cannot act
+    # on those the same way. E-008 asks for differences to be DISTINGUISHABLE.
+    #
+    # Measured on DVWA, and the two cases this separates: `/vulnerabilities/brute/`
+    # is a GET form at `low` and a POST form at `impossible`, so the GET operation
+    # genuinely disappears; `/vulnerabilities/csrf/` gains a `password_current`
+    # input at `impossible`, so the injectable surface genuinely grows. Neither is a
+    # defect in the lane, and both look identical to a set difference.
+    def classify(entry, others, side):
+        at_endpoint = [o for o in others.values() if o["endpoint"] == entry["endpoint"]]
+        if not at_endpoint:
+            return {"kind": "not_reached_by_other_arm", "operation": entry["operation"],
+                    "endpoint": entry["endpoint"], "seen_by": side,
+                    "detail": "the other arm reached nothing at this endpoint"}
+        methods = {entry["method"].upper()} | {o["method"].upper() for o in at_endpoint}
+        if entry["method"].upper() not in {o["method"].upper() for o in at_endpoint}:
+            return {"kind": "method_changed", "operation": entry["operation"],
+                    "endpoint": entry["endpoint"], "seen_by": side,
+                    "methods": sorted(methods),
+                    "detail": "both arms reached this endpoint, by different methods"}
+        same_method = [o for o in at_endpoint
+                       if o["method"].upper() == entry["method"].upper()]
+        theirs = set().union(*(set(o["parameters"]) for o in same_method))
+        mine = set(entry["parameters"])
+        return {"kind": "parameters_changed", "operation": entry["operation"],
+                "endpoint": entry["endpoint"], "seen_by": side,
+                "only_in_first": sorted(mine - theirs) if side == "first" else sorted(theirs - mine),
+                "only_in_second": sorted(mine - theirs) if side == "second" else sorted(theirs - mine),
+                "detail": "both arms reached this endpoint with a different injectable surface"}
+
+    divergence = ([classify(left[k], right, "first") for k in only_left]
+                  + [classify(right[k], left, "second") for k in only_right])
+
     reasons = []
     if first_identity == second_identity:
         reasons.append("arms_share_one_identity")
@@ -429,6 +483,8 @@ async def compare_arms(session_id, first_identity, second_identity) -> dict:
         "only_in_first": only_left,
         "only_in_second": only_right,
         "per_arm_value_in_operation": per_arm_value,
+        # Each one-sided operation with a reason, where the data supports one.
+        "divergence": divergence,
         "comparable": not reasons,
         "refused_because": reasons,
         # Stated as a fraction because that is how the original defect was
