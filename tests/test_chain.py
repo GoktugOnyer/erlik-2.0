@@ -218,7 +218,15 @@ class TestDetectionIsUnchanged:
         robots = next(s for s in tc.steps if s.name == "robots")
         detectors = [e for e in robots.evaluators if e.emit_finding]
         assert len(detectors) == 1
-        assert detectors[0].pattern == '^Disallow:|^Allow:|^Sitemap:|^User-agent:'
+        # Changed once, deliberately, on 2026-09-10: it used to fire on
+        # `^User-agent:` — the one line every robots.txt has — and title that
+        # "robots.txt Discloses Paths". DVWA serves `User-agent: *` /
+        # `Disallow: /`, which discloses nothing, and the lane reported it on
+        # both arms of the lab's security differential as the only surviving
+        # finding. `/\S` is the fix: a rule covering the whole site is `/` with
+        # nothing after it. Juice Shop's `Disallow: /ftp` still matches.
+        assert detectors[0].pattern == (
+            r'^(?:Disallow|Allow):[ \t]*/\S|^Sitemap:[ \t]*\S')
         assert detectors[0].produces is None, "a detector was turned into a producer"
 
     def test_the_producers_emit_no_findings(self):

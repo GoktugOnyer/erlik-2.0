@@ -16,7 +16,16 @@ steps:
       curl -s -A "Mozilla/5.0" -L --max-time 10 "{{url}}/robots.txt"
     evaluators:
       - type: regex
-        pattern: '^Disallow:|^Allow:|^Sitemap:|^User-agent:'
+        # A PATH, not the file's existence. This fired on `^User-agent:` — the
+        # one line every robots.txt has — and titled it "Discloses Paths".
+        # Measured 2026-09-10: DVWA serves `User-agent: *` / `Disallow: /`, which
+        # discloses nothing at all, and it was reported on both arms of the lab's
+        # security differential as the only surviving finding. Juice Shop serves
+        # `Disallow: /ftp`, which is a real disclosure and still matches.
+        #
+        # `/\S` is the whole fix: a rule covering the entire site is `/` with
+        # nothing after it. A Sitemap line names a URL, so it stays.
+        pattern: '^(?:Disallow|Allow):[ \t]*/\S|^Sitemap:[ \t]*\S'
         emit_finding:
           vuln_type: robots.txt Discloses Paths
           severity: info
