@@ -172,3 +172,94 @@ async def test_a_registered_collector_is_still_swept(lane, database):
     await svc.run("kept")
     assert _Collector.instances[0].finished, "a registered collector was never finished"
     assert _Collector.instances[0].closed, "a registered collector was never closed"
+
+
+# ===========================================================================
+# The other half of the acceptance clause, and a defect the first fix caused.
+# "Cancellation and timeout at every awaited startup/probe boundary close all
+#  owned jobs; EVIDENCE REMAINS AVAILABLE."
+# ===========================================================================
+
+class _CollectorWithCallback(_Collector):
+    """Owns a callback that already arrived before the failure."""
+
+    def __init__(self, ctx, raising):
+        super().__init__(ctx, raising)
+        self.ingested = False
+
+    async def finish(self, wait=True):
+        # The real finish() is the ONLY code that reads callbacks.jsonl and
+        # records it. close() cancels the task and exits the sandbox; it ingests
+        # nothing.
+        self.ingested = True
+        self.finished = True
+        return StageResult()
+
+
+async def test_a_callback_that_already_arrived_is_ingested_before_release(
+        lane, database, monkeypatch):
+    """Closing is not ingesting.
+
+    An out-of-band finding has no other basis — the whole claim is a lookup of a
+    host only this assessment knew about — so losing the captured callback loses
+    the finding entirely, not merely its diagnostics."""
+    import orchestrator.integrations.service as module
+    _Collector.instances = []
+    module.Collector = lambda ctx: _CollectorWithCallback(ctx, asyncio.TimeoutError())
+    from orchestrator.integrations import service as svc
+    await svc.register("ingest", "https://app.test", config())
+    try:
+        await svc.run("ingest")
+    except BaseException:
+        pass
+    owned = _Collector.instances[0]
+    assert owned.closed, "regression: the owned job was not released"
+    assert owned.ingested, (
+        "the callback it had already captured was never read — close() releases, "
+        "only finish() ingests")
+
+
+class _CollectorBadClose(_Collector):
+    def __init__(self, ctx, raising, fail_closes):
+        super().__init__(ctx, raising)
+        self.fail_closes = fail_closes
+        self.close_calls = 0
+
+    async def finish(self, wait=True):
+        self.finished = True
+        return StageResult()
+
+    async def close(self):
+        self.close_calls += 1
+        self.closed = True
+        if self.close_calls <= self.fail_closes:
+            raise RuntimeError("docker rm -f refused")
+
+
+@pytest.mark.parametrize("fail_closes,why", [
+    (99, "a cleanup that always fails"),
+    (1, "a cleanup that fails once"),
+])
+async def test_a_failing_cleanup_does_not_replace_the_failure_it_cleaned_up_after(
+        fail_closes, why, lane, database, monkeypatch):
+    """Introduced by the first E-001 fix, and the worse of the two shapes is the
+    transient one.
+
+    `except BaseException: await collector.close(); raise` lets a close() that
+    itself raises REPLACE the exception being reported. When the original was a
+    CancelledError and the retry succeeds, nothing escapes at all: the run
+    returns normally, the cancellation is swallowed, and a cancelled asyncio task
+    returning normally breaks whoever awaits it during shutdown."""
+    import orchestrator.integrations.service as module
+    _Collector.instances = []
+    module.Collector = lambda ctx: _CollectorBadClose(ctx, asyncio.CancelledError(), fail_closes)
+    from orchestrator.integrations import service as svc
+    await svc.register("badclose", "https://app.test", config())
+
+    with pytest.raises(asyncio.CancelledError):
+        await svc.run("badclose")
+
+    rows = await database.rows("SELECT status FROM integration_stages WHERE session_id='badclose'")
+    assert rows[0]["status"] != "running", (
+        f"{why}: the stage was left mid-flight because the cleanup error "
+        f"displaced the original and skipped the handler that records it")

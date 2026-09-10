@@ -165,7 +165,43 @@ async def run(session_id, notify=None):
                                         try:
                                             result = await collector.probe(sandbox)
                                         except BaseException:
-                                            await collector.close()
+                                            # INGEST BEFORE RELEASE, AND NEVER LET
+                                            # CLEANUP REPLACE THE FAILURE.
+                                            #
+                                            # close() only RELEASES — it cancels the
+                                            # client task and exits the sandbox.
+                                            # finish() is the only code that reads
+                                            # callbacks.jsonl and records it, so
+                                            # closing alone loses a callback that had
+                                            # already arrived. An out-of-band finding
+                                            # has no other basis than that callback,
+                                            # so what is lost is the finding, not its
+                                            # diagnostics. Ingest first: __aexit__
+                                            # removes the job directory.
+                                            #
+                                            # Both steps swallow their own failures.
+                                            # A bare `await collector.close()` here
+                                            # let a failing close REPLACE the
+                                            # exception it was cleaning up after —
+                                            # and when the original was a
+                                            # CancelledError and a retry succeeded,
+                                            # NOTHING escaped: the run returned
+                                            # normally, the cancellation was lost, and
+                                            # a cancelled task returning normally
+                                            # breaks whoever awaits it at shutdown.
+                                            try:
+                                                interrupted = await collector.finish(wait=False)
+                                                interrupted.status = "partial"
+                                                interrupted.reason = (
+                                                    "callback collection interrupted before the probe "
+                                                    "completed; callbacks already correlated are retained")
+                                                await db.persist_result(session_id, stage["id"], interrupted)
+                                            except BaseException:
+                                                pass
+                                            try:
+                                                await collector.close()
+                                            except BaseException:
+                                                pass
                                             raise
                                         collectors.append((collector, stage))
                                         result.status = "running"
