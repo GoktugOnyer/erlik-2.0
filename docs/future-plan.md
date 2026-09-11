@@ -795,6 +795,69 @@ in one session, changing only the `security` cookie:
   would break it differently. Which of those an operator wants is their decision, and
   they could not make it while the fork was invisible.
 
+### E-031: the marker's protection is not protection — OPEN
+
+Adversarial review of the commit that made the cross-arm authorization findings
+persist found four defects. Three are fixed (one finding per operation rather than
+a silent `INSERT OR REPLACE`; the swapped privilege order refused; redaction and
+sanitisation applied on the one producer that had neither). These two are not, and
+both were re-measured here rather than taken on report.
+
+**`marker_sha256` is a confirmation oracle, not a protection.** The design's hard
+constraint is that the operator's marker never reaches a persisted record or an
+export, and the mechanism is a 12-hex-character — 48-bit — unsalted sha256 prefix
+carried in the finding's evidence in its place, with a sentence saying why. A marker
+is a short, low-entropy, highly guessable string: it names a field and a value in the
+application's own data. Measured against the digest `c5c79a1df019` that juice5's own
+export carries, over a candidate space of 4050 strings built from 18 field names, 15
+local-parts, 3 domains and 5 separator patterns:
+
+    exhausted in 0.0007s, recovered '"email":"admin@juice-sh.op"'
+
+So anyone holding the export holds the marker. The digest is not useless — it is a
+stable label — but the claim that it protects the marker is false, and the code and
+docs both make that claim. A salt per assessment, stored with the secrets rather than
+with the findings, would make the label stable and the recovery infeasible; that is
+the shape of the fix, not the fix itself.
+
+**The key cannot tell two markers apart, which its own comment says it exists to do.**
+`fingerprint(target, rule, "GET", url, "", arm)` has no marker term, so two route
+calls declaring different markers against the same URL build one key. Measured:
+
+    two markers, same url  ->  same fingerprint; the row keeps only the second digest
+
+The comment beside `marker_sha256` reads "The digest is here so two markers used in
+one session can be told apart." At the persistence layer they cannot be. Note the
+collapse fix above does NOT cover this: it groups within a single call, and this is a
+collision across calls.
+
+**Adjacent, from the same review, measured by the reviewer and not re-measured here:**
+a marker naming the unprivileged identity's own data produces a `high`/`confirmed`
+finding about nothing (jim reading his own record at `/api/Users/2`; precision 1 of 2
+for that marker), and `confirmed` is what sets DefectDojo's `verified=True` — so an
+operator's marker mistake is now a verified high-severity row in a client's tracker
+rather than a JSON body they read and discarded. `Identity.may_access` is the only
+defence and is empty unless declared. The reviewer's suggested gate — `confirmed` only
+when the marker is not also the unprivileged identity's own declared data, else
+`likely` — is cheap and sound. Separately, both identities' `subject_id` travel
+verbatim into the exported description under a banner reading "Evidence (credentials
+redacted)"; that value is necessary for the claim to be checkable, so the defect is
+the banner, not the travel. And `evidence_ids` is empty for exactly the findings the
+product is most sure of, while the three artifacts per finding that would fill it were
+identified (`arm_responses` drops the evidence row id it already has).
+
+**And a warning about the obvious next step.** Mirroring the two routes' arguments onto
+`AssessmentConfig` — so the checks run automatically — breaks the marker constraint
+outright: `service.register` stores `redact(config.model_dump())` in
+`integration_assessments.config`, `redact` is key-name matched, and no field called
+`marker` matches any of those names, so the marker would be served in plaintext by
+`GET /api/integrations/sessions/{id}`. The existing `security_assertions[].forbidden_marker`
+already has this property. Any automatic path must also gate on the status rollup:
+nothing in `inventory.py` reads `integration_stages.status`, and marking one arm's
+stages `partial` and deleting two captures took a run from 2 findings to 0 with
+`refused_because=[]` and every count byte-identical to the complete run — a half-run
+reporting absence as a clean result, which is this project's signature defect.
+
 ## 10. Shared technical contracts
 
 Prefer additive schema migrations and small services with explicit interfaces.
