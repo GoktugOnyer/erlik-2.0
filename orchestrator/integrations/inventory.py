@@ -384,7 +384,7 @@ async def operations(session_id, identity_id=None) -> dict[str, dict]:
 # attract more than one observation — truncated by the URL budget AND refused for a
 # forgeable name — and the reader needs the one that explains why nothing was learned.
 COVERAGE_STATES = ("verified", "answered", "unreachable", "refused", "not_run",
-                   "inferred", "not_attempted")
+                   "indistinct", "inferred", "not_attempted")
 
 # Deliberately absent: `tested`. `answered` means bytes came back, which is not proof
 # the check exercised anything — measured on DVWA, a probe missing its CSRF token
@@ -1104,7 +1104,8 @@ async def coverage(session_id, identity_id=None) -> list[dict]:
         for item in observations:
             kind, case = item.get("type"), item.get("test_case_id") or ""
             if kind not in ("test_case", "test_case_unreachable", "test_case_not_run",
-                            "test_case_truncated", "parameter_refused", "form_url_withheld"):
+                            "test_case_truncated", "parameter_refused", "form_url_withheld",
+                            "indistinct_url"):
                 continue
             record = (kind, case, item.get("reason") or "", item.get("parameters") or [])
             if item.get("url"):
@@ -1116,7 +1117,13 @@ async def coverage(session_id, identity_id=None) -> list[dict]:
     def state_of(kind):
         return {"test_case": "answered", "test_case_unreachable": "unreachable",
                 "test_case_not_run": "not_run", "test_case_truncated": "not_run",
-                "parameter_refused": "refused", "form_url_withheld": "refused"}[kind]
+                "parameter_refused": "refused", "form_url_withheld": "refused",
+                # Not untested work. This URL answered with a response another URL had
+                # already given, so there is nothing here left to test — see
+                # `indistinct_urls`. Reporting it as `not_run` read as outstanding work:
+                # measured on a real run, 461 of 566 coverage rows were `not_run` and a
+                # third of the arm's reads were spellings of one document.
+                "indistinct_url": "indistinct"}[kind]
 
     # Grouped into probeable pairs first, so one probe is credited once.
     grouped: dict[tuple, dict] = {}
@@ -1423,6 +1430,75 @@ def safe_object_id(value) -> str:
         return ""
     text = value if isinstance(value, str) else str(value)
     return text if _SAFE_ID.match(text) else ""
+
+
+# Headers that differ between two identical responses, so they cannot be part of "the same
+# response". Everything else IS compared, including `Set-Cookie`, `Allow`, the CORS headers
+# and the security headers — those are what the catalogue's header-reading evaluators decide
+# on, and leaving them out would let pruning lose a finding that lives entirely in a header.
+# Measured on a real run: comparing the stable headers as well as the body changed nothing
+# (35 groups and 37 pruned either way), so the blind spot closes for free.
+_VOLATILE_HEADERS = re.compile(
+    r"(?i)^(date|content-length|etag|age|expires|last-modified|keep-alive|connection"
+    r"|x-request-id|x-correlation-id|x-runtime|x-response-time|server-timing|report-to):")
+
+
+def response_signature(capture: str) -> str:
+    """What makes two responses the same response: the status, the stable headers, the body."""
+    stable = sorted(line.strip() for line in http_capture.headers(capture).splitlines()[1:]
+                    if line.strip() and not _VOLATILE_HEADERS.match(line.strip()))
+    material = f"{http_capture.status(capture)}\n" + "\n".join(stable) + "\n\n" + \
+        http_capture.body(capture)
+    return hashlib.sha256(material.encode("utf-8", "replace")).hexdigest()
+
+
+def indistinct_urls(captures) -> dict:
+    """URLs whose response the lane has ALREADY SEEN, mapped to the URL that had it first.
+
+    WHY THIS IS THE BINDING CONSTRAINT. Everything the lane does is rationed by `max_urls`,
+    and on a real three-arm Juice Shop run HALF the surface read's budget bought the same
+    document twice. 36 of 72 non-empty 2xx reads were byte-identical: `/`, `/Edge/`,
+    `/Trident/`, `/.json`, `/%5C/index.html`, `/2fa/enter`, `/about`, `/accounting`,
+    `/address/create` and 27 more all answer with the single-page application's shell, because
+    an SPA serves `index.html` for any route its server does not know. `/Edge/` and `/Trident/`
+    are browser-detection regex fragments katana mined out of a JavaScript bundle. A catalogue
+    case probing those for injection cannot find anything, and a coverage report listing them
+    as untested reads as work outstanding when there is none.
+
+    THE RULE IS A COMPARISON, NOT A GUESS. Two URLs that answered with the same status and the
+    same bytes produced one observation; the second is a spelling of the first. That also
+    folds in the ordinary case — `/api/Feedbacks` and `/api/Feedbacks/` are separate endpoint
+    rows with identical bodies.
+
+    AN EMPTY BODY IS NOT EVIDENCE, and this is the clause a real measurement forced. On DVWA
+    six genuinely different static files — `detail.png`, `overview.png`, `main.css`,
+    `logo.png` — grouped together because the captures came from an `OPTIONS` probe and every
+    body was 0 bytes. Pruning them would have discarded four real assets, so a body must carry
+    something before its absence of difference means anything.
+
+    Only 2xx, because a shared 401 or 404 is the application declining rather than answering,
+    and every refusal looks alike. `captures` is ordered and the FIRST spelling wins, so the
+    caller controls which URL survives by the order it reads in.
+
+    "The same response" includes the STABLE HEADERS, not only the body — see
+    `response_signature`. `WSTG-SESS-02` decides on `Set-Cookie` and `WSTG-CONF-06` on
+    `Allow`, so a rule that compared bodies alone could prune the only URL whose finding lives
+    in a header.
+    """
+    first_seen, duplicates = {}, {}
+    for url, capture in captures:
+        if not http_capture.ok(capture):
+            continue
+        body = http_capture.body(capture)
+        if not body.strip():
+            continue
+        key = response_signature(capture)
+        if key in first_seen:
+            if url != first_seen[key]:
+                duplicates[url] = first_seen[key]
+        else:
+            first_seen[key] = url
+    return duplicates
 
 
 def breadth_first(per_collection) -> list:

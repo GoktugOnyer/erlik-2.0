@@ -1381,6 +1381,42 @@ Juice Shop's `errorHandlingChallenge` fires on `statusCode > 401`, and `challeng
 runs `challenge.save()`. Verified in the container's own source. That is an operator's decision,
 not a default.
 
+**Increment 13 — half the read budget bought the same document twice.** Everything the lane does
+is rationed by `max_urls`, and the coverage report from Increment 12 said 461 of 566 pairs were
+never tested. Measured on a real three-arm Juice Shop run: of 86 surface reads, 37 returned a
+response the lane had ALREADY SEEN, absorbed into three survivors — `/`, `/api/Feedbacks` and
+`/api/Quantitys`. The 36-strong group is the single-page application's shell, which its server
+returns for any route it does not know, and it included `/Edge/` and `/Trident/` — browser
+detection regex fragments katana mined out of a JavaScript bundle.
+
+`inventory.indistinct_urls` maps each URL that answered with a response an earlier URL already
+gave to the URL that gave it first. "The same response" is the STATUS, the STABLE HEADERS and the
+BODY. One rule folds in the ordinary case too: `/api/Feedbacks` and `/api/Feedbacks/` are
+separate rows with identical bodies.
+
+**Three clauses came from measurements that would otherwise have made it wrong.** An EMPTY body
+is never evidence — on DVWA six genuinely different static files grouped together because the
+captures came from an OPTIONS probe and every body was 0 bytes, and pruning them would have
+discarded four real assets. The HEADERS are compared, because `WSTG-SESS-02` decides entirely on
+`Set-Cookie` and `WSTG-CONF-06` on `Allow`; measured, including the stable headers changed
+nothing (35 groups and 37 pruned either way), so that blind spot closed for free. And only 2xx is
+compared, because every refusal looks alike.
+
+**Only the no-parameter cases are pruned.** A parameter probe is a different request from the
+bare read that grouped. Measured, no pruned URL carried a discovered parameter at all — but the
+safety is structural rather than resting on that.
+
+**The first framing of the win was wrong and the measurement corrected it.** A case takes its
+SHARE of the budget, so a shorter eligible list changes WHICH urls it picks, not how many. Two
+otherwise identical runs:
+
+    before   WSTG-INFO-03 probed 21 urls, 11 of them a response already seen  (52%)
+    after    WSTG-INFO-03 probed 21 urls,  0 of them a response already seen
+
+Same 21 probes, every one now on a distinct response. The other half is the report: `coverage()`
+gained an `indistinct` state, so a URL with nothing left to test no longer reads as `not_run`.
+Endpoint rows are untouched, so the authorization comparison is unaffected.
+
 **Two verified defects are named rather than fixed, because both need lane plumbing.**
 The anonymous stage cannot carry application configuration (`service.py` passes `None` for
 it and the proxy then injects nothing), so on an application whose configuration lives in a

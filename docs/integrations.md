@@ -827,6 +827,64 @@ The other candidate signal, "does the collection body differ between the arms", 
 a different reason — `/api/Users` is byte-identical between admin and jim and is exactly where
 the real violation is.
 
+### The same response twice is not two observations
+
+Everything the lane does is rationed by `max_urls`, and half a real run's read budget bought the
+same document twice. Measured on a three-arm Juice Shop assessment: of 86 surface reads, **37
+returned a response the lane had already seen**, absorbed into three survivors — `/`,
+`/api/Feedbacks` and `/api/Quantitys`. The 36-strong group is the single-page application's
+shell, which its server returns for any route it does not know:
+
+    /   /%5C/index.html   /.json   /2fa/enter   /Edge/   /Trident/   /about
+    /accounting   /address/create   ...and 27 more
+
+`/Edge/` and `/Trident/` are browser-detection regex fragments katana mined out of a JavaScript
+bundle. A catalogue case probing those for injection cannot find anything, and a coverage report
+listing them as untested reads as outstanding work when there is none — that report said 461 of
+566 rows were `not_run`.
+
+**The rule is a comparison, not a guess.** `inventory.indistinct_urls` maps each URL that
+answered with a response an earlier URL had already given to the URL that gave it first. "The
+same response" is `inventory.response_signature`: the **status**, the **stable headers** and the
+**body**. One rule also folds in the ordinary case — `/api/Feedbacks` and `/api/Feedbacks/` are
+separate endpoint rows with identical bodies.
+
+**The headers are compared, and that was free.** `WSTG-SESS-02` decides entirely on
+`Set-Cookie` and `WSTG-CONF-06` on `Allow`, so a body-only rule could prune the one URL whose
+finding lives in a header. Only genuinely volatile headers are excluded — `Date`,
+`Content-Length`, `ETag`, `Age`, `Expires`, `Last-Modified`, `Keep-Alive`, `Connection` and a
+few request-id headers. Measured on the real captures, comparing the stable headers as well as
+the body changed nothing: 35 groups and 37 pruned either way. The blind spot closed for free.
+
+**An empty body is never evidence**, and a real measurement forced that clause. On DVWA six
+genuinely different static files — `detail.png`, `overview.png`, `main.css`, `logo.png` —
+grouped together because the captures came from an `OPTIONS` probe and every body was 0 bytes.
+Pruning them would have discarded four real assets. Only 2xx is compared for the same reason in
+reverse: every refusal looks alike, and on DVWA an unauthenticated arm is redirected away from
+the whole surface.
+
+**Only the no-parameter cases are pruned.** A parameter probe is a different request from the
+bare read that grouped, so a URL whose base response is the shell could still answer differently
+to `?id=1'`. Measured, no pruned URL carried a discovered parameter at all — but the safety is
+structural rather than resting on that: `parameters_by_url` pairs are never consulted against
+the pruned set.
+
+**What it buys is better targets, not fewer probes** — and the first framing of this was wrong,
+so it is worth being exact. A case takes its *share* of the budget (`case_targets =
+eligible[:case_budget(tc)]`), so a shorter eligible list changes *which* URLs it picks, not how
+many. Measured on two otherwise identical three-arm runs:
+
+    before   WSTG-INFO-03 probed 21 urls, 11 of them a response already seen  (52%)
+    after    WSTG-INFO-03 probed 21 urls,  0 of them a response already seen
+
+Same 21 probes; every one now lands on a distinct response instead of fetching the application
+shell eleven times.
+
+It does *not* free the surface read's own budget — the read cannot know a URL is a repeat until
+it has read it. The other half of the win is the **report**: `coverage()` has an `indistinct`
+state, so a URL with nothing left to test no longer reads as `not_run`. Endpoint rows are
+untouched, so the cross-arm authorization comparison sees exactly what it saw before.
+
 ### What the matrix does not unlock
 
 A lane stage carries exactly **one** identity — it resolves it from its own row, and the

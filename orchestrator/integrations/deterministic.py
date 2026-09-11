@@ -13,7 +13,7 @@ from .adapters import BaseAdapter, record
 from .contracts import (Endpoint, StageResult, IntegrationFinding, fingerprint,
                         identity_target_fields)
 from .egress_policy import EgressPolicy
-from .inventory import (seeds, eligible_test_cases, form_urls, parameters_by_url,
+from .inventory import (indistinct_urls, seeds, eligible_test_cases, form_urls, parameters_by_url,
                         case_needs_parameter, parameter_can_forge)
 from .runtime import JobOutput
 from .security import redact, safe_evidence
@@ -675,6 +675,9 @@ class CatalogueAdapter(BaseAdapter):
             return target_budget(ctx.config.max_urls, len(ctx.config.test_cases),
                                  len(case.steps))
         result.metadata["parameters_discovered"] = sum(len(v) for v in parameters.values())
+        # Empty unless the surface read ran and found repeats; the no-parameter cases below
+        # consult it either way.
+        indistinct: dict = {}
 
         # THE SURFACE READ, before the cases, because it is what the cross-arm checks
         # consume. See SURFACE_READ for why it exists and why it is not a catalogue case.
@@ -803,6 +806,37 @@ class CatalogueAdapter(BaseAdapter):
                                   f"fetched; this pass's share of the "
                                   f"{ctx.config.max_urls} URL budget is {derived_share}"})
 
+            # WHICH OF THESE READS WERE THE SAME RESPONSE TWICE.
+            #
+            # Measured on a real three-arm run: 37 of 86 surface reads returned a response the
+            # lane had already seen, absorbed into THREE survivors — `/`, `/api/Feedbacks` and
+            # `/api/Quantitys`. The 36-strong group is the single-page application's shell,
+            # which its server returns for any route it does not know, and it included
+            # `/Edge/` and `/Trident/` — browser-detection regex fragments katana mined out of
+            # a JavaScript bundle. Probing those for injection cannot find anything, and
+            # listing them as untested reads as work outstanding when there is none.
+            #
+            # ONLY THE NO-PARAMETER CASES ARE PRUNED. A parameter probe is a different request
+            # from the bare read that grouped, so a URL whose base response is the shell could
+            # still answer differently to `?id=1'`. Measured, no pruned URL carried a
+            # discovered parameter at all — but the safety is structural rather than resting
+            # on that: `parameters_by_url` pairs are never touched.
+            indistinct = indistinct_urls((url, capture) for url, capture in bodies)
+            if indistinct:
+                result.metadata["indistinct_urls"] = {
+                    "count": len(indistinct),
+                    "survivors": sorted(set(indistinct.values())),
+                    "establishes": ("these URLs answered with a response another URL had "
+                                    "already given, so a check that reads the response has "
+                                    "nothing left to find on them; parameter probes are "
+                                    "unaffected"),
+                }
+                for url, same_as in sorted(indistinct.items()):
+                    result.observations.append({
+                        "type": "indistinct_url", "test_case_id": SURFACE_READ_ID,
+                        "url": url, "steps": [],
+                        "reason": f"answered with the same response as {same_as}"})
+
             # Reported in the stage's METADATA rather than as `test_case` observations,
             # because `coverage()` counts those as a check having run against an endpoint
             # and this is not a check. Calling it coverage would overstate what was tested
@@ -880,7 +914,8 @@ class CatalogueAdapter(BaseAdapter):
             else:
                 eligible = [{"url": url} for url in targets
                             if case_id in eligible_test_cases(url)
-                            and url not in submit_urls]
+                            and url not in submit_urls
+                            and url not in indistinct]
                 withheld = sorted(u for u in targets
                                   if u in submit_urls and case_id in eligible_test_cases(u))
                 if withheld:
