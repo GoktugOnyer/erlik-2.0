@@ -282,6 +282,53 @@ reaches the code being compared and its zero findings are vacuous. Measured: adm
 and gordonb, both at `security=low`, produce `/vulnerabilities/sqli/?Submit=Submit`
 byte for byte — so the only variable is who made the request.
 
+## Coverage: what ran, what did not, and why
+
+Two routes answer the same question from either side of a run.
+
+`GET /api/integrations/sessions/{id}/preview` — **before** it starts, what will not be
+reached. `GET /api/integrations/sessions/{id}/coverage` — **after**, what happened to
+every known (endpoint, parameter) pair. Both accept `identity_id` to narrow to one arm.
+
+The reason they exist is measured. At the default budget the 2026-09-10 run tested one
+or two parameters per case out of eight and **lost six of nine findings** — and said so
+only in per-case observations nobody reads before launching. Everything needed was
+already recorded; nothing aggregated it, so the question an operator actually has ("was
+this endpoint tested?") had no answer.
+
+### The states, and what they refuse to claim
+
+| State | Meaning |
+|---|---|
+| `verified` | a finding came out of the probe |
+| `answered` | the probe ran and bytes came back, and nothing matched |
+| `unreachable` | every executed step received an empty response |
+| `refused` | the lane declined it — a forgeable parameter name, a withheld form action |
+| `not_run` | a selected case was eligible and the budget or the clock ran out |
+| `inferred` | read out of a JavaScript body; nothing has requested it |
+| `not_attempted` | in the inventory, and no selected case tests it |
+
+**There is no `tested`.** `answered` means something answered, which is not proof the
+check exercised the application: measured on DVWA, a probe missing its CSRF token
+answers HTTP 200 with 389 bytes of PHP warnings, so the emptiness detector stays quiet
+and nothing was tested all the same. `verified` is the only state the lane can stand
+behind, and adding `answered` to it does not produce a coverage figure.
+
+`not_run` and `not_attempted` are deliberately different answers. The first says a
+bigger `max_urls` would have covered it; the second says nothing you selected tests it,
+and no budget changes that.
+
+### One unit of work, shared
+
+Both routes count **probeable pairs**, not endpoint rows. Twenty crawled variants of
+`/api/Challenges/` are one pair per parameter, because a crawled URL's query holds a
+sample value rather than the name under test — while a form action keeps its query,
+which its handler requires. `inventory.probe_key` defines that once and both sides use
+it, so the preview cannot promise work the coverage report will not account for.
+
+Getting this wrong in either direction was measured: matching endpoint rows literally
+credited 2 of 13 probes that ran, and normalising without grouping credited 57.
+
 ## Authorization differentials: identity against configuration
 
 An authorization differential only says something about identity if identity is the

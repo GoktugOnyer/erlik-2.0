@@ -78,6 +78,63 @@ async def endpoints(session_id: str):
     return result
 
 
+@router.get("/sessions/{session_id}/preview")
+async def launch_preview(session_id: str, identity_id: str | None = None):
+    """What the next run will NOT reach, before it starts.
+
+    The mirror of `/coverage`, which answers the same question afterwards. E-010 asks the
+    preview to "state what the run **will not** do, not only what it will", because the
+    cost of not saying so is measured: at the default budget the 2026-09-10 run tested
+    one or two parameters per case out of eight and lost six of nine findings, reporting
+    it only in observations nobody reads before launch.
+    """
+    from .inventory import preview
+
+    rows = await db.rows("SELECT config,config_secret_id FROM integration_assessments "
+                         "WHERE session_id=?", (session_id,))
+    if not rows:
+        raise HTTPException(404, "integration assessment not found")
+    # The executable configuration, not the redacted copy: the budget arithmetic needs
+    # `max_urls` and the selected cases, and the published copy is for reading.
+    config = (AssessmentConfig.model_validate(
+                  SecretStore().get(rows[0]["config_secret_id"])["assessment_config"])
+              if rows[0].get("config_secret_id")
+              else AssessmentConfig.model_validate_json(rows[0]["config"]))
+    return await preview(session_id, config, identity_id)
+
+
+@router.get("/sessions/{session_id}/coverage")
+async def coverage_report(session_id: str, identity_id: str | None = None):
+    """What the run did, what it did not, and why — per operation and identity.
+
+    The lane already recorded all of it, scattered across each stage's observations, so
+    the one question an operator has ("was this endpoint tested?") had no answer. §E-010
+    gives the measured cost: at the default budget the 2026-09-10 run tested one or two
+    parameters per case out of eight and lost six of nine findings, saying so only in
+    per-case observations nobody reads.
+
+    `summary` counts the states; `rows` carries every known (operation, parameter) pair
+    including the ones nothing touched, because a report listing only what ran reads as
+    a clean bill of health for everything it omits.
+    """
+    from .inventory import coverage, COVERAGE_STATES
+
+    rows = await coverage(session_id, identity_id)
+    summary = {state: 0 for state in COVERAGE_STATES}
+    for row in rows:
+        summary[row["state"]] = summary.get(row["state"], 0) + 1
+    return {
+        "rows": rows,
+        "summary": summary,
+        # Said in the payload, not only in the docs: a caller that adds `answered` to
+        # `verified` and calls the total "tested" has made the claim this refuses to.
+        "establishes": ("`verified` means a finding came out of the probe. `answered` "
+                        "means bytes came back and nothing matched, which is not proof "
+                        "the check exercised the application — a probe refused for want "
+                        "of a token still answers. No state means `tested`."),
+    }
+
+
 @router.get("/sessions/{session_id}/evidence")
 async def evidence_list(session_id: str):
     return await db.rows("SELECT * FROM integration_evidence WHERE session_id=?", (session_id,))

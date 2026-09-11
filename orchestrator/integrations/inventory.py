@@ -378,6 +378,267 @@ async def operations(session_id, identity_id=None) -> dict[str, dict]:
     return found
 
 
+# The states a known operation can be in, worst-known-first. Order matters: a pair can
+# attract more than one observation — truncated by the URL budget AND refused for a
+# forgeable name — and the reader needs the one that explains why nothing was learned.
+COVERAGE_STATES = ("verified", "answered", "unreachable", "refused", "not_run",
+                   "inferred", "not_attempted")
+
+# Deliberately absent: `tested`. `answered` means bytes came back, which is not proof
+# the check exercised anything — measured on DVWA, a probe missing its CSRF token
+# answers HTTP 200 with 389 bytes of PHP warnings, so the emptiness-only detector does
+# not fire and nothing was tested all the same. `verified` is reserved for "a finding
+# came out of it", which is the only state the lane can actually stand behind.
+_ANSWERED_CAVEAT = ("the probe ran and the target returned bytes; that is not proof the "
+                    "check exercised the application, only that something answered")
+
+
+def probe_key(url: str, sources) -> str:
+    """The URL a case is actually given for this endpoint row.
+
+    THE UNIT OF WORK IS THE PROBEABLE PAIR, NOT THE ENDPOINT ROW, and conflating them
+    broke the coverage report in both directions. `parameters_by_url` keeps a FORM
+    action's query — that query is the form's companion fields, which its handler
+    requires — and strips a crawled URL's, because there the query holds a sample value
+    rather than the name under test. So twenty crawled variants of `/api/Challenges/`
+    are ONE probeable pair per parameter.
+
+    Matching endpoint rows literally credited 2 of 13 probes; normalising both sides
+    without grouping credited 57. Defining the unit once, here, is what makes the
+    before-the-run preview and the after-the-run coverage agree by construction.
+    """
+    return url if "form" in (sources or []) else base_url(url)
+
+
+async def preview(session_id, config, identity_id=None) -> dict:
+    """What the run will and will NOT reach, before it starts.
+
+    E-010 asks for "an explicit preview of work to be resumed" and that the preview
+    "state what the run **will not** do, not only what it will". §E-010 gives the
+    measured reason: at the default `max_urls` with every runnable case selected, the
+    2026-09-10 run tested one or two parameters per case out of eight and lost six of
+    nine findings — and said so twelve times, in per-case observations nobody reads
+    before launch.
+
+    Measured again while building `coverage`, which is this function's mirror: on Juice
+    Shop at `max_urls=140`, seven times the default share per case, **158 of 163
+    (endpoint, parameter) pairs were still not run**. That is the number to see
+    beforehand.
+
+    The arithmetic is `deterministic.target_budget`, the same function the runner uses,
+    so the preview cannot promise what the run will not do.
+    """
+    from .deterministic import target_budget
+    from orchestrator.testcase.loader import find_by_id
+
+    where, args = "WHERE session_id=?", [session_id]
+    if identity_id is not None:
+        where += " AND identity_id=?"
+        args.append(identity_id)
+    rows = await db.rows(
+        f"SELECT url,parameters,sources FROM integration_endpoints {where}", tuple(args))
+
+    selected = list(config.test_cases or [])
+    # Grouped into probeable pairs by the same rule `coverage` uses, so the two agree.
+    grouped, inferred = {}, 0
+    for row in rows:
+        sources = json.loads(row["sources"] or "[]")
+        names = [n for n in json.loads(row["parameters"] or "[]") if PARAMETER_NAME.match(n)]
+        # Withheld from probing, so it is not a target however many parameters it names.
+        if "javascript" in sources:
+            inferred += len(names) or 1
+            continue
+        grouped.setdefault(probe_key(row["url"], sources), set()).update(names)
+    readable = sorted(grouped)
+    probeable = sorted((url, name) for url, names in grouped.items() for name in names)
+
+    cases = []
+    for case_id in selected:
+        tc = find_by_id(case_id)
+        if not tc:
+            cases.append({"test_case_id": case_id, "eligible_pairs": 0, "target_budget": 0,
+                          "not_reached": 0, "note": "this case is not in the catalogue"})
+            continue
+        budget = target_budget(config.max_urls, len(selected), len(tc.steps))
+        if case_needs_parameter(tc):
+            eligible = len([1 for url, name in probeable
+                            if case_id in eligible_test_cases(url, "GET", [name])])
+            note = ("" if eligible else
+                    "no discovered parameter to test — this case needs one, so it will "
+                    "run against nothing and report nothing")
+        else:
+            eligible = len([1 for url in readable if case_id in eligible_test_cases(url)])
+            note = ("" if eligible else
+                    "no discovered URL this case can run against")
+        reached = min(eligible, budget)
+        cases.append({"test_case_id": case_id, "steps": len(tc.steps),
+                      "eligible_pairs": eligible, "target_budget": budget,
+                      "not_reached": eligible - reached, "note": note})
+
+    # SUMMED ACROSS CASES, and said so. Several cases usually share one pair, so this is
+    # the number of case-targets the run will not get to — not the number of distinct
+    # pairs left untested. Labelling it as pairs read as the smaller, wronger number.
+    not_reached = sum(c["not_reached"] for c in cases)
+    distinct_pairs = len({(url, name) for url, name in probeable})
+    return {
+        "cases": cases,
+        "max_urls": config.max_urls,
+        "selected": len(selected),
+        "not_reached": not_reached,
+        "distinct_pairs": distinct_pairs,
+        "inferred_not_probed": inferred,
+        "remedy": (f"{not_reached} case-target(s) will not be reached at "
+                   f"max_urls={config.max_urls} across {len(selected)} selected case(s) "
+                   f"and {distinct_pairs} distinct (endpoint, parameter) pair(s); raise "
+                   f"max_urls or select fewer cases"
+                   if not_reached else
+                   f"every eligible case-target fits within max_urls={config.max_urls}"),
+    }
+
+
+async def coverage(session_id, identity_id=None) -> list[dict]:
+    """Per (operation, parameter, identity): what happened, and why not.
+
+    The plan asks that an operator "sees its coverage", and §E-010 gives the measured
+    reason: at the default `max_urls` the 2026-09-10 run tested one or two parameters
+    per case out of eight and LOST SIX OF NINE FINDINGS. It said so twelve times, in
+    per-case observations nobody reads.
+
+    Everything needed was already recorded — `test_case`, `test_case_not_run`,
+    `test_case_truncated`, `test_case_unreachable`, `parameter_refused`,
+    `form_url_withheld` — and scattered across stage results, so the one question an
+    operator has ("was this endpoint tested?") had no answer. This aggregates it.
+
+    Every row carries a reason, including the ones nothing touched: a report that
+    listed only what ran would read as a clean bill of health for everything it left
+    out, which is the shape of wrongness this project keeps removing.
+    """
+    from .contracts import operation_key
+
+    where, args = "WHERE session_id=?", [session_id]
+    if identity_id is not None:
+        where += " AND identity_id=?"
+        args.append(identity_id)
+
+    # BOTH SIDES OF THE JOIN ARE NORMALISED, because the probe's URL is not the
+    # endpoint row's. `parameters_by_url` hands a case the QUERY-STRIPPED url — a
+    # crawled `/search?q=hello` becomes `/search`, since the query holds a sample value
+    # rather than the name being tested — so an observation says `/search` while the row
+    # says `/search?q=hello`. Matching them literally attached almost nothing: measured
+    # on Juice Shop, 13 probes ran and this credited 2. The launch preview predicted 13
+    # correctly, which is how the disagreement surfaced.
+    #
+    # A form action keeps its companion query and is probed at that exact URL, so both
+    # sides are stripped rather than one side being reconstructed.
+    def pair(url, parameter, identity):
+        return (base_url(url), parameter or "", identity)
+
+    findings = {}
+    for row in await db.rows("SELECT payload FROM integration_findings WHERE session_id=?",
+                             (session_id,)):
+        payload = json.loads(row["payload"])
+        findings.setdefault(pair(payload.get("url", ""), payload.get("parameter"),
+                                 payload.get("identity", "anonymous")), []).append(
+            payload.get("rule", ""))
+
+    # Observations, indexed by what they are about. A `url`-less observation (a budget
+    # truncation, a refusal) applies to every pair of that case for that identity.
+    seen, case_wide = {}, {}
+    for row in await db.rows(f"SELECT identity_id,result FROM integration_stages {where}",
+                            tuple(args)):
+        try:
+            observations = json.loads(row["result"] or "{}").get("observations") or []
+        except (ValueError, TypeError):
+            continue
+        for item in observations:
+            kind, case = item.get("type"), item.get("test_case_id") or ""
+            if kind not in ("test_case", "test_case_unreachable", "test_case_not_run",
+                            "test_case_truncated", "parameter_refused", "form_url_withheld"):
+                continue
+            record = (kind, case, item.get("reason") or "", item.get("parameters") or [])
+            if item.get("url"):
+                seen.setdefault(pair(item["url"], item.get("parameter"),
+                                     row["identity_id"]), []).append(record)
+            else:
+                case_wide.setdefault(row["identity_id"], []).append(record)
+
+    def state_of(kind):
+        return {"test_case": "answered", "test_case_unreachable": "unreachable",
+                "test_case_not_run": "not_run", "test_case_truncated": "not_run",
+                "parameter_refused": "refused", "form_url_withheld": "refused"}[kind]
+
+    # Grouped into probeable pairs first, so one probe is credited once.
+    grouped: dict[tuple, dict] = {}
+    for row in await db.rows(
+            f"SELECT url,method,identity_id,sources,parameters FROM integration_endpoints "
+            f"{where} ORDER BY url", tuple(args)):
+        sources = json.loads(row["sources"] or "[]")
+        key = (probe_key(row["url"], sources), row["method"], row["identity_id"])
+        entry = grouped.setdefault(key, {"url": probe_key(row["url"], sources),
+                                         "method": row["method"],
+                                         "identity_id": row["identity_id"],
+                                         "sources": set(), "parameters": []})
+        entry["sources"].update(sources)
+        for name in json.loads(row["parameters"] or "[]"):
+            if name not in entry["parameters"]:
+                entry["parameters"].append(name)
+
+    out = []
+    for row in grouped.values():
+        sources = sorted(row["sources"])
+        names = row["parameters"] or [""]
+        for name in names:
+            records = list(seen.get(pair(row["url"], name, row["identity_id"]), []))
+            for kind, case, reason, parameters in case_wide.get(row["identity_id"], []):
+                # A case-wide refusal names the parameters it refused; a budget
+                # truncation names none and applies to that case's OWN pairs.
+                if parameters and name not in parameters:
+                    continue
+                # And only to pairs the case could have tested. Applying a truncation to
+                # everything in the inventory labelled 41 pairs `not_run` on a Juice Shop
+                # run where no selected case was eligible for them at all — "the budget
+                # cut this" and "nothing selected tests this" are different answers, and
+                # only the second is true there.
+                if case and case not in eligible_test_cases(
+                        row["url"], row["method"], [name] if name else ()):
+                    continue
+                records.append((kind, case, reason, parameters))
+
+            # An inferred route outranks a case-wide budget truncation. Nothing was
+            # ever going to probe it — it is withheld from `parameters_by_url` by
+            # design — so reporting `not_run` would tell an operator that a larger
+            # `max_urls` covers it, and a larger budget changes nothing here. Only a
+            # URL-SPECIFIC observation can override it, because that means something
+            # did reach it after all.
+            url_specific = bool(seen.get(pair(row["url"], name, row["identity_id"])))
+            if "javascript" in sources and not url_specific:
+                state, case, reason = "inferred", "", (
+                    "read out of a JavaScript body and not been requested by anything; "
+                    "select it to test it")
+            elif not records:
+                state, case, reason = "not_attempted", "", (
+                    "no catalogue check ran against this pair — it may not have been "
+                    "selected, or no selected case tests a parameter")
+            else:
+                ranked = sorted(records, key=lambda r: COVERAGE_STATES.index(state_of(r[0])))
+                kind, case, reason, _ = ranked[0]
+                state = state_of(kind)
+                if state == "answered":
+                    matched = findings.get(pair(row["url"], name, row["identity_id"]))
+                    if matched:
+                        state = "verified"
+                        reason = "a finding came out of this probe: " + ", ".join(sorted(set(matched)))
+                    else:
+                        reason = reason or _ANSWERED_CAVEAT
+            out.append({
+                "operation": operation_key(row["url"], row["method"], [n for n in names if n]),
+                "url": row["url"], "method": row["method"], "identity": row["identity_id"],
+                "parameter": name, "sources": sorted(sources),
+                "test_case_id": case, "state": state, "reason": reason,
+            })
+    return out
+
+
 async def compare_arms(session_id, first_identity, second_identity) -> dict:
     """Do two identities describe the same surface? The R0 exit gate.
 

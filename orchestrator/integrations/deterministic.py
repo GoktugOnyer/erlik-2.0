@@ -366,6 +366,23 @@ def curl_request(command):
     return ["curl", *emitted], url, method
 
 
+def target_budget(max_urls: int, selected: int, steps: int) -> int:
+    """How many (endpoint, parameter) pairs one selected case may test.
+
+    NO CASE MAY STARVE ANOTHER: the URL budget is shared across the whole stage, so
+    cases running in selection order meant the first broad one took all of it. Each
+    selected case gets an equal share, denominated in requests — a case with four steps
+    reaches a quarter as many pairs as a single-step case for the same share.
+
+    Module-level because the launch preview answers the same question before the run, and
+    two copies of one fact is the defect this codebase already names about its own
+    catalogue lists. Never zero: a selected case that could test nothing at all would
+    run, find nothing, and the zero would read as clean.
+    """
+    share = max_urls // max(1, selected)
+    return max(1, share // max(1, steps))
+
+
 class CatalogueAdapter(BaseAdapter):
     name = "testcases"
 
@@ -535,9 +552,9 @@ class CatalogueAdapter(BaseAdapter):
         # because one target costs a case one request per step. A case with
         # fewer targets than its share simply uses less; a case with more says
         # what it did not reach.
-        def target_budget(case):
-            share = ctx.config.max_urls // max(1, len(ctx.config.test_cases))
-            return max(1, share // max(1, len(case.steps)))
+        def case_budget(case):
+            return target_budget(ctx.config.max_urls, len(ctx.config.test_cases),
+                                 len(case.steps))
         result.metadata["parameters_discovered"] = sum(len(v) for v in parameters.values())
 
         # STOP BEFORE THE AXE FALLS. service.py wraps each stage in
@@ -582,7 +599,7 @@ class CatalogueAdapter(BaseAdapter):
                         "parameters": sorted(set(forgeable)),
                         "reason": "these parameter names match this case's own evidence pattern, so an "
                                   "application that merely echoes the name would satisfy it"})
-                case_targets = pairs[:target_budget(tc)]
+                case_targets = pairs[:case_budget(tc)]
                 if len(pairs) > len(case_targets):
                     # Said out loud, because a truncated sweep that reports
                     # nothing looks exactly like a clean one.
@@ -607,13 +624,13 @@ class CatalogueAdapter(BaseAdapter):
                                   "one performs the form's action. Measured on DVWA: a bare GET, "
                                   "HEAD or OPTIONS of /vulnerabilities/csrf/?Change=Change sets the "
                                   "admin password to md5(\"\")"})
-                case_targets = eligible[:target_budget(tc)]
+                case_targets = eligible[:case_budget(tc)]
                 if len(eligible) > len(case_targets):
                     result.observations.append({
                         "type": "test_case_truncated", "test_case_id": case_id, "url": None, "steps": [],
                         "reason": f"{len(eligible) - len(case_targets)} of {len(eligible)} in-scope URLs "
                                   f"were not tested; this check's share of the {ctx.config.max_urls} URL "
-                                  f"budget is {target_budget(tc)} targets across "
+                                  f"budget is {case_budget(tc)} targets across "
                                   f"{len(ctx.config.test_cases)} selected checks"})
             if not case_targets:
                 # Selected, and nothing to run it against. Saying nothing here

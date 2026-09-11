@@ -920,6 +920,48 @@ its evidence. The identity-isolation half of E-008 belongs in Increment 1 or 2
 instead — §3 explains why it gates R0. Expand browser journeys and business
 workflows after this works.
 
+**Increment 5 — make coverage answerable, before and after.** The slice sentence asks
+that an operator "sees its coverage", and §E-010 gives the cost of not being able to: at
+the default budget the 2026-09-10 run tested one or two parameters per case out of eight
+and lost six of nine findings, saying so only in per-case observations nobody reads
+before launching. Everything needed was already recorded — `test_case`,
+`test_case_not_run`, `test_case_truncated`, `test_case_unreachable`, `parameter_refused`,
+`form_url_withheld` — and scattered across stage results, so the question an operator
+actually has had no answer. The same shape as the schema digest in E-030: recorded, never
+read.
+
+`inventory.coverage` aggregates it per (pair, identity) with a state and a reason, and
+`inventory.preview` answers the same question before the run using
+`deterministic.target_budget` — the runner's own arithmetic, extracted to module level so
+there is one definition rather than two claims. Both are exposed as
+`/sessions/{id}/coverage` and `/sessions/{id}/preview`.
+
+**There is no `tested` state, and that is the point.** `answered` means bytes came back;
+it is not proof the check exercised anything, because a DVWA probe missing its CSRF token
+answers HTTP 200 with 389 bytes of PHP warnings. `verified` — a finding came out of it —
+is the only state the lane can stand behind. `not_run` and `not_attempted` are likewise
+kept apart: the first says a bigger `max_urls` covers it, the second says nothing
+selected tests it and no budget changes that.
+
+**Three of my own errors were caught by making the two views agree**, which is the whole
+argument for building them as a pair:
+
+- Matching observations to endpoint rows literally credited **2 of 13** probes that
+  actually ran — because `parameters_by_url` hands a case the query-stripped URL while
+  the row keeps its query. A report claiming six times less coverage than the run
+  delivered sends an operator chasing gaps that are not there. The preview predicted 13
+  correctly, which is how the disagreement surfaced.
+- Normalising both sides without grouping then credited **57**, because twenty crawled
+  variants of one path each claimed the same probe. The unit of work is the probeable
+  pair, not the endpoint row; `inventory.probe_key` defines it once for both views.
+- A case-wide budget truncation was being applied to every pair in the inventory,
+  labelling 41 pairs `not_run` on a run where no selected case was eligible for them at
+  all. A case-wide record now applies only to pairs that case could have tested.
+
+And one label of mine was misleading rather than wrong: `not_reached` sums per-case
+shortfalls, so it counts case-targets rather than distinct pairs — several cases usually
+share a pair. It now says so, and reports `distinct_pairs` beside it.
+
 **Increment 4 — reach the surface the crawler was missing.** No fourth increment was
 written down; this is the work §12's own measurements call the binding constraint:
 *detection works and discovery does not reach*. On Juice Shop the lane reported 136
