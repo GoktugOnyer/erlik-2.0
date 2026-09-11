@@ -431,29 +431,53 @@ async def test_schema_file_returns_the_same_shape_with_and_without_a_schema():
     assert len(await schema_file(Context("s", "stage", "https://app.test", config()), None)) == 3
 
 
-async def test_a_stage_that_runs_out_of_time_keeps_what_it_found(database, tmp_path):
+async def test_a_stage_that_runs_out_of_time_keeps_what_it_found(database, tmp_path,
+                                                                  monkeypatch):
     """service.py wraps each stage in asyncio.timeout and on expiry REPLACES the
     accumulated StageResult with an empty one, so everything found before the
-    deadline is discarded. Measured against Juice Shop: a 120-URL inventory
-    times out here long before it finishes. The adapter therefore stops on its
-    own, short of the outer deadline, and returns what it has."""
-    import time
+    deadline is discarded. Measured against Juice Shop: a 120-URL inventory times out
+    here long before it finishes. The adapter therefore stops on its own, short of the
+    outer deadline, and returns what it has.
+
+    DRIVEN BY AN INJECTED CLOCK, not by racing one. This slept 0.12s per container
+    start against a real 8-second budget, so whether it passed depended on how fast
+    the machine was — it failed once in a full-suite run on a loaded laptop and
+    reproduced neither in isolation nor under four concurrent suites, which is the
+    worst kind of flake to own. An adversarial review had flagged it and I had
+    dismissed it because ten runs passed.
+
+    What is under test is the BUDGET LOGIC: that `time.monotonic` crossing the
+    deadline makes the adapter stop, report `partial`, and name what it did not reach.
+    A fake clock tests exactly that, deterministically, and the test no longer sleeps
+    at all.
+    """
     cfg = config(active=True, test_cases=["WSTG-SESS-02", "WSTG-INFO-03"],
                  budget={"stage_seconds": 8})
     await database.persist_result("s", "discovery", StageResult(endpoints=[
         Endpoint(url=f"https://app.test/p{n}", source="katana", identity="anonymous")
         for n in range(120)]))
 
-    class SlowSandbox(Sandbox):
-        async def run(self, argv, **kw):
-            time.sleep(0.12)                       # blocking, like a container start
-            return await super().run(argv, **kw)
+    class Clock:
+        """Advances half a second every time the adapter looks at it."""
+        def __init__(self):
+            self.now = 0.0
 
-    sandbox = SlowSandbox(tmp_path, cfg.model_dump())
+        def monotonic(self):
+            self.now += 0.5
+            return self.now
+
+    from orchestrator.integrations import deterministic as module
+    monkeypatch.setattr(module, "time", Clock())
+
+    sandbox = Sandbox(tmp_path, cfg.model_dump())
     result = await CatalogueAdapter().run(Context("s", "tests", "https://app.test", cfg), sandbox)
 
     assert result.status == "partial"
-    assert "budget" in (result.reason or "")
+    # The TIME deadline specifically. `"budget" in reason` was satisfied by the
+    # per-case URL budget as well, so the test passed with the time check removed
+    # entirely — a green from a clause that was not running, which is the defect this
+    # codebase keeps finding. The two reasons are distinguishable, so distinguish them.
+    assert "stage time budget reached" in (result.reason or ""), result.reason
     assert sandbox.calls, "it did real work before stopping"
     unrun = [o for o in result.observations
              if o["type"] in ("test_case_not_run", "test_case_truncated")]
