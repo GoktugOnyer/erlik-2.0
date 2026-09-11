@@ -48,7 +48,8 @@ async def lab(tmp_path, monkeypatch):
     return {"db": db, "h": handles}
 
 
-async def stage(lab, identity, steps, url=URL, case="read", endpoint_url=None):
+async def stage(lab, identity, steps, url=URL, case="read", endpoint_url=None,
+                parameter=""):
     """One stage, its endpoint row, and one run artifact with the given steps."""
     db = lab["db"]
     stage_id = uuid.uuid4().hex
@@ -60,7 +61,8 @@ async def stage(lab, identity, steps, url=URL, case="read", endpoint_url=None):
                      "identity_id,sources,parameters) VALUES(?,?,?,?,?,?)",
                      ("s", endpoint_url or url, "GET", identity,
                       json.dumps(["katana"]), "[]"))
-    run = {"test_case_id": case, "target": {"url": url, "parameter": ""}, "findings": [],
+    run = {"test_case_id": case, "target": {"url": url, "parameter": parameter},
+           "findings": [],
            "chain_next": [], "stopped_early": False, "duration_ms": 1, "produced": {},
            "steps": [{"step": name, "command": "curl", "success": True, "duration_ms": 1,
                       "exit_code": 0, "skipped": False, "error": None, "output": body}
@@ -98,17 +100,37 @@ async def test_bodies_from_different_test_cases_are_not_compared(lab):
     assert result["findings"] == []
 
 
-async def test_two_artifacts_for_one_request_are_refused_not_ranked(lab):
-    """One arm recorded the same (url, case, step) twice — a 403 and a 200. Row order
-    used to decide, which both invents findings and loses them. Neither answer is the
-    arm's answer, so the pair is dropped and said out loud."""
+async def test_two_artifacts_for_one_request_are_dropped_not_ranked(lab):
+    """One arm recorded the same (url, case, step, parameter) twice — a 403 and a 200. Row
+    order used to decide, which both invents findings and loses them. Neither answer is the
+    arm's answer, so the KEY is dropped and counted.
+
+    Dropped rather than refusing the session, for the reason a real DVWA run forced: the
+    key originally omitted the PARAMETER, so `WSTG-INPV-05.2:single_quote` probing `username`
+    and probing `password` on one URL looked like one contradictory request and abandoned the
+    whole comparison.
+    """
     await stage(lab, lab["h"]["jim"], [("read", REFUSED_403)])
     await stage(lab, lab["h"]["jim"], [("read", OWNED)])
     await stage(lab, lab["h"]["admin"], [("read", OWNED)])
     await stage(lab, "anonymous", [("read", REFUSED_401)])
     result = await check(lab)
     assert result["findings"] == []
-    assert "ambiguous_evidence" in result["refused_because"]
+    assert result["ambiguous_evidence"] >= 1, result
+
+
+async def test_two_probes_of_DIFFERENT_parameters_are_not_contradictory(lab):
+    """Measured on the first real DVWA run: `WSTG-INPV-05.2` runs once per (endpoint,
+    parameter) pair, so one URL legitimately carries several captures. Without the parameter
+    in the key they collapsed into one, the differing captures read as self-contradiction,
+    and `ambiguous_evidence` refused all 29 comparable operations."""
+    from orchestrator.integrations.inventory import arm_responses
+
+    await stage(lab, lab["h"]["jim"], [("probe", OWNED)], parameter="username")
+    await stage(lab, lab["h"]["jim"], [("probe", REFUSED_403)], parameter="password")
+    out, ambiguous = await arm_responses("s", lab["h"]["jim"])
+    assert ambiguous == set(), "two different parameters are two different requests"
+    assert len(out) == 2
 
 
 async def test_a_url_the_isolation_gate_never_compared_is_not_reported(lab):

@@ -186,13 +186,13 @@ async def test_a_caller_who_was_refused_is_not_a_finding(lab):
 
 # ------------------------------------------- it refuses rather than concluding
 
-async def test_arms_that_are_not_comparable_are_refused_not_silently_clean(lab):
+async def test_an_operation_the_arms_reached_at_DIFFERENT_urls_is_excluded(lab):
     """Composing on the isolation gate instead of repeating it.
 
-    Comparing responses from arms that issued DIFFERENT requests measures the request.
-    Here the arms reached the operation at different concrete URLs — the case the
-    operation key introduces, which `compare_arms` already names — so this must refuse
-    out loud rather than report no finding, because the two are not the same answer.
+    Comparing responses from arms that issued DIFFERENT requests measures the request, so
+    this operation must not produce a finding. It is EXCLUDED and counted rather than
+    refusing the whole comparison — see the test below for why that distinction is the
+    difference between the feature working and not.
     """
     from orchestrator.integrations.inventory import cross_arm_authorization
 
@@ -204,7 +204,39 @@ async def test_arms_that_are_not_comparable_are_refused_not_silently_clean(lab):
                                            lab["handles"]["admin"], "data.UserId",
                                            anonymous="anonymous")
     assert result["findings"] == []
-    assert "per_arm_value_in_operation" in result["refused_because"], result
+    assert result["not_comparable"] >= 1, (
+        "and it must be counted — a comparison that silently skipped it would read as "
+        "having covered it")
+
+
+async def test_one_incomparable_operation_does_not_discard_the_comparable_ones(lab):
+    """Measured on the first real three-arm run against Juice Shop: 37 of 37 operations were
+    seen by both arms, the roles were declared correctly, and both cross-arm checks returned
+    nothing — because THREE `/socket.io/` operations carry a per-connection `sid` and a
+    cache-busting `t` in their query, and that refused the session. Thirty-four comparable
+    operations were thrown away for three websocket handshakes.
+
+    Excluding an operation can only lose a finding, never invent one, so per-operation is
+    both the more precise reading of the rule and the safer one.
+    """
+    from orchestrator.integrations.inventory import cross_arm_authorization
+
+    transport = "http://app.test/socket.io/"
+    await arm(lab, lab["handles"]["jim"], url=transport + "?sid=aaa", body=owned_by(9))
+    await arm(lab, lab["handles"]["admin"], url=transport + "?sid=bbb", body=owned_by(9))
+    await arm(lab, "anonymous", url=transport, body=DENIED, status=401)
+    # ...and the real violation, on an operation both arms reached identically.
+    await arm(lab, lab["handles"]["jim"], body=owned_by(1))
+    await arm(lab, lab["handles"]["admin"], body=owned_by(1))
+    await arm(lab, "anonymous", body=DENIED, status=401)
+
+    result = await cross_arm_authorization("s", lab["handles"]["jim"],
+                                           lab["handles"]["admin"], "data.UserId",
+                                           anonymous="anonymous")
+    assert result["refused_because"] == [], result
+    assert len(result["findings"]) == 1, result
+    assert result["findings"][0]["url"] == BASKET
+    assert result["not_comparable"] >= 1
 
 
 async def test_an_identity_without_a_declared_subject_is_refused(lab):
@@ -286,3 +318,28 @@ async def test_an_unknown_session_is_a_404(lab):
         await authorization_check("nope", AuthorizationCheck(
             caller="a", owner="b", owner_field="data.UserId"))
     assert exc.value.status_code == 404
+
+
+async def test_no_companion_value_reaches_the_published_comparison(lab):
+    """`compare_arms` reports divergence with every value withheld, naming only the query
+    FIELDS that differ — a companion value is target-controlled text. A first attempt at the
+    per-operation exclusion returned the concrete URLs alongside, which carried a single-use
+    `user_token` straight into the payload; the invariant is kept here and the exclusion now
+    needs no URLs at all, because it is a COUNT."""
+    from orchestrator.integrations.inventory import compare_arms, cross_arm_authorization
+
+    secret = "b3ae1ff6aafb9151ef0c06930815107d"
+    await arm(lab, lab["handles"]["jim"], url=BASKET + "?Submit=Submit", body=owned_by(1))
+    await arm(lab, lab["handles"]["admin"],
+              url=BASKET + f"?Submit=Submit&user_token={secret}", body=owned_by(1))
+
+    surfaces = await compare_arms("s", lab["handles"]["jim"], lab["handles"]["admin"])
+    assert secret not in json.dumps(surfaces), (
+        "a target-controlled companion value reached the published comparison")
+    assert surfaces["per_arm_value_in_operation"], "it still reports the divergence"
+
+    result = await cross_arm_authorization("s", lab["handles"]["jim"],
+                                           lab["handles"]["admin"], "data.UserId",
+                                           anonymous="anonymous")
+    assert secret not in json.dumps(result), "nor the check's own payload"
+    assert result["not_comparable"] >= 1, "and the count still says one operation diverged"

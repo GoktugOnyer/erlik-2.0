@@ -114,6 +114,7 @@ async def authentication_controls_for(session_id, config, identities):
             checks.setdefault(check_key(check), check)
     if not checks:
         return {}
+    checks_urls = {check.get("url") for check in checks.values()} - {None}
     out = {}
     # A FAILURE HERE MUST NOT ABORT THE ASSESSMENT. Returning what was obtained leaves
     # `authenticate` to answer `control_unavailable` for exactly the identities whose
@@ -121,7 +122,7 @@ async def authentication_controls_for(session_id, config, identities):
     # which has nothing to verify, still runs. Raising instead would lose the whole run,
     # including stages that needed no control at all.
     try:
-        sandbox = Sandbox(config, None)
+        sandbox = Sandbox(config, None, control_urls=sorted(checks_urls))
         sandbox.assessment_context = {"session_id": session_id,
                                       "stage_id": "authentication-control"}
         async with sandbox:
@@ -190,6 +191,16 @@ async def authenticate(ctx, sandbox, controls=None) -> str:
     check = ctx.identity["check"]
     response = await rpc(sandbox, {"action": "request", "request": check})
     await db.evidence(ctx.session_id, ctx.stage_id, "authentication-check", json.dumps(response), ctx.known)
+    if response.get("blocked") or response.get("error"):
+        # ERLIK'S OWN REFUSAL IS NOT A DEAD CREDENTIAL. Measured on the first real
+        # three-arm run: the admin arm crawled 63 endpoints, the closing check was refused
+        # by the proxy with `X-Erlik-Blocked: true / URL budget exhausted`, `satisfies`
+        # returned False, and the stage was recorded "authentication expired during stage;
+        # replace credentials and resume" — advice about a credential that was fine. The
+        # whole assessment then halted, including the anonymous arm, which needs no
+        # credential at all. This is the same defect as the blocked CONTROL one line below,
+        # which was fixed an increment earlier; it was sitting directly above it.
+        return "probe_refused"
     if not satisfies(response, check):
         return "needs_auth"
     samples = (controls or {}).get(check_key(check)) or []
@@ -229,6 +240,13 @@ async def authenticate(ctx, sandbox, controls=None) -> str:
 CONTROL_SAMPLES = 2
 
 AUTH_OUTCOMES = {
+    # Pre-stage: the identity was never established, so the stage must not run and be
+    # attributed to an unverified arm. Not `needs_auth`, because the credential may be
+    # perfectly good and resuming would hit the same refusal.
+    "probe_refused": ("failed",
+                      "the authentication check was refused by the assessment proxy, not by "
+                      "the application, so this identity was never verified; raise the URL "
+                      "or request budget, or widen the scope to include the check URL"),
     "check_is_unstable": ("failed",
                           "the authentication check is not stable on this target: two "
                           "identical anonymous requests disagreed about its own assertion, "
@@ -298,6 +316,11 @@ async def run(session_id, notify=None):
             # `authenticate` compares each identity's own answer against it; see there for
             # why an assertion that holds without the credential establishes nothing.
             controls = await authentication_controls(session_id, config)
+            # The declared check URLs, so the proxy can keep erlik's own liveness traffic
+            # out of the operator's URL budget.
+            control_urls = sorted({
+                (SecretStore().get(identity_id) or {}).get("check", {}).get("url")
+                for identity_id in config.identity_ids} - {None})
             for stage in stages:
                 identity = SecretStore().get(stage["identity_id"]) if stage["identity_id"] != "anonymous" else None
                 ctx = Context(session_id, stage["id"], assessment["target"], config, stage["identity_id"], identity)
@@ -310,12 +333,13 @@ async def run(session_id, notify=None):
                         # Build operation policy using a read-only sandbox before any mutation.
                         routes = []
                         if config.workflow:
-                            discovery = Sandbox(config, identity)
+                            discovery = Sandbox(config, identity, control_urls=control_urls)
                             discovery.assessment_context = {"session_id": session_id, "stage_id": stage["id"]}
                             async with discovery:
                                 routes = await operation_routes(config, discovery, ctx.target)
                                 await record(ctx, discovery, JobOutput(0, "workflow schema inventory", ""), StageResult())
-                        sandbox = Sandbox(config, identity, operation_routes=routes)
+                        sandbox = Sandbox(config, identity, operation_routes=routes,
+                                          control_urls=control_urls)
                         sandbox.assessment_context = {"session_id": session_id, "stage_id": stage["id"]}
                         async def retain_files(closing):
                             await record(ctx, closing, JobOutput(0, "Stage final audit", ""), StageResult())
@@ -403,6 +427,18 @@ async def run(session_id, notify=None):
                                         closing = await authenticate(ctx, sandbox, controls)
                                         if closing == "needs_auth":
                                             result.status, result.reason = "needs_auth", "authentication expired during stage; results are incomplete"
+                                        elif closing == "probe_refused":
+                                            # The stage did its work; only the CLOSING
+                                            # confirmation is missing, and it is missing
+                                            # because of our own budget rather than the
+                                            # application. `partial` keeps the results and
+                                            # keeps the run going — `needs_auth` would halt
+                                            # every remaining arm over a credential that is
+                                            # fine.
+                                            result.status, result.reason = "partial", (
+                                                "the closing authentication check was refused by the "
+                                                "assessment proxy, so the session could not be confirmed "
+                                                "still live; the results above stand but are unconfirmed")
                                         elif closing != "authenticated":
                                             # The check stopped discriminating, or its
                                             # control is gone. Either way this arm's

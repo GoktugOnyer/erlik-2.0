@@ -91,7 +91,7 @@ async def lab(tmp_path, monkeypatch):
     return {"db": db, "handles": handles}
 
 
-async def arm(lab, identity, body, status=200, url=USERS, output=None):
+async def arm(lab, identity, body, status=200, url=USERS, output=None, case="read"):
     db = lab["db"]
     stage_id = uuid.uuid4().hex
     await db.execute(
@@ -102,13 +102,13 @@ async def arm(lab, identity, body, status=200, url=USERS, output=None):
         "INSERT OR REPLACE INTO integration_endpoints"
         "(session_id,url,method,identity_id,sources,parameters) VALUES(?,?,?,?,?,?)",
         ("s", url, "GET", identity, json.dumps(["katana"]), "[]"))
-    run = {"test_case_id": "read", "target": {"url": url, "parameter": ""}, "findings": [],
+    run = {"test_case_id": case, "target": {"url": url, "parameter": ""}, "findings": [],
            "chain_next": [], "stopped_early": False, "duration_ms": 1, "produced": {},
            "steps": [{"step": "read", "command": "curl", "success": True, "duration_ms": 1,
                       "exit_code": 0, "skipped": False, "error": None,
                       "output": (output if output is not None
                                  else f"HTTP/1.1 {status} OK\r\n\r\n{body}")}]}
-    await db.evidence("s", stage_id, "testcase:read", json.dumps(run))
+    await db.evidence("s", stage_id, f"testcase:{case}", json.dumps(run))
 
 
 def body(payload):
@@ -521,3 +521,44 @@ async def test_a_form_encoded_reflection_is_caught(lab):
         "s", lab["handles"]["admin"], lab["handles"]["jim"], marker, anonymous="anonymous")
     assert result["findings"] == []
     assert result["skipped_reflected_marker"] == [url]
+
+
+async def test_one_finding_per_operation_not_per_probe_that_fetched_it(lab):
+    """Measured on the first real DVWA run: `WSTG-CONF-06:options` and
+    `WSTG-SESS-02:fetch_headers` both fetched `http://dvwa/`, and the check emitted TWO
+    byte-identical findings. Which case did the fetching is not part of the claim, so it
+    cannot be what distinguishes two of them."""
+    from orchestrator.integrations.inventory import cross_arm_privileged_function
+
+    for case in ("WSTG-CONF-06", "WSTG-SESS-02"):
+        await arm(lab, lab["handles"]["admin"], PRIVILEGED, case=case)
+        await arm(lab, lab["handles"]["jim"], PRIVILEGED, case=case)
+        await arm(lab, "anonymous", DENIED_401, status=401, case=case)
+
+    result = await cross_arm_privileged_function(
+        "s", lab["handles"]["admin"], lab["handles"]["jim"], MARKER, anonymous="anonymous")
+    assert len(result["findings"]) == 1, [f["url"] for f in result["findings"]]
+    assert result["checked"] >= 2, "it still LOOKED at both probes"
+
+
+async def test_an_incomparable_operation_does_not_discard_the_comparable_ones(lab):
+    """The twin of the object-level test. Measured on the first real Juice Shop run: three
+    `/socket.io/` operations carry a per-connection `sid`, and that refused all 34 comparable
+    operations — so the check produced nothing on a real assessment even after Increment 9
+    made it reachable at all."""
+    from orchestrator.integrations.inventory import cross_arm_privileged_function
+
+    transport = "http://app.test/socket.io/"
+    await arm(lab, lab["handles"]["admin"], PRIVILEGED, url=transport + "?sid=aaa")
+    await arm(lab, lab["handles"]["jim"], PRIVILEGED, url=transport + "?sid=bbb")
+    await arm(lab, "anonymous", DENIED_401, status=401, url=transport)
+    # ...and the real crossing, on an operation both arms reached identically.
+    await arm(lab, lab["handles"]["admin"], PRIVILEGED)
+    await arm(lab, lab["handles"]["jim"], PRIVILEGED)
+    await arm(lab, "anonymous", DENIED_401, status=401)
+
+    result = await cross_arm_privileged_function(
+        "s", lab["handles"]["admin"], lab["handles"]["jim"], MARKER, anonymous="anonymous")
+    assert result["refused_because"] == [], result
+    assert [f["url"] for f in result["findings"]] == [USERS]
+    assert result["not_comparable"] >= 1

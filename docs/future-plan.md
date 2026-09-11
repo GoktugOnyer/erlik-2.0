@@ -1167,6 +1167,59 @@ than a test failure, which is the same trap as the Increment 5 negative control 
 IndentationError. Two more clauses turned out to be genuinely unreachable and were rewritten
 rather than kept.
 
+**Increment 10 — run one.** Increment 9's worst finding was a feature that could not run in
+production while its tests were green, so the way to find the next one is to stop writing
+fixtures and run a real assessment: `service.run()`, three arms, against both lab
+applications. That had never happened — the anonymous arm only started being registered an
+increment earlier. It found three more reasons the authorization work produced nothing, and
+none of them was reachable from a unit test.
+
+**A refusal by erlik's own proxy, read as an expired credential, halted the run.** The admin
+arm crawled 63 Juice Shop endpoints under `max_urls=60`, so the stage's CLOSING liveness check
+was the 61st distinct URL; the proxy refused it, `satisfies` opens with `not blocked`, and the
+stage was recorded "authentication expired during stage; replace credentials and resume" about
+a credential that was fine. `run()` then broke out of the loop, costing the other identity and
+the anonymous arm, which has no credential to expire. This is the third instance of one
+pattern — our own refusal read as the target's — and it sat one line above the control version
+fixed in Increment 9. A blocked probe is now its own verdict, and erlik's liveness traffic no
+longer spends the operator's URL budget: `max_urls` bounds exploration of the TARGET, and a
+probe of one declared, scope-checked URL is not exploration.
+
+**One incomparable operation discarded every comparable one.** 37 of 37 Juice Shop operations
+seen by both arms, roles declared correctly, both checks returning nothing — because THREE
+`/socket.io/` operations carry a per-connection `sid` and a cache-busting `t`. Thirty-four
+comparable operations thrown away for three websocket handshakes. The two per-operation
+conditions now count instead of refusing the session.
+
+My first fix for that returned the concrete excluded URLs, which carry the companion VALUES
+`compare_arms` deliberately withholds — a single-use `user_token` reached the payload, and an
+existing test caught it. Then the subtraction turned out to be unnecessary at all, because
+`arm_responses` keys evidence by the request with the URL included, so two arms are only ever
+compared on the identical URL. Verified by removing it and re-running both real sessions:
+identical results. Reported, not subtracted.
+
+**The evidence key omitted the parameter**, so `WSTG-INPV-05.2` probing `username` and
+probing `password` on one DVWA URL collapsed into one key, their differing captures read as
+self-contradiction, and `ambiguous_evidence` refused all 29 comparable operations. Every
+fixture had used `parameter: ""`. The parameter is part of the request and is now part of the
+key.
+
+**Zero findings was then verified to be an honest zero, not a vacuous one.** On DVWA two real
+keys carry a finding's exact structure (admin 2xx, low 2xx, anonymous ANSWERED non-2xx), and
+running the shipped check over the real lane evidence fires on a marker present in those
+captures and not on one absent from them. It also surfaced a duplicate — two catalogue cases
+fetched `http://dvwa/` and the check emitted two byte-identical findings — so it is one
+finding per operation now.
+
+**Two structural limits, measured, neither a defect.** DVWA's anonymous arm discovered 4
+endpoints against the identity arms' 31 and 32, because DVWA redirects an unauthenticated
+caller away from its entire surface, so the anonymous clause is unevaluable for the
+authenticated surface and the checks skip rather than conclude. And the cross-arm checks read
+whatever the selected catalogue cases happened to fetch — **none of the runnable cases reads a
+privileged object as each identity**, so the authorization work is opportunistic. A case that
+fetches each discovered endpoint as each arm is the natural next piece of work, and it is what
+would make these checks systematic rather than dependent on what a run happens to leave behind.
+
 **Two verified defects are named rather than fixed, because both need lane plumbing.**
 The anonymous stage cannot carry application configuration (`service.py` passes `None` for
 it and the proxy then injects nothing), so on an application whose configuration lives in a

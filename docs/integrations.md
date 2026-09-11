@@ -557,6 +557,84 @@ assessment the product accepts**; the three-arm sessions its tests exercise were
 the database by the tests. `anonymous_arm` now defaults to true and costs one more pass of
 each selected stage.
 
+### What a real assessment revealed
+
+Increment 9 made the cross-arm checks reachable. Increment 10 ran one — `service.run()`,
+three arms, against both lab applications — and found three reasons they still produced
+nothing, none of which any unit test could have shown.
+
+**A refusal by erlik's own proxy was read as an expired credential, and halted the run.** The
+admin arm crawled 63 Juice Shop endpoints under `max_urls=60`; the stage's CLOSING liveness
+check was then the 61st distinct URL, so the proxy refused it, `satisfies` opens with
+`not response["blocked"]`, and the stage was recorded:
+
+    katana, admin arm   needs_auth   "authentication expired during stage; results are
+                                      incomplete"
+    every other stage   queued
+
+The evidence says it plainly — `authentication-check blocked=True status=403 body='X-Erlik-
+Blocked: true\nURL budget exhausted'`. The credential was fine. One arm's budget then cost
+the other identity **and the anonymous arm**, which has no credential that can expire. Two
+fixes: a blocked or errored probe is its own verdict (`probe_refused` — `failed` pre-stage,
+`partial` post-stage, never `needs_auth`), and **erlik's own liveness traffic no longer
+spends the operator's URL budget.** `max_urls` bounds how much of the *target* an assessment
+explores; a probe of one declared, already scope-checked URL is not exploration. It still
+counts against `max_requests` and is still scope-checked.
+
+**One incomparable operation discarded every comparable one.** `compare_arms` warns that an
+operation both arms reached at different concrete URLs cannot be compared — and that warning
+refused the whole session. Measured: 37 of 37 Juice Shop operations seen by both arms, roles
+declared correctly, and both checks returning nothing, because **three `/socket.io/`
+operations carry a per-connection `sid` and a cache-busting `t`**. Thirty-four comparable
+operations thrown away for three websocket handshakes. Those two conditions are per-operation,
+so they are now counted (`not_comparable`) rather than refusing the session.
+
+A first attempt at that returned the concrete excluded URLs, which carry the companion
+*values* `compare_arms` deliberately withholds — a single-use `user_token` went straight into
+the payload, and an existing test caught it. It then turned out the subtraction was
+unnecessary at all: `arm_responses` keys evidence by the request, URL included, so two arms
+are only ever compared on the *identical* URL and the danger the warning describes cannot
+arise through this path. Verified by removing it and re-running both real sessions —
+identical results. So it is reported, not subtracted; code that cannot fire implies a
+protection that is not there.
+
+**The evidence key omitted the parameter.** `WSTG-INPV-05.2` runs once per (endpoint,
+parameter) pair, so on DVWA one URL legitimately carries several captures:
+
+    key WSTG-INPV-05.2:single_quote on /vulnerabilities/brute/?Login=Login
+        parameters behind that ONE key: ['password', 'username']
+
+Two genuinely different probes collapsed into one key, their differing captures read as
+self-contradiction, and `ambiguous_evidence` refused all 29 comparable operations. Every test
+fixture had used `parameter: ""`, so only a real run could show it. The parameter is part of
+the request and is now part of the key; ambiguity drops the key and is counted rather than
+refusing the session.
+
+**After the three fixes**, both real sessions run clean: Juice Shop 34 operations checked,
+DVWA 37 and 38, `refused_because` empty on all four checks.
+
+**Zero findings was the honest answer, and that was verified rather than assumed.** A check
+that cannot fire also returns zero. On DVWA two real keys have a finding's exact structure —
+admin 2xx, low-privilege 2xx, anonymous *answered* non-2xx — and running the shipped check
+over the real lane evidence with a marker actually present in those captures produces a
+finding, while a marker absent from them produces none. So the machinery fires on real
+evidence and the marker is what decides. (That diagnostic used a discovered marker, which is
+target-controlled, so it is not a reportable finding — only proof of non-vacuity.)
+
+It also exposed one duplicate: `WSTG-CONF-06:options` and `WSTG-SESS-02:fetch_headers` both
+fetched `http://dvwa/`, and the check emitted two byte-identical findings. Which case did the
+fetching is not part of the claim, so one finding per operation now.
+
+**Two structural limits, both measured, neither a defect.** On DVWA the anonymous arm
+discovered **4** endpoints against the identity arms' 31 and 32, because DVWA redirects an
+unauthenticated caller away from its whole surface — so the anonymous clause cannot be
+evaluated for the authenticated surface at all, and the checks correctly skip rather than
+conclude. And the cross-arm checks read whatever the selected catalogue cases happened to
+fetch: the four used here (`SESS-02`, `INPV-05.2`, `CONF-06`, `INFO-03`) probe for injection
+and information, and **none of them reads a privileged object as each identity.** Until a case
+does that systematically, the authorization checks are opportunistic — they work, on whatever
+evidence the run happens to leave them.
+
 ### What the matrix does not unlock
 
 A lane stage carries exactly **one** identity — it resolves it from its own row, and the

@@ -6,7 +6,7 @@ import time
 from pathlib import Path
 from urllib.parse import urlsplit
 from mitmproxy import http
-from egress_policy import EgressPolicy, merged_cookies, origin
+from egress_policy import EgressPolicy, budget_refusal, merged_cookies, origin
 
 
 class Guard:
@@ -50,10 +50,9 @@ class Guard:
             allowed, reason = False, "WebSocket execution is unsupported"
         self.count += 1
         self.urls.add((flow.request.method, flow.request.pretty_url))
-        if self.count > self.config.get("max_requests", 10000):
-            allowed, reason = False, "request budget exhausted"
-        if not self.config.get("service_only") and len(self.urls) > self.config.get("max_urls", 500):
-            allowed, reason = False, "URL budget exhausted"
+        over = budget_refusal(self.config, self.count, self.urls, flow.request.pretty_url)
+        if over:
+            allowed, reason = False, over
         self.record({"url": flow.request.pretty_url, "method": flow.request.method, "allowed": allowed, "reason": reason, "timestamp": time.time()})
         if not allowed:
             # The marker goes in the BODY as well as the header. A catalogue

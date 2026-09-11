@@ -501,7 +501,7 @@ async def preview(session_id, config, identity_id=None) -> dict:
 async def arm_responses(session_id, identity_id) -> tuple[dict, set]:
     """What one arm recorded, keyed by the REQUEST it recorded it for.
 
-    Returns `({(url, test_case, step): output}, ambiguous)`.
+    Returns `({(url, test_case, step, parameter): output}, ambiguous)`.
 
     THE KEY IS THE WHOLE REQUEST, not the url. This used to key by the run's declared
     `target.url` and take the FIRST step that had output, and that was the common cause
@@ -541,14 +541,22 @@ async def arm_responses(session_id, identity_id) -> tuple[dict, set]:
             continue            # an unreadable artifact is not a verdict
         if not isinstance(run, dict):
             continue
-        url = (run.get("target") or {}).get("url")
+        target = run.get("target") or {}
+        url = target.get("url")
         case = run.get("test_case_id") or ""
+        # THE PARAMETER IS PART OF THE REQUEST. Leaving it out of the key collapsed two
+        # genuinely different probes into one and then called them contradictory: measured on
+        # the first real DVWA run, `WSTG-INPV-05.2:single_quote` ran once for `username` and
+        # once for `password` on `/vulnerabilities/brute/?Login=Login`, the two captures
+        # differed as they should, and `ambiguous_evidence` refused the WHOLE comparison.
+        # Every fixture had used `parameter: ""`, so only a real run could show it.
+        parameter = target.get("parameter") or ""
         if not url:
             continue
         for step in run.get("steps") or []:
             if not isinstance(step, dict) or not step.get("output"):
                 continue
-            key = (url, case, step.get("step") or "")
+            key = (url, case, step.get("step") or "", parameter)
             if key in out and out[key] != step["output"]:
                 ambiguous.add(key)
             out[key] = step["output"]
@@ -672,17 +680,18 @@ async def cross_arm_authorization(session_id, caller, owner, owner_field,
         refused.append("no_anonymous_arm")
 
     surfaces = await compare_arms(session_id, caller, owner)
-    if not surfaces["comparable"]:
-        refused += [reason for reason in surfaces["refused_because"]
-                    if reason != "arms_share_one_identity"]
+    refused += [reason for reason in surfaces["refused_because"]
+                if reason not in PER_OPERATION_REFUSALS]
 
     caller_saw, caller_split = await arm_responses(session_id, caller)
     owner_saw, owner_split = await arm_responses(session_id, owner)
     anonymous_saw, anonymous_split = ((await arm_responses(session_id, anonymous))
                                       if anonymous is not None else ({}, set()))
-    if caller_split or owner_split or anonymous_split:
-        # Evidence that contradicts itself about one request is not a record to compare.
-        refused.append("ambiguous_evidence")
+    # Evidence that contradicts itself about ONE request is not a record to compare — and
+    # `arm_responses` has already dropped those keys, so nothing downstream can read them.
+    # It is NOT a session refusal: the same over-broad shape as the per-operation conditions
+    # above, and measured the same way. Counted so it cannot be silent.
+    ambiguous = len(caller_split | owner_split | anonymous_split)
     if anonymous is not None and not anonymous_saw:
         # `service.register` creates an anonymous stage only via
         # `config.identity_ids or ["anonymous"]`, so a two-identity run has none — and an
@@ -692,9 +701,21 @@ async def cross_arm_authorization(session_id, caller, owner, owner_field,
 
     # Only URLs the isolation gate actually looked at. `compare_arms` reads the endpoint
     # rows; without this, evidence could report a finding for a URL those rows never held.
-    gated = await arm_urls(session_id, caller) & await arm_urls(session_id, owner)
+    #
+    # IT DOES NOT ALSO SUBTRACT THE INCOMPARABLE OPERATIONS, and the reason is worth stating
+    # because the first fix did. `compare_arms` warns that an operation both arms reached at
+    # DIFFERENT concrete URLs cannot be compared — but `arm_responses` keys evidence by the
+    # request, URL included, so two arms are only ever compared on the IDENTICAL url, case,
+    # step and parameter. The danger the warning describes cannot arise through this path.
+    # Verified by removing the subtraction and re-running both real lab sessions: identical
+    # results (34/34 and 37/38 checked). So it is counted and reported, not subtracted —
+    # code that cannot fire implies a protection that is not there.
+    not_comparable = (len(surfaces["per_arm_value_in_operation"])
+                      + len(surfaces["only_in_first"]) + len(surfaces["only_in_second"]))
+    gated = (await arm_urls(session_id, caller)
+             & await arm_urls(session_id, owner))
 
-    findings, checked, allowed = [], 0, []
+    findings, checked, allowed, reported = [], 0, [], set()
     if not refused:
         for key, body in sorted(caller_saw.items()):
             url = key[0]
@@ -731,6 +752,9 @@ async def cross_arm_authorization(session_id, caller, owner, owner_field,
             if _entitled(url, entitled):
                 allowed.append(url)
                 continue
+            if url in reported:
+                continue            # one finding per object, not per probe — see the twin
+            reported.add(url)
             findings.append({
                 "url": url, "owner_field": owner_field,
                 "caller": caller, "caller_subject_id": caller_subject,
@@ -746,6 +770,8 @@ async def cross_arm_authorization(session_id, caller, owner, owner_field,
         "refused_because": refused,
         "checked": checked,
         "suppressed_declared_access": allowed,
+        "not_comparable": not_comparable,
+        "ambiguous_evidence": ambiguous,
         "surfaces": surfaces["summary"],
         "establishes": ("nothing, when `refused_because` is non-empty — an empty findings "
                         "list is not a clean result unless the comparison actually ran"),
@@ -841,21 +867,24 @@ async def cross_arm_privileged_function(session_id, privileged, unprivileged, ma
         refused.append("no_anonymous_arm")
 
     surfaces = await compare_arms(session_id, privileged, unprivileged)
-    if not surfaces["comparable"]:
-        refused += [reason for reason in surfaces["refused_because"]
-                    if reason != "arms_share_one_identity"]
+    refused += [reason for reason in surfaces["refused_because"]
+                if reason not in PER_OPERATION_REFUSALS]
 
     privileged_saw, high_split = await arm_responses(session_id, privileged)
     unprivileged_saw, low_split = await arm_responses(session_id, unprivileged)
     anonymous_saw, anonymous_split = ((await arm_responses(session_id, anonymous))
                                       if anonymous is not None else ({}, set()))
-    if high_split or low_split or anonymous_split:
-        refused.append("ambiguous_evidence")
+    ambiguous = len(high_split | low_split | anonymous_split)
     if anonymous is not None and not anonymous_saw:
         refused.append("anonymous_arm_did_not_run")
 
-    # Only URLs the isolation gate looked at, for the same reason as the sibling check.
-    gated = await arm_urls(session_id, privileged) & await arm_urls(session_id, unprivileged)
+    # Only URLs the isolation gate looked at, and a COUNT of the operations it says are not
+    # comparable rather than a subtraction of them — see the sibling check for why the
+    # subtraction cannot fire.
+    not_comparable = (len(surfaces["per_arm_value_in_operation"])
+                      + len(surfaces["only_in_first"]) + len(surfaces["only_in_second"]))
+    gated = (await arm_urls(session_id, privileged)
+             & await arm_urls(session_id, unprivileged))
 
     needle = marker.strip() if isinstance(marker, str) else ""
 
@@ -868,7 +897,7 @@ async def cross_arm_privileged_function(session_id, privileged, unprivileged, ma
         """
         return bool(response) and _http_status_ok(response) and needle in _response_body(response)
 
-    findings, checked, reflected, allowed = [], 0, [], []
+    findings, checked, reflected, allowed, reported = [], 0, [], [], set()
     if not refused:
         for key, response in sorted(privileged_saw.items()):
             url = key[0]
@@ -921,6 +950,15 @@ async def cross_arm_privileged_function(session_id, privileged, unprivileged, ma
             if _entitled(url, entitled):
                 allowed.append(url)
                 continue
+            # ONE FINDING PER OPERATION, not per probe that happened to fetch it. The
+            # evidence is keyed by request, so two catalogue cases reading the same URL
+            # produce two keys — and measured on the first real DVWA run, `WSTG-CONF-06:
+            # options` and `WSTG-SESS-02:fetch_headers` both fetched `http://dvwa/`, so this
+            # emitted two byte-identical findings. Which case did the fetching is not part of
+            # the claim, so it cannot be what distinguishes two of them.
+            if url in reported:
+                continue
+            reported.add(url)
             findings.append({
                 "url": url,
                 "privileged": privileged, "privileged_role": high,
@@ -949,6 +987,11 @@ async def cross_arm_privileged_function(session_id, privileged, unprivileged, ma
         # `Identity.may_access`. Listed, because a suppression nobody can see is
         # indistinguishable from a check that never looked.
         "suppressed_declared_access": allowed,
+        # Operations both arms reached at DIFFERENT URLs, or that only one arm saw. Counted,
+        # because a comparison that quietly skipped them would read as having covered them.
+        "not_comparable": not_comparable,
+        # Requests one arm recorded twice with different captures. Dropped, not ranked.
+        "ambiguous_evidence": ambiguous,
         "surfaces": surfaces["summary"],
         "establishes": ("nothing, when `refused_because` is non-empty. What the marker "
                         "means is the operator's claim; that both arms received it and an "
@@ -1097,6 +1140,13 @@ async def coverage(session_id, identity_id=None) -> list[dict]:
                 "test_case_id": case, "state": state, "reason": reason,
             })
     return out
+
+
+# Refusals `compare_arms` reports that are about ONE OPERATION, not the session. The
+# cross-arm checks skip those operations instead of abandoning the comparison; see
+# `compare_arms` for the measurement that forced the distinction.
+PER_OPERATION_REFUSALS = ("arms_share_one_identity", "different_operations",
+                          "per_arm_value_in_operation")
 
 
 async def compare_arms(session_id, first_identity, second_identity) -> dict:

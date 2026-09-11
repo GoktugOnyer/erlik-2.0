@@ -125,7 +125,7 @@ class JobOutput:
 
 
 class Sandbox:
-    def __init__(self, config: AssessmentConfig, identity=None, *, services=None, operation_routes=None, publish=False):
+    def __init__(self, config: AssessmentConfig, identity=None, *, services=None, operation_routes=None, publish=False, control_urls=None):
         self.config = config
         self.identity = identity
         self.key = uuid.uuid4().hex
@@ -152,6 +152,14 @@ class Sandbox:
             # Applied to every arm by the proxy, this sandbox's identity or its absence
             # notwithstanding. See contracts.ApplicationCookie.
             "application_cookies": [c.model_dump() for c in config.application_cookies],
+            # ERLIK'S OWN CONTROL TRAFFIC, exempt from the URL budget. `max_urls` bounds how
+            # much of the TARGET an assessment explores; a liveness probe of one declared,
+            # already scope-checked URL is not exploration. Measured: with max_urls=60 a
+            # katana crawl of Juice Shop consumed the budget and the CLOSING liveness check
+            # became the 61st distinct URL, so it was refused and the stage was recorded as
+            # an expired credential — halting the whole assessment. Still scope-checked,
+            # still counted against max_requests; only the distinct-URL ceiling ignores them.
+            "control_urls": sorted(control_urls or []),
         }
 
     async def __aenter__(self):

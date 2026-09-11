@@ -10,6 +10,39 @@ def origin(url):
     return u.scheme.lower(), (u.hostname or "").lower().rstrip("."), u.port or (443 if u.scheme == "https" else 80)
 
 
+def budget_refusal(config, count, urls, url) -> str:
+    """"" if this request is within budget, else the reason it is not.
+
+    Extracted from the mitmproxy addon so it can be tested: mitmproxy is not importable
+    outside the proxy image, so while this lived inline nothing exercised it, and the
+    interaction below cost a whole assessment.
+
+    ERLIK'S OWN CONTROL TRAFFIC DOES NOT COUNT AGAINST THE DISTINCT-URL CEILING.
+    `max_urls` bounds how much of the TARGET an assessment explores; a liveness probe of
+    one declared, already scope-checked URL is not exploration. Measured on the first real
+    three-arm run: with `max_urls=60`, katana's crawl of Juice Shop consumed the budget and
+    the CLOSING liveness check became the 61st distinct URL. It was refused, `satisfies`
+    read the refusal as a failed assertion, and the stage was recorded "authentication
+    expired during stage; replace credentials and resume" — about a credential that was
+    fine. The run then halted every remaining arm, including the anonymous one, which has
+    no credential to expire.
+
+    They still count against `max_requests`, and they are still scope-checked, so this
+    exempts the ceiling and nothing else.
+    """
+    if config.get("service_only"):
+        return ""
+    if count > config.get("max_requests", 10000):
+        return "request budget exhausted"
+    control = set(config.get("control_urls") or [])
+    if url in control:
+        return ""
+    explored = {pair for pair in urls if pair[1] not in control}
+    if len(explored) > config.get("max_urls", 500):
+        return "URL budget exhausted"
+    return ""
+
+
 def cookie_applies(cookie, path, scheme, now):
     """Whether one declared cookie belongs on this request."""
     expires = cookie.get("expires", -1)
