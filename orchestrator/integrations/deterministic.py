@@ -4,12 +4,14 @@ import shlex
 import time
 import re
 from urllib.parse import urlsplit, quote_plus
+from orchestrator import http_capture
 from orchestrator.testcase.runner import run_test_case
 from orchestrator.testcase.schema import TestCase, TestStep
 from orchestrator.testcase.loader import find_by_id
 from orchestrator.testcase.scope import ScopeViolation, check_url
 from .adapters import BaseAdapter, record
-from .contracts import StageResult, IntegrationFinding, fingerprint, identity_target_fields
+from .contracts import (Endpoint, StageResult, IntegrationFinding, fingerprint,
+                        identity_target_fields)
 from .egress_policy import EgressPolicy
 from .inventory import (seeds, eligible_test_cases, form_urls, parameters_by_url,
                         case_needs_parameter, parameter_can_forge)
@@ -689,11 +691,16 @@ class CatalogueAdapter(BaseAdapter):
         if ctx.config.identity_ids and ctx.config.surface_read:
             share = surface_read_budget(ctx.config.max_urls, len(ctx.config.test_cases))
             readable = surface_read_order(url for url in targets if url not in submit_urls)
-            reading = readable[:share]
-            read_count, reached = 0, []
-            for url in reading:
-                if time.monotonic() > started_at + ctx.config.budget.stage_seconds * 0.85:
-                    break
+            # THE SHARE IS SPLIT, not doubled. Derived instances can only be found by first
+            # reading a collection, so the read is two passes — and a second pass that helped
+            # itself to another whole share would make `max_urls` mean something other than
+            # what the operator set.
+            derived_share = share // 3 if ctx.config.derive_instances and ctx.config.active else 0
+            reading = readable[:share - derived_share]
+            read_count, reached, bodies = 0, [], []
+
+            async def read_one(url):
+                """One recorded GET as this identity. Returns the capture, or None."""
                 current.clear()
                 current.update({"url": url})
                 target = {"url": url, "scope": ctx.config.scope.model_dump(),
@@ -705,8 +712,97 @@ class CatalogueAdapter(BaseAdapter):
                     ctx.session_id, ctx.stage_id, "testcase:" + SURFACE_READ_ID,
                     run.model_dump_json(), ctx.known)
                 result.evidence_ids.append(evidence_id)
+                return next((step.output for step in run.steps if step.output), None)
+
+            for url in reading:
+                if time.monotonic() > started_at + ctx.config.budget.stage_seconds * 0.85:
+                    break
+                body = await read_one(url)
                 read_count += 1
                 reached.append(url)
+                if body:
+                    bodies.append((url, body))
+            # PASS TWO: the instances those collections named.
+            #
+            # The lane discovers COLLECTIONS and not INSTANCES, and object-level authorization
+            # lives on instances — measured on a real run, `/api/Users` had endpoint rows and
+            # `/api/Users/1` had none, and three of the four known violations were unreachable
+            # for that reason alone.
+            #
+            # UNLIKE PASS ONE, THIS IS NOT A REQUEST THE CRAWLER ALREADY MADE. Pass one can
+            # say every URL it fetches was already fetched during discovery; a derived
+            # instance was not. That is an escalation, so it is tied to `active` — the
+            # operator's existing declaration that this run may probe — and has its own
+            # switch. `inventory.safe_object_id` is what stops the TARGET choosing the
+            # request: an id is used only if it is a bounded ASCII integer or a canonical
+            # UUID, and the URL is rebuilt from the collection's own scheme, netloc and path.
+            derived_urls, derived_read = [], 0
+            if derived_share:
+                from .inventory import breadth_first, instance_urls
+                # BREADTH BEFORE DEPTH. Taking every instance of one collection before
+                # touching the next spends a tight budget on whichever collections sort
+                # first: measured on a real run, 30 candidates against a share of 28 dropped
+                # two — and they were `/api/Users/2` and `/api/Users/3`, because `/api/Users`
+                # comes last alphabetically. Round-robin gives every collection its first
+                # instance before any gets a second, so the interesting one is reached
+                # whatever its name.
+                per_collection = [
+                    [instance for instance in instance_urls(url, http_capture.body(body))
+                     if instance not in reached]
+                    for url, body in bodies]
+                candidates = breadth_first(per_collection)
+                # THE ANONYMOUS ARM CANNOT DERIVE THE INSTANCES THAT MATTER, so it is given
+                # the ones other arms derived.
+                #
+                # An arm derives from collections IT can read, and the anonymous arm is
+                # refused exactly the interesting ones — measured on a clean three-arm run,
+                # the only derived instances all three arms shared were of PUBLIC collections
+                # (Challenges, Products, Feedbacks...), while `/api/Users/1` was derived by
+                # both identity arms and by neither the anonymous one. The function-level
+                # check then skipped it, because clause 3 requires the anonymous arm to have
+                # ASKED — and it is right to: an anonymous arm that never requested a URL
+                # proves nothing about whether that URL is public.
+                #
+                # So the arm whose whole job is to establish "not published" is handed the
+                # URLs it must ask about. The anonymous stage is registered last, so those
+                # rows exist by the time it runs. This cannot invent a finding: an anonymous
+                # 2xx SUPPRESSES one, so the only thing asking can do is remove findings the
+                # lane would otherwise have reported.
+                if ctx.identity_id == "anonymous":
+                    from .inventory import derived_urls as recorded_by_other_arms
+                    mine = set(candidates)
+                    others = [url for url in sorted(await recorded_by_other_arms(ctx.session_id))
+                              if url not in mine and url not in reached]
+                    # Theirs first: those are the ones only this arm is missing.
+                    candidates = others + candidates
+                derived_urls = candidates[:derived_share]
+                for url in derived_urls:
+                    if time.monotonic() > started_at + ctx.config.budget.stage_seconds * 0.85:
+                        break
+                    await read_one(url)
+                    derived_read += 1
+                    # Recorded as an endpoint so the cross-arm checks' `gated` intersection
+                    # contains it — without a row they would skip the very URLs this exists
+                    # to produce. `source` says where it came from, because a URL nothing
+                    # crawled must be distinguishable from one something did.
+                    result.endpoints.append(Endpoint(url=url, method="GET", source="derived",
+                                                     identity=ctx.identity_id))
+                result.metadata["derived_instances"] = {
+                    "read": derived_read,
+                    "candidates": len(candidates),
+                    "share_of_url_budget": derived_share,
+                    "from_collections": len({url for url, body in bodies
+                                             if instance_urls(url, http_capture.body(body))}),
+                }
+                if len(candidates) > derived_read:
+                    result.observations.append({
+                        "type": "surface_read_truncated", "test_case_id": SURFACE_READ_ID,
+                        "url": None, "steps": [],
+                        "reason": f"{len(candidates) - derived_read} of {len(candidates)} "
+                                  f"object instances named by the collections read were not "
+                                  f"fetched; this pass's share of the "
+                                  f"{ctx.config.max_urls} URL budget is {derived_share}"})
+
             # Reported in the stage's METADATA rather than as `test_case` observations,
             # because `coverage()` counts those as a check having run against an endpoint
             # and this is not a check. Calling it coverage would overstate what was tested

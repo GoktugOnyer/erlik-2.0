@@ -1284,6 +1284,103 @@ safety rested on a crawler omission. And katana mines junk paths out of JS bundl
 `/Trident/` are browser-detection regex fragments), which a richer crawl fills the read's share
 with; that is discovery quality, not read ordering.
 
+**Increment 12 — the lane discovered collections and never instances.** Object-level
+authorization lives on instances. Measured on a real three-arm Juice Shop run: `/api/Users` and
+`/api/Cards` had endpoint rows, `/api/Users/1` and `/rest/basket/1` had none, and only 5 of 234
+discovered URLs contained a numeric path segment. The surface read's own evidence already named
+the instances — 15 collections carrying integer row ids — so pass two of the read derives
+instance URLs from the collection bodies pass one captured.
+
+**This is the sharpest hazard in the threat model, deliberately entered.** "A discovered value
+fed back into a probe lets the target choose the evidence" is the rule a planted
+`<a href="/search?219359=1">` earned. So `safe_object_id` is a whitelist of SHAPES — a bounded
+run of ASCII digits or a canonical UUID, explicit `[0-9]` because `\d` matches Arabic-Indic `١`
+and fullwidth `１` — and the URL is REBUILT from the collection's own scheme, netloc and path
+with query and fragment dropped, so no id can move the request or escape the path. An
+independent implementation that concatenated instead produced
+`/api/Challenges/?name=Score%20Board/74`, still the list route, 200 to everybody.
+
+And the gate is stated for what it is: across all 15 collection bodies, 889 rows, every `id` an
+integer, **0 rejected**. A safety gate against a hostile target, not a precision filter.
+
+**The important result is what the object-level check must NOT be shown.** On a derived instance
+the asserted owner IS the path segment the lane chose — `GET /api/Users/1` answers
+`{"data":{"id":1,…}}`, so `owner_field: data.id` reads back the lane's own input. An adversarial
+pass scored it across four declarations on real captures: derivation took
+`cross_arm_authorization` from 0 findings to 1 true positive and SEVEN false positives, precision
+over all declarations from 1.00 to 0.42, and porting the reflection clause removed all seven
+ALONG WITH the only true positive. There is nothing for that check to keep on a URL the lane
+invented, so derived URLs are excluded from it. The worst FP names itself: `/api/Feedbacks`
+answers 200 to anonymous while `/api/Feedbacks/1` is 401, because only the instance route is
+guarded — so every clause fires on content the anonymous arm's own collection evidence shows is
+published.
+
+`cross_arm_privileged_function` is unaffected and gains, because its marker is the OPERATOR'S
+and no choice of URL satisfies it. The safety asymmetry one level down. Measured end to end on a
+three-arm Juice Shop assessment through `service.run()`:
+
+    privileged-function   findings=2   checked=225   refused_because=[]
+      FINDING /api/Users     [customer -> admin]
+      FINDING /api/Users/1   [customer -> admin]
+    object-level          findings=0   checked=206
+
+Two of the four known violations, zero false positives over 225 compared operations.
+
+**Unlike pass one this issues requests nothing crawled**, so it also requires `active` and has
+its own switch, and the share is SPLIT not doubled — pass two takes a third, so `max_urls` keeps
+meaning what the operator set. Candidates go breadth before depth: depth-first dropped exactly
+`/api/Users/2` and `/api/Users/3` from 30 candidates against a share of 28, because `/api/Users`
+sorts last.
+
+**Two premises of mine were wrong and an agent corrected both.**
+`/rest/user/authentication-details/` — with the trailing slash my own query missed — WAS in every
+arm's endpoint rows, non-static, at position 105 of 200; it was lost to the URL BUDGET, not to
+the collection/instance gap. And `/rest/basket/1` is not recoverable by derivation at all: no
+collection lists baskets and `/api/BasketItems` carries `BasketId` as a foreign key rather than
+as its rows' id. 4 of 4 is out of reach either way.
+
+**Limits measured and recorded, not papered over.** Classic BOLA — each arm seeing only its own
+ids — is out of reach, because an arm derives from its own listing and never names another
+principal's object; `/api/Users/3` is a real violation the check declines on purpose, so BOLA
+recall is bounded by the number of DECLARED IDENTITIES. DVWA has no derivable collections: of 50
+2xx responses exactly 2 are JSON, both bare arrays, and the per-user one has no `id` key and is
+served as text/html — and its derived instance is not an instance route at all, since Apache
+takes the extra segment as PATH_INFO and `get_user_data.php/1` returns the entire collection
+byte-identical. The feature is API-only in practice.
+
+**And the first clean run of it produced NOTHING, which found the last piece.** An arm derives
+from collections IT can read, and the anonymous arm is refused exactly the interesting ones:
+measured, the only derived instances all three arms shared were of PUBLIC collections, while
+`/api/Users/1` was derived by both identity arms and by neither the anonymous one — so the check
+skipped it, correctly, because clause 3 requires the anonymous arm to have ASKED. The anonymous
+arm is now handed the instances other arms derived; it runs last, so the rows exist. It cannot
+invent a finding, because an anonymous 2xx SUPPRESSES one.
+
+That also reverses what looked like the obvious economy. 10 of 15 collections are anonymously
+readable and a third of derived probes hit routes denied to everyone, and gating derivation on
+"was the COLLECTION refused to the anonymous arm" was measured to cut 36 probes to 10 while
+keeping the true positive — but the gate is backwards once the anonymous arm needs the
+instances: the collections it cannot read are precisely the ones worth deriving from. The other
+candidate signal, "does the collection differ between the arms", is UNSOUND for a different
+reason — `/api/Users` is byte-identical between admin and jim and is exactly where the real
+violation is.
+
+**Two safety findings from the adversarial pass changed the design.** A dot segment in the
+COLLECTION'S own path escaped everything: measured on the wire with the pinned worker curl,
+collection `http://h/d22/x/../..` produced the recorded URL `/d22/x/../../7` while apache logged
+`GET /7` — so the request was neither under the collection path nor the URL written into the
+endpoint row and the evidence key, and `EgressPolicy.check` matches `excluded_paths` and
+`ends_the_session` against the RAW path. The id gate was irrelevant to it; the id stayed `7`. A
+collection whose path is not already what curl will send now derives nothing.
+
+And derivation is OFF BY DEFAULT. The surface read can say every URL it fetches was already
+fetched by this arm's crawler, so it changes the VOLUME of requests and not the class of side
+effect. A derived instance cannot say that, and on this project's own primary lab app the first
+derived reads land on writes: `GET /rest/memories/1` and `GET /rest/products/search/1` both 500,
+Juice Shop's `errorHandlingChallenge` fires on `statusCode > 401`, and `challengeUtils.solve`
+runs `challenge.save()`. Verified in the container's own source. That is an operator's decision,
+not a default.
+
 **Two verified defects are named rather than fixed, because both need lane plumbing.**
 The anonymous stage cannot carry application configuration (`service.py` passes `None` for
 it and the proxy then injects nothing), so on an application whose configuration lives in a

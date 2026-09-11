@@ -565,6 +565,31 @@ async def arm_responses(session_id, identity_id) -> tuple[dict, set]:
     return out, ambiguous
 
 
+async def derived_urls(session_id) -> set:
+    """URLs the lane DERIVED rather than discovered — an instance built from an id it read
+    out of a collection body.
+
+    THE OBJECT-LEVEL CHECK MUST NOT SEE THESE. `cross_arm_authorization` asks whether the
+    target attributed an object to somebody who is not the caller — and on a derived
+    instance the asserted owner IS the path segment the lane chose. Measured: `GET
+    /api/Users/1` answers `{"data":{"id":1,…}}`, so `owner_field: data.id` reads back the
+    `1` the lane put in the URL. An adversarial pass scored it across four owner_field
+    declarations on real captures: derivation took the check from 0 findings to 1 true
+    positive and SEVEN false positives, precision over all declarations falling from 1.00 to
+    0.42 — and porting the reflection clause to it removed all seven along with the only true
+    positive. There is nothing for it to keep on a URL the lane invented.
+
+    `cross_arm_privileged_function` is unaffected and gains from them, because its marker is
+    the OPERATOR'S and no choice of URL satisfies it: on the same captures it went from 1 of
+    4 known violations to 2, with zero false positives. That is the safety asymmetry one
+    level down — who the caller is comes from the operator, and so does what privileged data
+    looks like, but an OWNER is read from the response and the lane just wrote it.
+    """
+    return {row["url"] for row in await db.rows(
+        "SELECT url,sources FROM integration_endpoints WHERE session_id=?", (session_id,))
+        if "derived" in json.loads(row["sources"] or "[]")}
+
+
 async def arm_urls(session_id, identity_id) -> set:
     """The URLs this arm has an ENDPOINT row for.
 
@@ -712,8 +737,11 @@ async def cross_arm_authorization(session_id, caller, owner, owner_field,
     # code that cannot fire implies a protection that is not there.
     not_comparable = (len(surfaces["per_arm_value_in_operation"])
                       + len(surfaces["only_in_first"]) + len(surfaces["only_in_second"]))
+    # MINUS THE URLS THE LANE ITSELF INVENTED. See `derived_urls`: on an instance built from
+    # an id the lane read out of a collection, the owner this check reads back is that id.
+    invented = await derived_urls(session_id)
     gated = (await arm_urls(session_id, caller)
-             & await arm_urls(session_id, owner))
+             & await arm_urls(session_id, owner)) - invented
 
     # See the sibling check: operations counted one way, URLs another, and only the URL
     # number answers "I read N, why did you compare M?".
@@ -776,6 +804,9 @@ async def cross_arm_authorization(session_id, caller, owner, owner_field,
         "suppressed_declared_access": allowed,
         "not_comparable": not_comparable,
         "urls_not_shared_by_both_arms": not_shared,
+        # Instances the lane derived, excluded because this check would read its own input
+        # back as the asserted owner. The function-level check uses them.
+        "derived_urls_excluded": len(invented),
         "ambiguous_evidence": ambiguous,
         "surfaces": surfaces["summary"],
         "establishes": ("nothing, when `refused_because` is non-empty — an empty findings "
@@ -1358,6 +1389,121 @@ async def compare_arms(session_id, first_identity, second_identity) -> dict:
         "establishes": "that the two arms describe the same surface, and nothing "
                        "about whether either arm reached it",
     }
+
+
+# At most this many instances per collection. The bound is the flood control: a measured
+# Juice Shop run holds 15 collections in its surface-read evidence and several return six or
+# more rows, so an unbounded derivation would be 90+ extra requests per arm.
+MAX_DERIVED_PER_COLLECTION = 3
+
+# An id is used ONLY if it is structurally an identifier. Explicit `[0-9]`, never `\d`,
+# because `\d` matches Arabic-Indic `١` and fullwidth `１` — which are not ASCII digits and
+# would reach a path segment as multi-byte UTF-8.
+_SAFE_ID = re.compile(
+    r"\A(?:[0-9]{1,12}"                                      # a bounded integer key
+    r"|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}"
+    r"-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\Z")                    # or a canonical UUID
+
+
+def safe_object_id(value) -> str:
+    """The id as a path segment, or "" if it is not safely one.
+
+    THE TARGET CHOOSES THESE VALUES, which is the sharpest hazard this codebase has: §the
+    threat model records a planted `<a href="/search?219359=1">` turning a discovered
+    parameter name into a CRITICAL template-injection finding against an application with no
+    template engine. An id read out of a response body is the same kind of text.
+
+    So the rule is a whitelist of SHAPES, not a blacklist of characters: a bounded run of
+    ASCII digits, or a canonical UUID. Nothing else is an identifier for these purposes, and
+    every injection shape — a dot segment, a slash, a percent escape, a space, a unicode
+    digit, a URL — fails it. `True` needs no special case even though `isinstance(True, int)`
+    is True in Python: it renders as "True", which is not an id shape.
+    """
+    if not isinstance(value, (int, str)):
+        return ""
+    text = value if isinstance(value, str) else str(value)
+    return text if _SAFE_ID.match(text) else ""
+
+
+def breadth_first(per_collection) -> list:
+    """Every collection's first instance before any collection's second.
+
+    Depth-first spends a tight budget on whichever collections sort first: measured on a real
+    run, 30 candidates against a share of 28 dropped exactly `/api/Users/2` and
+    `/api/Users/3`, because `/api/Users` comes last alphabetically — and `/api/Users/1` is the
+    one instance that carries a known violation. Round-robin reaches the interesting
+    collection whatever its name.
+    """
+    out, seen, depth = [], set(), 0
+    longest = max((len(group) for group in per_collection), default=0)
+    for depth in range(longest):
+        for group in per_collection:
+            if depth < len(group) and group[depth] not in seen:
+                seen.add(group[depth])
+                out.append(group[depth])
+    return out
+
+
+def instance_urls(collection_url: str, body: str,
+                  limit: int = MAX_DERIVED_PER_COLLECTION) -> tuple:
+    """Instance URLs a collection response names, by its own row ids.
+
+    WHY THIS EXISTS. The lane discovers COLLECTIONS and not INSTANCES, and object-level
+    authorization lives on instances. Measured on a real three-arm Juice Shop run:
+    `/api/Users` and `/api/Cards` have endpoint rows, `/api/Users/1` and `/rest/basket/1`
+    have none, and only 5 of 234 discovered URLs contain a numeric path segment. Three of
+    the four known violations were unreachable for that reason alone.
+
+    HOW THE URL CANNOT ESCAPE. The scheme and netloc are COPIED from the collection, the
+    query and fragment are dropped, and the id is appended as one path segment after
+    `safe_object_id` has restricted it to digits or a UUID. So a derived URL is always on the
+    collection's own origin, always under its own path, and always a plain GET of one more
+    segment. The query is dropped deliberately: a collection's filter is not an instance's.
+
+    It will not derive from a URL whose last segment is already an id, so instances do not
+    chain into `/api/Users/1/1`.
+    """
+    import posixpath
+
+    parts = urlsplit(collection_url)
+    path = (parts.path or "/").rstrip("/")
+    # THE COLLECTION'S OWN PATH IS ALSO A TARGET-SUPPLIED STRING, and it was the real lever.
+    # Appending to it is only sound if the path is already what curl will send. Measured on
+    # the wire against DVWA with the pinned worker curl: a collection
+    # `http://h/d22/x/../..` produced the recorded URL `/d22/x/../../7` while apache logged
+    # `GET /7` — so the request was neither under the collection's path nor the URL written
+    # into the endpoint row and the evidence key. `EgressPolicy.check` also matches
+    # `excluded_paths` and `ends_the_session` against the RAW path, so `/x/../../logout`
+    # passes that check while curl sends `/logout`.
+    #
+    # A path that needs normalising is not a sound base to extend, and an inventory should
+    # not hold one: refused outright rather than normalised, because normalising would make
+    # the lane probe a URL the crawler never reported. `%` likewise — an encoded separator in
+    # a path about to gain a segment is ambiguous, and no path in the measured inventories
+    # contains one.
+    if "%" in path or posixpath.normpath(path or "/") != (path or "/"):
+        return ()
+    if safe_object_id(path.rsplit("/", 1)[-1]):
+        return ()                   # already an instance
+    try:
+        document = json.loads(body)
+    except (ValueError, TypeError):
+        return ()
+    rows = document.get("data") if isinstance(document, dict) else document
+    if not isinstance(rows, list):
+        return ()
+    out, seen = [], set()
+    for row in rows:
+        if len(out) >= limit:
+            break               # checked BEFORE appending, so limit=0 derives nothing
+        if not isinstance(row, dict):
+            continue
+        identifier = safe_object_id(row.get("id"))
+        if not identifier or identifier in seen:
+            continue
+        seen.add(identifier)
+        out.append(urlunsplit((parts.scheme, parts.netloc, f"{path}/{identifier}", "", "")))
+    return tuple(out)
 
 
 def eligible_test_cases(url, method="GET", parameters=()):

@@ -709,6 +709,124 @@ looks. And `owner_field: data.id` appears to find both object-level violations, 
 admin's `subject_id` only because Juice Shop seeds basket *n* to user *n*. `data.UserId` is the
 sound declaration.
 
+### Deriving object instances from collections
+
+The lane discovered **collections** and never **instances**, and object-level authorization
+lives on instances. Measured on a real three-arm Juice Shop run: `/api/Users` and `/api/Cards`
+had endpoint rows, `/api/Users/1` and `/rest/basket/1` had none, and only 5 of 234 discovered
+URLs contained a numeric path segment.
+
+The surface read's own evidence already named them: 15 collections in that run carried integer
+row ids, `/api/Users` among them. So pass two of the read derives instance URLs from the
+collection bodies pass one captured, and reads those.
+
+**The hazard this raises is the sharpest one in the threat model** — "a discovered value fed
+back into a probe lets the target choose the evidence", the rule a planted
+`<a href="/search?219359=1">` earned by turning a discovered parameter name into a CRITICAL
+template-injection finding against an application with no template engine. An id read out of a
+response body is the same kind of text.
+
+So `inventory.safe_object_id` is a whitelist of **shapes**: a bounded run of ASCII digits, or a
+canonical UUID. Explicit `[0-9]`, never `\d`, because `\d` matches Arabic-Indic `١` and
+fullwidth `１`. A traversal, a slash, a percent escape, a space, a sign, a float, a URL and a
+Python `bool` all fail it. The URL is then **rebuilt** — scheme and netloc copied from the
+collection, query and fragment dropped, the id appended as one path segment — so no id can move
+the request to another host or above the collection's path. Dropping the query matters: an
+independent implementation that concatenated produced
+`/api/Challenges/?name=Score%20Board/74`, which is still the list route with a nonsense filter
+and answers 200 to everybody.
+
+**Say plainly what the gate is for.** Measured across all 15 collection bodies in a real run:
+889 rows, every `id` an integer, **0 rejected**. It is a safety gate against a hostile target,
+not a precision filter — it is what makes the feature safe to have, not what makes it useful.
+
+**Unlike pass one, this issues requests nothing crawled.** Pass one can say every URL it
+fetches was already fetched during discovery; a derived instance was not. So it additionally
+requires `active` — the operator's existing declaration that this run may probe — and has its
+own `derive_instances` switch. The share is **split, not doubled**: pass two takes a third of
+the read's budget, so `max_urls` keeps meaning what the operator set.
+
+Candidates are taken **breadth before depth** — every collection's first instance before any
+collection's second. Depth-first spent a tight budget on whichever collections sorted first:
+measured, 30 candidates against a share of 28 dropped exactly `/api/Users/2` and
+`/api/Users/3`, because `/api/Users` comes last alphabetically.
+
+**Derived URLs are excluded from the object-level check, and this is the important part.** On a
+derived instance the asserted owner IS the path segment the lane chose: `GET /api/Users/1`
+answers `{"data":{"id":1,…}}`, so `owner_field: data.id` reads back the `1` the lane put in the
+URL. An adversarial pass scored it on real captures across four `owner_field` declarations —
+derivation took `cross_arm_authorization` from 0 findings to **1 true positive and 7 false
+positives**, precision over all declarations falling from 1.00 to 0.42 — and porting the
+reflection clause removed all seven *along with the only true positive*. There is nothing for
+that check to keep on a URL the lane invented.
+
+The worst of those false positives is worth naming: `/api/Feedbacks` answers **200 to anonymous**
+and its row id 1 carries `UserId 1` with the full comment, while `/api/Feedbacks/1` is 401 to
+anonymous because only the instance route is guarded. Every clause is then satisfied for a
+customer "reading the administrator's feedback" — content the anonymous arm's own evidence for
+the *collection* shows is published.
+
+`cross_arm_privileged_function` is unaffected and gains, because its marker is the **operator's**
+and no choice of URL satisfies it. That is the safety asymmetry one level down: who the caller is
+comes from the operator, and so does what privileged data looks like — but an *owner* is read
+from the response, and here the lane wrote it.
+
+**Measured end to end** on a three-arm Juice Shop assessment through `service.run()` with
+`derive_instances` enabled:
+
+    privileged-function   findings=2   checked=225   refused_because=[]
+      FINDING http://juice-shop:3000/api/Users     [customer -> admin]
+      FINDING http://juice-shop:3000/api/Users/1   [customer -> admin]
+    object-level          findings=0   checked=206
+
+Two of the four known violations, zero false positives over 225 compared operations — the
+collection from Increment 11 and now the instance. The object-level check reports nothing, which
+is correct: derived URLs are withheld from it and no other object-level violation was reached.
+
+**What this does not reach, measured.** `/rest/basket/1` is not recoverable this way at all: no
+collection lists baskets, and `/api/BasketItems` carries `BasketId` as a foreign key rather than
+as its rows' `id`. Classic BOLA — each arm seeing only its own ids — is also out of reach,
+because an arm derives from its own listing and never names another principal's object.
+`/api/Users/3` (a customer reading a third user's record) is a real violation the check declines
+on purpose: `asserted != owner_subject` drops it, so BOLA recall is bounded by the number of
+**declared identities**, not by the number of instances read.
+
+And one of the three "unreachable" violations never was: `/rest/user/authentication-details/`
+(with the trailing slash) was in every arm's endpoint rows, non-static, at position 105 of 200
+in the read order — lost to the **URL budget**, not to the collection/instance gap. Raise
+`max_urls` and it is read.
+
+**DVWA has no derivable collections.** Of 50 2xx responses in a real DVWA run exactly 2 are
+JSON, both bare arrays, and the one carrying per-user records has no `id` key at all (only
+`user_id`) and is served as `text/html`. Worse, its derived instance URL is not an instance
+route: Apache accepts the extra segment as `PATH_INFO`, the script ignores it, and
+`get_user_data.php/1` returns the **entire collection**, byte-identical. The feature is API-only
+in practice.
+
+**The anonymous arm is handed the instances the other arms derived, and without that the
+feature produces nothing.** An arm derives from collections *it* can read, and the anonymous arm
+is refused exactly the interesting ones. Measured on a clean three-arm run: the only derived
+instances all three arms shared were of **public** collections — Challenges, Products, Feedbacks,
+SecurityQuestions — while `/api/Users/1` was derived by both identity arms and by neither the
+anonymous one. The function-level check then skipped it, correctly: clause 3 requires the
+anonymous arm to have **asked**, and an arm that never requested a URL proves nothing about
+whether that URL is public.
+
+So the arm whose whole job is to establish "not published" is given the URLs it must ask about.
+The anonymous stage is registered last, so those rows exist when it runs. This cannot invent a
+finding — an anonymous 2xx *suppresses* one — so the only thing asking can do is remove findings
+the lane would otherwise have reported.
+
+It also corrects what looked like the obvious economy. 10 of the 15 collections are readable
+anonymously and nearly a third of derived probes hit routes `denyAll()` or `isAccounting()`
+refuses to everyone, so about two thirds of the derived budget appears to buy nothing — and
+gating derivation on "was the **collection** refused to the anonymous arm" was measured to cut 36
+probes to 10 while keeping the true positive. But that gate is backwards once the anonymous arm
+needs the instances: the collections it cannot read are precisely the ones worth deriving from.
+The other candidate signal, "does the collection body differ between the arms", is **unsound** for
+a different reason — `/api/Users` is byte-identical between admin and jim and is exactly where
+the real violation is.
+
 ### What the matrix does not unlock
 
 A lane stage carries exactly **one** identity — it resolves it from its own row, and the

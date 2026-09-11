@@ -296,6 +296,23 @@ class AssessmentConfig(StrictModel):
     # deterministic.SURFACE_READ for why the checks were a capability with no input without
     # it, and why it is not a catalogue case.
     surface_read: bool = True
+    # Derive object INSTANCE urls from the collection bodies the surface read captures, and
+    # read those too. Object-level authorization lives on instances while the lane discovers
+    # collections: measured on a real run, `/api/Users` had endpoint rows and `/api/Users/1`
+    # had none, and enabling this took the privileged-function check from 1 of 4 known
+    # violations to 2 with no false positives.
+    #
+    # OFF BY DEFAULT, and the reason is measured rather than cautious. The surface read can
+    # say every URL it fetches was already fetched by this arm's own crawler, so it changes
+    # the VOLUME of requests and not the class of side effect. A derived instance cannot say
+    # that, and on the project's own primary lab app the first derived reads land on writes:
+    # `GET /rest/memories/1` and `GET /rest/products/search/1` both answer 500, Juice Shop's
+    # `errorHandlingChallenge` fires on `statusCode > 401`, and `challengeUtils.solve` runs
+    # `challenge.save()` — a database write, plus an outbound webhook when one is configured.
+    # `GET /rest/basket/:id` writes for any id that is not the arm's own basket.
+    #
+    # So this is an operator's decision, not a default. It additionally requires `active`.
+    derive_instances: bool = False
     ai_summary: bool = False
     # Not a Literal. The set of runnable cases is a PROPERTY OF THE PARSER, and
     # a literal here was a second hand-maintained copy of it that could only
