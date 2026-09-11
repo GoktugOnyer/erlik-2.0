@@ -290,6 +290,12 @@ class AssessmentConfig(StrictModel):
     # more pass of each selected stage, which is the price of the comparison meaning
     # anything.
     anonymous_arm: bool = True
+    # One plain GET of each discovered endpoint, per arm, as the evidence the cross-arm
+    # authorization checks compare. Default True, and inert on a single-arm assessment:
+    # there is nothing to difference, so the requests would buy nothing. See
+    # deterministic.SURFACE_READ for why the checks were a capability with no input without
+    # it, and why it is not a catalogue case.
+    surface_read: bool = True
     ai_summary: bool = False
     # Not a Literal. The set of runnable cases is a PROPERTY OF THE PARSER, and
     # a literal here was a second hand-maintained copy of it that could only

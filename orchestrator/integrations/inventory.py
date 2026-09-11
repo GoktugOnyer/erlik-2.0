@@ -715,6 +715,10 @@ async def cross_arm_authorization(session_id, caller, owner, owner_field,
     gated = (await arm_urls(session_id, caller)
              & await arm_urls(session_id, owner))
 
+    # See the sibling check: operations counted one way, URLs another, and only the URL
+    # number answers "I read N, why did you compare M?".
+    read_urls = {key[0] for key in caller_saw}
+    not_shared = len(read_urls - gated)
     findings, checked, allowed, reported = [], 0, [], set()
     if not refused:
         for key, body in sorted(caller_saw.items()):
@@ -771,6 +775,7 @@ async def cross_arm_authorization(session_id, caller, owner, owner_field,
         "checked": checked,
         "suppressed_declared_access": allowed,
         "not_comparable": not_comparable,
+        "urls_not_shared_by_both_arms": not_shared,
         "ambiguous_evidence": ambiguous,
         "surfaces": surfaces["summary"],
         "establishes": ("nothing, when `refused_because` is non-empty — an empty findings "
@@ -897,6 +902,14 @@ async def cross_arm_privileged_function(session_id, privileged, unprivileged, ma
         """
         return bool(response) and _http_status_ok(response) and needle in _response_body(response)
 
+    # HOW MANY OF THIS ARM'S READS COULD NOT BE COMPARED AT ALL. `not_comparable` counts
+    # OPERATIONS, and measured on a real run that understated the loss 28:1: each arm held
+    # evidence for 130 URLs, `gated` was 46, and the only visible trace was `checked=46`
+    # against a 130-URL read. The 84 missing were all `/socket.io/?…&sid=…`, whose per-arm
+    # session id puts them in one arm's endpoint rows and not the other's — correct to drop,
+    # and not something an operator should have to infer from a subtraction.
+    read_urls = {key[0] for key in privileged_saw}
+    not_shared = len(read_urls - gated)
     findings, checked, reflected, allowed, reported = [], 0, [], [], set()
     if not refused:
         for key, response in sorted(privileged_saw.items()):
@@ -990,6 +1003,10 @@ async def cross_arm_privileged_function(session_id, privileged, unprivileged, ma
         # Operations both arms reached at DIFFERENT URLs, or that only one arm saw. Counted,
         # because a comparison that quietly skipped them would read as having covered them.
         "not_comparable": not_comparable,
+        # URLs this arm has evidence for that the other arm has no endpoint row for, so there
+        # was nothing to compare them against. The number an operator needs to reconcile
+        # "I read N" with "you checked M".
+        "urls_not_shared_by_both_arms": not_shared,
         # Requests one arm recorded twice with different captures. Dropped, not ranked.
         "ambiguous_evidence": ambiguous,
         "surfaces": surfaces["summary"],

@@ -5,6 +5,7 @@ import time
 import re
 from urllib.parse import urlsplit, quote_plus
 from orchestrator.testcase.runner import run_test_case
+from orchestrator.testcase.schema import TestCase, TestStep
 from orchestrator.testcase.loader import find_by_id
 from orchestrator.testcase.scope import ScopeViolation, check_url
 from .adapters import BaseAdapter, record
@@ -383,6 +384,122 @@ def target_budget(max_urls: int, selected: int, steps: int) -> int:
     return max(1, share // max(1, steps))
 
 
+# The reserved id of the SURFACE READ — one plain GET of each discovered endpoint, as this
+# stage's identity, recorded as evidence and evaluating nothing.
+#
+# WHY IT EXISTS. Three increments built cross-arm authorization checks
+# (`inventory.cross_arm_authorization`, `cross_arm_privileged_function`) that compare what
+# each arm received for the same request. They read the evidence catalogue cases leave
+# behind — and NOT ONE runnable case simply reads a discovered endpoint. Measured on the
+# first real three-arm run: both checks ran clean, 34 and 37 operations compared, no
+# refusals, and found nothing, because no arm had ever asked for a privileged object. The
+# checks were a capability with no input.
+#
+# WHY IT IS NOT A WSTG CASE. It concludes nothing on its own and must not pretend to: one
+# read by one identity cannot distinguish privileged data from published data, which is the
+# whole reason the comparison is cross-arm. A catalogue entry whose evaluator can never fire
+# is the vacuous-case shape this project keeps deleting, so this has NO evaluator and is not
+# in the catalogue.
+#
+# It is deliberately the same id and step name on every arm, because the cross-arm checks key
+# evidence on (url, test_case, step, parameter) and a comparison needs the arms to agree on
+# all four.
+#
+# A PLAIN GET IS NOT ALWAYS A READ, and this probe does not pretend otherwise. Measured on
+# Juice Shop: a bare `GET /rest/captcha/` runs `CaptchaModel.build().save()` and rotates the
+# live captcha (captchaId 51 then 52 on two consecutive reads); `GET /rest/saveLoginIp`
+# updates the user row; retrieving five static PNGs under `/assets/public/images/padding/`
+# flips challenges to solved; and `GET /rest/web3/nftMintListen` makes the TARGET open a
+# websocket to a public host. `state_changing: false` cannot express any of that, because it
+# is about the METHOD and these are about the application's semantics.
+#
+# WHAT BOUNDS THE EXPOSURE IS WHERE THE URLS COME FROM. `seeds()` returns only this arm's own
+# `integration_endpoints` rows, minus script-inferred routes (never requested by anything) and
+# minus form-synthesised actions, with fragments collapsed — so every URL here was already
+# REQUESTED BY THIS ARM'S OWN CRAWLER during discovery. Verified on a real run: 0 of the 86
+# URLs read were absent from that arm's rows, and `/rest/captcha/` was discovered by the
+# browser pass, meaning its write had already happened before this probe existed. The read
+# changes the VOLUME of requests, not the class of side effect the lane already causes.
+SURFACE_READ_ID = "ERLIK-SURFACE-READ"
+
+SURFACE_READ = TestCase(
+    id=SURFACE_READ_ID,
+    name="Read the discovered surface as this identity",
+    category="Authorization",
+    steps=[TestStep(
+        name="read",
+        tool="curl",
+        # No evaluator. The verdict is not here; it is in the cross-arm comparison, which
+        # needs this arm's answer AND the other arms' answers for the same request.
+        command='curl -s -i --connect-timeout 3 --max-time 8 "{{url}}"',
+    )],
+)
+
+
+# Extensions whose responses are bytes off a disk. A static asset cannot differ by
+# identity, so it cannot carry an authorization differential — and the surface read exists
+# only to feed one.
+_STATIC_SUFFIXES = (
+    ".jpg", ".jpeg", ".png", ".gif", ".svg", ".ico", ".bmp", ".webp", ".avif",
+    ".woff", ".woff2", ".ttf", ".otf", ".eot",
+    ".css", ".map", ".mp4", ".webm", ".mp3", ".wav", ".pdf", ".zip", ".gz",
+    # A script bundle is never an API response. Measured: `/main.js` and `/polyfills.js`
+    # took two of twelve slots on the real Juice Shop inventory.
+    ".js",
+)
+
+# Conventional directories for bytes off a disk. `/assets/i18n/en.json` is static and its
+# extension cannot say so, while a bare `.json` endpoint is a plausible API — so the
+# directory carries this one, not the suffix list.
+_STATIC_SEGMENTS = frozenset({"assets", "static", "public", "images", "img", "fonts",
+                              "css", "styles", "media"})
+
+
+def looks_static(url: str) -> bool:
+    """Is this URL bytes off a disk rather than a response about a caller?"""
+    from urllib.parse import urlsplit
+
+    path = (urlsplit(url).path or "").lower()
+    if path.endswith(_STATIC_SUFFIXES):
+        return True
+    return any(segment in _STATIC_SEGMENTS for segment in path.split("/"))
+
+
+def surface_read_order(urls):
+    """The order the surface read spends its budget in: dynamic first, static last.
+
+    NOT A FILTER — a stable reordering, so a generous budget still reads everything and a
+    tight one spends on what can actually differ between arms.
+
+    `seeds()` returns `ORDER BY url`, i.e. alphabetical, and that wasted the share. Measured
+    on a real Juice Shop inventory at `max_urls=60` with four cases, where the read's share
+    is twelve: those twelve were the homepage, `MaterialIcons-Regular.woff2`, two JSON APIs,
+    `favicon_js.ico`, `assets/i18n/en.json` and six product JPEGs — and the first `/rest/`
+    URL sat at rank 24. The probe was precise and reached nothing, which is the same
+    "bottleneck is reaching the endpoint" this project has measured before. Reordering took
+    that from 3 of 12 API URLs to 10 of 12 on the same inventory.
+
+    IT DOES NOT DEDUPE FRAGMENTS, because `seeds()` already has. A fragment is never sent to
+    a server, so `/#/about` and `/#/contact` are the same request as `/` — verified on Juice
+    Shop, all three answer 200 with an identical 3748 bytes — and a draft of this did collapse
+    them. `inventory.seeds` runs every candidate through `urldefrag` before returning it, so
+    the probe's input holds no fragment to collapse: measured on a real run, 0 of the 86 URLs
+    read carried one. Code that cannot fire implies a protection that is not there.
+    """
+    return sorted(urls, key=lambda url: (looks_static(url), url))
+
+
+def surface_read_budget(max_urls: int, cases: int) -> int:
+    """How many endpoints the surface read may fetch.
+
+    It takes ONE share, as if it were one more single-step case, so enabling it does not
+    quietly halve what every catalogue case gets. It competes for the same proxy URL ceiling
+    as everything else in the stage — `max_urls` bounds distinct URLs per sandbox — so
+    pretending it were free would only move the truncation somewhere less visible.
+    """
+    return target_budget(max_urls, cases + 1, 1)
+
+
 class CatalogueAdapter(BaseAdapter):
     name = "testcases"
 
@@ -556,6 +673,61 @@ class CatalogueAdapter(BaseAdapter):
             return target_budget(ctx.config.max_urls, len(ctx.config.test_cases),
                                  len(case.steps))
         result.metadata["parameters_discovered"] = sum(len(v) for v in parameters.values())
+
+        # THE SURFACE READ, before the cases, because it is what the cross-arm checks
+        # consume. See SURFACE_READ for why it exists and why it is not a catalogue case.
+        #
+        # Only when there is another arm to compare against: a single-arm assessment has
+        # nothing to difference, and the requests would buy nothing. `config.identity_ids`
+        # being non-empty is the same condition that registers the anonymous arm, so the
+        # arms this produces evidence for are exactly the arms that exist.
+        #
+        # `submit_urls` is excluded by the same rule the no-parameter cases use: a URL that
+        # exists only because a GET form was found is not a page, and requesting it performs
+        # the form's action — measured on DVWA, a bare GET of
+        # /vulnerabilities/csrf/?Change=Change sets the admin password to md5("").
+        if ctx.config.identity_ids and ctx.config.surface_read:
+            share = surface_read_budget(ctx.config.max_urls, len(ctx.config.test_cases))
+            readable = surface_read_order(url for url in targets if url not in submit_urls)
+            reading = readable[:share]
+            read_count, reached = 0, []
+            for url in reading:
+                if time.monotonic() > started_at + ctx.config.budget.stage_seconds * 0.85:
+                    break
+                current.clear()
+                current.update({"url": url})
+                target = {"url": url, "scope": ctx.config.scope.model_dump(),
+                          **identity_target_fields(ctx.identity)}
+                run = await run_test_case(SURFACE_READ, target, executor=execute,
+                                          step_policy=step_policy, command_checker=check,
+                                          allow_llm=False)
+                evidence_id = await db.evidence(
+                    ctx.session_id, ctx.stage_id, "testcase:" + SURFACE_READ_ID,
+                    run.model_dump_json(), ctx.known)
+                result.evidence_ids.append(evidence_id)
+                read_count += 1
+                reached.append(url)
+            # Reported in the stage's METADATA rather than as `test_case` observations,
+            # because `coverage()` counts those as a check having run against an endpoint
+            # and this is not a check. Calling it coverage would overstate what was tested
+            # by exactly the number of URLs read.
+            result.metadata["surface_read"] = {
+                "urls_read": read_count,
+                "urls_available": len(readable),
+                "urls_withheld_as_form_actions": len(targets) - len(readable),
+                "share_of_url_budget": share,
+                "establishes": ("nothing on its own — it is the evidence the cross-arm "
+                                "authorization checks compare, and a single read by a single "
+                                "identity cannot tell privileged data from published data"),
+            }
+            if read_count < len(readable):
+                result.observations.append({
+                    "type": "surface_read_truncated", "test_case_id": SURFACE_READ_ID,
+                    "url": None, "steps": [],
+                    "reason": f"{len(readable) - read_count} of {len(readable)} in-scope URLs "
+                              f"were not read as this identity, so the cross-arm "
+                              f"authorization checks have no evidence for them; this probe's "
+                              f"share of the {ctx.config.max_urls} URL budget is {share}"})
 
         # STOP BEFORE THE AXE FALLS. service.py wraps each stage in
         # asyncio.timeout and, on expiry, REPLACES the accumulated StageResult

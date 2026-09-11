@@ -635,6 +635,80 @@ and information, and **none of them reads a privileged object as each identity.*
 does that systematically, the authorization checks are opportunistic — they work, on whatever
 evidence the run happens to leave them.
 
+### Reading the surface as each identity
+
+The cross-arm checks above compare what each arm received for the same request. They read the
+evidence catalogue cases leave behind — and **not one runnable case simply reads a discovered
+endpoint.** So on a real three-arm run both checks ran clean, compared 34 operations, refused
+nothing, and found nothing: the zero was honest and useless. They were a capability with no
+input.
+
+`ERLIK-SURFACE-READ` is one plain GET of each discovered endpoint, per arm, recorded as run
+evidence and **evaluating nothing**. It is deliberately not a WSTG case: one read by one
+identity cannot tell privileged data from published data — that is the whole reason the
+comparison is cross-arm — and a catalogue entry whose evaluator can never fire is the
+vacuous-case shape this project keeps deleting. It uses the same id and step name on every
+arm, because the checks key evidence on `(url, test_case, step, parameter)`.
+
+**It closes the arc.** On a real three-arm assessment of Juice Shop, through `service.run()`:
+
+    privileged-function   findings=1   checked=213   refused_because=[]
+      FINDING http://juice-shop:3000/api/Users  [customer -> admin]
+
+213 operations compared where the same run without the read compared 34, and the finding is
+the violation first measured by hand two increments earlier — a customer reading the
+administrator's record out of `/api/Users`. It is the lane's first authorization finding
+produced end to end, from discovery to verdict.
+
+**Where it spends a budget it cannot finish matters more than the probe itself.** `seeds()`
+returns `ORDER BY url`, and alphabetical wasted the share. Measured on a real 63-URL inventory
+at `max_urls=60` with four cases, where the share is twelve: the twelve were the homepage,
+`MaterialIcons-Regular.woff2`, two JSON APIs, `favicon_js.ico`, `assets/i18n/en.json` and six
+product JPEGs — and the first `/rest/` URL sat at rank 24. A static asset cannot differ by
+identity, so it cannot carry a differential; sorting those last took the share from 3 of 12
+API URLs to 10 of 12. It is a **reordering, not a filter** — a generous budget still reads
+everything, and `surface_read_truncated` says what was left.
+
+**Two declarations are the floor, not a tuning choice.** An independent pass scored the shipped
+checks over three arms of the full violation set and recovered all four with zero false
+positives across ten negative controls — but only as the union of `cross_arm_privileged_function`
+with marker `"role":"admin"` (`/api/Users`, `/api/Users/1`,
+`/rest/user/authentication-details`) and `cross_arm_authorization` with `owner_field
+data.UserId` (`/rest/basket/1`). No single marker reaches 4/4: an exhaustive sweep of 15,001
+substrings of the admin user record found 826 that score 4/4, and every one is a seed-data
+timestamp fragment or JSON punctuation. The reason is structural — three of the four are one
+dataset a function marker can name, and the BOLA is an object whose body carries no privileged
+attribute at all, only an owner field.
+
+The marker is genuinely load-bearing: a shape-only marker `"status":"success"` reports 7, of
+which 3 are declared negative controls (`/api/Cards` per-identity scoping, `/rest/basket/99999`
+absent record, `/rest/order-history` each arm's own orders).
+
+**A PLAIN GET IS NOT ALWAYS A READ**, and the probe does not pretend otherwise. Measured on
+Juice Shop: a bare `GET /rest/captcha/` runs `CaptchaModel.build().save()` and rotates the live
+captcha (`captchaId` 51 then 52 on two consecutive reads); `GET /rest/saveLoginIp` updates the
+user row; retrieving five static PNGs under `/assets/public/images/padding/` flips challenges
+to solved; and `GET /rest/web3/nftMintListen` makes the **target** open a websocket to a public
+host. `state_changing: false` cannot express any of that, because it is about the method.
+
+What bounds the exposure is where the URLs come from. `seeds()` returns only this arm's own
+endpoint rows, minus script-inferred routes (never requested by anything) and minus
+form-synthesised actions, fragments collapsed — so **every URL read was already requested by
+this arm's own crawler during discovery.** Verified: 0 of the 86 URLs read on a real run were
+absent from that arm's rows, and `/rest/captcha/` was discovered by the browser pass, so its
+write had already happened before this probe existed. The read changes the volume of requests,
+not the class of side effect the lane already causes. On an application that must not be
+touched that way, set `surface_read: false` and the cross-arm checks go back to having no
+input.
+
+**Two further limits worth knowing.** The lane's own redaction rewrites secret-shaped values,
+so stored evidence for `/rest/user/authentication-details` reads
+`"password":"[REDACTED]"` — a password-shaped marker can never be found, however natural it
+looks. And `owner_field: data.id` appears to find both object-level violations, but on
+`/rest/basket/1` it is reading the basket's own primary key as a principal id; it matches
+admin's `subject_id` only because Juice Shop seeds basket *n* to user *n*. `data.UserId` is the
+sound declaration.
+
 ### What the matrix does not unlock
 
 A lane stage carries exactly **one** identity — it resolves it from its own row, and the

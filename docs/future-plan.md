@@ -1220,6 +1220,70 @@ privileged object as each identity**, so the authorization work is opportunistic
 fetches each discovered endpoint as each arm is the natural next piece of work, and it is what
 would make these checks systematic rather than dependent on what a run happens to leave behind.
 
+**Increment 11 — the checks get an input.** Increment 10 ended by naming the gap: the cross-arm
+authorization work reads evidence catalogue cases leave behind, and none of the runnable cases
+reads a discovered endpoint as each identity. `ERLIK-SURFACE-READ` is one plain GET per
+discovered endpoint per arm, recorded as evidence and evaluating NOTHING. Not a WSTG case: one
+read by one identity cannot tell privileged data from published data, and an entry whose
+evaluator can never fire is the vacuous-case shape this project keeps deleting.
+
+**It closes the arc.** On a real three-arm assessment of Juice Shop through `service.run()`:
+
+    privileged-function   findings=1   checked=213   refused_because=[]
+      FINDING http://juice-shop:3000/api/Users  [customer -> admin]
+
+213 operations compared where the same run without the read compared 34, and the finding is the
+violation first measured BY HAND in Increment 8. The lane's first authorization finding produced
+end to end, from discovery to verdict.
+
+**Where it spends a budget it cannot finish mattered more than the probe.** `seeds()` returns
+`ORDER BY url`, so the share went alphabetically: measured on a real 63-URL inventory at
+`max_urls=60` with four cases (share twelve), the twelve were the homepage, a woff2, two JSON
+APIs, a favicon, `assets/i18n/en.json` and six product JPEGs, with the first `/rest/` URL at
+rank 24. A static asset cannot differ by identity, so it cannot carry a differential; sorting
+those last took the share from 3 of 12 API URLs to 10 of 12. A reordering, not a filter.
+
+A draft also deduped fragments — `/#/about` and `/` are the same request, verified as an
+identical 3748 bytes — and that could never fire, because `seeds()` already defragments every
+candidate. Measured: 0 of the 86 URLs read carried a fragment. Removed, for the third time this
+arc: code that cannot fire implies a protection that is not there.
+
+**Two declarations are the floor, not a tuning choice.** An adversarial pass scored the shipped
+checks over three arms of the full violation set: all four recovered, zero false positives over
+ten negative controls, but only as the union of a function marker (`"role":"admin"` →
+`/api/Users`, `/api/Users/1`, `/rest/user/authentication-details`) and an owner field
+(`data.UserId` → `/rest/basket/1`). No single marker reaches 4/4 — an exhaustive sweep of 15,001
+substrings of the admin record found 826 that do, and every one is a seed-data timestamp or JSON
+punctuation. Three of the four are one dataset; the BOLA is an object whose body carries no
+privileged attribute, only an owner field. The marker is load-bearing: `"status":"success"`
+reports 7, of which 3 are declared negative controls.
+
+**A PLAIN GET IS NOT ALWAYS A READ.** Measured on Juice Shop: a bare `GET /rest/captcha/` runs
+`CaptchaModel.build().save()` and rotates the live captcha (captchaId 51 then 52); `GET
+/rest/saveLoginIp` updates the user row; five static PNGs under `/assets/public/images/padding/`
+flip challenges to solved on retrieval; `GET /rest/web3/nftMintListen` makes the TARGET open a
+websocket to a public host. `state_changing: false` is about the METHOD and cannot express any
+of it. What bounds the exposure is the input: `seeds()` returns only this arm's own endpoint
+rows, minus script-inferred routes and form-synthesised actions, so every URL read was already
+requested by this arm's own crawler — verified, 0 of 86 absent, and `/rest/captcha/` was
+discovered by the browser pass, so its write predates the probe. The read changes the volume of
+requests, not the class of side effect the lane already causes. `surface_read: false` turns it
+off.
+
+**Also fixed: the checks under-reported what they could not compare 28:1.** Measured on a real
+run, each arm held evidence for 130 URLs, the gated intersection was 46, and the only visible
+trace was `checked=46` — the 84 missing were all `/socket.io/?…&sid=…`, correct to drop and not
+something an operator should infer from a subtraction. `urls_not_shared_by_both_arms` now says
+it.
+
+**Known and not addressed.** DVWA's `/vulnerabilities/csrf/?Change=Change` is permitted by the
+product's DEFAULT `excluded_paths`; it is safe today only because the form-synthesis guard
+withholds it once discovered, which an independent pass verified with a positive control — but
+in the one real DVWA run no form row for it existed, so that guard protected nothing and the
+safety rested on a crawler omission. And katana mines junk paths out of JS bundles (`/Edge/`,
+`/Trident/` are browser-detection regex fragments), which a richer crawl fills the read's share
+with; that is discovery quality, not read ordering.
+
 **Two verified defects are named rather than fixed, because both need lane plumbing.**
 The anonymous stage cannot carry application configuration (`service.py` passes `None` for
 it and the proxy then injects nothing), so on an application whose configuration lives in a
