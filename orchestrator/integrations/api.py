@@ -110,7 +110,10 @@ class AuthorizationCheck(BaseModel):
     # A dotted path into the response body: Juice Shop answers GET /rest/basket/1 with
     # {"status":"success","data":{"id":1,"UserId":1,...}}, so "data.UserId".
     owner_field: str = Field(min_length=1, max_length=200)
-    anonymous: str | None = None
+    # min_length, because `""` named no arm and then passed an `is None` presence check —
+    # so the clause that makes a finding was never evaluated, and the caller was told
+    # nothing was refused.
+    anonymous: str | None = Field(default=None, min_length=1)
 
 
 @router.post("/sessions/{session_id}/authorization")
@@ -132,6 +135,44 @@ async def authorization_check(session_id: str, body: AuthorizationCheck):
         raise HTTPException(404, "integration assessment not found")
     return await cross_arm_authorization(session_id, body.caller, body.owner,
                                         body.owner_field, body.anonymous)
+
+
+class PrivilegedFunctionCheck(BaseModel):
+    """Which arms to compare, and what privileged data looks like in a response.
+
+    `marker` is the one thing the lane cannot infer. A function has no owner field to
+    read — `GET /api/Users` returns every user and nothing in the payload says who may
+    ask — so the operator names a substring that identifies PRIVILEGED data, e.g.
+    `"email":"admin@juice-sh.op"`. It is never echoed back into a finding: it describes
+    the application's private data, and a finding travels into an export.
+    """
+    privileged: str = Field(min_length=1)
+    unprivileged: str = Field(min_length=1)
+    marker: str = Field(min_length=1, max_length=512)
+    anonymous: str | None = Field(default=None, min_length=1)
+
+
+@router.post("/sessions/{session_id}/privileged-function")
+async def privileged_function_check(session_id: str, body: PrivilegedFunctionCheck):
+    """Function-level authorization, compared across arms of a finished assessment.
+
+    The companion to `/authorization`, which asks the object-level question. Both exist
+    because a lane stage carries ONE identity, so no single stage can hold the three arms
+    a differential needs.
+
+    READ `refused_because` BEFORE `findings`, for the same reason as the sibling route: a
+    refusal means the comparison never ran — the arms share a declared role, a role was
+    never declared, there was no anonymous arm — and an empty `findings` list is then not
+    a clean result.
+    """
+    from .inventory import cross_arm_privileged_function
+
+    if not await db.rows("SELECT 1 FROM integration_assessments WHERE session_id=?",
+                         (session_id,)):
+        raise HTTPException(404, "integration assessment not found")
+    return await cross_arm_privileged_function(session_id, body.privileged,
+                                              body.unprivileged, body.marker,
+                                              body.anonymous)
 
 
 @router.get("/sessions/{session_id}/coverage")

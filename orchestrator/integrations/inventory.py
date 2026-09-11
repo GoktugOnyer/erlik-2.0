@@ -1,8 +1,9 @@
 """Identity-specific inventory shared by discovery and downstream testing."""
+import hashlib
 import json
 import re
 from functools import lru_cache
-from urllib.parse import urldefrag, urlsplit, urlunsplit
+from urllib.parse import unquote_plus, urldefrag, urlsplit, urlunsplit
 from orchestrator.engagement import looks_injectable
 from .contracts import PARAMETER_NAME, parameter_names
 from . import persistence as db
@@ -496,6 +497,129 @@ async def preview(session_id, config, identity_id=None) -> dict:
     }
 
 
+async def arm_responses(session_id, identity_id) -> tuple[dict, set]:
+    """What one arm recorded, keyed by the REQUEST it recorded it for.
+
+    Returns `({(url, test_case, step): output}, ambiguous)`.
+
+    THE KEY IS THE WHOLE REQUEST, not the url. This used to key by the run's declared
+    `target.url` and take the FIRST step that had output, and that was the common cause
+    of four ways to manufacture a finding:
+
+      * a run whose steps were [`login` 200 carrying the owner, `read_as_caller` 403]
+        reported the LOGIN's body as the caller's access, so a refused read became a
+        finding;
+      * one arm's body could come from a different test case entirely — an injection
+        probe against the same URL — so two arms that issued different requests were
+        compared as a differential;
+      * two steps in one run disagreeing about the owner silently discarded the second;
+      * two artifacts for one request let ROW ORDER decide, which both invents findings
+        and loses real ones.
+
+    `ambiguous` holds keys that appeared more than once with different captures. They are
+    dropped rather than ranked: neither capture is more the arm's answer than the other,
+    and a caller that picks one is picking by insertion order.
+
+    A missing url, an unreadable artifact and a run with no steps are all skipped. None
+    of them is a verdict, and inventing an empty response for one would let a check
+    conclude "this arm was refused" from a read failure.
+    """
+    out: dict[tuple, str] = {}
+    ambiguous: set = set()
+    stages = {row["id"] for row in await db.rows(
+        "SELECT id FROM integration_stages WHERE session_id=? AND identity_id=?",
+        (session_id, identity_id))}
+    for row in await db.rows(
+            "SELECT id,stage_id,kind FROM integration_evidence WHERE session_id=?",
+            (session_id,)):
+        if row["stage_id"] not in stages or not row["kind"].startswith("testcase:"):
+            continue
+        try:
+            run = json.loads((await db.evidence_bytes(row["id"])).decode("utf-8", "replace"))
+        except Exception:
+            continue            # an unreadable artifact is not a verdict
+        if not isinstance(run, dict):
+            continue
+        url = (run.get("target") or {}).get("url")
+        case = run.get("test_case_id") or ""
+        if not url:
+            continue
+        for step in run.get("steps") or []:
+            if not isinstance(step, dict) or not step.get("output"):
+                continue
+            key = (url, case, step.get("step") or "")
+            if key in out and out[key] != step["output"]:
+                ambiguous.add(key)
+            out[key] = step["output"]
+    for key in ambiguous:
+        out.pop(key, None)
+    return out, ambiguous
+
+
+async def arm_urls(session_id, identity_id) -> set:
+    """The URLs this arm has an ENDPOINT row for.
+
+    `compare_arms` gates on those rows, so a finding about a URL absent from them is a
+    finding nothing gated — measured: evidence targeting `/admin/export?all=1` while the
+    rows knew only `/rest/basket/1`, and the isolation summary read "1 of 1 operations
+    seen by both".
+    """
+    return {row["url"] for row in await db.rows(
+        "SELECT url FROM integration_endpoints WHERE session_id=? AND identity_id=?",
+        (session_id, identity_id))}
+
+
+def _arm_name(identity_id):
+    """The arm actually named, or None. `""` names no arm.
+
+    The route's model accepted an empty string, which then passed an `is None` presence
+    check and left the load-bearing clause unevaluated.
+    """
+    if identity_id is None:
+        return None
+    name = str(identity_id).strip()
+    return name or None
+
+
+def _declared_access(identity_declaration) -> tuple:
+    """Paths this identity is declared to be entitled to reach.
+
+    `Identity.may_access` has existed, been validated, and been read by NOTHING. This is
+    the first reader, and it reads it in the only direction that is safe: as an
+    OPEN-WORLD suppression. A declared path removes a finding; an empty declaration
+    removes none. Read the other way — as a closed-world allowlist, "anything not
+    declared is a violation" — it manufactures findings, worst of all for the anonymous
+    arm, whose allowlist is empty and for whom every public endpoint would then read as
+    forbidden.
+
+    Measured on Juice Shop: `GET /rest/basket/2` is jim's OWN basket, and the
+    administrator can read it too, so a marker naming jim's own data is present in the
+    privileged arm AND the unprivileged arm while anonymous is refused — every clause
+    satisfied, and nothing wrong. No rule reading only responses can tell that from a
+    real crossing, because the difference is entitlement, which only the operator knows.
+    """
+    declared = identity_declaration or {}
+    return tuple(path for path in (declared.get("may_access") or [])
+                 if isinstance(path, str) and path.startswith("/"))
+
+
+def _entitled(url, declared_paths) -> bool:
+    """True when a declared path covers this URL.
+
+    Exact path match, or a declaration ending in `/` covering everything beneath it. The
+    query is ignored: entitlement is to an operation, and a declaration cannot be made
+    to depend on a value the probe chose.
+    """
+    path = urlsplit(url).path or "/"
+    for declared in declared_paths:
+        if declared.endswith("/"):
+            if path == declared.rstrip("/") or path.startswith(declared):
+                return True
+        elif path == declared or path == declared + "/":
+            return True
+    return False
+
+
 async def cross_arm_authorization(session_id, caller, owner, owner_field,
                                   anonymous=None) -> dict:
     """Object-level authorization, compared ACROSS stages. E-011's remaining half.
@@ -533,12 +657,14 @@ async def cross_arm_authorization(session_id, caller, owner, owner_field,
             return {}
 
     refused = []
+    entitled = _declared_access(declared(caller))
     caller_subject = str(declared(caller).get("subject_id") or "").strip()
     owner_subject = str(declared(owner).get("subject_id") or "").strip()
     if not caller_subject:
         refused.append("caller_has_no_subject_id")
     if not owner_subject:
         refused.append("owner_has_no_subject_id")
+    anonymous = _arm_name(anonymous)
     if anonymous is None:
         # The clause cannot be evaluated without the arm, and a clause nobody ran is not
         # a clause that passed.
@@ -549,34 +675,30 @@ async def cross_arm_authorization(session_id, caller, owner, owner_field,
         refused += [reason for reason in surfaces["refused_because"]
                     if reason != "arms_share_one_identity"]
 
-    async def responses(identity_id):
-        """url -> the body this arm recorded for it, from the stored run evidence."""
-        out = {}
-        stages = {row["id"] for row in await db.rows(
-            "SELECT id FROM integration_stages WHERE session_id=? AND identity_id=?",
-            (session_id, identity_id))}
-        for row in await db.rows(
-                "SELECT id,stage_id,kind FROM integration_evidence WHERE session_id=?",
-                (session_id,)):
-            if row["stage_id"] not in stages or not row["kind"].startswith("testcase:"):
-                continue
-            try:
-                run = json.loads((await db.evidence_bytes(row["id"])).decode("utf-8", "replace"))
-            except Exception:
-                continue            # an unreadable artifact is not a verdict
-            url = (run.get("target") or {}).get("url")
-            for step in run.get("steps") or []:
-                if url and step.get("output"):
-                    out.setdefault(url, step["output"])
-        return out
+    caller_saw, caller_split = await arm_responses(session_id, caller)
+    owner_saw, owner_split = await arm_responses(session_id, owner)
+    anonymous_saw, anonymous_split = ((await arm_responses(session_id, anonymous))
+                                      if anonymous is not None else ({}, set()))
+    if caller_split or owner_split or anonymous_split:
+        # Evidence that contradicts itself about one request is not a record to compare.
+        refused.append("ambiguous_evidence")
+    if anonymous is not None and not anonymous_saw:
+        # `service.register` creates an anonymous stage only via
+        # `config.identity_ids or ["anonymous"]`, so a two-identity run has none — and an
+        # operator passing the lane's own name for it would otherwise get findings whose
+        # load-bearing clause was never evaluated.
+        refused.append("anonymous_arm_did_not_run")
 
-    caller_saw = await responses(caller)
-    owner_saw = await responses(owner)
-    anonymous_saw = await responses(anonymous) if anonymous is not None else {}
+    # Only URLs the isolation gate actually looked at. `compare_arms` reads the endpoint
+    # rows; without this, evidence could report a finding for a URL those rows never held.
+    gated = await arm_urls(session_id, caller) & await arm_urls(session_id, owner)
 
-    findings, checked = [], 0
+    findings, checked, allowed = [], 0, []
     if not refused:
-        for url, body in sorted(caller_saw.items()):
+        for key, body in sorted(caller_saw.items()):
+            url = key[0]
+            if url not in gated:
+                continue
             checked += 1
             if not _http_status_ok(body):
                 continue
@@ -587,13 +709,26 @@ async def cross_arm_authorization(session_id, caller, owner, owner_field,
                 # The target named somebody who is not either declared identity, so
                 # nothing here can corroborate the claim.
                 continue
-            corroborating = owner_saw.get(url, "")
+            # The SAME request, as recorded by the other arm — not merely the same URL.
+            corroborating = owner_saw.get(key, "")
             if not (_http_status_ok(corroborating)
                     and _asserted_owner(corroborating, owner_field) == asserted):
                 continue
-            unauthenticated = anonymous_saw.get(url, "")
-            if _asserted_owner(unauthenticated, owner_field) == asserted:
-                continue            # published, not leaked
+            if key not in anonymous_saw:
+                continue            # the anonymous arm never issued this request
+            # RECEIPT, not the owner's value. Comparing the anonymous arm's owner field
+            # let the target escape this clause by retyping it ("1" for 1) or omitting
+            # it — a no-privilege-needed way to manufacture a high finding on fully
+            # public data. A 2xx to an unauthenticated caller is publication whatever
+            # the body calls the owner.
+            if _http_status_ok(anonymous_saw[key]):
+                continue
+            # Declared entitlement, the same open-world suppression the function-level
+            # check applies: an object the operator says this caller may read is not a
+            # crossing, and no response can say so.
+            if _entitled(url, entitled):
+                allowed.append(url)
+                continue
             findings.append({
                 "url": url, "owner_field": owner_field,
                 "caller": caller, "caller_subject_id": caller_subject,
@@ -608,9 +743,207 @@ async def cross_arm_authorization(session_id, caller, owner, owner_field,
         "findings": findings,
         "refused_because": refused,
         "checked": checked,
+        "suppressed_declared_access": allowed,
         "surfaces": surfaces["summary"],
         "establishes": ("nothing, when `refused_because` is non-empty — an empty findings "
                         "list is not a clean result unless the comparison actually ran"),
+    }
+
+
+async def cross_arm_privileged_function(session_id, privileged, unprivileged, marker,
+                                        anonymous=None) -> dict:
+    """Privileged-function access, compared ACROSS stages. E-011's last clause.
+
+    Object-level authorization reads an owner out of the response, so the TARGET says who
+    a record belongs to and the check only has to notice that it is not the caller. A
+    FUNCTION has no owner to read. `GET /api/Users` returns every user and nothing in the
+    payload says "only an administrator may ask this" — so the one thing that cannot be
+    inferred, that this is privileged at all, comes from the OPERATOR as a marker
+    identifying privileged data. Everything else comes from what the arms recorded.
+
+    WHY NOT COMPARE STATUSES. "Both authenticated arms got 200, the anonymous arm did
+    not" describes every ordinary authenticated endpoint in an application. Measured on
+    Juice Shop v17.1.1, identical three-arm shapes for a violation and for a customer
+    reading their own orders:
+
+        /api/Users                          admin 200   customer 200   anon 401
+        /rest/user/authentication-details         200            200         401
+        /rest/order-history                       200            200         500   <- not a finding
+
+    The marker separates them, because the administrator's data is not in the customer's
+    order history. A status-shaped rule cannot, and would report the third.
+
+    WHY THE ANONYMOUS ARM CARRIES THE WEIGHT. Three of the first four candidates measured
+    are PUBLIC, and two of those have `admin` in the path:
+
+        /rest/admin/application-configuration   200  200  200
+        /rest/admin/application-version         200  200  200
+        /api/Feedbacks                          200  200  200
+        /api/Recycles                           200  200  200
+
+    A path-name heuristic reports all four. A two-arm rule reports all four. They are
+    published content, and clause 3 is what says so.
+
+    AND THE MARKER REMOVES THE NEED FOR A DENIAL LIST. A refusal is not always a 4xx:
+    Juice Shop denies `/api/Cards/3` to the wrong customer with HTTP **400**
+    `{"status":"error","data":"Malicious activity detected"}`, and DVWA denies with HTTP
+    **200** `{"result":"fail","error":"Access denied"}`. Neither body contains the
+    privileged data, so clause 2 rejects both without knowing anything about how this
+    application spells "no".
+
+    THE SAFETY ASYMMETRY IS WHY THIS IS SAFE TO BUILD. Which role is privileged comes
+    from the operator, via `Identity.role`; whether the data came back comes from the
+    target. A target can cost itself a finding by denying the unprivileged arm, and
+    cannot manufacture one — the only way to fabricate a finding is to hand privileged
+    data to an unprivileged caller while withholding it from nobody, which IS the finding.
+
+    Returns `{findings, refused_because, checked}`. A refusal means the comparison never
+    ran, and an empty `findings` list is then not a clean result.
+    """
+    from orchestrator.testcase import declared
+    from orchestrator.testcase.runner import _http_status_ok, _response_body
+    from .security import SecretStore
+
+    def role_of(identity_id):
+        if identity_id in (None, "", "anonymous"):
+            return "anonymous"
+        try:
+            return str((SecretStore().get(identity_id) or {}).get("role") or "").strip()
+        except Exception:
+            return ""
+
+    refused = []
+    # The marker is held to the rule that already governs it as a declaration, rather
+    # than to a second rule invented here that could drift from it.
+    bad = declared.validate("private_object_marker", marker)
+    if bad:
+        refused.append("marker_unusable")
+    try:
+        entitled = _declared_access(SecretStore().get(unprivileged)
+                                   if unprivileged not in (None, "", "anonymous") else {})
+    except Exception:
+        entitled = ()
+    high, low = role_of(privileged), role_of(unprivileged)
+    if not high or not low:
+        # Guessing which of two identities is privileged — from a name, from which was
+        # passed first — would let the lane report a finding off its own assumption.
+        refused.append("role_not_declared")
+    elif high == low:
+        # A privilege crossing needs two privilege levels. Two identities the operator
+        # labelled the same way is a configuration mistake, and a finding drawn from it
+        # would be reporting that mistake as a vulnerability. This also subsumes the
+        # degenerate case of one identity passed twice.
+        refused.append("arms_share_a_role")
+    anonymous = _arm_name(anonymous)
+    if anonymous is None:
+        refused.append("no_anonymous_arm")
+
+    surfaces = await compare_arms(session_id, privileged, unprivileged)
+    if not surfaces["comparable"]:
+        refused += [reason for reason in surfaces["refused_because"]
+                    if reason != "arms_share_one_identity"]
+
+    privileged_saw, high_split = await arm_responses(session_id, privileged)
+    unprivileged_saw, low_split = await arm_responses(session_id, unprivileged)
+    anonymous_saw, anonymous_split = ((await arm_responses(session_id, anonymous))
+                                      if anonymous is not None else ({}, set()))
+    if high_split or low_split or anonymous_split:
+        refused.append("ambiguous_evidence")
+    if anonymous is not None and not anonymous_saw:
+        refused.append("anonymous_arm_did_not_run")
+
+    # Only URLs the isolation gate looked at, for the same reason as the sibling check.
+    gated = await arm_urls(session_id, privileged) & await arm_urls(session_id, unprivileged)
+
+    needle = marker.strip() if isinstance(marker, str) else ""
+
+    def carries(response):
+        """The marked data came back in the BODY of a successful response.
+
+        Body, because a marker reflected into a `Location:` header is not the
+        application handing over a record. Successful, because a 400 that echoes the
+        request would otherwise let reflected input satisfy a clause.
+        """
+        return bool(response) and _http_status_ok(response) and needle in _response_body(response)
+
+    findings, checked, reflected, allowed = [], 0, [], []
+    if not refused:
+        for key, response in sorted(privileged_saw.items()):
+            url = key[0]
+            if url not in gated:
+                continue
+            checked += 1
+            # 0. THE MARKER MUST NOT BE THE CALLER'S OWN INPUT. Measured on Juice Shop:
+            #    `GET /rest/track-order/99999` answers 200 `{"data":[{"orderId":"99999"}]}`
+            #    — the whole record is the value from the path. An endpoint that echoes
+            #    input AND requires a session would satisfy all three clauses below
+            #    without disclosing anything, because the target would be supplying the
+            #    evidence for its own verdict. Checked unquoted too, since a marker in a
+            #    query arrives percent-encoded.
+            # `unquote_plus`, not `unquote`: a form-encoded marker carries `+` for
+            # space, so `?name=Vulnerability%3A+Reflected` did not match the marker
+            # `Vulnerability: Reflected` that DVWA reflects three times into that page.
+            if needle in url or needle in unquote_plus(url):
+                reflected.append(url)
+                continue
+            # 1. The privileged arm received the marked data, so there is a privileged
+            #    function here to cross into. Without this the operator's declaration
+            #    alone decides, and a marker naming something the endpoint never returns
+            #    would be reported against every endpoint that denies the anonymous arm.
+            if not carries(response):
+                continue
+            # 2. The unprivileged arm received the SAME marked data. This is the crossing,
+            #    and it is also what makes a denial — in any dialect, at any status — not
+            #    a finding, and a dead session not a finding either.
+            if not carries(unprivileged_saw.get(key, "")):
+                continue
+            # 3. An anonymous arm ASKED and did not receive it. `get` with a default would
+            #    read "the anonymous arm never probed this" as "the anonymous arm was
+            #    refused", which is the unrun-clause defect this project keeps removing.
+            if key not in anonymous_saw:
+                continue
+            if carries(anonymous_saw[key]):
+                continue            # published content, not a privilege crossing
+            # 4. The operator has not declared the unprivileged identity entitled to this
+            #    operation. Measured: `/rest/basket/2` is jim's OWN basket and the
+            #    administrator can read it too, so a marker naming jim's own data
+            #    satisfies every clause above with nothing wrong. Entitlement is the one
+            #    thing no response can express.
+            if _entitled(url, entitled):
+                allowed.append(url)
+                continue
+            findings.append({
+                "url": url,
+                "privileged": privileged, "privileged_role": high,
+                "unprivileged": unprivileged, "unprivileged_role": low,
+                # The marker is NOT echoed. It is operator text describing the
+                # application's private data — a real customer's address, an internal
+                # identifier — and a finding travels into an export. The digest is here
+                # so two markers used in one session can be told apart.
+                "marker_sha256": hashlib.sha256(needle.encode()).hexdigest()[:12],
+                "marker_not_quoted": ("the declared marker identifies privileged data and "
+                                      "is recorded as a digest, not as text"),
+                "detail": (f"the operator declared {low!r} to be less privileged than "
+                           f"{high!r}; both arms received the marked data from this "
+                           f"operation, and an anonymous arm asked for it and did not "
+                           f"receive it, so it is not published content"),
+            })
+
+    return {
+        "findings": findings,
+        "refused_because": refused,
+        "checked": checked,
+        # Named and listed, not counted silently: these operations were NOT evaluated,
+        # and a report that omitted them would read as a clean result for them.
+        "skipped_reflected_marker": reflected,
+        # Operations the operator declared this identity entitled to, via
+        # `Identity.may_access`. Listed, because a suppression nobody can see is
+        # indistinguishable from a check that never looked.
+        "suppressed_declared_access": allowed,
+        "surfaces": surfaces["summary"],
+        "establishes": ("nothing, when `refused_because` is non-empty. What the marker "
+                        "means is the operator's claim; that both arms received it and an "
+                        "anonymous arm did not is the application's answer"),
     }
 
 

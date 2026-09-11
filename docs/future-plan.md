@@ -952,13 +952,137 @@ The safety asymmetry is unchanged and is why this was worth building at all: who
 caller IS comes from the operator via `Identity.subject_id`, and the asserted owner comes
 from the target. A target can cost itself a finding and cannot manufacture one.
 
-**What remains of E-011** is the function-level half, where there is no object to attribute
-and so no ownership field to read. DVWA offers no level that is authenticated-but-
-unauthorized — measured: at `security=low` its authbypass module serves the user table to
-anybody carrying the level cookie, which is missing authentication rather than broken
-authorization, and at `impossible` it enforces correctly. Juice Shop's `/api/Users` is the
-real shape. That needs a privileged-function declaration on the matrix rather than an
-object one, and it is the next increment.
+**Increment 8 — the privileged-function half, which completes E-011.** Object-level
+authorization reads an owner out of the response, so the target says who a record belongs
+to and the check only has to notice it is not the caller. A function has no owner to read:
+`GET /api/Users` returns every user and nothing in the payload says who may ask. So the
+operator declares a marker identifying privileged **data**, and
+`inventory.cross_arm_privileged_function` asks three things of the stored evidence — the
+marked data reached the privileged arm, it also reached the unprivileged arm, and an
+anonymous arm asked for it and did not receive it. Exposed as
+`POST /sessions/{id}/privileged-function`.
+
+It generalises the sibling check rather than copying it: the stage/evidence join both need
+is now `inventory.arm_responses`, in one place, so a second check cannot drift from the
+first.
+
+**The status-shaped rule was measured and rejected, not assumed away.** Over 16 Juice Shop
+endpoints with three real arms:
+
+    endpoint                              admin  cust  anon   status rule   marker rule
+    /api/Users                             200    200   401    report       report
+    /api/Users/1                           200    200   401    report       report
+    /rest/user/authentication-details      200    200   401    report       report
+    /rest/basket/1                         200    200   401    report  FP   -
+    /api/Complaints                        200    200   401    report  FP   -
+    /rest/order-history                    200    200   500    report  FP   -
+
+    -> 3 findings of 16 checked, refused_because [], 0 false positives,
+       and neither the marker nor a bearer token anywhere in the verdict
+
+`/rest/order-history` is the one that settles it: each arm received its own orders, which
+is indistinguishable from a crossing by status alone.
+
+The anonymous clause carries more weight than expected. **Three of the first four
+candidates measured are public, and two of them have `admin` in the path** —
+`/rest/admin/application-configuration` and `/rest/admin/application-version` answer 200 to
+anybody, as do `/api/Feedbacks` and `/api/Recycles`. A path-name heuristic reports all
+four.
+
+The marker also removes the need for a denial list: Juice Shop refuses with HTTP **400**
+`{"status":"error","data":"Malicious activity detected"}` and DVWA with HTTP **200**
+`{"result":"fail","error":"Access denied"}`, and neither body carries the privileged data.
+The same clause covers an expired session, which receives the anonymous response.
+
+DVWA could not supply the positive control and was measured before being set aside: it
+offers no level that is authenticated-but-unauthorized — at `security=low` its authbypass
+module serves the user table to anybody carrying the level cookie, which is missing
+authentication rather than broken authorization, and at `impossible` it enforces correctly.
+
+Twelve clauses and sub-clauses were each removed to confirm a test fails without them.
+Four initially did not, and each exposed a real gap: a control where the marker named the
+*unprivileged* arm's own data, a marker echoed by a 400, a marker present only in the
+response headers, and a header-only capture with no body at all. One of the tests written
+for this increment **passed for the wrong reason** — it patched a stored capture under a
+stage id nothing reads, so the clause it claimed to cover was never exercised; and two
+fixtures built an "echo" with `json.dumps`, which escapes the marker's own quotes, so the
+marker was absent from bodies meant to contain it. The same escaping made the
+marker-not-echoed assertion unable to fail. All four are the suite's recurring defect
+shape, found by ablation rather than by reading.
+
+There is deliberately **no catalogue case** for this. A lane stage carries one identity, so
+a case naming a privileged arm and an anonymous arm has no way to have either — the same
+reason a lane-runnable `WSTG-AUTHZ-04.2` was written and then deleted in Increment 3.
+
+**An adversarial pass over the foundation found five defects, four of them in shipped
+code.** The function-level check was going to rest on them, so they were fixed first.
+
+*A target could assert its own status.* `_http_status_ok` was
+`re.search(r"^HTTP/\S+\s+2\d\d", out, re.MULTILINE)` — the whole capture, and the body
+is part of the capture and is written by the target. A 403 whose body contained a line
+`HTTP/1.1 200 OK` read as a success. `detection.py` had the same defect in its own copy
+(`findall(...)[-1]`). That primitive is under the `ownership` and `idor` evaluators and both
+cross-arm checks, so a target could assert that its own refusal had succeeded — the one
+direction the safety asymmetry exists to make impossible. Both lanes now share
+`orchestrator/http_capture.py`, which reads a status only from the first line of a header
+block, walking forward and advancing only across 3xx blocks. `curl -i -L` prints every
+header block and only the final body, so redirect chains still work and the body is
+unreachable.
+
+*Two arms could be compared without having issued the same request.* The evidence reader
+keyed a response by the run's declared `target.url` and took the FIRST step with output.
+So a run whose steps were `[login 200 carrying the owner, read_as_caller 403]` reported the
+LOGIN's body as the caller's access, a refused read became a finding, one arm's body could
+come from a different test case entirely, and two artifacts for one request let row order
+decide — which both invents findings and loses real ones. `arm_responses` now keys by
+`(url, test_case, step)`, drops keys whose captures disagree with an `ambiguous_evidence`
+refusal, and both checks intersect with the endpoint rows `compare_arms` actually gated, so
+a finding cannot name a URL nothing compared.
+
+*A named anonymous arm need not have run.* `service.register` creates an anonymous stage
+only via `config.identity_ids or ["anonymous"]`, so a two-identity run has none — and an
+operator passing the lane's own literal name for it got findings with the load-bearing
+clause never evaluated. The route's model also accepted `anonymous=""`, which named no arm
+and then passed an `is None` presence check. Both refuse now.
+
+*Publication was judged by a VALUE the target controls.* The object-level clause compared
+the anonymous arm's owner field to the caller's, so a target that retyped `1` as `"1"` or
+omitted the field escaped it — a no-privilege-needed way to manufacture a HIGH finding on
+fully public data. It now asks whether the anonymous arm RECEIVED the object, which is what
+the `ownership` evaluator already did.
+
+*And the reflection gate missed a form encoding.* `unquote` leaves `+`, so
+`?name=Vulnerability%3A+Reflected` did not match the marker `Vulnerability: Reflected` that
+DVWA reflects three times into that page. `unquote_plus` now.
+
+**The rule needed a fifth clause, and the lab proved it.** `GET /rest/basket/2` is jim's
+OWN basket and the administrator can read it too, so a marker naming jim's own data is
+present in both arms while anonymous is refused — every clause satisfied, nothing wrong.
+No rule reading only responses can separate that from a crossing, because the difference is
+ENTITLEMENT. `Identity.may_access` is where the operator says so; it had been validated and
+read by nothing, and this is its first reader. It is read as an open-world suppression — a
+declared path removes a finding, an empty declaration removes none — because read as a
+closed-world allowlist it manufactures them, worst of all for the anonymous arm, whose list
+is empty.
+
+**Two verified defects are named rather than fixed, because both need lane plumbing.**
+The anonymous stage cannot carry application configuration (`service.py` passes `None` for
+it and the proxy then injects nothing), so on an application whose configuration lives in a
+cookie the anonymous arm is evaluated against a DIFFERENT application — measured on DVWA,
+273 bytes with `security=low` versus 41 bytes without it. And `service.authenticate` is a
+status-and-marker probe rather than a differential one, with `expected_status` defaulting to
+200, so an identity whose check URL is the target origin passes while carrying nothing. Both
+are the next increment; both are stated in docs/integrations.md so nobody trusts the
+anonymous clause on a cookie-configured application in the meantime.
+
+**One stale claim of my own was corrected.** `AUTHZ-04_idor.yaml` carried a verdict table
+asserting `security=low -> FINDING` and `security=medium -> FINDING` on DVWA's authbypass
+endpoint. Re-measured: the case reports NOTHING there at any level, and that is right — once
+`config_cookie` put the security level on every arm, the ANONYMOUS arm receives the same
+273-byte user table, so the endpoint is missing authentication rather than broken
+authorization. The table was measured before `config_cookie` existed and was never
+re-measured after. The stale row is kept in the comment rather than deleted, because it is
+exactly the hazard this project keeps finding.
 
 **Increment 6 — the identity matrix, and the boundary it does not cross.** The slice
 sentence opens with "an operator selects two lab identities", and by now every later

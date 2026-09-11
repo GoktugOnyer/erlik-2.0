@@ -336,6 +336,117 @@ Measured end to end on Juice Shop with three stages, three identities and the re
 
     -> 1 finding, refused_because [], and no bearer token anywhere in the verdict
 
+### Checking access to a privileged function
+
+`POST /api/integrations/sessions/{id}/privileged-function` asks the other half of the
+same question. Object-level authorization reads an owner out of the response, so the
+target itself says who a record belongs to. A **function** has no owner to read:
+`GET /api/Users` returns every user and nothing in the payload says "only an
+administrator may ask this".
+
+So the operator supplies the one thing that cannot be inferred — a marker identifying
+privileged **data** — and the lane supplies what happened:
+
+```json
+{ "privileged": "<identity handle>", "unprivileged": "<identity handle>",
+  "marker": "\"email\":\"admin@juice-sh.op\"", "anonymous": "anonymous" }
+```
+
+Three clauses, all of which must hold: the marked data reached the **privileged** arm, so
+there is a privileged function here at all; it also reached the **unprivileged** arm, which
+is the crossing; and an anonymous arm **asked for it and did not receive it**, so it is not
+published content.
+
+**Why not compare statuses.** "Both authenticated arms got 200, the anonymous arm did not"
+describes every ordinary authenticated endpoint. Measured over 16 Juice Shop endpoints with
+three real arms, a status-shaped rule reports **6 and is wrong about 3** of them:
+
+    endpoint                              admin  cust  anon   status rule   marker rule
+    /api/Users                             200    200   401    report       report
+    /api/Users/1                           200    200   401    report       report
+    /rest/user/authentication-details      200    200   401    report       report
+    /rest/basket/1                         200    200   401    report  FP   -
+    /api/Complaints                        200    200   401    report  FP   -
+    /rest/order-history                    200    200   500    report  FP   -
+
+    -> marker rule: 3 findings of 16 checked, 0 false positives
+
+`/rest/order-history` is the clearest one: each arm received its **own** orders, and no
+rule that only looks at status codes can tell that apart from a crossing.
+
+**Why the anonymous arm carries the weight.** Three of the first four candidates measured
+turned out to be public, and two of them have `admin` in the path —
+`/rest/admin/application-configuration`, `/rest/admin/application-version`,
+`/api/Feedbacks`, `/api/Recycles` all answer **200 to nobody in particular**. A path-name
+heuristic reports all four.
+
+**A denial is not always a 4xx**, so there is no denial list to keep current. Juice Shop
+refuses the wrong customer's card with HTTP **400**
+`{"status":"error","data":"Malicious activity detected"}`; DVWA refuses with HTTP **200**
+`{"result":"fail","error":"Access denied"}`. Neither body contains the privileged data, so
+clause 2 rejects both. The same clause rejects an arm whose session has expired, because a
+dead session receives the anonymous response.
+
+The marker is matched against the response **body** of a **2xx** only. A marker reflected
+into a `Location:` header, or echoed back by a 400, is the application repeating the
+question rather than answering it.
+
+**Read `refused_because` before `findings`**, as with the sibling route. It refuses when
+either identity declares no `role`, when both declare the **same** role (a privilege
+crossing needs two privilege levels, and guessing which of two handles is privileged would
+let the lane report its own assumption), when there is no anonymous arm, and when the
+marker is not a usable comparison — it is held to `declared.validate`, the same rule that
+governs `private_object_marker` in the catalogue, rather than to a second rule invented
+here.
+
+**Entitlement is the one thing no response can express**, so the operator declares it.
+`Identity.may_access` — a field that until now was validated and read by nothing — lists
+paths an identity is entitled to reach, and a declared path removes a finding. It is read
+as an OPEN-WORLD suppression: an empty declaration suppresses nothing, so it can only ever
+remove a finding, never manufacture one. Read the other way, as "anything not declared is a
+violation", it invents them — worst of all for the anonymous arm, whose list is empty and
+for whom every public endpoint would then read as forbidden.
+
+The measured case that makes it necessary: `GET /rest/basket/2` is **jim's own basket**,
+and the administrator can read it too —
+
+    admin  200 {"status":"success","data":{"id":2,...,"UserId":2,...}}
+    jim    200 byte-identical
+    anon   401
+
+— so a marker naming jim's own data satisfies every clause with nothing wrong. Declaring
+`may_access: ["/rest/basket/2"]` on that identity is how the operator says so, and
+`suppressed_declared_access` in the payload lists what was removed, because a suppression
+nobody can see is indistinguishable from a check that never looked.
+
+**Two measured limits, both outside this check and both real.**
+
+*The anonymous arm cannot carry application configuration.* `service.register` builds a
+stage's identity as `SecretStore().get(...) if identity_id != "anonymous" else None`, and
+the proxy injects nothing when that is `None` — so on an application whose configuration
+lives in a cookie, the anonymous arm is evaluated against a **different application**.
+Measured on DVWA, whose security level is a caller-supplied cookie
+(`dvwaPage.inc.php:200`): `/vulnerabilities/authbypass/get_user_data.php` returns the
+273-byte user table to an anonymous caller carrying `security=low`, and 41 bytes
+`{"result":"fail","error":"Access denied"}` with no cookie at all. The anonymous clause
+compares against whichever of those the lane happened to produce. Until a stage can carry
+non-credential configuration, **trust the anonymous clause only on applications that do not
+keep configuration in a cookie.**
+
+*Liveness is not differential.* `service.authenticate` returns
+`not blocked and status == expected_status and (optional body_contains)`, and
+`RequestSpec.expected_status` defaults to 200 — so an identity whose check URL is the
+target origin passes while carrying no credential at all, and its arm is then effectively
+anonymous. In the other direction, `GET /rest/user/whoami` with a header-only Juice Shop
+token answers 200 `{"user":{}}`, byte-identical to the anonymous answer, so that URL as a
+check reports a working session as dead. This is the same defect `login._verify` already
+documents for the other lane, and the fix is the same: compare against a control request
+that drops the identity.
+
+**The marker is never echoed into a finding.** It describes the application's private
+data — a real address, an internal identifier — and a finding travels into a DefectDojo
+export. The payload carries a short digest instead, and says so.
+
 ### What the matrix does not unlock
 
 A lane stage carries exactly **one** identity — it resolves it from its own row, and the

@@ -7,6 +7,7 @@ import time
 from typing import Any
 from pydantic import BaseModel, Field
 
+from orchestrator import http_capture
 from orchestrator import llm_client
 from orchestrator import credentials as _CRED
 from orchestrator.testcase.schema import TestCase, TestStep, Evaluator
@@ -421,16 +422,32 @@ def _asserted_owner(output: str, field: str):
 
 
 def _http_status_ok(output: str) -> bool:
-    """True when the captured response line is a 2xx."""
-    return bool(re.search(r"^HTTP/\S+\s+2\d\d", output, re.MULTILINE))
+    """True when the final response was a 2xx.
+
+    Delegates to `http_capture.ok`. It used to be
+    `re.search(r"^HTTP/\\S+\\s+2\\d\\d", output, re.MULTILINE)`, which searched the
+    whole capture — and the body is part of the capture and is written by the TARGET.
+    A 403 whose body contained a line `HTTP/1.1 200 OK` read as a success, which let a
+    target assert that its own refusal had succeeded. That is the one direction the
+    safety asymmetry behind every authorization check is supposed to make impossible.
+    """
+    return http_capture.ok(output)
 
 
 def _response_headers(output: str) -> str:
     """The header block only — never let a body echo fake a header match."""
-    for sep in ("\r\n\r\n", "\n\n"):
-        if sep in output:
-            return output.split(sep, 1)[0]
-    return output
+    return http_capture.headers(output)
+
+
+def _response_body(output: str) -> str:
+    """The body only — the mirror of `_response_headers`, for the opposite reason.
+
+    A marker is searched for in a response to decide whether privileged DATA came
+    back. Searching the whole capture would let the headers answer: a reflected
+    marker in a `Location:` redirect, or an echo of the request line, is not the
+    application handing over a record.
+    """
+    return http_capture.body(output)
 
 
 async def _run_evaluator(

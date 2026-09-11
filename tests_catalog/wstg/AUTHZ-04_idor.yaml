@@ -47,17 +47,34 @@ references:
 # the comparison is noise. That normalisation is deliberately narrow: it
 # cannot mask a difference in the DATA, which is what the test is about.
 #
-# VERIFIED against DVWA /vulnerabilities/authbypass/get_user_data.php, which
-# returns the full user table. The verdict tracks the security level, which is
-# what makes it a control rather than a demo:
+# RE-MEASURED against DVWA /vulnerabilities/authbypass/get_user_data.php, which
+# returns the full user table. THIS CASE REPORTS NOTHING THERE, AT ANY LEVEL —
+# and that is the right answer:
 #
-#   security=low         admin and gordonb identical, anon differs  -> FINDING
-#   security=medium      identical                                  -> FINDING
-#   security=high        gordonb gets the anonymous response        -> no finding
-#   security=impossible  gordonb gets the anonymous response        -> no finding
+#   security=low         all three arms get the 273-byte table   -> no finding
+#   security=medium      all three arms get the 273-byte table   -> no finding
+#   security=high        gordonb gets the anonymous response     -> no finding
+#   security=impossible  gordonb gets the anonymous response     -> no finding
 #
-# and /dvwa/css/main.css is identical for all three, so the `low != anon`
-# clause correctly refuses to call a public asset an IDOR.
+# The table above USED to read "-> FINDING" for low and medium, and that was
+# measured before `config_cookie` put the security level on every arm. DVWA's
+# level is a caller-supplied cookie (dvwaPage.inc.php:200 returns $_COOKIE
+# ['security'] when set, else "impossible"), so once the ANONYMOUS arm carries
+# `security=low` too it receives the same table — measured: 273 bytes with the
+# cookie, 41 bytes `{"result":"fail","error":"Access denied"}` without it.
+#
+# That is missing AUTHENTICATION, not broken authorization: the endpoint serves
+# the user table to anybody who sets a cookie. The anonymous clause is what
+# declines to call it an IDOR, and it is working. The stale row is recorded
+# rather than deleted because it is the exact hazard this project keeps
+# finding — a verdict table that was true when written, and was not re-measured
+# after the behaviour it describes was changed one commit later.
+#
+# The real positive control is Juice Shop `GET /api/Users` with the marker
+# `"email":"admin@juice-sh.op"`: admin 200, jim 200, anonymous 401.
+#
+# /dvwa/css/main.css is identical for all three arms, so the `low != anon`
+# clause also refuses to call a public asset an IDOR.
 
 target_schema:
   required: [url_template, private_object_marker]

@@ -21,6 +21,7 @@ A finding dict has the shape::
      "parameter": str, "evidence": str}
 """
 
+from orchestrator import http_capture
 import json
 import re
 
@@ -168,17 +169,15 @@ def _detect_xss_tools(ctx: DetectContext) -> list[Finding]:
 
 
 # ── response status ─────────────────────────────────────────────────────────
-_STATUS_RX = re.compile(r"^HTTP/[\d.]+\s+(\d{3})", re.MULTILINE)
-
-
 def _http_status(output: str) -> int | None:
     """Status of the LAST HTTP response in the output, or None if absent.
 
-    Last, not first, because a redirect chain (`curl -L`) emits several and the
-    final one is what the client actually got.
+    Delegates to `http_capture.status`. It used to be `_STATUS_RX.findall(out)[-1]`
+    with an `re.MULTILINE` pattern, i.e. the last status-shaped line ANYWHERE in the
+    capture — and the body is written by the target, so a response body containing a
+    line `HTTP/1.1 200 OK` became the reported status of a refusal.
     """
-    m = _STATUS_RX.findall(output or "")
-    return int(m[-1]) if m else None
+    return http_capture.status(output or "")
 
 
 def _succeeded(ctx: "DetectContext") -> bool:
