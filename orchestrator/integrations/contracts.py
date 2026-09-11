@@ -728,6 +728,20 @@ class IntegrationFinding(StrictModel):
     #
     # Empty for every single-arm finding, which is all of the catalogue ones.
     compared_with: str = ""
+    # WHICH OPERATOR DECLARATIONS THIS RESTS ON, as keyed labels — never as text.
+    #
+    # A LIST, because two declarations about one operation are two proofs of ONE
+    # vulnerability, not two vulnerabilities. `fingerprint` has no marker term, so two
+    # markers against one URL build one key; the records then collided and
+    # `INSERT OR REPLACE` kept only the second digest, which is how a row came to attest
+    # to the last declaration alone while its own comment claimed the digest existed "so
+    # two markers used in one session can be told apart". Merged by `persist_findings`
+    # the way `evidence_ids` is.
+    #
+    # NOT in the `evidence` prose, which is the reason this is a field at all: the prose
+    # is built before the merge happens, so a digest written into it could never reflect
+    # what the merge produced. Rendered into the export from here instead.
+    marker_digests: list[str] = Field(default_factory=list)
     severity: str = "medium"
     confidence: Literal["suspected", "likely", "confirmed"] = "suspected"
     # WHY THE CLAIM WAS MADE — lane-authored, and safe to render as-is.

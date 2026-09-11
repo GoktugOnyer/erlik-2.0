@@ -33,7 +33,7 @@ FUNCTION_RESULT = {
         "url": "http://app.test/api/Users",
         "privileged": "handle-admin", "privileged_role": "admin",
         "unprivileged": "handle-jim", "unprivileged_role": "customer",
-        "marker_sha256": "c5c79a1df019",
+        "marker_digest": "c5c79a1df019",
         "detail": "both arms received the marked data and an anonymous arm did not",
     }],
 }
@@ -77,7 +77,19 @@ def test_the_evidence_carries_the_three_arm_differential():
     evidence = authorization_findings(TARGET, "function", FUNCTION_RESULT)[0].evidence
     assert "privileged arm" in evidence and "unprivileged arm" in evidence
     assert "anonymous arm" in evidence
-    assert "c5c79a1df019" in evidence, "the digest says which declaration this was"
+
+
+def test_which_declaration_it_rests_on_is_a_field_not_prose():
+    """It moved OUT of the evidence text, and the move is the point.
+
+    `persist_findings` merges these, because two declarations proving one operation is
+    broken are two proofs of one finding. Prose is built before the merge, so a digest
+    written into it could never reflect what the merge produced — see
+    `tests/test_two_declarations_are_two_proofs_of_one_finding.py`.
+    """
+    finding = authorization_findings(TARGET, "function", FUNCTION_RESULT)[0]
+    assert finding.marker_digests == ["c5c79a1df019"]
+    assert "c5c79a1df019" not in finding.evidence
 
 
 def test_the_object_level_evidence_says_whose_claim_is_whose():
@@ -108,13 +120,17 @@ def test_the_marker_never_reaches_the_finding(marker):
     result = {"refused_because": [], "findings": [{
         **FUNCTION_RESULT["findings"][0],
         "marker": marker, "private_object_marker": marker, "forbidden_marker": marker,
-        "marker_sha256": hashlib.sha256(marker.encode()).hexdigest()[:12]}]}
+        "marker_digest": "a-keyed-label"}]}
     blob = authorization_findings(TARGET, "function", result)[0].model_dump_json()
     assert marker not in blob
     assert "admin@juice-sh.op" not in blob and "hunter2" not in blob
     assert "JBSWY3DPEHPK3PXP" not in blob
-    # ...and the digest IS there, so the reader can tell which declaration this was.
-    assert hashlib.sha256(marker.encode()).hexdigest()[:12] in blob
+    # ...and the label IS there, so the reader can tell which declaration this was.
+    assert authorization_findings(TARGET, "function", result)[0].marker_digests
+    # AND IT IS NOT A DIGEST OF THE MARKER ALONE. That form was an oracle: a
+    # 4050-candidate space recovered a real marker from a real export in 0.0007s. See
+    # tests/test_a_marker_label_is_not_an_oracle.py for the recovery itself.
+    assert hashlib.sha256(marker.encode()).hexdigest()[:12] not in blob
 
 
 def test_a_refused_check_records_nothing():
@@ -207,7 +223,15 @@ async def test_the_finding_reaches_the_export_payload(lane):
                                          "WHERE session_id='s'"))[0]["payload"])
     payload = finding_payload(stored)
     assert payload["severity"] == "High"
-    assert payload["verified"] is True, "a three-arm differential is confirmed-grade"
+    # NOT `verified`. This line used to assert that "a three-arm differential is
+    # confirmed-grade", and measurement overturned it: over 16 markers on the real Juice
+    # Shop assessment the function-level check was right 12 times in 26 (0.46), and 12 in
+    # 16 over the realistic markers. `verified=True` tells a client a human need not
+    # check — and the thing most needing a check, whether the marker names privileged
+    # data, is unverifiable by the lane and deliberately absent from the report. High
+    # severity, unverified grade: see the comment on `confidence` in
+    # `inventory.authorization_findings`.
+    assert payload["verified"] is False
     assert payload["endpoints"] == ["http://app.test/api/Users"]
     assert payload["cwe"] == 285
     assert "anonymous arm" in payload["description"], "the differential travels with the claim"

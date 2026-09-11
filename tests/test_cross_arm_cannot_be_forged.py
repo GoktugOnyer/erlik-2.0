@@ -128,7 +128,7 @@ async def test_two_probes_of_DIFFERENT_parameters_are_not_contradictory(lab):
 
     await stage(lab, lab["h"]["jim"], [("probe", OWNED)], parameter="username")
     await stage(lab, lab["h"]["jim"], [("probe", REFUSED_403)], parameter="password")
-    out, ambiguous = await arm_responses("s", lab["h"]["jim"])
+    out, ambiguous, artifacts = await arm_responses("s", lab["h"]["jim"])
     assert ambiguous == set(), "two different parameters are two different requests"
     assert len(out) == 2
 

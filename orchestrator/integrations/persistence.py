@@ -2,6 +2,7 @@
 from __future__ import annotations
 import hashlib
 import json
+import re
 import uuid
 from pathlib import Path
 from orchestrator.database import get_db
@@ -66,6 +67,7 @@ async def migrate():
                                   ("remote_engagement_id", "INTEGER"), ("evidence_id", "TEXT")):
             if name not in export_columns:
                 await db.execute(f"ALTER TABLE integration_exports ADD COLUMN {name} {declaration}")
+        await _withdraw_invertible_marker_digests(db)
         await db.commit()
     finally:
         await db.close()
@@ -167,6 +169,49 @@ async def persist_result(session_id, stage_id, result):
     await persist_findings(session_id, result.findings)
 
 
+# The line the cross-arm authorization findings used to carry: an UNSALTED
+# `sha256(marker)[:12]`, which a 4050-candidate search inverts in 0.0007s.
+_INVERTIBLE_DIGEST_LINE = re.compile(r"(?m)^\s*marker digest:.*\n?")
+
+
+async def _withdraw_invertible_marker_digests(db) -> int:
+    """Strip the pre-keying marker label out of evidence already on disk.
+
+    A SCHEMA MIGRATION WOULD NOT HAVE BEEN ENOUGH. The label moved from the `evidence`
+    prose to a keyed field, so new findings are safe — but rows persisted before that still
+    carry the invertible form in their prose, and the export still publishes it. Measured on
+    the real Juice Shop store: 2 of 11 findings still held `marker digest: c5c79a1df019`,
+    from which the marker recovers in under a millisecond.
+
+    It STRIPS rather than re-labels, because it cannot do anything else: recomputing a keyed
+    label needs the marker, and the marker was never stored — which is the design working.
+    Losing an unrecoverable-by-design label from an old row is a small cost; keeping an
+    invertible one is not a cost the operator chose.
+
+    Bounded to the two authorization rules, and idempotent: a row with no such line is not
+    rewritten.
+    """
+    changed = 0
+    cursor = await db.execute("SELECT session_id,fingerprint,payload FROM integration_findings")
+    for session_id, fingerprint, payload in await cursor.fetchall():
+        if "marker digest:" not in (payload or ""):
+            continue
+        try:
+            finding = json.loads(payload)
+        except (ValueError, TypeError):
+            continue
+        if not str(finding.get("rule", "")).startswith("erlik:authorization:"):
+            continue
+        stripped = _INVERTIBLE_DIGEST_LINE.sub("", finding.get("evidence") or "")
+        if stripped == finding.get("evidence"):
+            continue
+        finding["evidence"] = stripped
+        await db.execute("UPDATE integration_findings SET payload=? WHERE session_id=? "
+                         "AND fingerprint=?", (json.dumps(finding), session_id, fingerprint))
+        changed += 1
+    return changed
+
+
 async def persist_findings(session_id, findings):
     """Write findings, preserving triage and never replacing evidence with nothing.
 
@@ -181,6 +226,13 @@ async def persist_findings(session_id, findings):
         if old:
             prior = json.loads(old[0]["payload"])
             finding.evidence_ids = sorted(set(prior.get("evidence_ids", []) + finding.evidence_ids))
+            # THE SAME RULE, for the same reason. Two operator declarations that both prove
+            # one operation is broken are two proofs of one finding — `fingerprint` has no
+            # marker term, so they arrive as two writes to one row. Replacing rather than
+            # merging made the row attest to the last declaration alone, and the earlier one
+            # vanished from the product.
+            finding.marker_digests = sorted(set(prior.get("marker_digests", [])
+                                                + finding.marker_digests))
             finding.triage_state = prior.get("triage_state", "open")
             finding.triage_note = prior.get("triage_note", "")
             # A fingerprint covers (case, step, url, parameter, identity), so two

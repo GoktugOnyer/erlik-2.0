@@ -101,7 +101,10 @@ def test_target_bytes_cannot_break_out_of_the_exported_description():
     body = finding_payload({"basis": "b", "title": "t", "severity": "high",
                             "fingerprint": "f", "url": "u", "confidence": "suspected",
                             "evidence": hostile})["description"]
-    quoted = body.split("Evidence (credentials redacted):\n\n", 1)[1]
+    # Split on the structural part of the banner, not its prose: the banner's wording is
+    # load-bearing for a reader and has been corrected once, and a test that pins the
+    # sentence fails for a change that improves it.
+    quoted = body.split("redacted", 1)[1].split(":\n\n", 1)[1]
     for line in quoted.splitlines():
         assert line == "" or line.startswith("    "), f"escaped the block: {line!r}"
     # ...and every hostile construct is still READABLE, just inert.

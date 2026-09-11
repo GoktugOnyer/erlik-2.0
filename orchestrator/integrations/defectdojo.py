@@ -69,6 +69,16 @@ def remote_mismatches(item, expected):
     for key, value in expected.items():
         if key == "endpoints":
             continue
+        # TAGS ARE NOT COMPARED, for the same reason `endpoints` is not: what the remote
+        # returns for them is its own business. DefectDojo stores tags through a tagging
+        # model that lowercases and re-orders them, and a parser is free to drop them
+        # entirely — so an exact comparison turns a cosmetic label into a read-back
+        # mismatch, and a mismatch writes the export row `uncertain`, which BLOCKS every
+        # later export to that destination for that session. A convenience label must not
+        # be able to do that. The methodology it carries is asserted in `description`,
+        # which IS compared.
+        if key == "tags":
+            continue
         actual = item.get(key)
         # DefectDojo 2.58.4 normalizes Finding.title using titlecase and a
         # 511-character limit in the model's save method.
@@ -110,9 +120,18 @@ def finding_payload(finding):
     # about it before trusting a single character.
     # WHERE the finding is, not just which URL. A client told that a blind SQL
     # injection exists at a URL and never told which parameter cannot act on it.
+    # METHODOLOGY GOES IN THE DESCRIPTION, not only in `tags`. The claim that the WSTG
+    # mapping never reached DefectDojo was overstated: a catalogue finding's `rule` IS its
+    # case id, so "detector WSTG-INPV-05.2:single_quote" carried it all along. It was lost
+    # entirely only for the cross-arm findings, whose rule is `erlik:authorization:...`.
+    # Naming it here is also what makes the mapping VERIFIABLE — `description` is compared
+    # on read-back and `tags` cannot be (see the exemption in `remote_mismatches`), and a
+    # field we send but never check is the confident-output-from-nothing shape again.
     where = ", ".join(x for x in (
         ("parameter " + finding["parameter"]) if finding.get("parameter") else "",
-        ("detector " + finding["rule"]) if finding.get("rule") else "") if x)
+        ("detector " + finding["rule"]) if finding.get("rule") else "",
+        ("methodology " + ", ".join(finding["methodology"]))
+        if finding.get("methodology") else "") if x)
     if where:
         description += "\n\n" + where
     # The banner says only what is true of EVERY evidence value. It used to claim
@@ -121,8 +140,25 @@ def finding_payload(finding):
     # fragments quoted inside it — so for half the findings in the 2026-09-10 run
     # the banner attributed erlik's words to the client's application. The
     # evidence now opens by saying which it is.
+    # WHICH OPERATOR DECLARATIONS THE CLAIM RESTS ON. Keyed labels, never the declaration
+    # itself: a marker names the application's private data. They live on the finding rather
+    # than inside `evidence` because `persist_findings` MERGES them — two declarations
+    # proving one operation is broken are two proofs of one finding — and prose written
+    # before that merge could not reflect it.
+    if finding.get("marker_digests"):
+        labels = ", ".join(sorted(finding["marker_digests"]))
+        description += (f"\n\nOperator declaration(s) this rests on: {labels}\n"
+                        "(labels keyed to this assessment; the declaration itself is not "
+                        "quoted, and cannot be recovered from the label)")
     if finding.get("evidence", "").strip():
-        description += ("\n\nEvidence (credentials redacted):\n\n"
+        # THE BANNER SAYS WHAT IS TRUE OF THIS BLOCK. It used to read "credentials
+        # redacted", and credentials are: `redact` runs over every producer's evidence. But
+        # the cross-arm findings quote the operator's own `subject_id` — which for most
+        # applications is an email or a customer number — and that value is NECESSARY for
+        # the claim to be checkable, so it travels deliberately. A banner promising it had
+        # been removed was the defect, not the travel.
+        description += ("\n\nEvidence (credential values redacted; operator-declared "
+                        "identifiers are kept, because the claim is about them):\n\n"
                         + _quoted(finding["evidence"]))
     if finding.get("triage_note"):
         description += "\n\nErlik triage: " + finding["triage_note"]
@@ -132,6 +168,16 @@ def finding_payload(finding):
                "endpoints": [finding["url"]], "active": triage == "open", "false_p": triage == "false_positive",
                "verified": finding["confidence"] == "confirmed" and triage != "false_positive",
                "static_finding": False, "dynamic_finding": True}
+    # THE METHODOLOGY MAPPING, which never left the process. Every finding has carried one
+    # for as long as the catalogue has — `methodology=[case_id]` on a catalogue finding,
+    # `["WSTG-AUTHZ-04"]` on a cross-arm one — and `finding_payload` sent no field for it,
+    # so a client's tracker could not answer "which WSTG checks ran". The same shape of
+    # loss `cwe` had. `tags` is what DefectDojo's Finding carries for this and what its
+    # importers accept; values are bounded and whitespace-free because a tag is a label.
+    tags = [str(item).strip().replace(" ", "-")[:64]
+            for item in (finding.get("methodology") or []) if str(item).strip()]
+    if tags:
+        payload["tags"] = sorted(set(tags))
     # `is_mitigated` is only ours to assert while WE are the ones claiming it.
     # Closing a finding as a false positive hands the mitigation lifecycle to
     # DefectDojo: 2.58.4 sets is_mitigated=True on the closed finding, so

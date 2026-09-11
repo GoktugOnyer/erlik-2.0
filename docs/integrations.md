@@ -1028,6 +1028,226 @@ lane-authored prose, which is the distinction `IntegrationFinding.evidence` docu
 `MAX_EVIDENCE_CHARS` moved to `contracts`, beside the field it bounds. It was three copies of
 `1500` and this was about to write a fourth.
 
+And keying the label was not enough on its own: rows persisted before it still carried the
+invertible `sha256(marker)[:12]` in their evidence PROSE, and the export still published it —
+measured on the real store, 2 of 11 findings. `persistence.migrate` withdraws it. It STRIPS
+rather than re-labels, because it cannot do anything else: recomputing a keyed label needs the
+marker, and the marker was never stored, which is the design working. Bounded to the two
+authorization rules and idempotent.
+
+`service.report()` carries `marker_digests` too. The DefectDojo export had them and erlik's
+own report did not, so the product's report was the one place a reader could not tell which
+declaration proved a finding.
+
+### What the marker costs
+
+The marker is the one input the lane cannot infer and cannot corroborate, and four things
+followed from that which were not true of anything else in the product.
+
+**The digest that stood in for the marker was an oracle.** A finding must say which
+declaration it rests on and must not quote it; the mechanism was `sha256(marker)[:12]`,
+described in the code as recording the marker "as a digest, not as text". Against the digest
+a real export carries, over 4050 candidates built from field names, local-parts, domains and
+separator patterns:
+
+    exhausted in 0.0007s, recovered '"email":"admin@juice-sh.op"'
+
+**Truncation was not the binding problem**, which matters before anyone "fixes" this by
+widening the digest: the full 64-hex sha256 of the same marker falls to the same harness at
+the same cost, and forging a second 48-bit preimage would cost 385 machine-days against
+0.48ms to simply guess the marker. The input's entropy is the problem — a marker names a
+field and a value in an application's own data. An adversarial pass built the candidate space
+mechanically out of the assessment's **own recorded bytes** — 68 JSON keys x 1711 values x 9
+separator patterns = 2^20 candidates — and exhausted it in 0.60s with exactly one hit,
+guessing nothing at all.
+
+So the label is keyed: `security.marker_digest` is HMAC-SHA256 under 128 random bits per
+assessment, in its own SecretStore file whose handle is derived as
+`sha256("erlik:marker-salt:" + session_id)[:32]` and minted on first use. Derived rather than
+stored in a column because the protection here is the filesystem, not the handle's address —
+the store's other handles are already in plain SQLite — and because it means every row shape
+has a salt home, including the ones with no `config_secret_id`, so there is no branch that
+quietly falls back to an unkeyed digest. Keyed per assessment, not globally: a label only has
+to be unique inside the one report that carries it. Measured after: the same 2^20 attack
+yields 0 hits against the label and 1 against the unsalted control in the same run.
+
+Three failure modes of that code are worth naming, because all three were written here and
+then found. A damaged salt file — including the zero-byte one `private_write`'s
+`O_CREAT|O_TRUNC` leaves behind after a crash — was caught by
+`except (FileNotFoundError, KeyError, ValueError)`, and `json.JSONDecodeError` **is** a
+`ValueError`, so corruption read as "mint a new one": every label already exported becomes
+unreproducible while the report still looks correct. Only an absent salt is minted now.
+
+The mint then writes the salt whole and `os.link`s it into place, rather than opening the
+destination `O_EXCL` and writing into it. `O_EXCL` alone makes exactly one writer win, but it
+leaves the destination EMPTY between the open and the write — and a reader in that window now
+hits the hard failure the previous paragraph just installed. The two fixes together would have
+converted a latent double-mint into a crash. `os.link` is atomic and fails if the name is
+taken, so the destination never exists in a partial state and the loser re-reads.
+
+And the retry loop is BOUNDED, which was not a hypothetical: an ablation that broadened that
+`except` by one word made the read fail, the mint lose the link race against the file already
+there, and the loop spin forever — inside what would be a request handler. It wedged a test
+run for twenty minutes before being traced. Three attempts, then a clear failure; failing
+loudly is the right outcome for a store that will not settle.
+
+**Two declarations about one operation are two proofs of one finding.** `fingerprint` has no
+marker term, so two route calls with different markers against one URL build one key — and
+the label lived inside the `evidence` prose, so `INSERT OR REPLACE` kept whichever arrived
+second and arrival order decided. The split is the wrong fix: two `IntegrationFinding`
+records built from two true declarations about one operation differ in exactly one key, and
+within it in twelve hex characters — title, url, rule, severity, confidence, cwe, basis,
+identity, compared_with and methodology are identical, so two rows in a client tracker would
+be two indistinguishable rows for one missing authorization check, two triage decisions and
+two retests. Measured against the export path, the split POSTs twice and leaves the first
+remote row active forever while local triage reaches only the second; the merge POSTs once
+and PATCHes. So `IntegrationFinding.marker_digests` is a list, merged by `persist_findings`
+the way `evidence_ids` already is, and rendered into the export from there. It had to leave
+the prose for that to be possible at all: prose is built before the merge happens.
+
+**`confirmed` was an overclaim, and it was the only `confirmed` in the assessment.**
+`finding_payload` maps `confidence == "confirmed"` to DefectDojo's `verified=True`, which
+tells a client a human need not check. Measured over sixteen markers:
+
+    all sixteen markers          12 of 26 findings true   0.46
+    the ten realistic ones       12 of 16                 0.75
+    one plausible marker on the negative-control target    0 of 1
+
+and those two rows were the only `confirmed` findings in the whole run — so the single
+producer of `verified=True` was the one whose decisive input is an operator string nothing
+can corroborate, and whose report deliberately omits that string. The function-level check
+emits `likely` now. Severity stays `high`: the grade is certainty, not impact. The
+object-level check keeps `confirmed`, because its load-bearing value — who the application
+says owns the record — comes from the **target**, and the own-data case is excluded in code by
+`derived_urls` rather than left to a declaration.
+
+**And a URL the lane addressed to the caller itself is not a crossing.** With a marker naming
+the customer's own email, `/api/Users/2` satisfies every clause — privileged arm 200 with the
+marked data, unprivileged arm byte-identical, anonymous arm 401 — and record 2 **is** the
+customer, whose declared `subject_id` is "2".
+
+No marker rule reaches this. A gate comparing the marker against the identity's declarations
+assigns one grade per *marker*, and the two findings from that marker differ only in URL:
+`/api/Users` is real and `/api/Users/2` is not. Measured, the gate first proposed for this
+left the motivating false positive at `confirmed` and downgraded two true findings, and
+`"email":"jim@juice-sh.op"` contains neither the subject_id `"2"` nor the role `"customer"`,
+so it never fired on the case it was written for. The rule that works keys on the URL, and
+both of its sides come from outside the target: the id segment is one the **lane** chose by
+deriving an instance from a collection body, and the principal it is compared against is the
+**operator's** declaration. A target cannot move a finding out of reach with it.
+
+    with the clause      8 true, 0 false, precision 1.00   {/api/Users, /api/Users/1}
+    ablated              8 true, 2 false, precision 0.80   {..., /api/Users/2}
+
+Recall is identical — it cost zero true findings. This also refutes what `derived_urls` says
+about the function-level check, that it "is unaffected and gains, because its marker is the
+operator's and no choice of URL satisfies it": the URL does not need to satisfy the marker, it
+needs to name the caller.
+
+Three details of that clause were wrong in its first version and are worth keeping written
+down, because each was found by ablation rather than by reading.
+
+- **It compares only the LAST path segment**, the one `instance_urls` appends. Matching any
+  segment made the rule depend on path vocabulary: a declared `subject_id` of "api" skipped 25
+  of the run's 31 derived URLs and "Users" skipped 2, neither having anything to do with an
+  identity.
+- **It runs after the evidence clauses, not before them.** Placed first it reported every
+  derived URL carrying that segment — 8 of 31, identically for a marker where nothing was
+  wrong — so `skipped_url_names_the_caller` was 8:1 noise and the one case that mattered was
+  invisible. Re-measured after the move: the list is exactly `['/api/Users/2']` for the marker
+  that needs it and empty for the markers that do not. Every clause is a pure read of captures
+  already in memory, so the order costs nothing.
+- **Its safety argument is narrower than first written.** The first docstring said the id
+  segment is "one the LANE chose". It is not: `instance_urls` derives it from an id read out of
+  a collection body, so the value is the target's. What is true and sufficient is that the
+  thing it is compared against is the operator's declaration, and the only finding a target
+  can suppress this way is one at the single URL that addresses the declared caller — which by
+  the operator's own account is the caller's own record.
+
+It stays a **listed** skip, because an object id can equal an identity id by coincidence, and
+then the rule removes a true finding: a declared `subject_id` of "1" would remove
+`/api/Users/1`, one of this assessment's two true positives. And because `subject_id` is
+optional, `caller_own_records_not_excluded` says when the clause could not run at all — an
+inert protection that says nothing is the shape this project keeps deleting.
+
+**An unfollowed redirect is not a denial either.** `carries()` requires a 2xx, so an anonymous
+capture that is 3xx with an empty body satisfied "asked for it and did not receive it" for
+free — while what it points at may be public. Measured on DVWA, the negative-control target:
+the anonymous arm's capture for `/` is `302 Found / Location: login.php / Content-Length: 0`,
+the same arm holds `login.php` 200 carrying that page's own text, and three markers naming
+that text each produced a finding where nothing was wrong. Source-ablated to confirm it:
+
+    with the clause      0 findings, 2 operations listed as redirect-skipped
+    without it           1 finding each for 3 markers, all at http://dvwa/
+
+`assertion_verdict` already refuses a redirected response for the same reason. Withdrawn as a
+listed skip rather than counted as a denial, because what that arm would have received is
+unknown and that is the point — and scoped to an EMPTY body, since a 3xx that answers with
+content was answered and the existing clauses can judge it. It withdraws nothing on the Juice
+Shop run, where 0 of 250 anonymous captures are 3xx-with-empty-body.
+
+**A marker must be able to identify something.** The marker `2` validated, and the check then
+reported ten high findings of which none was true, plus thirty-six operations skipped for
+reflecting it. `declared.validate` now holds an evaluator-only value to a length floor of 8 —
+a length rule and not "must contain a letter", because a 16-digit card number is exactly the
+kind of datum an operator should be able to name.
+
+### The strongest findings were the only uncitable ones
+
+Measured on the same run: eleven findings, nine citing a resolvable evidence artifact — and
+the two citing none were the two graded highest, the only two setting `verified=True`. Of
+five high-severity findings three cited evidence; of the two `confirmed` ones, zero did. The
+six artifacts existed the whole time: `arm_responses` reads `row["id"]` and threw it away.
+
+It has to come from the **satisfying key**, not from the URL. A URL does not have one
+artifact — 27 of one arm's 96 URLs carry more than one `(url, case, step, parameter)` key,
+sixteen of them `/socket.io/` — so a lookup by URL afterwards cites a capture no clause ever
+read. `arm_responses` returns a third dict now, and drops an id whenever it drops the key as
+ambiguous, so a finding can never offer as proof a capture the comparison refused to use.
+Both checks record the three ids at the append site and `authorization_findings` cites them,
+naming them **before** the collapsed-URL block because `MAX_EVIDENCE_CHARS` would otherwise
+truncate the proof away and keep the context.
+
+This publishes nothing new. `evidence_ids` appears nowhere in `defectdojo.py`; it feeds
+`service.report`, `GET /sessions/{id}/findings` and the download route, which re-checks the
+stored digest before serving a byte. The captures hold no credential, and not by luck: the
+proxy injects identity headers after curl has emitted the request, so `-i` prints a response
+that never contained them — and Juice Shop's own `deluxeToken` values were already
+`[REDACTED]` at write time by `persistence.evidence`, which is a positive control that
+redaction fires on exactly these artifacts.
+
+### A forbidden marker was published in plaintext
+
+Not a hypothetical about a future declaration. `AssessmentConfig.security_assertions[].forbidden_marker`
+is by its own definition a string naming data that must not appear — "this identity must not
+be able to see this string here" — and `register` publishes `redact(config.model_dump())`
+into `integration_assessments.config`, which `GET /api/integrations/sessions/{id}` returns in
+full. `redact` blanks by KEY NAME against /authorization|cookie|password|secret|token|api.?key|session/,
+and nothing called `marker` matches. Measured end to end through the real route: a marker of
+"14 Rue de la Paix, 75002 Paris" came back verbatim, and sat verbatim in the persisted row.
+
+The published copy blanks the value and keeps the `description` and the request, the same
+split `application_cookies` already gets — a record that cannot say which assertion was made
+is not a record, and the value is the part that does not belong in it. The executable copy in
+the SecretStore keeps the marker, because the run cannot make the assertion without it.
+
+### The methodology mapping, and a field that must not block a destination
+
+`finding_payload` sent no field for `methodology`, so a client's tracker could not answer
+"which WSTG checks ran". The earlier claim that it never reached DefectDojo was overstated —
+a catalogue finding's `rule` **is** its case id, so "detector WSTG-INPV-05.2:single_quote"
+carried it; it was lost entirely only for the cross-arm findings, whose rule is
+`erlik:authorization:privileged-function`. It is sent as `tags` now, and also named in
+`description`.
+
+Both, deliberately. `tags` is **exempt** from `remote_mismatches` the way `endpoints` is:
+DefectDojo stores tags through a tagging model that lowercases and re-orders them, and a
+parser is free to drop them, so an exact read-back comparison turns a cosmetic label into a
+mismatch — and a mismatch writes the export row `uncertain`, which blocks every later export
+to that destination for that session. A convenience label must not be able to do that. The
+`description` is compared, which is what keeps the mapping from being a field we send and
+never check.
+
 **Two gaps the work exposed, both fixed.**
 
 `finding_payload` dropped `cwe` entirely. Findings have carried one since the ZAP adapter began

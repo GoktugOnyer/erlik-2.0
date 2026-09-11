@@ -43,7 +43,7 @@ def result(privileged, unprivileged):
         "url": "http://app.test/api/Users",
         "privileged": privileged, "privileged_role": "admin",
         "unprivileged": unprivileged, "unprivileged_role": "customer",
-        "marker_sha256": "c5c79a1df019"}]}
+        "marker_digest": "c5c79a1df019"}]}
 
 
 @pytest.fixture

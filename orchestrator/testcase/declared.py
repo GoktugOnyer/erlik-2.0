@@ -112,6 +112,11 @@ EVALUATOR_ONLY = ("private_object_marker",)
 # character would corrupt the evidence the finding quotes.
 _UNCOMPARABLE = set("\n\r\x00\x1b")
 
+# The shortest evaluator-only value that can identify a datum rather than match by
+# chance. Measured: `2` produced 10 findings and 0 true ones; the realistic markers in
+# the same experiment were 10 characters and longer.
+MIN_EVALUATOR_VALUE = 8
+
 # Values for these are stored as a PATH and rendered under the operator's base
 # URL. A declaration therefore cannot name a host at all — structurally
 # stronger than comparing one afterwards.
@@ -142,6 +147,20 @@ def validate(field: str, value: Any) -> str:
         if offending:
             return ("contains a control character: "
                     + " ".join(repr(c) for c in offending))
+        # AND IT MUST BE ABLE TO IDENTIFY A DATUM. An evaluator-only value is judged by
+        # whether it APPEARS in a response, so one that appears by chance is not evidence
+        # of anything. Measured on the Juice Shop assessment: the marker `2` validates
+        # today, and `cross_arm_privileged_function` then reports TEN high findings of
+        # which none is true, plus 36 operations skipped for reflecting it.
+        #
+        # A LENGTH FLOOR, and not "must contain a letter", which was the other candidate:
+        # a 16-digit card number is all digits and is exactly the kind of datum an operator
+        # should be allowed to name. Length is the honest proxy for "unlikely by chance",
+        # and it is the same reasoning the catalogue applies to its own literal markers.
+        if len(v) < MIN_EVALUATOR_VALUE:
+            return (f"is too short to identify anything — at least "
+                    f"{MIN_EVALUATOR_VALUE} characters, because a value this small "
+                    f"appears in a response by chance and then proves nothing")
         return ""
     bad = looks_injectable(v)
     if bad:

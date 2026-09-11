@@ -117,7 +117,7 @@ def test_a_declared_role_cannot_reorder_the_title():
         "refused_because": [], "findings": [{
             "url": "http://app.test/api/Users", "privileged": "H",
             "privileged_role": "admin", "unprivileged": "L",
-            "unprivileged_role": "cust‮omer", "marker_sha256": "c5c79a1df019"}]})[0]
+            "unprivileged_role": "cust‮omer", "marker_digest": "c5c79a1df019"}]})[0]
     assert "‮" not in finding.title
     assert "‮" not in finding.evidence
     assert "<U+202E>" in finding.title, "named in place, not deleted"

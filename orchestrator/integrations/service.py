@@ -56,6 +56,19 @@ async def register(session_id, target, config):
     # The NAMES and ORIGINS survive and the values do not. `security=low` is not a secret;
     # it is the single fact that makes a finding reproducible, and a report that cannot say
     # which application the evidence describes is not a report.
+    #
+    # AND THE SAME TREATMENT FOR A FORBIDDEN MARKER, which `redact` cannot reach because it
+    # matches by KEY NAME and nothing called `marker` matches any of its names. A
+    # `forbidden_marker` is, by its own definition, a string naming data that must not be
+    # disclosed — "this identity must not be able to see this string here" — and this row is
+    # returned in full by `GET /api/integrations/sessions/{id}`. Measured before this: a
+    # marker of "14 Rue de la Paix, 75002 Paris" came back verbatim from that route and sat
+    # verbatim in `integration_assessments.config`. The `description` is what carries the
+    # assertion's meaning for a reader and is not secret, so it survives; the marker does
+    # not. Same shape as the cookie rule above: keep the record legible, drop the value.
+    published["security_assertions"] = [
+        {**assertion.model_dump(), "forbidden_marker": "[REDACTED]"}
+        for assertion in config.security_assertions]
     await db.execute("INSERT INTO integration_assessments(session_id,target,config,config_secret_id) VALUES(?,?,?,?)",
                      (session_id, target, json.dumps(published), secret_id))
     # An anonymous arm ALONGSIDE the identity arms, not only in place of them. See
@@ -565,4 +578,8 @@ async def report(session_id):
                 # escape it. .get() because findings persisted before the field
                 # existed have no key.
                 "evidence": f.get("evidence", ""),
-                "evidence_ids": f["evidence_ids"], "source": f["source"]} for f in findings]}
+                "evidence_ids": f["evidence_ids"], "source": f["source"],
+                # WHICH OPERATOR DECLARATIONS THE CLAIM RESTS ON. The DefectDojo export
+                # carried these and the product's own report did not, so erlik's report was
+                # the one place a reader could not tell which marker proved a finding.
+                "marker_digests": f.get("marker_digests", [])} for f in findings]}

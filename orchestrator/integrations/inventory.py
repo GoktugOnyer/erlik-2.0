@@ -8,7 +8,8 @@ from orchestrator import http_capture
 from orchestrator.engagement import looks_injectable
 from .contracts import (MAX_EVIDENCE_CHARS, PARAMETER_NAME, IntegrationFinding,
                         fingerprint, parameter_names)
-from .security import SecretStore, redact, safe_evidence, secret_values
+from .security import (SecretStore, marker_digest, redact, safe_evidence,
+                       secret_values)
 from . import persistence as db
 from .egress_policy import EgressPolicy
 
@@ -500,10 +501,20 @@ async def preview(session_id, config, identity_id=None) -> dict:
     }
 
 
-async def arm_responses(session_id, identity_id) -> tuple[dict, set]:
+async def arm_responses(session_id, identity_id) -> tuple[dict, set, dict]:
     """What one arm recorded, keyed by the REQUEST it recorded it for.
 
-    Returns `({(url, test_case, step, parameter): output}, ambiguous)`.
+    Returns `({key: output}, ambiguous, {key: evidence_id})` for
+    `key = (url, test_case, step, parameter)`.
+
+    THE ARTIFACT ID TRAVELS WITH THE OUTPUT. It was read here and thrown away, and the
+    consequence was measured: of eleven findings in a real assessment nine cited a
+    resolvable evidence artifact, and the two that cited none were the only two graded
+    `confirmed` — the product could not show a reader the bytes behind the claims it was
+    most sure of. It has to come from HERE rather than be looked up per URL afterwards,
+    because a URL does not have one artifact: 27 of one arm's 96 urls carry more than one
+    `(url, case, step, parameter)` key, sixteen of them for `/socket.io/`, so a lookup by
+    URL would cite a capture the clauses never read.
 
     THE KEY IS THE WHOLE REQUEST, not the url. This used to key by the run's declared
     `target.url` and take the FIRST step that had output, and that was the common cause
@@ -529,6 +540,7 @@ async def arm_responses(session_id, identity_id) -> tuple[dict, set]:
     """
     out: dict[tuple, str] = {}
     ambiguous: set = set()
+    artifacts: dict[tuple, str] = {}
     stages = {row["id"] for row in await db.rows(
         "SELECT id FROM integration_stages WHERE session_id=? AND identity_id=?",
         (session_id, identity_id))}
@@ -562,9 +574,14 @@ async def arm_responses(session_id, identity_id) -> tuple[dict, set]:
             if key in out and out[key] != step["output"]:
                 ambiguous.add(key)
             out[key] = step["output"]
+            artifacts[key] = row["id"]
     for key in ambiguous:
         out.pop(key, None)
-    return out, ambiguous
+        # AND ITS ARTIFACT GOES TOO. A finding must never cite bytes whose contents this
+        # function refused to use — that would hand a reader an artifact as the proof of a
+        # comparison that was dropped precisely because the artifact was not trustworthy.
+        artifacts.pop(key, None)
+    return out, ambiguous, artifacts
 
 
 async def derived_urls(session_id) -> set:
@@ -710,10 +727,10 @@ async def cross_arm_authorization(session_id, caller, owner, owner_field,
     refused += [reason for reason in surfaces["refused_because"]
                 if reason not in PER_OPERATION_REFUSALS]
 
-    caller_saw, caller_split = await arm_responses(session_id, caller)
-    owner_saw, owner_split = await arm_responses(session_id, owner)
-    anonymous_saw, anonymous_split = ((await arm_responses(session_id, anonymous))
-                                      if anonymous is not None else ({}, set()))
+    caller_saw, caller_split, caller_art = await arm_responses(session_id, caller)
+    owner_saw, owner_split, owner_art = await arm_responses(session_id, owner)
+    anonymous_saw, anonymous_split, anonymous_art = ((await arm_responses(session_id, anonymous))
+                                      if anonymous is not None else ({}, set(), {}))
     # Evidence that contradicts itself about ONE request is not a record to compare — and
     # `arm_responses` has already dropped those keys, so nothing downstream can read them.
     # It is NOT a session refusal: the same over-broad shape as the per-operation conditions
@@ -791,6 +808,10 @@ async def cross_arm_authorization(session_id, caller, owner, owner_field,
             reported.add(url)
             findings.append({
                 "url": url, "owner_field": owner_field,
+                "arm_evidence": {name: art[key] for name, art in
+                                 ((caller, caller_art), (owner, owner_art),
+                                  (anonymous or "anonymous", anonymous_art))
+                                 if key in art},
                 "caller": caller, "caller_subject_id": caller_subject,
                 "owner": owner, "asserted_owner": asserted,
                 "detail": (f"the caller is declared to be {caller_subject!r} and the "
@@ -814,6 +835,42 @@ async def cross_arm_authorization(session_id, caller, owner, owner_field,
         "establishes": ("nothing, when `refused_because` is non-empty — an empty findings "
                         "list is not a clean result unless the comparison actually ran"),
     }
+
+
+def _names_the_caller(url, subject_id) -> bool:
+    """A path segment of this URL IS the unprivileged arm's own declared principal id.
+
+    THE CHECK'S FOURTH FALSE-POSITIVE CLASS, and the only one a structural rule reaches.
+    Measured on Juice Shop with a marker naming the customer's own email: `/api/Users/2`
+    satisfies every clause — the privileged arm received the marked data, the unprivileged
+    arm received the SAME bytes, the anonymous arm asked and got 401 — and the claim is
+    false, because record 2 IS the customer. jim's declared `subject_id` is "2".
+
+WHY THIS IS SAFE TO SUPPRESS ON, stated carefully, because the first version of this
+    docstring got it wrong. The id VALUE is the target's — `instance_urls` derives an
+    instance from an id read out of a collection body — so it is not true that "the lane
+    chose it". What is true is narrower and sufficient: the thing it is compared against is
+    the OPERATOR's declaration of who the caller is, and the only finding a target can
+    suppress this way is one at the single URL that addresses the declared caller. By the
+    operator's own account that URL is the caller's own record, and a target wanting to hide
+    a leak there could simply not leak.
+
+    ONLY THE LAST SEGMENT, because that is the one `instance_urls` appends. Matching any
+    segment made the rule depend on path vocabulary: measured on the real run, a declared
+    `subject_id` of "api" skipped 25 of 31 derived urls and "Users" skipped 2, neither
+    having anything to do with an identity.
+
+    NO MARKER RULE CAN DO THIS JOB. A gate comparing the marker to the identity's
+    declarations assigns one grade per MARKER, and the two findings from the jim marker
+    differ only in URL: `/api/Users` is real and `/api/Users/2` is not. Measured over 16
+    markers and 26 findings, the gate proposed for this left the motivating false positive
+    at `confirmed` and downgraded two true findings.
+    """
+    # No guard for an empty `subject_id`: empty segments are filtered out, so the
+    # comparison below can never be true for one. An explicit check read as the protection
+    # and was unreachable — ablating it changed nothing, which is how it was found.
+    segments = [segment for segment in (urlsplit(url).path or "/").split("/") if segment]
+    return bool(segments) and segments[-1] == subject_id
 
 
 async def _already_compared_the_other_way(session_id, rule, privileged,
@@ -931,10 +988,13 @@ async def cross_arm_privileged_function(session_id, privileged, unprivileged, ma
     if bad:
         refused.append("marker_unusable")
     try:
-        entitled = _declared_access(SecretStore().get(unprivileged)
-                                   if unprivileged not in (None, "", "anonymous") else {})
+        declaration = (SecretStore().get(unprivileged)
+                       if unprivileged not in (None, "", "anonymous") else {}) or {}
     except Exception:
-        entitled = ()
+        declaration = {}
+    entitled = _declared_access(declaration)
+    subject = str(declaration.get("subject_id") or "").strip()
+    derived = await derived_urls(session_id)
     high, low = role_of(privileged), role_of(unprivileged)
     if not high or not low:
         # Guessing which of two identities is privileged — from a name, from which was
@@ -961,10 +1021,10 @@ async def cross_arm_privileged_function(session_id, privileged, unprivileged, ma
     refused += [reason for reason in surfaces["refused_because"]
                 if reason not in PER_OPERATION_REFUSALS]
 
-    privileged_saw, high_split = await arm_responses(session_id, privileged)
-    unprivileged_saw, low_split = await arm_responses(session_id, unprivileged)
-    anonymous_saw, anonymous_split = ((await arm_responses(session_id, anonymous))
-                                      if anonymous is not None else ({}, set()))
+    privileged_saw, high_split, high_art = await arm_responses(session_id, privileged)
+    unprivileged_saw, low_split, low_art = await arm_responses(session_id, unprivileged)
+    anonymous_saw, anonymous_split, anonymous_art = ((await arm_responses(session_id, anonymous))
+                                      if anonymous is not None else ({}, set(), {}))
     ambiguous = len(high_split | low_split | anonymous_split)
     if anonymous is not None and not anonymous_saw:
         refused.append("anonymous_arm_did_not_run")
@@ -997,6 +1057,7 @@ async def cross_arm_privileged_function(session_id, privileged, unprivileged, ma
     read_urls = {key[0] for key in privileged_saw}
     not_shared = len(read_urls - gated)
     findings, checked, reflected, allowed, reported = [], 0, [], [], set()
+    caller_named, redirected = [], []
     if not refused:
         for key, response in sorted(privileged_saw.items()):
             url = key[0]
@@ -1039,6 +1100,24 @@ async def cross_arm_privileged_function(session_id, privileged, unprivileged, ma
             # refusal text.
             if not http_capture.answered(anonymous_saw[key]):
                 continue
+            # AND A REDIRECT IS NOT A DENIAL. `carries` requires a 2xx, so a 3xx with an
+            # empty body satisfied "asked for it and did not receive it" for free — while the
+            # content it points at may be public. Measured on DVWA, the negative-control
+            # target: the anonymous arm's capture for `/` is `302 Found / Location:
+            # login.php / Content-Length: 0`, the same arm holds `login.php` 200 carrying
+            # that page's own text, and three markers naming that text each produced a
+            # finding against an application where nothing was wrong. `assertion_verdict`
+            # already refuses a redirected response for exactly this reason.
+            #
+            # A LISTED SKIP rather than a denial, because what that arm would have received
+            # is unknown and that is the whole point. Measured cost: it withdraws the DVWA
+            # finding for every marker that produced one, and nothing on the Juice Shop run,
+            # where 0 of 250 anonymous captures are 3xx-with-empty-body.
+            status = http_capture.status(anonymous_saw[key])
+            if status is not None and 300 <= status < 400 \
+                    and not http_capture.body(anonymous_saw[key]).strip():
+                redirected.append(url)
+                continue
             if carries(anonymous_saw[key]):
                 continue            # published content, not a privilege crossing
             # 4. The operator has not declared the unprivileged identity entitled to this
@@ -1048,6 +1127,24 @@ async def cross_arm_privileged_function(session_id, privileged, unprivileged, ma
             #    thing no response can express.
             if _entitled(url, entitled):
                 allowed.append(url)
+                continue
+            # 5. AND THE OPERATION MUST NOT BE THE CALLER'S OWN RECORD, where the lane
+            #    derived the instance and its id is the caller's own declared principal.
+            #
+            #    LAST, not first, although it is clause 0's twin in spirit. Placed before
+            #    the evidence clauses it reported every derived url carrying that segment —
+            #    8 of 31 on the measured run, identically for a marker where nothing was
+            #    wrong — so `skipped_url_names_the_caller` was 8:1 noise and the one case it
+            #    mattered was invisible. Here it names exactly the findings the rule took
+            #    away, which is the only version an operator can act on. Every clause is a
+            #    pure read of captures already in memory, so the order costs nothing.
+            #
+            #    The cost is irreducible and belongs in the open: an object id can equal a
+            #    principal id by coincidence, and then this removes a true finding. Measured
+            #    on this assessment, a declared `subject_id` of "1" removes `/api/Users/1`,
+            #    which is one of its two true positives. That is why it is LISTED.
+            if url in derived and _names_the_caller(url, subject):
+                caller_named.append(url)
                 continue
             # ONE FINDING PER OPERATION, not per probe that happened to fetch it. The
             # evidence is keyed by request, so two catalogue cases reading the same URL
@@ -1060,15 +1157,28 @@ async def cross_arm_privileged_function(session_id, privileged, unprivileged, ma
             reported.add(url)
             findings.append({
                 "url": url,
+                # THE THREE ARTIFACTS THIS RESTS ON, for the KEY that satisfied the clauses
+                # — not looked up by URL afterwards, because a URL does not have one
+                # artifact and a lookup would cite a capture no clause read. Keyed by arm
+                # rather than listed, so a reader can tell which arm each one is.
+                "arm_evidence": {name: art[key] for name, art in
+                                 ((privileged, high_art), (unprivileged, low_art),
+                                  (anonymous or "anonymous", anonymous_art))
+                                 if key in art},
                 "privileged": privileged, "privileged_role": high,
                 "unprivileged": unprivileged, "unprivileged_role": low,
                 # The marker is NOT echoed. It is operator text describing the
                 # application's private data — a real customer's address, an internal
                 # identifier — and a finding travels into an export. The digest is here
                 # so two markers used in one session can be told apart.
-                "marker_sha256": hashlib.sha256(needle.encode()).hexdigest()[:12],
-                "marker_not_quoted": ("the declared marker identifies privileged data and "
-                                      "is recorded as a digest, not as text"),
+                # KEYED, not a bare digest of the marker. `sha256(marker)[:12]` was not a
+                # label but an oracle: a 4050-candidate space recovered a real marker from
+                # a real export in 0.0007s, because a marker is short and structured by
+                # construction. See `security.marker_digest`.
+                "marker_digest": marker_digest(session_id, needle),
+                "marker_not_quoted": ("the declared marker identifies privileged data and is "
+                                      "recorded as a label keyed to this assessment, from "
+                                      "which the marker cannot be recovered"),
                 "detail": (f"the operator declared {low!r} to be less privileged than "
                            f"{high!r}; both arms received the marked data from this "
                            f"operation, and an anonymous arm asked for it and did not "
@@ -1086,6 +1196,20 @@ async def cross_arm_privileged_function(session_id, privileged, unprivileged, ma
         # Named and listed, not counted silently: these operations were NOT evaluated,
         # and a report that omitted them would read as a clean result for them.
         "skipped_reflected_marker": reflected,
+        # Operations where the anonymous arm was REDIRECTED rather than refused. Not
+        # evaluated, because an unfollowed 3xx says nothing about what that arm could read.
+        "skipped_anonymous_was_redirected": redirected,
+        # Operations the LANE addressed to the unprivileged identity's own declared
+        # principal id. Not evaluated, and named for the same reason as the reflected ones:
+        # the rule cannot tell an identity id from an unrelated object id that happens to
+        # match, so an operator has to be able to see what it took out.
+        "skipped_url_names_the_caller": caller_named,
+        # AND WHETHER THAT CLAUSE COULD RUN AT ALL. `subject_id` is optional on an identity,
+        # and with none declared the clause above is inert — it would otherwise be a silent
+        # protection, which is the shape this project keeps removing. The sibling
+        # object-level check refuses outright without a subject_id; this one cannot, because
+        # it does not otherwise need one and refusing would withdraw findings that are fine.
+        "caller_own_records_not_excluded": not subject,
         # Operations the operator declared this identity entitled to, via
         # `Identity.may_access`. Listed, because a suppression nobody can see is
         # indistinguishable from a check that never looked.
@@ -1221,11 +1345,11 @@ def authorization_findings(target, check: str, result: dict) -> list:
             evidence = (
                 "erlik compared what three arms received for the SAME request. The marker is the\n"
                 "operator's description of privileged data and is NOT quoted here, because a\n"
-                "finding travels into an export; its digest identifies which declaration this was.\n"
+                "finding travels into an export; which declaration this rests on is carried as a\n"
+                "keyed label on the finding, outside this prose so that it survives a merge.\n"
                 f"  privileged arm   ({finding.get('privileged_role')}): received the marked data\n"
                 f"  unprivileged arm ({finding.get('unprivileged_role')}): received the SAME data\n"
-                "  anonymous arm:     asked for it and did not receive it\n"
-                f"  marker digest:     {finding.get('marker_sha256', '')}")
+                "  anonymous arm:     asked for it and did not receive it")
             basis = ("Three-arm differential. The operator declared which role is privileged and "
                      "what privileged data looks like; that both arms received it and an "
                      "anonymous arm asked and did not is the application's own answer.")
@@ -1243,6 +1367,15 @@ def authorization_findings(target, check: str, result: dict) -> list:
             basis = ("Three-arm differential. Who the caller IS comes from the operator via "
                      "Identity.subject_id and the asserted owner comes from the target, so a "
                      "target can cost itself a finding and cannot manufacture one.")
+        # THE ARTIFACTS, NAMED BEFORE THE COLLAPSED GROUP. `evidence` is capped at
+        # MAX_EVIDENCE_CHARS, and a collapsed group of twelve urls of the length the real
+        # run produces (up to 106 characters each) needs more room than the cap leaves — so
+        # putting the group first would truncate away the proof and keep the context.
+        cited = {name: eid for name, eid in (finding.get("arm_evidence") or {}).items()}
+        if cited:
+            evidence += ("\n  the response each arm received is stored; read it at\n"
+                         + "".join(f"    GET /api/integrations/evidence/{eid}   ({name})\n"
+                                   for name, eid in sorted(cited.items(), key=lambda kv: kv[1])))
         if len(urls) > 1:
             shown = urls[:MAX_URLS_NAMED]
             evidence += (
@@ -1259,7 +1392,33 @@ def authorization_findings(target, check: str, result: dict) -> list:
             # `IntegrationFinding.evidence` already documents.
             title=safe_evidence(title), url=redact(url, known),
             rule=rule, source="cross-arm", identity=arm, compared_with=other,
-            severity="high", confidence="confirmed", basis=basis,
+            marker_digests=[d for d in [finding.get("marker_digest")] if d],
+            # THE PRODUCT'S STRONGEST FINDINGS WERE ITS ONLY UNCITABLE ONES. Measured on a
+            # real assessment: nine of eleven findings cited a resolvable artifact, and the
+            # two that cited none were the two the lane was most sure of. Served by
+            # `GET /api/integrations/evidence/{id}` with the stored digest re-checked, and
+            # reached by `service.report`; nothing in the DefectDojo payload carries them,
+            # so this publishes nothing new.
+            evidence_ids=sorted(set((finding.get("arm_evidence") or {}).values())),
+            severity="high",
+            # `likely` FOR THE FUNCTION-LEVEL CHECK, and the grade is the finding.
+            #
+            # `finding_payload` maps `confirmed` to DefectDojo's `verified=True`, which tells
+            # a client that a human need not check this. The one thing that most needs
+            # checking here is whether the marker names privileged data — and that is both
+            # unverifiable from any evidence the lane holds AND deliberately absent from the
+            # report, because the marker is not quoted. Measured over 16 markers on a real
+            # assessment: 12 of 26 findings true (0.46), 12 of 16 over the ten realistic
+            # markers (0.75), and one plausible marker on the negative-control target gives
+            # 0 of 1. Those two rows were also the ONLY `confirmed` findings in that whole
+            # assessment, so the single producer of `verified=True` was the one whose
+            # decisive input is an operator string nothing can corroborate.
+            #
+            # The OBJECT-level check keeps `confirmed`: its load-bearing value — who the
+            # application says owns the record — comes from the TARGET, and the own-data case
+            # is excluded in code by `derived_urls` rather than left to a declaration.
+            # `severity` stays high in both: the grade is about certainty, not impact.
+            confidence="confirmed" if check == "object" else "likely", basis=basis,
             evidence=safe_evidence(redact(evidence, known))[:MAX_EVIDENCE_CHARS],
             methodology=["WSTG-AUTHZ-04"],
             # A BARE NUMBER, matching what the ZAP adapter already stores and what DefectDojo's

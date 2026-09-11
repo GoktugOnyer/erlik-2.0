@@ -35,7 +35,7 @@ def violations(*urls, check="object"):
         return {"refused_because": [], "findings": [
             {"url": url, "privileged": "H", "privileged_role": "admin",
              "unprivileged": "L", "unprivileged_role": "customer",
-             "marker_sha256": "c5c79a1df019"} for url in urls]}
+             "marker_digest": "c5c79a1df019"} for url in urls]}
     return {"refused_because": [], "findings": [
         {"url": url, "caller": "L", "caller_subject_id": "2", "owner": "H",
          "asserted_owner": 1, "owner_field": "data.UserId"} for url in urls]}

@@ -1,9 +1,13 @@
 """Secrets stay outside SQLite, reports and model prompts."""
 from __future__ import annotations
+import hashlib
+import hmac
 import json
 import os
+import pathlib
 import re
 import secrets
+import tempfile
 from pathlib import Path
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
@@ -36,6 +40,106 @@ class SecretStore:
 
     def get(self, key: str) -> dict:
         return json.loads(self.path(key).read_text())
+
+
+# THE LABEL FOR AN OPERATOR DECLARATION, which must not be a way to recover it.
+#
+# A finding must say WHICH declaration it rests on — an assessment can use several
+# markers — and must not quote the declaration, because a marker names the
+# application's private data and a finding travels into an export. The first attempt
+# at that was an unsalted `sha256(marker)[:12]`, and it was not a label but an oracle.
+# Measured against the digest a real Juice Shop export carries, over a candidate space
+# of 4050 strings built from 18 field names, 15 local-parts, 3 domains and 5 separator
+# patterns:
+#
+#     exhausted in 0.0007s, recovered '"email":"admin@juice-sh.op"'
+#
+# Truncation to 48 bits was not the binding problem; the input's entropy was. A marker
+# is short, structured and guessable by construction — it names a field and a value in
+# an application's own data — so no digest of the marker ALONE can be published safely.
+#
+# So the label is keyed. The key is 128 random bits, one per assessment, living in the
+# SecretStore like every other secret — outside SQLite, outside every report, 0600 in a
+# 0700 directory. Its LOCATION is derived from the session id rather than recorded in a
+# column, because the protection here is the filesystem, not the key's address: the
+# store's other handles are already in plain SQLite. That also means every assessment
+# has a salt home, including rows created without a `config_secret_id`, so there is no
+# path that quietly falls back to an unkeyed digest.
+#
+# Keyed per ASSESSMENT, not globally: a label only has to be unique and stable within
+# the one report that carries it, and a global key would make digests comparable across
+# every client's engagement.
+_MARKER_SALT_BYTES = 16
+MARKER_DIGEST_CHARS = 12
+
+
+def _marker_salt(session_id: str) -> bytes:
+    """This assessment's HMAC key, minted on first use.
+
+    A DAMAGED SALT IS FATAL, not "no salt yet". The first version of this caught
+    `(FileNotFoundError, KeyError, ValueError)`, and `json.JSONDecodeError` is a
+    `ValueError` — so a truncated or corrupt salt file, including the zero-byte one
+    `private_write`'s `O_CREAT|O_TRUNC` leaves behind if a crash lands between open and
+    write, read as "mint a new one". Every label already exported under the old salt is
+    then unreproducible while the report still looks correct, which is this codebase's
+    signature defect written fresh. Only a salt that is genuinely ABSENT may be minted.
+
+    `O_EXCL`, so two first uses cannot mint two salts for one assessment. Not reachable
+    today — `marker_digest` is called from no thread, there is no `await` between the read
+    and the write so concurrent tasks on one loop cannot interleave, and the server runs a
+    single worker — but a latent second label for one marker is indistinguishable from two
+    declarations, which is the one thing the label exists to tell apart.
+    """
+    key = hashlib.sha256(f"erlik:marker-salt:{session_id}".encode()).hexdigest()[:32]
+    store = SecretStore()
+    path = store.path(key)
+    # BOUNDED. `while True` here is a hang waiting for a future edit: broaden the `except`
+    # below by one word and a salt that cannot be parsed makes the read fail, the mint lose
+    # the link race against the file that is already there, and the loop spin forever inside
+    # a request handler. Three attempts is more than any real contention needs, and failing
+    # loudly is the correct outcome for a store that will not settle.
+    for _ in range(3):
+        try:
+            return bytes.fromhex(json.loads(path.read_text())["marker_salt"])
+        except FileNotFoundError:
+            pass
+        salt = secrets.token_bytes(_MARKER_SALT_BYTES)
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        # WRITTEN WHOLE, THEN LINKED INTO PLACE. `O_EXCL` on the destination alone would
+        # have made exactly one writer win — but it leaves the file EMPTY between the open
+        # and the write, and a reader in that window now hits a hard failure, because a
+        # damaged salt is deliberately fatal. The two fixes together would have turned a
+        # latent double-mint into a crash. `os.link` is atomic and fails if the name exists,
+        # so the destination never exists in a partial state and the loser re-reads.
+        # `mkstemp`, not a hand-rolled `O_EXCL` open: on a name this function invents the
+        # exclusive flag cannot fire, so it was a protection-shaped line that no ablation
+        # could reach. mkstemp is the standard way to say "a new private file", creates at
+        # 0600, and leaves nothing for a reader to mistake for a guarantee.
+        handle, name = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
+        staging = pathlib.Path(name)
+        try:
+            with os.fdopen(handle, "wb") as stream:
+                stream.write(json.dumps({"marker_salt": salt.hex()}).encode())
+            try:
+                os.link(staging, path)
+            except FileExistsError:
+                continue        # somebody else minted it first; read theirs
+        finally:
+            staging.unlink(missing_ok=True)
+        return salt
+    raise RuntimeError(f"could not read or mint the marker salt at {path.name}")
+
+
+def marker_digest(session_id: str, marker: str) -> str:
+    """A stable label for an operator declaration, from which it cannot be recovered.
+
+    Stable for one marker within one assessment; different for the same marker in
+    another assessment. An operator who needs to know which marker a digest names
+    re-runs the check with that marker and reads the digest back — the checks already
+    return it per finding, so this needs no new surface.
+    """
+    return hmac.new(_marker_salt(session_id), (marker or "").encode(),
+                    hashlib.sha256).hexdigest()[:MARKER_DIGEST_CHARS]
 
 
 _SENSITIVE = re.compile(r"authorization|cookie|password|secret|token|api.?key|session", re.I)

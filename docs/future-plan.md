@@ -795,68 +795,142 @@ in one session, changing only the `security` cookie:
   would break it differently. Which of those an operator wants is their decision, and
   they could not make it while the fork was invisible.
 
-### E-031: the marker's protection is not protection — OPEN
+### E-031: the marker's protection is not protection — CLOSED
 
-Adversarial review of the commit that made the cross-arm authorization findings
-persist found four defects. Three are fixed (one finding per operation rather than
-a silent `INSERT OR REPLACE`; the swapped privilege order refused; redaction and
-sanitisation applied on the one producer that had neither). These two are not, and
-both were re-measured here rather than taken on report.
+Adversarial review of the commit that made the cross-arm authorization findings persist
+found four defects; three were fixed immediately and these two were recorded here. Both
+are now fixed, and measuring them turned up four more on the same theme — everything the
+marker costs. The full account, with the measurements, is in `docs/integrations.md`
+("What the marker costs", "The strongest findings were the only uncitable ones", "A
+forbidden marker was published in plaintext"). In brief:
 
-**`marker_sha256` is a confirmation oracle, not a protection.** The design's hard
-constraint is that the operator's marker never reaches a persisted record or an
-export, and the mechanism is a 12-hex-character — 48-bit — unsalted sha256 prefix
-carried in the finding's evidence in its place, with a sentence saying why. A marker
-is a short, low-entropy, highly guessable string: it names a field and a value in the
-application's own data. Measured against the digest `c5c79a1df019` that juice5's own
-export carries, over a candidate space of 4050 strings built from 18 field names, 15
-local-parts, 3 domains and 5 separator patterns:
+- **The digest was an oracle.** `sha256(marker)[:12]` inverted in 0.0007s over 4050
+  candidates. Truncation was NOT the binding problem — the full 64-hex digest falls at the
+  same cost; input entropy is. A candidate space built mechanically from the assessment's
+  own recorded bytes (68 JSON keys x 1711 values x 9 separators = 2^20) exhausts in 0.60s
+  with one hit, guessing nothing. Now HMAC-SHA256 under 128 random bits per assessment, in
+  the SecretStore at a derived handle; the same attack then yields 0 hits against the label
+  and 1 against the unsalted control in the same run. THREE defects in that code were
+  written and then found here: a damaged salt read as "no salt yet" (because
+  `json.JSONDecodeError` is a `ValueError`), which silently relabels an exported report; a
+  destination opened `O_EXCL` and written into, which made the new hard failure reachable
+  through the empty window, fixed by writing whole and `os.link`ing; and an unbounded retry
+  loop that an ablation turned into a twenty-minute hang.
+- **And keying new findings was not enough.** Rows persisted before it still carried the
+  invertible form in their evidence PROSE and the export still published it — 2 of 11 on the
+  real store. `persistence.migrate` strips it; it cannot re-label, because that needs the
+  marker and the marker was never stored.
+- **Two declarations collided.** One finding is right, not two — the records differ in
+  twelve hex characters and the split orphans a remote row. `marker_digests` is a list now,
+  merged by `persist_findings`, out of the prose so the merge can reach it.
+- **`confirmed` was an overclaim.** 12 of 26 findings true over sixteen markers (0.46),
+  12 of 16 over the realistic ten, 0 of 1 on the negative control — and those were the only
+  `confirmed` findings in the whole assessment. The function-level check emits `likely`;
+  severity stays high; the object-level check keeps `confirmed` because its decisive value
+  comes from the target.
+- **A URL the lane addressed to the caller is not a crossing.** The gate first proposed for
+  this could not fire on the case it was written for. The rule that works keys on the URL:
+  precision 1.00 against 0.80 ablated, with identical recall, as a listed skip. Three
+  details of it were wrong in the first version and each was found by ablation — it compared
+  any path segment rather than the appended one (a `subject_id` of "api" skipped 25 of 31
+  derived URLs), it ran before the evidence clauses so its list was 8:1 noise, and its
+  docstring claimed the id segment was erlik's when it is the target's.
+- **An unfollowed redirect is not a denial.** `carries()` requires a 2xx, so an anonymous
+  3xx with an empty body satisfied "asked and did not receive" for free. Measured on DVWA,
+  the negative control: three markers naming the login page's own text each produced one
+  finding at `http://dvwa/`, withdrawn by the clause and confirmed by source ablation.
+- **A marker must identify something.** `2` validated and produced ten findings, none true.
+  Length floor of 8 on evaluator-only declarations.
+- **The strongest findings were the only uncitable ones.** Nine of eleven findings cited a
+  resolvable artifact; the two that cited none were the two graded highest. The six
+  artifacts were read and discarded by `arm_responses`. Cited per satisfying key, never per
+  URL.
+- **A forbidden marker was published in plaintext** by `GET /api/integrations/sessions/{id}`
+  — a present leak, not a hypothesis, because `redact` matches by key name and nothing
+  called `marker` matches. Blanked in the published copy, kept in the executable one.
+- **Methodology reaches the export**, as `tags` and in `description`. `tags` is exempt from
+  the read-back comparison, because a cosmetic label that mismatches writes the export row
+  `uncertain` and blocks the destination.
 
-    exhausted in 0.0007s, recovered '"email":"admin@juice-sh.op"'
+**Considered and rejected, with the measurement.** A triage hook stating which of the
+unprivileged arm's declared values also appear in the matched response: the response-based
+variant was measured to downgrade 100% of findings, so as information it is true of every
+finding, which is not information. The regrade to `likely` carries "a human must check this"
+instead.
 
-So anyone holding the export holds the marker. The digest is not useless — it is a
-stable label — but the claim that it protects the marker is false, and the code and
-docs both make that claim. A salt per assessment, stored with the secrets rather than
-with the findings, would make the label stable and the recovery infeasible; that is
-the shape of the fix, not the fix itself.
+**And one claim in the original E-031 was too broad.** It said the marker "must never reach a
+persisted record or an export". That is a property of the CROSS-ARM path, where the marker is
+not needed as evidence — it is not a property of the product. `SecurityAssertion` builds its
+finding's evidence as `_marker_window(body, forbidden_marker)`, 200 bytes centred on the
+marker, and says so in a comment: the claim there is "this identity saw a string you declared
+forbidden", and showing the neighbourhood IS the proof. That is a defensible choice on a
+different path, and the constraint should be stated per path rather than as a system property.
+See E-032 for what follows from it.
 
-**The key cannot tell two markers apart, which its own comment says it exists to do.**
-`fingerprint(target, rule, "GET", url, "", arm)` has no marker term, so two route
-calls declaring different markers against the same URL build one key. Measured:
+### E-032: what the authorization work still does not do — OPEN
 
-    two markers, same url  ->  same fingerprint; the row keeps only the second digest
+All measured, none fixed. Listed so none is rediscovered as new.
 
-The comment beside `marker_sha256` reads "The digest is here so two markers used in
-one session can be told apart." At the persistence layer they cannot be. Note the
-collapse fix above does NOT cover this: it groups within a single call, and this is a
-collision across calls.
-
-**Adjacent, from the same review, measured by the reviewer and not re-measured here:**
-a marker naming the unprivileged identity's own data produces a `high`/`confirmed`
-finding about nothing (jim reading his own record at `/api/Users/2`; precision 1 of 2
-for that marker), and `confirmed` is what sets DefectDojo's `verified=True` — so an
-operator's marker mistake is now a verified high-severity row in a client's tracker
-rather than a JSON body they read and discarded. `Identity.may_access` is the only
-defence and is empty unless declared. The reviewer's suggested gate — `confirmed` only
-when the marker is not also the unprivileged identity's own declared data, else
-`likely` — is cheap and sound. Separately, both identities' `subject_id` travel
-verbatim into the exported description under a banner reading "Evidence (credentials
-redacted)"; that value is necessary for the claim to be checkable, so the defect is
-the banner, not the travel. And `evidence_ids` is empty for exactly the findings the
-product is most sure of, while the three artifacts per finding that would fill it were
-identified (`arm_responses` drops the evidence row id it already has).
-
-**And a warning about the obvious next step.** Mirroring the two routes' arguments onto
-`AssessmentConfig` — so the checks run automatically — breaks the marker constraint
-outright: `service.register` stores `redact(config.model_dump())` in
-`integration_assessments.config`, `redact` is key-name matched, and no field called
-`marker` matches any of those names, so the marker would be served in plaintext by
-`GET /api/integrations/sessions/{id}`. The existing `security_assertions[].forbidden_marker`
-already has this property. Any automatic path must also gate on the status rollup:
-nothing in `inventory.py` reads `integration_stages.status`, and marking one arm's
-stages `partial` and deleting two captures took a run from 2 findings to 0 with
-`refused_because=[]` and every count byte-identical to the complete run — a half-run
-reporting absence as a clean result, which is this project's signature defect.
+- **A stock DefectDojo with deduplication enabled blocks the destination permanently.**
+  Measured against a live 2.58.4: with `System_Settings.enable_deduplication=True` and
+  DefectDojo's default algorithm for this parser, 6 of 9 catalogue findings come back
+  `duplicate, active=False`; erlik's PATCH of `active: true` is refused with HTTP 400
+  `"Duplicate findings cannot be verified or active"`; the export row goes `uncertain`,
+  which matches `export()`'s blocking query, so every later export to that server for that
+  session writes nothing, and `reconcile` cannot clear it because the duplicates' state
+  genuinely differs. Pre-existing — the catalogue triplets cause it — but the cross-arm
+  findings are then stranded behind it and a later triage to `false_positive` can never
+  propagate. This is the steady-state client configuration.
+- **Re-registering an identity orphans its findings.** A fresh handle is a fresh
+  `identity`, which is in the fingerprint, so the same violation exports as a NEW DefectDojo
+  finding rather than updating the old one. Token expiry makes re-registration the normal
+  operating rhythm, so exports to one test accumulate a fresh copy per rotation, each
+  starting at `triage_state` open.
+- **Nothing reads `integration_stages.status`.** Marking one arm's stages `partial` and
+  deleting two captures took a real run from 2 findings to 0 with `refused_because=[]`,
+  `checked=225`, `not_shared=5` and `not_comparable=15` all byte-identical to the complete
+  run. A half-run reports absence as a clean result. Any automatic path for these checks
+  must gate on the rollup; the on-demand routes should say what they were working from.
+- **`may_access` is unusable as the defence it is presented as.** It works — declaring
+  `/api/Users/2` suppresses exactly that — but the plausible coarser declaration
+  `/api/Users/` suppresses the two true findings as well, the operator must name 2 exact
+  paths out of 189 gated operations, the object id is not derivable from `subject_id`
+  (jim's is 2 while his address ids are 4 and 5), and they can only learn which after
+  reading the false finding. Keep the clause; stop calling it the answer.
+- **`SecurityAssertion` grades `confirmed` while its own `basis` says it establishes
+  nothing of the kind** — one arm, one response, no control beyond a synthetic 404. The
+  grade and the prose in the same object contradict each other. Not changed here because it
+  was reasoned from source rather than measured, and it is a different producer.
+- **The marker is quoted by two other producers, by design, and nothing says so.**
+  `SecurityAssertion` evidence is 200 bytes centred on the `forbidden_marker`, and the
+  catalogue's marker-based evaluators match in the response the same way. For those the
+  quotation is the proof and the reader is the data's owner, so it is probably right — but
+  "the marker never travels" is written as a product-wide property and is not one. Decide it
+  per path and say which is which.
+- **The marker can reach `recon_context`, which outlives the session.** `handoff.bridge_run`
+  writes `f"{url} {evidence}"[:500]` keyed by host:port, read across sessions and formatted
+  into the agent's context. It is the LEGACY lane's findings that flow there today, so this
+  is a reachable shape rather than a measured leak — an adversarial pass put it 42 characters
+  from the agent's prompt. Check it before any producer's marker-bearing evidence is bridged.
+- **Length is a weak proxy for a degenerate marker, and breadth is a better one.** The floor
+  of 8 kills `2` and `"id":2`, but markers well over 8 characters — `"role":"customer"` — still
+  match most of a corpus. An adversarial pass measured breadth over the privileged arm's own
+  captures separating 2-3x better. Not adopted, because the counter-example is real and
+  unresolved: a genuinely broad leak (the administrator's email on twenty endpoints) is twenty
+  true findings, and breadth cannot tell that from a marker that matches everything.
+- **The catalogue's `idor` evaluator has no reflection clause**, so the gate that
+  `cross_arm_privileged_function` applies as clause 0 — refuse when the marker appears in the
+  request URL — is absent on a path that also grades `confirmed`. Reasoned from source by an
+  adversarial pass, not measured here.
+- **Per-assessment labels churn the export.** A re-run in a new session keeps the fingerprint
+  and changes the label, so the description differs and the next export PATCHes. Cosmetic, and
+  the alternative — one global key — would make labels comparable across every client's
+  engagement, which is worse. Recorded so it is not mistaken for a defect.
+- **And the obvious next step is still a trap.** Mirroring the two routes' arguments onto
+  `AssessmentConfig` so the checks run automatically would put the marker in the published
+  config row; `redact` is key-name matched and would not cover a field called `marker`. The
+  `forbidden_marker` fix above is the pattern to follow, not a reason to think the problem
+  is gone.
 
 ## 10. Shared technical contracts
 
