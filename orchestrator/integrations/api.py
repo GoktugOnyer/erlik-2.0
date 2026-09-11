@@ -128,13 +128,19 @@ async def authorization_check(session_id: str, body: AuthorizationCheck):
     no anonymous arm — and an empty `findings` list is then not a clean result. The payload
     says so in `establishes` for the same reason.
     """
-    from .inventory import cross_arm_authorization
+    from .inventory import authorization_findings, cross_arm_authorization
 
-    if not await db.rows("SELECT 1 FROM integration_assessments WHERE session_id=?",
-                         (session_id,)):
+    rows = await db.rows("SELECT target FROM integration_assessments WHERE session_id=?",
+                         (session_id,))
+    if not rows:
         raise HTTPException(404, "integration assessment not found")
-    return await cross_arm_authorization(session_id, body.caller, body.owner,
-                                        body.owner_field, body.anonymous)
+    result = await cross_arm_authorization(session_id, body.caller, body.owner,
+                                          body.owner_field, body.anonymous)
+    # RECORDED, not merely returned. These used to exist only as this response body, so they
+    # reached no report, no export and no triage — see `inventory.authorization_findings`.
+    recorded = authorization_findings(rows[0]["target"], "object", result)
+    await db.persist_findings(session_id, recorded)
+    return {**result, "recorded": [f.fingerprint for f in recorded]}
 
 
 class PrivilegedFunctionCheck(BaseModel):
@@ -165,14 +171,18 @@ async def privileged_function_check(session_id: str, body: PrivilegedFunctionChe
     never declared, there was no anonymous arm — and an empty `findings` list is then not
     a clean result.
     """
-    from .inventory import cross_arm_privileged_function
+    from .inventory import authorization_findings, cross_arm_privileged_function
 
-    if not await db.rows("SELECT 1 FROM integration_assessments WHERE session_id=?",
-                         (session_id,)):
+    rows = await db.rows("SELECT target FROM integration_assessments WHERE session_id=?",
+                         (session_id,))
+    if not rows:
         raise HTTPException(404, "integration assessment not found")
-    return await cross_arm_privileged_function(session_id, body.privileged,
-                                              body.unprivileged, body.marker,
-                                              body.anonymous)
+    result = await cross_arm_privileged_function(session_id, body.privileged,
+                                                body.unprivileged, body.marker,
+                                                body.anonymous)
+    recorded = authorization_findings(rows[0]["target"], "function", result)
+    await db.persist_findings(session_id, recorded)
+    return {**result, "recorded": [f.fingerprint for f in recorded]}
 
 
 @router.get("/sessions/{session_id}/coverage")

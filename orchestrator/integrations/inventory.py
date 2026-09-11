@@ -6,7 +6,8 @@ from functools import lru_cache
 from urllib.parse import unquote_plus, urldefrag, urlsplit, urlunsplit
 from orchestrator import http_capture
 from orchestrator.engagement import looks_injectable
-from .contracts import PARAMETER_NAME, parameter_names
+from .contracts import (PARAMETER_NAME, IntegrationFinding, fingerprint,
+                        parameter_names)
 from . import persistence as db
 from .egress_policy import EgressPolicy
 
@@ -1047,6 +1048,83 @@ async def cross_arm_privileged_function(session_id, privileged, unprivileged, ma
     }
 
 
+# The rules the two cross-arm checks report under. Stable strings, because `fingerprint` hashes
+# them and DefectDojo dedups on that hash — a rename would orphan every finding already exported.
+AUTHORIZATION_RULES = {
+    "object": "erlik:authorization:object",
+    "function": "erlik:authorization:privileged-function",
+}
+
+
+def authorization_findings(target, check: str, result: dict) -> list:
+    """Turn a cross-arm check's result into findings the product can actually carry.
+
+    THE CHECKS USED TO PERSIST NOTHING. Nine increments built them, a real three-arm run produced
+    two true positives with no false positives — and they existed only as the body of an API
+    response. Measured on that run: `integration_findings` held NINE rows, all from catalogue
+    cases, while the checks reported `/api/Users` and `/api/Users/1`. So
+    `GET /sessions/{id}/findings` omitted them, the DefectDojo export omitted them, triage could
+    not mark them, and `coverage()` never credited those operations as `verified`. The lane's
+    strongest evidence was the only evidence it threw away.
+
+    THE MARKER NEVER TRAVELS. It names the application's private data, and a finding goes into an
+    export — so the finding carries the digest the check already computed and a sentence saying
+    why, exactly as the check's own payload does. The `evidence` text states what each arm
+    RECEIVED rather than quoting any of it, for the same reason: the obvious evidence string
+    would quote the response around the marker, which is the private data itself.
+
+    `refused_because` is honoured. A refusal means the comparison did not run, and turning an
+    empty findings list into zero rows would be indistinguishable from a clean result — so a
+    refused check yields nothing and the caller is expected to read the reason.
+    """
+    if result.get("refused_because"):
+        return []
+    rule = AUTHORIZATION_RULES[check]
+    out = []
+    for finding in result.get("findings") or []:
+        url = finding.get("url", "")
+        if check == "function":
+            arm = finding.get("unprivileged", "")
+            title = (f"{finding.get('unprivileged_role') or 'a less privileged role'} reached a "
+                     f"privileged function")
+            evidence = (
+                "erlik compared what three arms received for the SAME request. The marker is the\n"
+                "operator's description of privileged data and is NOT quoted here, because a\n"
+                "finding travels into an export; its digest identifies which declaration this was.\n"
+                f"  privileged arm   ({finding.get('privileged_role')}): received the marked data\n"
+                f"  unprivileged arm ({finding.get('unprivileged_role')}): received the SAME data\n"
+                "  anonymous arm:     asked for it and did not receive it\n"
+                f"  marker digest:     {finding.get('marker_sha256', '')}")
+            basis = ("Three-arm differential. The operator declared which role is privileged and "
+                     "what privileged data looks like; that both arms received it and an "
+                     "anonymous arm asked and did not is the application's own answer.")
+        else:
+            arm = finding.get("caller", "")
+            title = "One identity read an object the application attributes to another"
+            evidence = (
+                "erlik compared an ownership claim the application made against the identity it\n"
+                "was made to. The quoted values are the application's own.\n"
+                f"  the caller is declared to be:  {finding.get('caller_subject_id')!r}"
+                "  (operator-supplied)\n"
+                f"  the response attributes it to: {finding.get('asserted_owner')!r}"
+                f"  (read from {finding.get('owner_field')!r})\n"
+                "  the declared owner's arm:       received the same object\n"
+                "  anonymous arm:                  was refused, so it is not published")
+            basis = ("Three-arm differential. Who the caller IS comes from the operator via "
+                     "Identity.subject_id and the asserted owner comes from the target, so a "
+                     "target can cost itself a finding and cannot manufacture one.")
+        out.append(IntegrationFinding(
+            fingerprint=fingerprint(target, rule, "GET", url, "", arm),
+            title=title, url=url, rule=rule, source="cross-arm", identity=arm,
+            severity="high", confidence="confirmed", basis=basis, evidence=evidence,
+            methodology=["WSTG-AUTHZ-04"],
+            # A BARE NUMBER, matching what the ZAP adapter already stores and what DefectDojo's
+            # Finding.cwe expects (an integer). 639 is authorization bypass through a
+            # user-controlled key — the object-level case; 285 is improper authorization.
+            cwe="639" if check == "object" else "285"))
+    return out
+
+
 async def coverage(session_id, identity_id=None) -> list[dict]:
     """Per (operation, parameter, identity): what happened, and why not.
 
@@ -1169,7 +1247,14 @@ async def coverage(session_id, identity_id=None) -> list[dict]:
             # URL-SPECIFIC observation can override it, because that means something
             # did reach it after all.
             url_specific = bool(seen.get(pair(row["url"], name, row["identity_id"])))
-            if "javascript" in sources and not url_specific:
+            # A FINDING ON THIS PAIR OUTRANKS EVERY OTHER STATE, and it used to be reachable
+            # only from `answered` — that is, only when a catalogue case had probed the pair and
+            # got bytes back. The cross-arm authorization findings do not come out of a case;
+            # they come from comparing what three arms recorded. So measured on a real run, the
+            # operation carrying a HIGH `confirmed` privilege crossing was reported `not_run`,
+            # which reads as outstanding work on the very pair the lane was most sure about.
+            matched = findings.get(pair(row["url"], name, row["identity_id"]))
+            if "javascript" in sources and not url_specific and not matched:
                 state, case, reason = "inferred", "", (
                     "read out of a JavaScript body and not been requested by anything; "
                     "select it to test it")
@@ -1177,17 +1262,19 @@ async def coverage(session_id, identity_id=None) -> list[dict]:
                 state, case, reason = "not_attempted", "", (
                     "no catalogue check ran against this pair — it may not have been "
                     "selected, or no selected case tests a parameter")
+                if matched:
+                    state, reason = "verified", (
+                        "a finding was made on this pair without a catalogue check running "
+                        "against it: " + ", ".join(sorted(set(matched))))
             else:
                 ranked = sorted(records, key=lambda r: COVERAGE_STATES.index(state_of(r[0])))
                 kind, case, reason, _ = ranked[0]
                 state = state_of(kind)
-                if state == "answered":
-                    matched = findings.get(pair(row["url"], name, row["identity_id"]))
-                    if matched:
-                        state = "verified"
-                        reason = "a finding came out of this probe: " + ", ".join(sorted(set(matched)))
-                    else:
-                        reason = reason or _ANSWERED_CAVEAT
+                if matched:
+                    state = "verified"
+                    reason = "a finding came out of this pair: " + ", ".join(sorted(set(matched)))
+                elif state == "answered":
+                    reason = reason or _ANSWERED_CAVEAT
             out.append({
                 "operation": operation_key(row["url"], row["method"], [n for n in names if n]),
                 "url": row["url"], "method": row["method"], "identity": row["identity_id"],

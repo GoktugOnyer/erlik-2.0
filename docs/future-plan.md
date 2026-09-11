@@ -1452,6 +1452,40 @@ Fourteen clauses ablated across both pieces, all fourteen measured. One was dead
 removed rather than kept: a filter protecting `keep` URLs from being reported as duplicates,
 which `outranks` already guarantees.
 
+**Increment 15 — the authorization findings were never findings.** Nine increments built the
+cross-arm checks, a real three-arm Juice Shop run produced two true positives and zero false
+positives, and they existed only as the body of an API response. Measured:
+`integration_findings` held NINE rows, all from catalogue cases, while the checks reported
+`/api/Users` and `/api/Users/1`. So the findings route omitted them, the DefectDojo export omitted
+them, triage could not mark them, and `coverage()` never credited those operations. The lane threw
+away the only findings it was most sure of.
+
+`inventory.authorization_findings` builds the rows and both routes record what they find.
+Persisting goes through `persistence.persist_findings`, split out of `persist_result` so the
+triage-merge rule has one implementation — so a re-run updates one row and an operator's
+`false_positive` survives. Measured on the real run: 9 findings became 11, and persisting twice
+left 11.
+
+The MARKER never travels: the finding carries the digest the check already computed, and its
+evidence states what each arm RECEIVED rather than quoting it, because the obvious evidence string
+would quote the response around the marker — which is the private data. Verified against the real
+run: neither the marker, the bare email, nor a bearer token appears in any stored payload or in the
+export body. A refused check records nothing, because zero rows from a refusal is
+indistinguishable from a clean result.
+
+**Two gaps the work exposed, both pre-existing, both fixed.** `finding_payload` dropped `cwe`
+entirely — findings have carried one since the ZAP adapter began recording `alert["cweid"]` and it
+never reached DefectDojo, so its CWE reporting was empty for every erlik import. And `coverage()`'s
+`verified` state was reachable ONLY from `answered`, i.e. only when a catalogue case had probed the
+pair; a cross-arm finding does not come out of a case, so the operation carrying a HIGH `confirmed`
+privilege crossing was reported `not_run` — outstanding work, on the pair the lane was most sure
+about. A finding now outranks every other state and says when no case probed the pair. Measured,
+`verified` went 6 to 8.
+
+Fourteen clauses ablated, all fourteen measured. Two of my own tests were initially unablatable and
+were rewritten to be: one whose marker ablation was a no-op comment, and one that exercised only
+the `not_attempted` branch of the coverage change.
+
 **Two verified defects are named rather than fixed, because both need lane plumbing.**
 The anonymous stage cannot carry application configuration (`service.py` passes `None` for
 it and the proxy then injects nothing), so on an application whose configuration lives in a

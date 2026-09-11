@@ -164,7 +164,19 @@ async def persist_result(session_id, stage_id, result):
         await execute("INSERT OR REPLACE INTO integration_endpoints VALUES(?,?,?,?,?,?)",
                       (session_id, endpoint.url, endpoint.method, endpoint.identity,
                        json.dumps(sorted(sources)), json.dumps(sorted(parameters))))
-    for finding in result.findings:
+    await persist_findings(session_id, result.findings)
+
+
+async def persist_findings(session_id, findings):
+    """Write findings, preserving triage and never replacing evidence with nothing.
+
+    Split out of `persist_result` so the cross-arm authorization checks can record what they
+    find without pretending to be a stage. They are asked for on demand and at the end of a
+    run, and before this they persisted NOTHING — so the lane's strongest evidence reached no
+    report, no export and no triage. One implementation, because the triage-merge rule below is
+    the sort of thing that drifts when copied.
+    """
+    for finding in findings:
         old = await rows("SELECT payload FROM integration_findings WHERE session_id=? AND fingerprint=?", (session_id, finding.fingerprint))
         if old:
             prior = json.loads(old[0]["payload"])

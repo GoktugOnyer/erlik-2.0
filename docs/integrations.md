@@ -935,6 +935,50 @@ The comparison is `inventory.worker_response_signature`, the same rule the inven
 and reached through the same function: two ways of deciding whether two responses are the same
 response would be one defect waiting to happen.
 
+### The authorization findings are findings
+
+Nine increments built the cross-arm checks. They are the strongest evidence the lane produces — a
+three-arm differential against an operator declaration, measured at two true positives and zero
+false positives on a real Juice Shop assessment — and they **persisted nothing**. Measured on that
+run:
+
+    integration_findings    9 rows, every one from a catalogue case
+    the checks reported     /api/Users and /api/Users/1
+
+So `GET /sessions/{id}/findings` omitted them, the DefectDojo export omitted them, triage could not
+mark them, and `coverage()` never credited those operations. The lane threw away the only findings
+it was most sure of.
+
+`inventory.authorization_findings` turns a check's result into `IntegrationFinding` rows and both
+routes now record what they find, returning the fingerprints under `recorded`. Persisting goes
+through `persistence.persist_findings` — split out of `persist_result` so there is one
+implementation of the triage-merge rule — so running a check twice updates one row and an operator's
+`false_positive` survives a re-run. Measured on the real run: 9 findings became **11**, and
+persisting the same result twice left 11.
+
+**The marker never travels.** It names the application's private data, and a finding goes into an
+export. The finding carries the 12-character digest the check already computed, and its `evidence`
+states what each arm *received* rather than quoting any of it — the obvious evidence string would
+quote the response around the marker, which *is* the private data. Verified against the real run:
+neither the marker nor the bare email nor a bearer token appears in any stored payload or in the
+export body.
+
+A refused check records nothing. A refusal means the comparison did not run, and turning that into
+zero rows would be indistinguishable from a clean result.
+
+**Two gaps the work exposed, both fixed.**
+
+`finding_payload` dropped `cwe` entirely. Findings have carried one since the ZAP adapter began
+recording `alert["cweid"]`, and it never reached DefectDojo — so its CWE reporting was empty for
+every erlik import. It is sent as an integer now, which is what `Finding.cwe` is, and a value that
+is not a bare number is left out rather than guessed at.
+
+And `coverage()`'s `verified` state was reachable only from `answered` — only when a catalogue case
+had probed the pair and got bytes back. A cross-arm finding does not come out of a case, so the
+operation carrying a HIGH `confirmed` privilege crossing was reported `not_run`: outstanding work,
+on the pair the lane was most sure about. A finding on a pair now outranks every other state, and
+says when no catalogue check ran against it. Measured: `verified` went 6 → 8.
+
 ### What the matrix does not unlock
 
 A lane stage carries exactly **one** identity — it resolves it from its own row, and the

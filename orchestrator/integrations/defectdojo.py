@@ -141,6 +141,13 @@ def finding_payload(finding):
     # 2.58.4 instance; the drift was exactly is_mitigated(True!=False).
     if triage != "false_positive":
         payload["is_mitigated"] = triage == "fixed"
+    # THE CWE WAS STORED AND NEVER SENT. Findings have carried one since the ZAP adapter began
+    # recording `alert["cweid"]`, and this payload dropped it — so every export arrived without
+    # the one field that lets a reader group a finding with the wider class, and DefectDojo's
+    # own CWE reporting was empty for every erlik import. Sent as an integer, which is what
+    # `Finding.cwe` is; a value that is not a bare number is left out rather than guessed at.
+    if str(finding.get("cwe") or "").isdigit():
+        payload["cwe"] = int(finding["cwe"])
     return payload
 
 
