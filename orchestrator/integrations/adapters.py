@@ -366,6 +366,96 @@ class ZapAdapter(BaseAdapter):
         return await record(ctx, sandbox, output, result, accepted_codes=(0, 2))
 
 
+MAX_INFERRED_SCRIPTS = 6
+
+
+async def infer_from_scripts(ctx, sandbox, endpoints) -> tuple[list, dict | None]:
+    """Routes the application's own JavaScript names, which no crawler follows.
+
+    Discovery is the lane's binding constraint and this is the measured reason. On
+    Juice Shop the lane reports 136 endpoints, 4 parameters and 2 informational
+    findings, while the application's error-based SQL injection sits behind an Angular
+    XHR — and the route is in `main.js`, a file the lane already fetched and recorded:
+
+        .get(`${this.hostServer}/rest/products/search?q=${e}`)
+
+    Handed that URL directly the lane reports it HIGH in 21 seconds. Recovered from the
+    real bundle, with the four off-origin candidates in the same file refused:
+
+        /rest/products/search        q          the SQL injection
+        /redirect                    to         the known open redirect
+        /rest/user/security-question email
+        /api/Challenges/             key
+        /rest/user/change-password   current    a MUTATING endpoint
+
+    THE LAST ROW IS WHY THESE ARE PROPOSALS AND NOT TARGETS. Nothing syntactic
+    separates the first from the last, and a GET of `change-password?current=` as an
+    authenticated identity reaches the real password-change logic — measured: it
+    answers 401 anonymously, so authentication is the only thing standing between the
+    lane and changing a credential while enumerating. So an inferred endpoint is
+    recorded with `source="javascript"` and WITHHELD from `seeds()` and
+    `parameters_by_url()`. It appears in the inventory for an operator to select, which
+    is what E-007 means by keeping an inferred operation distinct from a tested one and
+    E-010 by "templates fill configuration; they do not expand authorization".
+
+    Bounded to `MAX_INFERRED_SCRIPTS` bodies, and only same-origin ones the crawl
+    already fetched, so this costs a handful of GETs for static assets the browser had
+    already downloaded.
+    """
+    from urllib.parse import urldefrag
+    from orchestrator.engagement import looks_injectable
+    from .contracts import canonical_origin, infer_endpoints
+    from .egress_policy import EgressPolicy
+
+    policy = EgressPolicy(sandbox.policy)
+    scripts = []
+    for endpoint in endpoints:
+        url = urldefrag(endpoint.url)[0]
+        if not url.lower().split("?")[0].endswith(".js"):
+            continue
+        if canonical_origin(url) != canonical_origin(ctx.target):
+            continue
+        if looks_injectable(url) or not policy.check(url, "GET")[0]:
+            continue
+        if url not in scripts:
+            scripts.append(url)
+        if len(scripts) >= MAX_INFERRED_SCRIPTS:
+            break
+
+    inferred, per_script = [], {}
+    for url in scripts:
+        try:
+            response = await rpc(sandbox, {"action": "request", "request": {"url": url}})
+        except Exception:
+            continue                       # an unreadable script is not a failure
+        if response.get("blocked") or not isinstance(response.get("body"), str):
+            continue
+        routes = infer_endpoints(response["body"], base=url)
+        if routes:
+            per_script[url] = [path for path, _ in routes]
+        for path, names in routes:
+            candidate = canonical_origin(ctx.target) + path
+            if looks_injectable(candidate) or not policy.check(candidate, "GET")[0]:
+                continue
+            inferred.append(Endpoint(url=candidate, method="GET", source="javascript",
+                                     identity=ctx.identity_id, parameters=names))
+
+    if not inferred:
+        return [], None
+    # Stated, because an inferred route that looks like a discovered one is a claim of
+    # coverage nobody earned.
+    observation = {
+        "type": "inferred_from_javascript", "url": None, "steps": [],
+        "scripts_read": len(scripts), "operations": sorted({e.url for e in inferred}),
+        "detail": (f"{len(set(e.url for e in inferred))} route(s) were read out of "
+                   f"{len(scripts)} script body/bodies and are NOT probed: a route the "
+                   f"crawler never reached has never been requested either, and nothing "
+                   f"syntactic separates a search endpoint from a password change. "
+                   f"Select one to test it."),
+    }
+    return inferred, observation
+
+
 def crawl_truncation(browser: dict) -> dict | None:
     """The rendered crawl's page cap, stated rather than left to be inferred.
 
@@ -441,8 +531,36 @@ class KatanaAdapter(BaseAdapter):
                 "-proxy", sandbox.proxy_url, "-cs", re.escape(ctx.target.rstrip("/")) + ".*", "-duc"]
         browser_endpoints = []
         browser_truncation = None
+        inferred, inference_note = [], None
+        browser = None
+        browser_failure = None
         if wants_rendered_pass(ctx.config):
-            browser = await rpc(sandbox, {"action": "browser", "url": ctx.target, "storage_state": (ctx.identity or {}).get("storage_state")})
+            # A RENDERED PASS THAT FAILS IS LOST COVERAGE, NOT A FAILED STAGE.
+            #
+            # `rpc` raises when the worker exits non-zero, and that exception used to
+            # propagate out of this adapter and abort the whole stage — discarding the
+            # katana crawl, which is the half that works. Measured on Juice Shop, whose
+            # Angular front end never reaches `networkidle`: `Page.goto: Timeout
+            # 30000ms exceeded`, and a stage that would otherwise have reported 136
+            # endpoints reported nothing at all.
+            #
+            # E-029 is why this matters now. Before it, the rendered pass ran only when
+            # an operator asked for it or an identity carried a storage_state; it now
+            # runs for every authenticated assessment, so a front end that defeats the
+            # crawler takes the whole stage with it far more often.
+            try:
+                browser = await rpc(sandbox, {"action": "browser", "url": ctx.target, "storage_state": (ctx.identity or {}).get("storage_state")})
+            except Exception as exc:
+                browser = None
+                browser_failure = {
+                    "type": "rendered_pass_failed", "url": ctx.target, "steps": [],
+                    "detail": ("the rendered crawl did not complete, so no form or "
+                               "JavaScript-derived surface was discovered; the fetched "
+                               "crawl below is unaffected. An application whose front "
+                               "end never goes idle defeats this pass — "
+                               + str(exc)[-300:]),
+                }
+        if browser:
             for request in browser["requests"]:
                 browser_endpoints.append(Endpoint(url=request["url"], method=request["method"], source="playwright",
                                                   identity=ctx.identity_id, parameters=parameter_names(request["url"])))
@@ -470,6 +588,10 @@ class KatanaAdapter(BaseAdapter):
             # discovery and produced the run's only true positives. They simply
             # are not pages to visit.
             browser_truncation = crawl_truncation(browser)
+            # Routes the application's own JavaScript names, which no crawler follows.
+            # Recorded as proposals — see infer_from_scripts for why they are never
+            # probed — so they must not reach `crawlable` or the katana seed list below.
+            inferred, inference_note = await infer_from_scripts(ctx, sandbox, browser_endpoints)
             crawlable = [e.url for e in browser_endpoints if e.source != "form"]
             seeds = [ctx.target, *browser["links"], *crawlable]
             from .egress_policy import EgressPolicy
@@ -498,8 +620,15 @@ class KatanaAdapter(BaseAdapter):
                 if len(result.endpoints) < ctx.config.max_urls:
                     result.endpoints.append(Endpoint(url=url, method=method, source="katana",
                                                      identity=ctx.identity_id, parameters=parameter_names(url)))
+        if browser_failure:
+            result.observations.append(browser_failure)
+            result.status = "partial"
+            result.reason = "the rendered crawl did not complete; form and JavaScript surface is missing"
         if browser_truncation:
             result.observations.append(browser_truncation)
+        if inference_note:
+            result.endpoints.extend(inferred)
+            result.observations.append(inference_note)
         if len(seen) > ctx.config.max_urls:
             result.status, result.reason = "partial", "URL inventory limit reached"
         elif not result.endpoints:

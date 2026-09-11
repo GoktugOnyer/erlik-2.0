@@ -71,7 +71,23 @@ def main():
             page = context.new_page()
             observed = []
             page.on("request", lambda r: observed.append({"url": r.url, "method": r.method}))
-            page.goto(config["url"], wait_until="networkidle", timeout=30000)
+            # `networkidle` first, because a settled page has loaded its bundles and
+            # issued its XHRs — which is where the routes no crawler follows live. But
+            # an application whose front end polls NEVER goes idle, and the timeout was
+            # fatal: measured on Juice Shop, `Page.goto: Timeout 30000ms exceeded`, and
+            # with it the whole rendered pass — the only source of form discovery.
+            #
+            # So idle is an optimisation, not a requirement. `domcontentloaded` is the
+            # floor, and the extra wait below gives late XHRs a bounded chance to fire
+            # without letting a chatty page hold the crawl open.
+            try:
+                page.goto(config["url"], wait_until="networkidle", timeout=20000)
+            except Exception:
+                page.goto(config["url"], wait_until="domcontentloaded", timeout=20000)
+                try:
+                    page.wait_for_timeout(3000)
+                except Exception:
+                    pass
             links = page.locator("a[href]").evaluate_all("nodes => nodes.map(n => n.href)")
             # Form controls, because an input the crawler cannot see is an input
             # nothing can test. `f.action` is already absolute in the DOM (the

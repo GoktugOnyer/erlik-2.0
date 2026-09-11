@@ -177,6 +177,31 @@ way:
 | `parameters_changed` | both reached it with a different injectable surface; the entry names the inputs that appeared or vanished |
 | `not_reached_by_other_arm` | there is genuinely nothing at that endpoint in the other arm |
 
+### Routes read out of JavaScript
+
+A single-page application calls its API from JavaScript, so the routes that matter are
+often in a bundle rather than behind a link. The lane reads them out of the script
+bodies the rendered pass already fetched and records them as `source="javascript"`,
+with relative routes resolved against the script's own URL — which is how Juice Shop
+spells its open redirect, `url:"./redirect?to=..."`.
+
+**These are proposals, and nothing probes them.** An inferred route is withheld from
+everything that fetches or injects until you select it. That is not caution for its own
+sake: the same Juice Shop bundle names `/rest/products/search?q=` and
+`/rest/user/change-password?current=`, nothing syntactic separates them, and a probe of
+the second as an authenticated identity is the password change. Surfacing a route no
+crawler reaches is the value; requesting it unasked is how a tool changes a credential
+while enumerating.
+
+Everything the reader returns is target-controlled text on its way to becoming a URL,
+so it refuses: more than one leading slash (`//w.soundcloud.com/player/?url=` is in the
+same bundle and is a different host), any scheme, `..`, a path that could carry a
+template placeholder or a shell metacharacter, parameter names the lane would not
+accept anywhere else, and any candidate whose query contains a `#` — cutting
+`?ok=1&a#b=2` at the fragment would yield a parameter the application never had.
+
+A `inferred_from_javascript` observation names what was read and from how many scripts.
+
 ### When the crawl stops early
 
 The rendered pass visits one level past the landing page, bounded by `form_pages`

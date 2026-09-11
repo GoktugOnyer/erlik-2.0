@@ -920,6 +920,62 @@ its evidence. The identity-isolation half of E-008 belongs in Increment 1 or 2
 instead — §3 explains why it gates R0. Expand browser journeys and business
 workflows after this works.
 
+**Increment 4 — reach the surface the crawler was missing.** No fourth increment was
+written down; this is the work §12's own measurements call the binding constraint:
+*detection works and discovery does not reach*. On Juice Shop the lane reported 136
+endpoints, 4 parameters and 2 findings, both informational, while the application's
+error-based SQL injection sat one request away.
+
+**The plan's diagnosis of why was wrong, and measuring it is what found that.** §2
+said "the parameter is one JS-body extractor away from being in the inventory". It was
+not. The route was out of reach because **the rendered pass was failing outright**: its
+landing navigation waited for `networkidle` with a fatal timeout, and an Angular front
+end that polls never goes idle — `Page.goto: Timeout 30000ms exceeded`. Worse, `rpc`
+raises, so the exception left the adapter and took the whole katana stage with it,
+discarding a crawl that would have reported 133 endpoints. E-029 had just made that
+path run for every authenticated assessment rather than on request, so the blast radius
+had grown.
+
+Idle is now an optimisation rather than a requirement — `domcontentloaded` is the floor,
+with a bounded extra wait so late XHRs still fire — and a rendered pass that fails
+anyway becomes a `rendered_pass_failed` observation with the stage marked `partial`,
+leaving the fetched crawl intact. On Juice Shop that took the pass from **0 to 122
+observed endpoints**, and the browser then saw the search XHR itself.
+
+**What that bought, measured end to end:**
+
+    before   136 endpoints, 4 parameters, 2 findings (robots.txt, security.txt)
+    after    145 endpoints, 7 parameters, and
+
+             [high] WSTG-INPV-05.2  /rest/products/search (q)
+                    982 bytes of evidence carrying the application's own
+                    `SQLITE_ERROR: near "probe": syntax error`
+
+**The JavaScript extractor is still worth having, and for a smaller reason than the
+plan claimed.** `contracts.infer_endpoints` reads routes out of a script body and
+resolves relative ones against the script's own URL, which is how Juice Shop spells its
+open redirect (`url:"./redirect?to=..."`). Of the five routes it recovers from
+`main.js`, two are found by nothing else — `/rest/user/change-password?current=` and
+`/rest/user/security-question?email=` — because the application never calls them on the
+landing page. Katana finds neither, and does not find the search route either.
+
+**Every route it returns is target-controlled text about to become a URL the lane
+requests and a parameter name it injects into**, so the refusals are the substance: one
+leading slash and never two (the same bundle names `//w.soundcloud.com/player/?url=`,
+which resolves to a different host); no scheme, no `..`, and a path charset that cannot
+carry a `${id}` placeholder or open an argv; parameter names held to `PARAMETER_NAME`;
+a fragment refuses the whole candidate rather than truncating it, because `?ok=1&a#b=2`
+cut at the `#` yields the name `a` the application never had.
+
+And **an inferred route is a proposal, never a target.** It is recorded as
+`source="javascript"` and withheld from `seeds()` and `parameters_by_url()`, so nothing
+fetches or probes it until an operator selects it. The reason is in the same five rows:
+`/rest/products/search?q=` and `/rest/user/change-password?current=` are syntactically
+indistinguishable, and the second is a real mutating endpoint — it answers 401
+anonymously, so authentication is the only thing between the lane and a changed
+credential while it enumerates. Surfacing a route no crawler reaches is the value;
+requesting it unasked is how a tool changes a password by accident.
+
 **Increment 3, first part — the R0 isolation gate and object-level authorization.**
 
 `contracts.operation_key` keys an operation on **what can be injected into it** —

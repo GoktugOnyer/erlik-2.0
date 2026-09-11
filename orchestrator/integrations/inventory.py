@@ -33,11 +33,17 @@ async def seeds(context, policy, include_form_actions: bool = False):
     reads the endpoint rows directly and deliberately keeps a form's companion
     query, because that query is what the form's handler requires.
     """
-    rows = await db.rows("SELECT url,method FROM integration_endpoints WHERE session_id=? AND identity_id=? ORDER BY url,method",
+    rows = await db.rows("SELECT url,method,sources FROM integration_endpoints WHERE session_id=? AND identity_id=? ORDER BY url,method",
                          (context.session_id, context.identity_id))
     if not include_form_actions:
         actions = await form_urls(context)
         rows = [row for row in rows if row["url"] not in actions]
+    # A route read out of a JavaScript body has never been requested by anything. It is
+    # a proposal for an operator, not a page to fetch: measured on Juice Shop, the same
+    # bundle names `/rest/products/search?q=` and `/rest/user/change-password?current=`,
+    # and nothing syntactic separates them. See adapters.infer_from_scripts.
+    rows = [row for row in rows
+            if "javascript" not in json.loads(row.get("sources") or "[]")]
     candidates = [{"url": context.target, "method": "GET"}, *rows]
     selected, seen = [], set()
     for item in candidates:
@@ -239,6 +245,12 @@ async def parameters_by_url(context, policy) -> dict[str, list[str]]:
                    "parameters": json.dumps(parameter_names(context.target))}, *rows]
     checker, found, dropped = EgressPolicy(policy), {}, 0
     for row in candidates:
+        # An inferred route is not a probe target until an operator selects it. Its
+        # PARAMETER is the valuable half and also the dangerous half: injecting into
+        # `change-password?current=` as an authenticated identity is the password
+        # change. See adapters.infer_from_scripts.
+        if "javascript" in json.loads(row.get("sources") or "[]"):
+            continue
         names = [n for n in json.loads(row["parameters"] or "[]") if PARAMETER_NAME.match(n)]
         if not names:
             continue

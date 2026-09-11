@@ -5,7 +5,7 @@ import hashlib
 import json
 from typing import Literal
 import re
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from orchestrator.testcase.scope import Scope, check_url
@@ -306,6 +306,111 @@ def form_endpoint(form: dict, page_url: str) -> tuple[str, list[str]] | None:
     # nothing to do with the application. Sorting makes the kept set depend on the
     # NAMES, which both arms agree about.
     return url, sorted(testable)[:MAX_FORM_PARAMETERS]
+
+
+# An inferred route is the only endpoint the lane learns from a BODY rather than from
+# a request it watched, so both bounds are deliberately tight.
+MAX_INFERRED = 40
+MAX_INFERRED_PATH = 120
+
+# A path, then a query parameter name. Anchored on a single leading slash: a
+# protocol-relative `//host/...` is a different ORIGIN wearing a path's clothes, and
+# resolving one against the target silently leaves the target.
+_ROUTE = re.compile(
+    r"(?<![A-Za-z0-9_/:.])/(?!/)"            # one slash, not two, not mid-token
+    r"([A-Za-z0-9_./-]{1," + str(MAX_INFERRED_PATH) + r"})"   # the path
+    # `#` is INCLUDED so a fragment is seen rather than silently cut around. A query
+    # captured up to a `#` would hand back `a` from `?ok=1&a#b=2` — a name the
+    # application never had, and the same truncation the parameter rules already
+    # refuse for `a#b`. Seen, then refused below.
+    r"\?([A-Za-z0-9_%=&.#\-]{1,200})")
+
+
+# The same shape written relative to the document, which is how Juice Shop's bundle
+# spells its open redirect: `url:"./redirect?to=https://..."`. Resolvable only when the
+# caller says which script the body came from — see the `base` argument.
+_RELATIVE_ROUTE = re.compile(
+    r"(?<![A-Za-z0-9_/:.])\./([A-Za-z0-9_./-]{1," + str(MAX_INFERRED_PATH) + r"})"
+    r"\?([A-Za-z0-9_%=&.#\-]{1,200})")
+
+
+def infer_endpoints(body: str, limit: int = MAX_INFERRED,
+                    base: str = "") -> list[tuple[str, list[str]]]:
+    """Routes a JavaScript body names, as (path, parameter names).
+
+    Discovery is the lane's binding constraint and this is the measured reason. On
+    Juice Shop it reports 136 endpoints, 4 parameters and 2 informational findings,
+    while the application's error-based SQL injection sits behind an Angular XHR that
+    no crawler follows — and the route is in `main.js`, a file the lane already
+    fetches:
+
+        .get(`${this.hostServer}/rest/products/search?q=${e}`)
+
+    Handed that URL directly the lane reports the injection HIGH in 21 seconds. So the
+    parameter was one body extractor away from the inventory, which is what E-007 means
+    by an operation "inferred from JavaScript/schema".
+
+    EVERYTHING THIS RETURNS IS TARGET-CONTROLLED TEXT on its way to becoming a URL the
+    lane requests and a parameter name it injects into, so the refusals are the
+    substance of the function:
+
+      - one leading slash, never two. `//w.soundcloud.com/player/?url=` is in the same
+        bundle and resolves to a DIFFERENT HOST; the scope check would refuse the
+        request, but only after the candidate had been counted as surface.
+      - no scheme, no `..`, and only `[A-Za-z0-9_./-]` in the path, so a `${id}`
+        placeholder cannot be mistaken for a segment and nothing can open the argv.
+      - parameter names must satisfy PARAMETER_NAME, the same rule a discovered query
+        string is held to.
+      - a path with NO parameter is not returned: the parameter is the whole value, and
+        an unobserved path is the riskiest thing to request.
+
+    What it deliberately does NOT do is decide that any of this is safe to probe.
+    Measured from the same ten candidates, `/rest/products/search?q=` and
+    `/rest/user/change-password?current=` are syntactically indistinguishable, and the
+    second is a real mutating endpoint. Callers treat these as proposals — see
+    `inventory.seeds` and `inventory.parameters_by_url`, which withhold them.
+    """
+    candidates = [(m.group(1), m.group(2), False) for m in _ROUTE.finditer(body or "")]
+    if base:
+        # A relative route is meaningless without the document it was written in, and
+        # meaningful with it: `./redirect?to=` inside `/main.js` is `/redirect`, which
+        # is what a browser would resolve it to. Refused entirely when the caller
+        # cannot say where the body came from, because the alternative is a guess.
+        candidates += [(m.group(1), m.group(2), True)
+                       for m in _RELATIVE_ROUTE.finditer(body or "")]
+
+    found: dict[str, list[str]] = {}
+    for path, query, relative in candidates:
+        if ".." in path or "://" in path:
+            continue
+        if relative:
+            resolved = urlsplit(urljoin(base, "./" + path))
+            # urljoin cannot leave the origin from a `./` path, but the check is cheap
+            # and the consequence of being wrong is a request to another host.
+            if canonical_origin(base) != canonical_origin(urljoin(base, "./" + path)):
+                continue
+            path = (resolved.path or "/").lstrip("/")
+        # A fragment means the query was not a query. `?ok=1&a#b=2` truncated to
+        # `ok=1&a` yields the name `a`, which the application never had — exactly the
+        # silent truncation the parameter-name rule refuses elsewhere. Refuse the
+        # candidate rather than keep the part before the cut.
+        if "#" in query:
+            continue
+        path = "/" + path
+        names = [name for name in parameter_names("http://x" + path + "?" + query)
+                 if PARAMETER_NAME.match(name)]
+        if not names:
+            continue
+        from orchestrator.engagement import looks_injectable
+        if looks_injectable(path):
+            continue
+        bucket = found.setdefault(path, [])
+        for name in names:
+            if name not in bucket:
+                bucket.append(name)
+        if len(found) >= limit:
+            break
+    return [(path, sorted(names)) for path, names in sorted(found.items())]
 
 
 def operation_key(url: str, method: str = "GET", parameters=()) -> str:
