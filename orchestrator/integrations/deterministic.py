@@ -8,7 +8,7 @@ from orchestrator.testcase.runner import run_test_case
 from orchestrator.testcase.loader import find_by_id
 from orchestrator.testcase.scope import ScopeViolation, check_url
 from .adapters import BaseAdapter, record
-from .contracts import StageResult, IntegrationFinding, fingerprint
+from .contracts import StageResult, IntegrationFinding, fingerprint, identity_target_fields
 from .egress_policy import EgressPolicy
 from .inventory import (seeds, eligible_test_cases, form_urls, parameters_by_url,
                         case_needs_parameter, parameter_can_forge)
@@ -655,7 +655,11 @@ class CatalogueAdapter(BaseAdapter):
                         "reason": f"{len(case_targets) - position} of {len(case_targets)} targets were not "
                                   f"reached before the stage budget ran out"})
                     break
-                target = {**target, "scope": ctx.config.scope.model_dump()}
+                # The identity's DECLARATIONS, so a case knows who it is running as.
+                # The material stays at the proxy; only `subject_id`, `identity_role` and
+                # `identity_tenant` travel, and only when the operator declared them.
+                target = {**target, "scope": ctx.config.scope.model_dump(),
+                          **identity_target_fields(ctx.identity)}
                 if case_id == "WSTG-INPV-19":
                     if not collector:
                         result.status, result.reason = "partial", "SSRF check incomplete: callback collector unavailable"

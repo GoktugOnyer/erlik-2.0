@@ -282,6 +282,42 @@ reaches the code being compared and its zero findings are vacuous. Measured: adm
 and gordonb, both at `security=low`, produce `/vulnerabilities/sqli/?Submit=Submit`
 byte for byte — so the only variable is who made the request.
 
+## The identity matrix
+
+An identity carries what authenticates it and, optionally, what the operator declares
+about it:
+
+| Field | Kind | Used for |
+|---|---|---|
+| `headers`, `cookies`, `storage_state` | secret, injected by the proxy | authenticating every in-scope request |
+| `role` | operator label | reporting — the lane does not interpret it |
+| `tenant` | operator label | reporting, and `cross_tenant` on an arm comparison |
+| `subject_id` | operator declaration | **who this identity IS in the application** |
+| `may_access` | operator declaration | which object paths this identity is expected to reach |
+
+`subject_id` is the one the authorization checks rest on, and the asymmetry is the safety
+property: who the caller is comes from **you**, the asserted owner comes from the
+**target**. A target can therefore cost itself a finding and can never manufacture one.
+It lives on the identity rather than being typed per run so that it travels with the arm —
+two arms cannot accidentally share one.
+
+None of the four is a secret, and `secret_values` is an explicit allow-list rather than a
+sweep, so they survive into a finding's evidence. That matters: the ownership finding
+quotes "the caller is declared to be '2'", and a comparison whose own terms were redacted
+could not be checked by whoever reads it.
+
+### What the matrix does not unlock
+
+A lane stage carries exactly **one** identity — it resolves it from its own row, and the
+proxy authenticates that stage's requests as it. The `ownership` evaluator needs three
+arms in one case execution (the caller, the declared owner, anonymous), so no single stage
+can satisfy it however the identity is declared. `subject_id` reaching a case is
+groundwork, not a working lane check.
+
+The lane-native shape is a comparison **across** stages — which `compare_arms` already
+does for surfaces and does not yet do for responses. Run the three-arm authorization
+checks through the sweep or the CLI, where per-role credentials can be supplied.
+
 ## Coverage: what ran, what did not, and why
 
 Two routes answer the same question from either side of a run.

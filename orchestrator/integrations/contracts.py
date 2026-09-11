@@ -30,6 +30,11 @@ class RequestSpec(StrictModel):
     body_contains: str | None = None
 
 
+# Declared objects, bounded. An identity naming a thousand of them is a configuration
+# mistake rather than a matrix.
+MAX_DECLARED_OBJECTS = 200
+
+
 class Identity(StrictModel):
     name: str = Field(min_length=1, max_length=80)
     target_origin: str
@@ -37,6 +42,25 @@ class Identity(StrictModel):
     cookies: list[dict] = Field(default_factory=list)
     storage_state: dict | None = None
     check: RequestSpec
+
+    # THE MATRIX (E-008). All four are OPERATOR-DECLARED and none is a secret, which is
+    # the whole point: the `ownership` evaluator rests on who the caller IS coming from
+    # the operator while the asserted owner comes from the target, so a target can cost
+    # itself a finding and cannot manufacture one.
+    #
+    # `subject_id` was previously passed per-run in the target dict. That works for a
+    # hand-driven check and cannot work in the lane, where authentication happens at the
+    # PROXY and a case carries no credentials — so nothing told a case who it was running
+    # as. On the identity it travels with the ARM rather than the run, and two arms cannot
+    # share one by accident.
+    #
+    # `role` and `tenant` are labels the operator chooses; the lane does not interpret
+    # them, it reports them, so "cross-tenant" becomes something a reader can see rather
+    # than infer.
+    role: str = Field(default="", max_length=80)
+    tenant: str = Field(default="", max_length=80)
+    subject_id: str = Field(default="", max_length=200)
+    may_access: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def valid(self):
@@ -54,7 +78,50 @@ class Identity(StrictModel):
                 raise ValueError("transport headers cannot be authentication headers")
             if any(c in key + value for c in "\r\n"):
                 raise ValueError("invalid header")
+        # The declarations reach a command template and an evidence quote, so they are
+        # held to the rule every other declared field is held to.
+        from orchestrator.engagement import looks_injectable
+        for field in ("role", "tenant", "subject_id"):
+            value = getattr(self, field)
+            if value and looks_injectable(value):
+                raise ValueError(f"{field} {looks_injectable(value)}")
+        if len(self.may_access) > MAX_DECLARED_OBJECTS:
+            raise ValueError(f"at most {MAX_DECLARED_OBJECTS} declared objects per identity")
+        for item in self.may_access:
+            # A PATH, never a URL. A declaration that can name a host lets an identity
+            # claim access to a different machine, and nothing downstream would catch it
+            # — the same reasoning `declared.PATH_FIELDS` already applies.
+            if not isinstance(item, str) or not item.startswith("/") or item.startswith("//"):
+                raise ValueError("each declared object must be a path on the target, "
+                                 "beginning with a single '/'")
+            if looks_injectable(item) or ".." in item:
+                raise ValueError("a declared object must be a plain path")
         return self
+
+
+def identity_target_fields(identity) -> dict[str, str]:
+    """The identity's DECLARATIONS, as target fields a case may interpolate.
+
+    In the assessment lane a case carries no credentials — the egress proxy injects the
+    identity's headers and cookies on every in-scope request — so nothing told a case who
+    it was running as, and the `ownership` evaluator's `subject_id` could only be supplied
+    by hand. That made a working evaluator unreachable from a real assessment, which is the
+    same unwired shape E-027 found in the `idor` evaluator.
+
+    Only the non-secret declarations travel. A case that needs credentials is meant to be
+    REFUSED by the lane (`inventory.IDENTITY_FIELDS`), not quietly handed them in a target
+    field, and an empty declaration is omitted rather than passed as "" — the evaluator's
+    question "is an owner asserted for this caller" must not look answered when nobody
+    said who the caller is.
+    """
+    identity = identity or {}
+    out = {}
+    for field, name in (("subject_id", "subject_id"), ("role", "identity_role"),
+                        ("tenant", "identity_tenant")):
+        value = str(identity.get(field) or "").strip()
+        if value:
+            out[name] = value
+    return out
 
 
 class SchemaInput(StrictModel):

@@ -920,6 +920,42 @@ its evidence. The identity-isolation half of E-008 belongs in Increment 1 or 2
 instead — §3 explains why it gates R0. Expand browser journeys and business
 workflows after this works.
 
+**Increment 6 — the identity matrix, and the boundary it does not cross.** The slice
+sentence opens with "an operator selects two lab identities", and by now every later
+clause was built: the hidden API operation is discovered (Increment 4), its coverage is
+visible (Increment 5), a seeded authorization flaw reproduces (the `ownership`
+evaluator), and its evidence opens. What was missing is the declaration that makes the
+rest mean something.
+
+`Identity` gained `role`, `tenant`, `subject_id` and `may_access` — all
+operator-declared, none a secret, each validated as text that reaches a command template
+and an evidence quote. `contracts.identity_target_fields` carries the non-secret ones
+into a case's target dict, and `compare_arms` reports the roles and tenants so
+`cross_tenant` is something a reader sees rather than infers from two opaque handles.
+
+`subject_id` is the one the authorization checks rest on, and putting it on the identity
+rather than in a per-run target dict is the point: it travels with the ARM, so two arms
+cannot share one by accident, and the asymmetry that makes the `ownership` evaluator safe
+— the caller's identity from the operator, the asserted owner from the target — is
+expressed where an operator can see it. A check worth confirming before building on it:
+`secret_values` is an explicit allow-list rather than a sweep, so the declarations survive
+into a finding's evidence. Had it swept every string, the ownership finding's own
+comparison would have been redacted out of the evidence that quotes it.
+
+**And the increment stopped at a measured boundary rather than shipping past it.** A lane
+stage carries exactly ONE identity — it resolves it from its own row, and the proxy
+authenticates that stage as it — while the `ownership` evaluator needs three arms in one
+case execution. I wrote a lane-runnable `WSTG-AUTHZ-04.2` to prove the matrix out, then
+deleted it: it named an `owner_step` and an `anonymous_step` it had no way to have, so it
+could never fire. A case that always reports nothing is worse than no case, and it is the
+exact unwired shape E-027 had just been fixed for.
+
+So `subject_id` reaching a case is groundwork, not a working lane check, and two tests pin
+that so a future reader does not assume otherwise. The lane-native shape is a comparison
+ACROSS stages, which `compare_arms` already does for surfaces and does not yet do for
+responses — **that is what Increment 7 should build**, and it is the remaining half of
+E-011.
+
 **Increment 5 — make coverage answerable, before and after.** The slice sentence asks
 that an operator "sees its coverage", and §E-010 gives the cost of not being able to: at
 the default budget the 2026-09-10 run tested one or two parameters per case out of eight

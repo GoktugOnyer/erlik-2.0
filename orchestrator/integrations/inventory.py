@@ -772,6 +772,26 @@ async def compare_arms(session_id, first_identity, second_identity) -> dict:
         if found:
             schema[identity_id] = found[0] if len(found) == 1 else found
 
+    # The arms' declared roles and tenants, so a reader can see WHAT boundary the
+    # differential crosses. E-011's acceptance names cross-user, cross-tenant and
+    # privileged-function violations, and without the labels "cross-tenant" has to be
+    # inferred from two opaque identity handles. The lane does not interpret them — an
+    # operator chooses them — it reports them.
+    roles, tenants = {}, {}
+    for identity_id in (first_identity, second_identity):
+        if identity_id == "anonymous":
+            roles[identity_id] = "anonymous"
+            continue
+        try:
+            from .security import SecretStore
+            declared = SecretStore().get(identity_id)
+        except Exception:
+            continue
+        if declared.get("role"):
+            roles[identity_id] = declared["role"]
+        if declared.get("tenant"):
+            tenants[identity_id] = declared["tenant"]
+
     reasons = []
     if schema and (len(schema) != 2 or len(set(map(str, schema.values()))) != 1):
         reasons.append("different_schema")
@@ -794,6 +814,11 @@ async def compare_arms(session_id, first_identity, second_identity) -> dict:
         "divergence": divergence,
         # The schema digest each arm was assessed against, when one was recorded.
         "schema": schema,
+        "roles": roles,
+        "tenants": tenants,
+        # True only when BOTH arms declared a tenant and the two differ — an undeclared
+        # tenant is not a tenant boundary, and guessing one would invent the finding.
+        "cross_tenant": len(tenants) == 2 and len(set(tenants.values())) == 2,
         "comparable": not reasons,
         "refused_because": reasons,
         # Stated as a fraction because that is how the original defect was
