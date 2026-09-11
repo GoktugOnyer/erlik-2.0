@@ -6,7 +6,7 @@ import time
 from pathlib import Path
 from urllib.parse import urlsplit
 from mitmproxy import http
-from egress_policy import EgressPolicy, origin
+from egress_policy import EgressPolicy, merged_cookies, origin
 
 
 class Guard:
@@ -73,20 +73,29 @@ class Guard:
             now = time.monotonic()
             await asyncio.sleep(max(0, self.next_request - now))
             self.next_request = time.monotonic() + 1 / self.config.get("requests_per_second", 5)
+        # Cookies are MERGED, never replaced, in a fixed order of authority. The rule
+        # itself lives in egress_policy.merged_cookies so it can be tested without
+        # mitmproxy; see there for why application configuration goes on every arm.
         identity = self.config.get("identity") or {}
+        mine = []
         if identity and origin(flow.request.pretty_url) == origin(identity["target_origin"]):
             for key, value in identity.get("headers", {}).items():
                 flow.request.headers[key] = value
-            cookies = identity.get("cookies", []) + (identity.get("storage_state") or {}).get("cookies", [])
-            host = flow.request.host.lower()
-            accepted = []
-            for c in cookies:
-                domain = c.get("domain", host).lower()
-                domain_ok = host == domain or (domain.startswith(".") and (host == domain[1:] or host.endswith(domain)))
-                if domain_ok and flow.request.path.startswith(c.get("path", "/")) and (not c.get("secure") or flow.request.scheme == "https") and (c.get("expires", -1) <= 0 or c["expires"] > time.time()):
-                    accepted.append(f"{c['name']}={c['value']}")
-            if accepted:
-                flow.request.headers["cookie"] = "; ".join(accepted)
+            mine = (identity.get("cookies", [])
+                    + ((identity.get("storage_state") or {}).get("cookies") or []))
+        jar, overridden = merged_cookies(
+            flow.request.headers.get("cookie"),
+            self.config.get("application_cookies") or [], mine,
+            flow.request.pretty_url, flow.request.path, flow.request.scheme, time.time())
+        if jar:
+            flow.request.headers["cookie"] = "; ".join(f"{k}={v}" for k, v in jar.items())
+        if overridden:
+            # Recorded, never silent: the declared configuration replaced a cookie this arm
+            # was already carrying, which is the intended behaviour and still a thing an
+            # operator must be able to see in the audit trail.
+            self.record({"url": flow.request.pretty_url,
+                         "configuration_overrode": sorted(set(overridden)),
+                         "timestamp": time.time()})
 
     def response(self, flow):
         self.record({"url": flow.request.pretty_url, "status": flow.response.status_code, "timestamp": time.time()})

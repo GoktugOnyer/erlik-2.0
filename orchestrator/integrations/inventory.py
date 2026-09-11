@@ -4,6 +4,7 @@ import json
 import re
 from functools import lru_cache
 from urllib.parse import unquote_plus, urldefrag, urlsplit, urlunsplit
+from orchestrator import http_capture
 from orchestrator.engagement import looks_injectable
 from .contracts import PARAMETER_NAME, parameter_names
 from . import persistence as db
@@ -714,8 +715,9 @@ async def cross_arm_authorization(session_id, caller, owner, owner_field,
             if not (_http_status_ok(corroborating)
                     and _asserted_owner(corroborating, owner_field) == asserted):
                 continue
-            if key not in anonymous_saw:
-                continue            # the anonymous arm never issued this request
+            if key not in anonymous_saw or not http_capture.answered(anonymous_saw[key]):
+                continue            # the anonymous arm never issued this request, or the
+                                    # proxy refused it — neither is the target saying no
             # RECEIPT, not the owner's value. Comparing the anonymous arm's owner field
             # let the target escape this clause by retyping it ("1" for 1) or omitting
             # it — a no-privilege-needed way to manufacture a high finding on fully
@@ -901,6 +903,13 @@ async def cross_arm_privileged_function(session_id, privileged, unprivileged, ma
             #    read "the anonymous arm never probed this" as "the anonymous arm was
             #    refused", which is the unrun-clause defect this project keeps removing.
             if key not in anonymous_saw:
+                continue
+            # AND IT MUST HAVE BEEN ANSWERED BY THE APPLICATION. A probe the egress proxy
+            # refused, or one that timed out, contains nothing — so it satisfied this clause
+            # for free. Measured: a finding on Juice Shop's `/rest/products/1/reviews`,
+            # content every arm can read, because the anonymous arm's capture was erlik's own
+            # refusal text.
+            if not http_capture.answered(anonymous_saw[key]):
                 continue
             if carries(anonymous_saw[key]):
                 continue            # published content, not a privilege crossing

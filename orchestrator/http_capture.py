@@ -63,6 +63,47 @@ def ok(output: str) -> bool:
     return code is not None and 200 <= code < 300
 
 
+# The header the egress proxy stamps on its OWN refusal (proxy_addon.Guard.request). A
+# capture carrying it is erlik's answer, not the application's, whatever its status line
+# says — and the 403 it comes with parses perfectly well as a response.
+_OUR_BLOCK = re.compile(r"(?im)^x-erlik-blocked:\s*true")
+
+
+def answered(output: str) -> bool:
+    """Did the APPLICATION answer this probe at all?
+
+    THIS IS THE CLAUSE FOUR CHECKS WERE MISSING, and the defect is the same every time: an
+    arm that received NOTHING trivially does not contain the thing being looked for, so
+    every "the anonymous arm did not get it" test passed on silence. Measured end to end:
+
+      * `cross_arm_privileged_function` reported a finding on Juice Shop's
+        `/rest/products/1/reviews` — content every arm can read — because the anonymous
+        arm's stored capture was erlik's OWN proxy-refusal text;
+      * the `idor` evaluator graded the same shape HIGH `confirmed` from a real
+        `curl --max-time 0.001` that returned zero bytes.
+
+    `deterministic.curl_request` hands an evaluator a NON-EMPTY string with no status line
+    when the proxy refuses, and 29 of 60 probes were refused in one measured run, so this is
+    the common case rather than an edge. A timeout, a reset and a proxy refusal all arrive
+    here as "not a 2xx", which is indistinguishable from the target saying no — and only one
+    of those is evidence about the application.
+
+    An absence is only evidence when something was there to be absent FROM.
+    """
+    text = output or ""
+    if not text.strip():
+        return False
+    # OUR OWN REFUSAL, WHICH DOES PARSE AS A RESPONSE. `deterministic.curl_request`
+    # substitutes a status-line-less sentence today, which the `status()` test below catches
+    # on its own — but a capture can also arrive with the proxy's real 403 in it, from any
+    # job whose output is not routed through that substitution, and `HTTP/1.1 403 Forbidden`
+    # parses exactly like the target saying no. The `X-Erlik-Blocked` header is the durable
+    # marker, stamped by the proxy on its own refusals.
+    if _OUR_BLOCK.search(headers(text)):
+        return False
+    return status(text) is not None
+
+
 def headers(output: str) -> str:
     """The first header block only — never let a body echo fake a header match."""
     parts = _BLOCK.split(output or "", 1)

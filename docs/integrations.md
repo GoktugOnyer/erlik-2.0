@@ -447,6 +447,116 @@ that drops the identity.
 data — a real address, an internal identifier — and a finding travels into a DefectDojo
 export. The payload carries a short digest instead, and says so.
 
+### Every arm tests the same application, and proves it is the arm it claims to be
+
+Both cross-arm checks above rest on an anonymous arm, and two things were wrong with the
+arms themselves. Neither was a missing feature; both were measured false positives.
+
+**`AssessmentConfig.application_cookies` — configuration every arm carries.** DVWA's
+security level is a value the CALLER chooses (`dvwaPage.inc.php:200` returns
+`$_COOKIE['security']` when set and `impossible` otherwise), and a stage's identity is
+`None` for the anonymous arm, so the proxy injected nothing into it. Measured through the
+real proxy on `/vulnerabilities/authbypass/get_user_data.php`:
+
+    identity arm carrying security=low     200, 273 bytes, the full user table
+    anonymous arm as the lane built it     200,  41 bytes, {"result":"fail",...}
+
+So the anonymous arm was not the authenticated arms' application with nobody logged in —
+it was a different, hardened application. Measured end to end with real admin and gordonb
+sessions: **1 false positive** before, **0** after, on data DVWA hands to anybody who sets
+a cookie.
+
+```json
+{ "application_cookies": [
+    { "name": "security", "value": "low", "target_origin": "http://dvwa" } ] }
+```
+
+`target_origin` is required, and it is the whole origin — scheme, host *and* port. A first
+draft reused the identity cookie plumbing, which is fenced by
+`origin(url) == origin(identity.target_origin)`, without that fence: a cookie declared for
+`localhost:8081` was measured landing on a request to `localhost:3000`, and no cookie
+`domain` can express a port. Juice Shop treats a bare `token` cookie as a full identity, so
+on a two-host scope that handed a credential to a second application.
+
+**The declaration outranks the identity**, and cookies are merged rather than replaced. DVWA
+answers *every* request with `Set-Cookie: security=impossible`, and `login.py`'s jar is a
+flat name→value dict that absorbs it — so an identity captured by erlik's own credential
+flow carries `security=impossible`, a cookie the operator never declared and has no reason
+to know is there. With the identity winning, declaring `security=low` silently did nothing.
+The override is recorded in the proxy audit, never silent. (The old code ended with
+`headers["cookie"] = "; ".join(accepted)`; ablating the merge back to that flips the same
+declared configuration between 5070 bytes with five usernames and 389 bytes with nothing,
+purely on join order, because PHP takes the **first** of duplicate cookie names.)
+
+**What this guarantees is UNIFORMITY, not that the values are not credentials.** Anything
+every arm carries cannot distinguish one arm from another, so it cannot manufacture a
+differential. It can change the application under test, which is the point. On a run with
+**no identities** there is only one arm and therefore no differential at all, so an operator
+who puts a session cookie here would get a post-authentication finding labelled anonymous
+with nothing to contradict it — which is why every stage records
+`metadata.application_configuration`, and why the published configuration keeps the cookie
+names and origins and redacts only the values.
+
+**`service.authenticate` is now differential.** It was
+`status == check["expected_status"] and (optional body_contains)`, and
+`RequestSpec.expected_status` defaults to 200 — so an identity whose check URL was the target
+origin passed while carrying nothing, and its arm was then effectively anonymous while every
+comparison believed it was a distinct identity. Two arms that are the same caller is the
+worst possible input to a differential.
+
+The rule: the identity's response satisfies the operator's assertion **and** a control — the
+same request with the identity dropped, the application's configuration kept — does not.
+Four verdicts, and only the first is resumable:
+
+| verdict | stage | meaning |
+|---|---|---|
+| `needs_auth` | `needs_auth` | the credential is dead or wrong — replace it and resume |
+| `indiscriminate` | `failed` | the assertion holds without the credential, so it establishes nothing |
+| `check_is_unstable` | `failed` | two identical anonymous requests disagreed about the assertion |
+| `control_unavailable` | `failed` | the control was never obtained, or the proxy refused it |
+
+Scored over 11 rows captured through the real proxy across both lab apps, the old rule is
+wrong on 3 and the new rule on 0; an independent 41-row corpus put the old rule at fp=11 and
+the new at fp=1, and ablating the differential took it straight back to 11. Every verdict the
+differential changed was `authenticated → indiscriminate` — it cannot produce a silent false
+dead — and each refused check had a discriminating alternative in the same corpus.
+
+Three things it does **not** fix, all measured:
+
+* **A control the egress proxy refused** used to read as a discriminating control, because
+  `satisfies` opens with `not response["blocked"]` and a blocked control fails every
+  assertion. That certified an arm carrying nothing — the defect the rule exists to remove,
+  resurrected by its own guard. A blocked or errored control is now `control_unavailable`.
+* **A non-deterministic assertion.** On Juice Shop's public `/metrics`, whose body varies
+  between consecutive identical requests, an arm carrying nothing was certified in 18–24% of
+  trials, and re-sampling plateaus rather than converging (24%, 6%, 10%, 8% for k=1,2,3,5).
+  Two control samples now refuse a check whose own assertion they disagree about, which names
+  the problem instead of trying to out-sample it. A residual remains for an assertion that is
+  *mostly* stable.
+* **The target supplying the discriminator.** Juice Shop answers `/api/Users` 401 `"Invalid
+  token: no header in signature"` to a garbage bearer token and 401 `"No Authorization header
+  was found"` to none, so an assertion keyed on the former passes both clauses with material
+  the target explicitly rejected. `Identity.check` must now assert a **2xx**: a rejection
+  cannot prove a credential works. That also removes an unreachable assertion — the worker
+  follows redirects, so a live DVWA session asserting 302 on `/index.php` was reported 200 and
+  failed as dead.
+
+On DVWA the control is degenerate and worth knowing about: following redirects as the worker
+does, anonymous GETs of `/index.php`, `/vulnerabilities/sqli/`, `/vulnerabilities/exec/`,
+`/security.php` and `/phpinfo.php` all return the identical 1342-byte login page. So the
+differential there reduces to "is your assertion absent from login.php" — and that page
+contains both `DVWA` and `Damn Vulnerable Web Application`. `Welcome`, `Logout` and the
+username discriminate.
+
+**The anonymous arm is now actually registered.** `register` built its arms as
+`config.identity_ids or ["anonymous"]`, so an anonymous arm existed only when *no* identity
+was configured — and `preflight` rejects `"anonymous"` as an identity handle. Measured on a
+two-identity registration: 4 stages, 2 arms, no anonymous one, and both cross-arm checks
+refusing with `anonymous_arm_did_not_run`. **The authorization work could not run on any
+assessment the product accepts**; the three-arm sessions its tests exercise were written into
+the database by the tests. `anonymous_arm` now defaults to true and costs one more pass of
+each selected stage.
+
 ### What the matrix does not unlock
 
 A lane stage carries exactly **one** identity — it resolves it from its own row, and the

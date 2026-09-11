@@ -1065,6 +1065,108 @@ declared path removes a finding, an empty declaration removes none — because r
 closed-world allowlist it manufactures them, worst of all for the anonymous arm, whose list
 is empty.
 
+**Increment 9 — an arm must be the arm it claims to be.** The two defects Increment 8 named,
+plus five more of the same shape that an adversarial pass found while attacking them. Every
+one was a measured false positive, not a missing feature.
+
+**The anonymous arm was testing a different application.** A stage's identity is `None` for
+the anonymous arm and the proxy injects nothing, while DVWA's security level is a cookie the
+CALLER chooses. Measured through the real proxy on the authbypass endpoint: 273 bytes with
+`security=low`, 41 without. `AssessmentConfig.application_cookies` is injected on every arm —
+each identity, the anonymous one, and the liveness control. Measured end to end with real
+admin and gordonb sessions, through the real proxy: **1 false positive before, 0 after**, on
+data DVWA hands to anybody who sets a cookie. It is a false positive in code shipped one
+increment earlier.
+
+Two things about it were wrong in the first draft and both were caught by measurement. It had
+no ORIGIN fence — a cookie declared for `localhost:8081` was measured landing on
+`localhost:3000`, and no cookie `domain` can express a port, so `target_origin` is required and
+compared whole. And it gave the IDENTITY precedence: DVWA answers every request with
+`Set-Cookie: security=impossible` and `login.py`'s jar absorbs it, so an identity captured by
+erlik's own credential flow carries `impossible` — declaring `security=low` would either have
+done nothing or, in the first draft's collision rule, aborted the entire assessment. The
+declaration outranks the identity, and the override is recorded rather than silent.
+
+What it guarantees is UNIFORMITY, not that the values are not credentials — anything every arm
+carries cannot distinguish arms. On a run with no identities there is one arm and no
+differential, so every stage records `metadata.application_configuration` and the published
+configuration keeps the names and origins while redacting the values.
+
+**Liveness is now differential.** `expected_status` defaults to 200, so an identity whose
+check URL was the target origin passed carrying nothing — and its arm was then effectively
+anonymous while every comparison believed it was a distinct identity. The rule is the one
+`login._verify` already learned: the identity's response satisfies the assertion AND a control
+with the identity dropped does not. Scored over 11 rows captured through the real proxy, the
+old rule is wrong on 3 and the new on 0; an independent 41-row corpus put the old at fp=11 and
+the new at fp=1, and ablating the differential returned it to 11. `indiscriminate`,
+`check_is_unstable` and `control_unavailable` are `failed` rather than `needs_auth`, because
+`run()` resumes `needs_auth` and resuming cannot fix a check that never tested a credential.
+
+Three holes in it were measured and closed or named. A control the EGRESS PROXY refused read
+as a discriminating control, because `satisfies` opens with `not blocked` — certifying an arm
+carrying nothing, the defect the rule exists to remove resurrected by its own guard. A
+non-deterministic assertion certified an empty arm in 18-24% of trials on Juice Shop's
+`/metrics`, and re-sampling plateaus rather than converging (24%, 6%, 10%, 8% for k=1,2,3,5),
+so two samples now REFUSE a check whose assertion they disagree about instead of trying to
+out-sample it; a residual remains for an assertion that is mostly stable. And the target can
+supply the discriminator — Juice Shop's two `/api/Users` 401 bodies differ on whether a
+credential was PRESENTED, not whether it was valid — so `Identity.check` must now assert a
+**2xx**, which also removes an unreachable 3xx assertion the worker's redirect-following made
+invisible.
+
+**THE AUTHORIZATION WORK COULD NOT RUN ON ANY REAL ASSESSMENT.** `register` built its arms as
+`config.identity_ids or ["anonymous"]`, so an anonymous arm existed only when NO identity was
+configured, and `preflight` rejects `"anonymous"` as a handle. Measured on a two-identity
+registration: 4 stages, 2 arms, no anonymous one, both cross-arm checks refusing with
+`anonymous_arm_did_not_run`. Increments 7 and 8 built those checks and their tests wrote the
+anonymous stage row into the database BY HAND, so the suite was green on a feature nothing
+could reach. `anonymous_arm` now defaults to true, and the new tests go through the real
+`register`, which is the only thing that would have caught it.
+
+**One root cause accounted for four more false positives: erlik's OWN refusal read as the
+target's.** `deterministic.curl_request` deliberately substitutes a status-line-less sentence
+when the proxy refuses a probe, and a timeout arrives as zero bytes — and every "the anonymous
+arm did not receive this" clause passed on that silence. An absence is only evidence when
+something was there to be absent from. The lane's own audit recorded 29 of 60 probes refused
+in one measured run, so this was the common case.
+
+    cross_arm_privileged_function on /rest/products/1/reviews   FINDING, refused_because []
+    the `idor` evaluator, from curl --max-time 0.001 (0 bytes)   HIGH, confidence confirmed
+
+`confirmed` is the grade that marks a finding verified on a client's tracker. Both cross-arm
+checks and both in-case evaluators now require `http_capture.answered`, whose own guard is the
+`X-Erlik-Blocked` header rather than a sentence prefix — the first draft's prefix check was
+UNREACHABLE, since a capture starting with `[erlik]` never parses as a response anyway, and an
+unreachable guard implies a protection that is not there.
+
+Two more in the same family. `cookie_attributes` parsed `Set-Cookie` out of the whole capture,
+so a reflected `?name=%0ASet-Cookie:+JSESSIONID%3Dforged%0A` produced a MEDIUM about a cookie
+the server never set — on WSTG-SESS-02, the one case runnable without `active`, which runs
+against every discovered URL. `_response_headers` existed in that file for exactly this reason
+and that call did not use it. And `SecurityAssertion` emitted HIGH `confirmed` findings from
+one response with no control: measured firing on a marker the operator put in the URL and the
+target echoed, and on a DVWA refusal followed to `login.php` whose finding named
+`/vulnerabilities/exec/` while its evidence was the login page. Both are refused now, the
+decision is extracted as `adapters.assertion_verdict` so it can be tested at all, and its
+`basis` says in the finding what one arm can establish.
+
+**Named rather than fixed, with the reason.** `SecurityAssertion` still has no control arm, so
+an operator naming a marker a catch-all route happens to serve (Juice Shop answers
+`/administration` with index.html, which contains "Juice Shop") still produces a finding; no
+single response can detect that, and giving it a second arm is a design change, not a clause.
+`interactsh.py`'s `ok = not response.get("blocked")` records a 404 or 403 probe as a callback
+in flight — measured at the predicate, inferred end to end, and it costs a lost finding rather
+than a false one. `infer_from_scripts` mines a body without checking its status, and the
+rendered pass records requests ISSUED rather than answered; both were unmeasured by the agent
+that raised them and are unverified here.
+
+**Thirty-one clauses were each removed to confirm a test fails without them.** Eight initially
+did not. Three of those were masked by a test of mine that was ALREADY FAILING — an ablation
+"caught by" a broken test is caught by nothing — and one ablation produced a SyntaxError rather
+than a test failure, which is the same trap as the Increment 5 negative control that left an
+IndentationError. Two more clauses turned out to be genuinely unreachable and were rewritten
+rather than kept.
+
 **Two verified defects are named rather than fixed, because both need lane plumbing.**
 The anonymous stage cannot carry application configuration (`service.py` passes `None` for
 it and the proxy then injects nothing), so on an application whose configuration lives in a
@@ -1072,8 +1174,8 @@ cookie the anonymous arm is evaluated against a DIFFERENT application — measur
 273 bytes with `security=low` versus 41 bytes without it. And `service.authenticate` is a
 status-and-marker probe rather than a differential one, with `expected_status` defaulting to
 200, so an identity whose check URL is the target origin passes while carrying nothing. Both
-are the next increment; both are stated in docs/integrations.md so nobody trusts the
-anonymous clause on a cookie-configured application in the meantime.
+were fixed in Increment 9 below, where the first turned out to be a measured false positive in
+this increment's own check rather than only a caveat.
 
 **One stale claim of my own was corrected.** `AUTHZ-04_idor.yaml` carried a verdict table
 asserting `security=low -> FINDING` and `security=medium -> FINDING` on DVWA's authbypass

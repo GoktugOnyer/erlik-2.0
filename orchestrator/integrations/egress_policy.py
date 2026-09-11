@@ -10,6 +10,79 @@ def origin(url):
     return u.scheme.lower(), (u.hostname or "").lower().rstrip("."), u.port or (443 if u.scheme == "https" else 80)
 
 
+def cookie_applies(cookie, path, scheme, now):
+    """Whether one declared cookie belongs on this request."""
+    expires = cookie.get("expires", -1)
+    return bool(path.startswith(cookie.get("path") or "/")
+                and (not cookie.get("secure") or scheme == "https")
+                and (expires is None or expires <= 0 or expires > now))
+
+
+def identity_cookie_applies(cookie, host, path, scheme, now):
+    """An identity cookie, which carries a cookie-style `domain` rather than an origin."""
+    domain = (cookie.get("domain") or host).lower()
+    domain_ok = host == domain or (domain.startswith(".")
+                                   and (host == domain[1:] or host.endswith(domain)))
+    return bool(domain_ok and cookie_applies(cookie, path, scheme, now))
+
+
+def merged_cookies(existing, application, identity_cookies, url, path, scheme, now):
+    """The `cookie:` header the proxy should send, as an ordered name->value mapping.
+
+    MERGED, NOT REPLACED. The proxy used to finish with
+    `flow.request.headers["cookie"] = "; ".join(accepted)`, discarding whatever the request
+    already carried. A CATALOGUE case cannot be the source of that — `deterministic.
+    curl_request` refuses `-b` with a value and refuses an explicit `Cookie:` header, so a
+    case cannot opt out of the stage's identity — but a SCANNER can: ZAP and katana keep
+    their own jars, and DVWA answers every single request with
+    `Set-Cookie: security=impossible`, so a scanner arm carries the application's own
+    configuration back on every later request. The merge is written down here, away from
+    mitmproxy, so it can be tested.
+
+    Ablating the dict to the old `"; ".join(...)` was measured: the SAME declared
+    configuration then returns 5070 bytes and five usernames or 389 bytes and nothing,
+    purely on join order, because PHP takes the FIRST of two cookies with one name.
+
+    ORDER OF AUTHORITY, least to most:
+      1. what the request already carried, including anything the target set;
+      2. the IDENTITY — the proxy is the authority on WHO an arm is;
+      3. the APPLICATION'S CONFIGURATION — the authority on WHICH APPLICATION every arm is
+         testing.
+
+    3 OUTRANKS 2 BY MEASUREMENT, not by taste. DVWA sets `security=impossible` on every
+    response and `login.py`'s jar is a flat name->value dict that absorbs it, so an identity
+    captured by erlik's own credential flow carries `security=impossible` — a cookie the
+    operator never declared and has no reason to know is there. With the identity winning,
+    declaring `security=low` either did nothing or (in the first draft) aborted the whole
+    assessment as a collision. With the application winning, every arm carries the declared
+    value whatever its jar picked up, which is the uniformity the whole design rests on.
+
+    `application` entries are gated on the full ORIGIN, scheme host and port, because a
+    cookie declared for one in-scope application must not be sent to another.
+    """
+    jar = {}
+    for pair in (existing or "").split(";"):
+        if "=" in pair:
+            name, _, value = pair.partition("=")
+            name = name.strip()
+            if name:
+                jar[name] = value.strip()
+    host = (urlsplit(url).hostname or "").lower()
+    for cookie in identity_cookies or ():
+        if cookie.get("name") and identity_cookie_applies(cookie, host, path, scheme, now):
+            jar[cookie["name"]] = cookie.get("value", "")
+    overridden = []
+    for cookie in application or ():
+        if not cookie.get("name") or origin(url) != origin(cookie.get("target_origin", "")):
+            continue
+        if not cookie_applies(cookie, path, scheme, now):
+            continue
+        if cookie["name"] in jar and jar[cookie["name"]] != cookie.get("value", ""):
+            overridden.append(cookie["name"])
+        jar[cookie["name"]] = cookie.get("value", "")
+    return jar, overridden
+
+
 # A PATH SEGMENT that ends the session, whatever the application calls it.
 #
 # `excluded_paths` is an operator list matched as a PREFIX, so its default

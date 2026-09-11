@@ -92,13 +92,18 @@ def lane(monkeypatch):
     _Collector.instances = []
     monkeypatch.setattr(service, "Sandbox", _Sandbox)
     monkeypatch.setattr(service, "preflight", lambda *a, **kw: _noop())
-    monkeypatch.setattr(service, "authenticate", lambda *a, **kw: _true())
+    # A VERDICT, not a bool — see service.authenticate.
+    monkeypatch.setattr(service, "authenticate", lambda *a, **kw: _verdict("authenticated"))
     monkeypatch.setattr(service, "record", lambda *a, **kw: _noop())
     return service
 
 
 async def _noop():
     return None
+
+
+async def _verdict(value):
+    return value
 
 
 async def _true():

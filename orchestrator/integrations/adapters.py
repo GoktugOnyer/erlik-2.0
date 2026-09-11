@@ -12,7 +12,7 @@ from typing import Protocol
 from urllib.parse import urlsplit, urljoin, urlencode, parse_qsl, urlunsplit
 import yaml
 
-from .contracts import (AssessmentConfig, Endpoint, IntegrationFinding, StageResult,
+from .contracts import (canonical_origin, AssessmentConfig, Endpoint, IntegrationFinding, StageResult,
                         fingerprint, form_endpoint, parameter_names)
 from .runtime import Sandbox, IMAGES, JobOutput
 from .security import SecretStore, secret_values, redact, safe_evidence
@@ -702,17 +702,61 @@ class SchemathesisAdapter(BaseAdapter):
                 continue
             response = await rpc(sandbox, {"action": "request", "request": assertion.request.model_dump()})
             result.observations.append({"type": "security_assertion", "response": response})
-            if not response["blocked"] and response["status"] == assertion.request.expected_status and assertion.forbidden_marker in response["body"]:
+            fires, refused = assertion_verdict(assertion, response)
+            if refused:
+                result.observations.append({"type": "security_assertion_refused",
+                                            "url": assertion.request.url, **refused})
+            if fires:
                 rule = "erlik:authorization:" + hashlib.sha256(assertion.description.encode()).hexdigest()[:16]
                 result.findings.append(IntegrationFinding(fingerprint=fingerprint(ctx.target, rule, "GET", assertion.request.url, identity=ctx.identity_id),
                     title=assertion.description, url=assertion.request.url, rule=rule, source="schemathesis", identity=ctx.identity_id,
-                    confidence="confirmed", basis="Explicit forbidden-content assertion reproduced with the configured identity", severity="high",
+                    confidence="confirmed",
+                    basis=("Explicit forbidden-content assertion reproduced with the "
+                           "configured identity. ONE ARM, ONE RESPONSE: there is no second "
+                           "identity and no anonymous control here, so this does not "
+                           "establish that the content is private — only that the operator "
+                           "declared it forbidden for this identity and it was returned"),
+                    severity="high",
                     # The marker's neighbourhood, so the reader can see the
                     # forbidden content rather than be told it was there.
                     evidence=safe_evidence(redact(_marker_window(response["body"], assertion.forbidden_marker),
                                     ctx.known))[:MAX_EVIDENCE_CHARS],
                     methodology=["WSTG-AUTHZ-04"]))
         return await record(ctx, sandbox, output, result, accepted_codes=(0, 1))
+
+
+def assertion_verdict(assertion, response) -> tuple[bool, dict | None]:
+    """Does one SecurityAssertion fire on one response, and if not, why not?
+
+    Extracted from the adapter so the decision can be tested without a sandbox — it emits a
+    HIGH `confirmed` finding, which is the grade that marks a finding verified on a client's
+    tracker, and it had no test of its own.
+
+    THE RESPONSE MUST BE THE ONE THAT WAS ASSERTED ON. `worker.request` follows up to five
+    redirects and reports the FINAL url, so the status and the body can belong to wherever
+    the target sent us. Measured on DVWA: `GET /vulnerabilities/exec/` landed on `login.php`
+    and the marker "Login" emitted a HIGH finding whose `url` field named
+    /vulnerabilities/exec/ while its evidence was the login page. A redirected answer is
+    evidence about the redirect target.
+
+    A BLOCKED RESPONSE ESTABLISHES NOTHING either, and it is reported rather than quietly
+    treated as a clean assertion.
+    """
+    landed = str(response.get("url") or "")
+    asserted = assertion.request.url
+    if response.get("blocked"):
+        return False, {"reason": "the assessment proxy refused this request; the target was "
+                                 "never contacted, so the assertion was not evaluated"}
+    if landed and (canonical_origin(landed) + urlsplit(landed).path
+                   != canonical_origin(asserted) + urlsplit(asserted).path):
+        return False, {"landed_on": landed,
+                       "reason": "the response came from a different URL, so it is not "
+                                 "evidence about the asserted one"}
+    if response.get("status") != assertion.request.expected_status:
+        return False, None
+    if assertion.forbidden_marker not in (response.get("body") or ""):
+        return False, None
+    return True, None
 
 
 ADAPTERS = {"zap": ZapAdapter(), "katana": KatanaAdapter(), "schemathesis": SchemathesisAdapter()}

@@ -102,12 +102,21 @@ async def _pause_then_resume(service, monkeypatch, database):
     """Run once with authentication failing mid-stage, then run again."""
     attempts = {"n": 0}
 
-    async def authenticate(ctx, sandbox):
+    async def authenticate(ctx, sandbox, controls=None):
         # Succeeds on entry, fails the post-stage re-check of the first run only.
+        # `authenticate` returns a VERDICT, not a bool: a differential check distinguishes
+        # "the credential is dead" (resumable) from "the check never tested one" (not).
         attempts["n"] += 1
-        return attempts["n"] != 2
+        return "authenticated" if attempts["n"] != 2 else "needs_auth"
 
     monkeypatch.setattr(service, "authenticate", authenticate)
+    # The differential control probes the check from its own identity-free sandbox, which
+    # this test's fake Sandbox cannot serve. `authenticate` is stubbed above, so the
+    # control's content is irrelevant here — only that the stage loop gets one.
+    async def controls(session_id, config):
+        return {"any": {"blocked": False, "status": 401, "body": ""}}
+
+    monkeypatch.setattr(service, "authentication_controls", controls)
     from orchestrator.integrations.security import SecretStore
     identity_id = SecretStore().put({
         "name": "reader", "target_origin": "https://app.test",
@@ -117,8 +126,8 @@ async def _pause_then_resume(service, monkeypatch, database):
     rows = await database.rows("SELECT status, reason FROM integration_stages WHERE session_id='pause'")
     paused = dict(rows[0])
 
-    async def always(ctx, sandbox):
-        return True
+    async def always(ctx, sandbox, controls=None):
+        return "authenticated"
 
     monkeypatch.setattr(service, "authenticate", always)
     second = await service.run("pause")

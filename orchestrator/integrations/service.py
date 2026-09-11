@@ -1,6 +1,7 @@
 """Sequential assessment lifecycle shared by REST and the deterministic CLI."""
 from __future__ import annotations
 import asyncio
+import hashlib
 import json
 import re
 import time
@@ -20,6 +21,11 @@ async def preflight(target, config: AssessmentConfig, *, check_images=True):
     check_url(target, config.scope)
     if urlsplit(target).scheme not in ("http", "https") or urlsplit(target).username:
         raise ValueError("assessment target must be an HTTP(S) URL without credentials")
+    # An application cookie names the origin it configures, and that origin is held to the
+    # same scope check as an identity's. Without it a declaration could put a value on a
+    # host the engagement never authorised.
+    for cookie in config.application_cookies:
+        check_url(cookie.target_origin, config.scope)
     for identity_id in config.identity_ids:
         identity = Identity.model_validate(SecretStore().get(identity_id))
         check_url(identity.target_origin, config.scope)
@@ -38,9 +44,28 @@ async def register(session_id, target, config):
     # Schemas and workflow fixtures can themselves contain credentials. Keep the
     # executable configuration private and publish only its redacted metadata.
     secret_id = SecretStore().put({"assessment_config": config.model_dump()})
+    published = redact(config.model_dump())
+    # `redact` blanks any key matching /cookie/ WHOLESALE, which turns this list into the
+    # string "[REDACTED]" — and the published copy is re-validated as an AssessmentConfig
+    # by the DefectDojo export path, which then raised a list_type error. Redact the VALUES
+    # and keep the shape, so the record stays valid AND stays legible: which configuration
+    # every arm carried is exactly what an auditor needs to know, and the values are the
+    # part that does not belong in a published record.
+    published["application_cookies"] = [
+        {**cookie.model_dump(), "value": "[REDACTED]"} for cookie in config.application_cookies]
+    # The NAMES and ORIGINS survive and the values do not. `security=low` is not a secret;
+    # it is the single fact that makes a finding reproducible, and a report that cannot say
+    # which application the evidence describes is not a report.
     await db.execute("INSERT INTO integration_assessments(session_id,target,config,config_secret_id) VALUES(?,?,?,?)",
-                     (session_id, target, json.dumps(redact(config.model_dump())), secret_id))
-    for identity in config.identity_ids or ["anonymous"]:
+                     (session_id, target, json.dumps(published), secret_id))
+    # An anonymous arm ALONGSIDE the identity arms, not only in place of them. See
+    # AssessmentConfig.anonymous_arm: without it both cross-arm authorization checks refuse
+    # on every assessment the product accepts, because the arm they compare against was
+    # never registered.
+    arms = list(config.identity_ids) or ["anonymous"]
+    if config.identity_ids and config.anonymous_arm:
+        arms.append("anonymous")
+    for identity in arms:
         selected = [name for name in ("interactsh", "katana", "zap", "schemathesis") if name in config.stages]
         if config.test_cases:
             selected.append("testcases")
@@ -62,14 +87,166 @@ async def recover():
     return True
 
 
-async def authenticate(ctx, sandbox):
+def satisfies(response, check) -> bool:
+    """The operator's assertion, applied to one response. One place, two callers."""
+    return bool(not response.get("blocked")
+                and response.get("status") == check["expected_status"]
+                and (not check.get("body_contains")
+                     or check["body_contains"] in (response.get("body") or "")))
+
+
+def check_key(check) -> str:
+    """Identifies a check request, so two identities sharing one share its control."""
+    return hashlib.sha256(json.dumps(check, sort_keys=True).encode()).hexdigest()
+
+
+async def authentication_controls_for(session_id, config, identities):
+    """`authentication_controls` for identity DECLARATIONS rather than handles.
+
+    The handle-resolving entry point below delegates here, so a caller holding an
+    identity it has not stored — a measurement harness, a test — probes the control the
+    same way the lane does rather than through a second implementation that could drift.
+    """
+    checks = {}
+    for identity in identities:
+        check = (identity or {}).get("check")
+        if check:
+            checks.setdefault(check_key(check), check)
+    if not checks:
+        return {}
+    out = {}
+    # A FAILURE HERE MUST NOT ABORT THE ASSESSMENT. Returning what was obtained leaves
+    # `authenticate` to answer `control_unavailable` for exactly the identities whose
+    # control is missing — which refuses those arms and says why — while an anonymous arm,
+    # which has nothing to verify, still runs. Raising instead would lose the whole run,
+    # including stages that needed no control at all.
+    try:
+        sandbox = Sandbox(config, None)
+        sandbox.assessment_context = {"session_id": session_id,
+                                      "stage_id": "authentication-control"}
+        async with sandbox:
+            for key, check in checks.items():
+                # TWO samples, not one. A single control cannot reveal that the operator's
+                # assertion is non-deterministic on this target, and an unstable assertion
+                # makes both clauses meaningless. Two requests in a sandbox that already
+                # exists is close to free.
+                samples = []
+                for _ in range(CONTROL_SAMPLES):
+                    try:
+                        samples.append(await rpc(sandbox, {"action": "request",
+                                                           "request": check}))
+                    except Exception:
+                        break
+                if len(samples) == CONTROL_SAMPLES:
+                    out[key] = samples
+    except Exception:
+        pass
+    return out
+
+
+async def authentication_controls(session_id, config):
+    """What each configured identity's check answers with NO IDENTITY at all.
+
+    ONE sandbox for the whole assessment. The control is a property of the check request
+    and the application's configuration, not of a stage, so probing it per stage would
+    cost a container per arm to learn the same thing. It carries the APPLICATION
+    configuration and no credential — on DVWA a control without the security cookie would
+    be probing a different application, which is the defect one layer down.
+    """
+    return await authentication_controls_for(
+        session_id, config,
+        [SecretStore().get(identity_id) for identity_id in config.identity_ids])
+
+
+async def authenticate(ctx, sandbox, controls=None) -> str:
+    """Is this arm actually the identity it claims to be? Asked DIFFERENTIALLY.
+
+    Returns "authenticated", "needs_auth", "indiscriminate" or "control_unavailable".
+
+    THE OLD RULE COULD NOT FAIL. It was `status == check["expected_status"] and (optional
+    body_contains)`, and `RequestSpec.expected_status` DEFAULTS TO 200 — so an identity
+    whose check URL was the target origin passed while carrying no credential at all.
+    Verified: `curl -s -o /dev/null -w "%{http_code}" http://localhost:3000/` is 200 to
+    anybody. That arm is then effectively anonymous while every cross-arm comparison
+    believes it is a distinct identity, which is the worst possible input to a
+    differential: two arms that are the same caller.
+
+    THE NEW RULE IS THE ONE `login._verify` ALREADY LEARNED for the other lane: an
+    assertion that holds WITHOUT the credential establishes nothing. So the identity's
+    response must satisfy the operator's assertion AND the control — the same request with
+    the identity dropped — must NOT.
+
+    `indiscriminate` is deliberately not `needs_auth`. Replacing the credential cannot fix
+    a check that never tested one, so the stage must not be resumable; the operator has to
+    write a check only an authenticated response satisfies. Measured: Juice Shop's
+    `/rest/user/whoami` answers 200 `{"user":{}}` to a header-only arm, byte-identical to
+    the anonymous answer, so that URL with the default assertion is exactly this case.
+
+    A MISSING CONTROL IS NOT A PASS. `control_unavailable` rather than "authenticated",
+    because a clause nobody ran is not a clause that passed.
+    """
     if not ctx.identity:
-        return True
+        return "authenticated"          # an anonymous arm claims nothing to verify
     check = ctx.identity["check"]
     response = await rpc(sandbox, {"action": "request", "request": check})
     await db.evidence(ctx.session_id, ctx.stage_id, "authentication-check", json.dumps(response), ctx.known)
-    return not response["blocked"] and response["status"] == check["expected_status"] and (
-        not check.get("body_contains") or check["body_contains"] in response["body"])
+    if not satisfies(response, check):
+        return "needs_auth"
+    samples = (controls or {}).get(check_key(check)) or []
+    if not samples:
+        return "control_unavailable"
+    await db.evidence(ctx.session_id, ctx.stage_id, "authentication-control",
+                      json.dumps(samples), ctx.known)
+    # A CONTROL THE EGRESS PROXY REFUSED IS NOT A DISCRIMINATING CONTROL.
+    #
+    # `satisfies` opens with `not response.get("blocked")`, so a blocked control fails
+    # every assertion — and the naive reading of that is "the check discriminates", which
+    # certified an arm carrying NOTHING. Measured: a 403 `X-Erlik-Blocked` control plus a
+    # real anonymous DVWA 200 gave clause1(identity)=True, clause1(control)=False,
+    # verdict=authenticated — the exact defect this rule was written to remove, resurrected
+    # by the guard meant to make it safe. A blocked or errored control establishes nothing,
+    # so it is `control_unavailable`.
+    if any(sample.get("blocked") or sample.get("error") for sample in samples):
+        return "control_unavailable"
+    verdicts = {satisfies(sample, check) for sample in samples}
+    if len(verdicts) > 1:
+        # THE ASSERTION IS NOT STABLE ON THIS TARGET, so neither clause means anything.
+        # Measured on Juice Shop's public `/metrics`, whose body varies between consecutive
+        # identical requests: an arm carrying nothing was certified in 18-24% of trials,
+        # because for a credential-free arm both clauses evaluate the same request twice.
+        # Re-sampling does not remove that (24% -> 6% -> 10% -> 8% for k=1,2,3,5), so this
+        # does not try to out-sample it — it refuses the check and says which problem it is.
+        return "check_is_unstable"
+    if True in verdicts:
+        return "indiscriminate"
+    return "authenticated"
+
+
+# Verdict -> (stage status, reason). `indiscriminate` and `control_unavailable` are
+# `failed` rather than `needs_auth` because `run()` resumes `needs_auth` stages, and
+# resuming changes nothing for either: one needs a better check, the other needs the
+# control request to succeed.
+CONTROL_SAMPLES = 2
+
+AUTH_OUTCOMES = {
+    "check_is_unstable": ("failed",
+                          "the authentication check is not stable on this target: two "
+                          "identical anonymous requests disagreed about its own assertion, "
+                          "so neither it nor the differential establishes anything. Assert "
+                          "on something the application answers deterministically"),
+    "needs_auth": ("needs_auth",
+                   "authentication assertion failed; replace credentials and resume"),
+    "indiscriminate": ("failed",
+                       "the authentication check does not distinguish this identity from "
+                       "an anonymous caller: the same assertion holds with the identity "
+                       "dropped, so it establishes nothing. Give the check a body_contains "
+                       "(or an expected_status) that only an authenticated response "
+                       "satisfies"),
+    "control_unavailable": ("failed",
+                            "the anonymous control request for the authentication check "
+                            "could not be made, so this identity was never verified "
+                            "differentially"),
+}
 
 
 async def operation_routes(config, sandbox, target):
@@ -117,6 +294,10 @@ async def run(session_id, notify=None):
     try:
         async with asyncio.timeout(remaining):
             stages = await db.rows("SELECT * FROM integration_stages WHERE session_id=? AND status IN ('queued','needs_auth') ORDER BY rowid", (session_id,))
+            # ONE identity-free probe of every authentication check, before any arm runs.
+            # `authenticate` compares each identity's own answer against it; see there for
+            # why an assertion that holds without the credential establishes nothing.
+            controls = await authentication_controls(session_id, config)
             for stage in stages:
                 identity = SecretStore().get(stage["identity_id"]) if stage["identity_id"] != "anonymous" else None
                 ctx = Context(session_id, stage["id"], assessment["target"], config, stage["identity_id"], identity)
@@ -142,8 +323,15 @@ async def run(session_id, notify=None):
                         if config.schema_input and config.schema_input.kind == "graphql":
                             sandbox.policy["graphql_url"] = ctx.target
                         async with sandbox:
-                            if not await authenticate(ctx, sandbox):
-                                result = StageResult(status="needs_auth", reason="authentication assertion failed; replace credentials and resume")
+                            verdict = await authenticate(ctx, sandbox, controls)
+                            if verdict != "authenticated":
+                                # `.get`, not `[...]`: only "authenticated" proceeds, so an
+                                # unmapped verdict already refuses — it should say why
+                                # rather than surface as a KeyError.
+                                outcome, reason = AUTH_OUTCOMES.get(
+                                    verdict, ("failed", f"authentication returned an "
+                                                        f"unrecognised verdict {verdict!r}"))
+                                result = StageResult(status=outcome, reason=reason)
                             else:
                                 try:
                                     if stage["adapter"] == "interactsh":
@@ -211,12 +399,37 @@ async def run(session_id, notify=None):
                                         result = await CatalogueAdapter().run(ctx, sandbox, active_collector)
                                     else:
                                         result = await ADAPTERS[stage["adapter"]].run(ctx, sandbox)
-                                    if identity and not await authenticate(ctx, sandbox):
-                                        result.status, result.reason = "needs_auth", "authentication expired during stage; results are incomplete"
+                                    if identity:
+                                        closing = await authenticate(ctx, sandbox, controls)
+                                        if closing == "needs_auth":
+                                            result.status, result.reason = "needs_auth", "authentication expired during stage; results are incomplete"
+                                        elif closing != "authenticated":
+                                            # The check stopped discriminating, or its
+                                            # control is gone. Either way this arm's
+                                            # results can no longer be attributed to this
+                                            # identity, and `failed` says so without
+                                            # inviting a resume that changes nothing.
+                                            result.status, result.reason = AUTH_OUTCOMES.get(
+                                                closing, ("failed", f"authentication returned "
+                                                          f"an unrecognised verdict {closing!r}"))
                                 except Exception:
                                     # Preserve raw output artifacts and proxy audit even if a parser fails.
                                     await record(ctx, sandbox, JobOutput(1, "", "adapter failed before parsing completed"), StageResult(status="failed"))
                                     raise
+                    # WHICH APPLICATION THIS ARM WAS TESTING, on every arm's own record.
+                    #
+                    # An anonymous arm that carried declared configuration is not the same
+                    # thing as an arm that carried nothing, and a finding from it is only
+                    # interpretable if the record says which. It matters most on a run with
+                    # NO identities: there is one arm, so no differential runs, nothing can
+                    # detect an operator who put a session cookie in `application_cookies`,
+                    # and a post-authentication finding would otherwise be recorded as
+                    # anonymous with nothing to contradict it. Names only — the values are
+                    # in the private copy of the configuration.
+                    if config.application_cookies:
+                        result.metadata["application_configuration"] = sorted(
+                            f"{cookie.name}@{cookie.target_origin}"
+                            for cookie in config.application_cookies)
                     cleaned = redact(result.model_dump(), ctx.known)
                     result = StageResult.model_validate(cleaned)
                     # Scanners can report URLs they did not request; never promote them into scope.

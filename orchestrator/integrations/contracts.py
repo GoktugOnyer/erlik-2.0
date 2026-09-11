@@ -5,7 +5,7 @@ import hashlib
 import json
 from typing import Literal
 import re
-from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, unquote_plus, urlencode, urljoin, urlsplit, urlunsplit
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from orchestrator.testcase.scope import Scope, check_url
@@ -28,6 +28,66 @@ class RequestSpec(StrictModel):
     body: dict | None = None
     expected_status: int = Field(default=200, ge=100, le=599)
     body_contains: str | None = None
+
+
+MAX_APPLICATION_COOKIES = 16
+
+
+class ApplicationCookie(StrictModel):
+    """A cookie that is the APPLICATION'S CONFIGURATION, not anybody's credential.
+
+    DVWA's security level is the measured case: `dvwa/includes/dvwaPage.inc.php:200`
+    returns `$_COOKIE['security']` when set and "impossible" otherwise, so the level is a
+    value the CALLER chooses. An arm that omits it is not a less privileged caller — it is
+    testing a different application. Measured through the real proxy against
+    `/vulnerabilities/authbypass/get_user_data.php`:
+
+        identity arm, security=low      200, 273 bytes, the full user table
+        anonymous arm, no cookie at all 200,  41 bytes, {"result":"fail",...}
+
+    and the anonymous arm is the load-bearing clause of both cross-arm authorization
+    checks, so that gap MANUFACTURED a finding: measured 1 false positive on data DVWA
+    publishes to anybody, and 0 once the anonymous arm carried the cookie.
+
+    WHY THIS IS SAFE TO ADD, which is the whole reason it is separate from `Identity`:
+    it is applied to EVERY arm — each identity stage, the anonymous stage, and the
+    liveness control request. Anything every arm carries cannot distinguish one arm from
+    another, so it can only ever LOSE a finding, never invent one. An operator who
+    mistakenly puts a session cookie here authenticates every arm identically and sees
+    findings disappear — and `service.authenticate`'s differential then refuses the
+    identity outright, because its check stops discriminating.
+    """
+    name: str = Field(min_length=1, max_length=200)
+    value: str = Field(max_length=4096)
+    # REQUIRED, and the whole origin — scheme, host AND port. `Identity.target_origin`
+    # exists so per-arm material cannot cross origins, and the first draft of this model
+    # reused the same cookie plumbing with that fence removed: measured, a cookie declared
+    # for localhost:8081 was put on a request to localhost:3000, and no `domain` value
+    # could scope it to one origin (`domain: "localhost:8081"` silently matched nothing,
+    # because a cookie domain has no port). Juice Shop treats a bare `token` cookie as a
+    # full identity, so on a two-host scope that handed a credential to a second
+    # application.
+    target_origin: str
+    path: str = Field(default="/", max_length=500)
+
+    @model_validator(mode="after")
+    def sane(self):
+        origin = urlsplit(self.target_origin)
+        if origin.scheme not in ("http", "https") or not origin.hostname or origin.username:
+            raise ValueError("application cookie requires an HTTP(S) target origin")
+        if origin.path not in ("", "/") or origin.query or origin.fragment:
+            raise ValueError("target_origin must not contain a path, query, or fragment")
+        for field in ("name", "value", "target_origin"):
+            text = getattr(self, field)
+            # A `;` or a newline would let one declared cookie become two, or smuggle a
+            # header. The proxy serialises these into a single `cookie:` line.
+            if any(c in text for c in ";\r\n\x00"):
+                raise ValueError(f"cookie {field} must not contain ';' or a control character")
+        if "=" in self.name or any(c.isspace() for c in self.name):
+            raise ValueError("cookie name must not contain '=' or whitespace")
+        if not self.path.startswith("/"):
+            raise ValueError("cookie path must start with '/'")
+        return self
 
 
 # Declared objects, bounded. An identity naming a thousand of them is a configuration
@@ -71,6 +131,23 @@ class Identity(StrictModel):
             raise ValueError("target_origin must not contain a path, query, or fragment")
         if self.check.method.upper() != "GET":
             raise ValueError("authentication check must use GET")
+        # AN AUTHENTICATION CHECK MUST ASSERT A SUCCESS.
+        #
+        # Two measured reasons, both about what a non-2xx assertion can actually establish.
+        # (1) A rejection never proves a credential works, and the target controls which
+        #     rejection it sends: Juice Shop answers `/api/Users` 401 "Invalid token: no
+        #     header in signature" to a GARBAGE bearer token and 401 "No Authorization
+        #     header was found" to no token at all. An assertion keyed on the former passes
+        #     both the check AND the anonymous differential while the target is explicitly
+        #     rejecting the material — the target supplying the discriminator.
+        # (2) A 3xx assertion is unreachable anyway. The worker follows redirects, so a
+        #     live DVWA session asserting 302 on /index.php is reported 200 and the arm is
+        #     failed as dead.
+        if not 200 <= self.check.expected_status < 300:
+            raise ValueError(
+                "authentication check must expect a 2xx: a non-2xx response cannot "
+                "establish that a credential works, and the worker follows redirects so a "
+                "3xx is never observed")
         if canonical_origin(self.check.url) != canonical_origin(self.target_origin):
             raise ValueError("authentication check must share the identity origin")
         for key, value in self.headers.items():
@@ -143,10 +220,35 @@ class Workflow(StrictModel):
 
 
 class SecurityAssertion(StrictModel):
+    """One operator assertion: "this identity must not be able to see this string here."
+
+    IT RESTS ON ONE ARM AND ONE RESPONSE. There is no second identity and no anonymous
+    control, so unlike the cross-arm checks it cannot tell a privilege crossing from
+    published content — the operator's declaration is the whole of the claim. Two ways it
+    was measured producing a HIGH finding from nothing are refused by the validator below;
+    a third, an operator naming a marker that a catch-all route happens to serve (Juice
+    Shop answers `/administration` with index.html, which contains "Juice Shop"), is not
+    detectable from one response and is why `basis` says what this rests on.
+    """
     request: RequestSpec
     identity_id: str
     description: str = Field(min_length=1)
     forbidden_marker: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def the_marker_is_not_our_own_input(self):
+        # THE TARGET MUST NOT BE ABLE TO SATISFY THIS BY ECHOING THE REQUEST. Measured:
+        # `GET /rest/track-order/ERLIK-PRIVATE-ORDER-4711` answers 200 with a 68-byte body
+        # containing that id, because the whole record is the value from the path — and this
+        # assertion then emitted a HIGH `confirmed` Broken Access Control finding. Same gate,
+        # same reason, as the reflection clause in `cross_arm_privileged_function`.
+        marker = self.forbidden_marker.strip()
+        if marker and (marker in self.request.url or marker in unquote_plus(self.request.url)):
+            raise ValueError(
+                "forbidden_marker appears in the request URL, so the target can satisfy "
+                "this assertion by echoing the request back; name a string the application "
+                "stores rather than one this probe supplies")
+        return self
 
 
 class CallbackConfig(StrictModel):
@@ -172,6 +274,22 @@ class AssessmentConfig(StrictModel):
     max_urls: int = Field(default=500, ge=1, le=10000)
     headless: bool = False
     excluded_paths: list[str] = Field(default_factory=lambda: ["/logout", "/signout"])
+    # Injected on EVERY arm, including the anonymous one and the liveness control. See
+    # ApplicationCookie for why that is what makes it safe.
+    application_cookies: list[ApplicationCookie] = Field(default_factory=list)
+    # An UNAUTHENTICATED arm alongside the identity arms. Default True because without one
+    # the lane's authorization work does not function at all: both cross-arm checks require
+    # an anonymous arm, `register` created one only when NO identity was configured, and so
+    # on every assessment the product actually accepts they refused with
+    # `anonymous_arm_did_not_run`. Measured on a two-identity registration: 4 stages, 2
+    # arms, no anonymous one — the three-arm sessions their tests exercise were written into
+    # the database by the tests themselves.
+    #
+    # It is also the clause that PREVENTS false positives rather than producing findings:
+    # it is what distinguishes a privilege crossing from published content. It costs one
+    # more pass of each selected stage, which is the price of the comparison meaning
+    # anything.
+    anonymous_arm: bool = True
     ai_summary: bool = False
     # Not a Literal. The set of runnable cases is a PROPERTY OF THE PARSER, and
     # a literal here was a second hand-maintained copy of it that could only
@@ -190,6 +308,13 @@ class AssessmentConfig(StrictModel):
             raise ValueError("select at least one stage")
         if len(self.test_cases) != len(set(self.test_cases)):
             raise ValueError("duplicate test cases")
+        if len(self.application_cookies) > MAX_APPLICATION_COOKIES:
+            raise ValueError(f"at most {MAX_APPLICATION_COOKIES} application cookies")
+        pairs = [(cookie.target_origin, cookie.name) for cookie in self.application_cookies]
+        if len(pairs) != len(set(pairs)):
+            # Two values for one name at one origin is not configuration, it is a coin
+            # toss: the proxy would send one of them and the arms would agree only by luck.
+            raise ValueError("duplicate application cookie name for one target_origin")
         from .inventory import executable_test_cases, COLLECTOR_CASES
         runnable = set(executable_test_cases()) | set(COLLECTOR_CASES)
         unrunnable = [case for case in self.test_cases if case not in runnable]

@@ -149,6 +149,9 @@ class Sandbox:
             "max_requests": int(config.budget.stage_seconds * config.budget.requests_per_second),
             "max_urls": config.max_urls,
             "service_only": services is not None, "services": services or [],
+            # Applied to every arm by the proxy, this sandbox's identity or its absence
+            # notwithstanding. See contracts.ApplicationCookie.
+            "application_cookies": [c.model_dump() for c in config.application_cookies],
         }
 
     async def __aenter__(self):

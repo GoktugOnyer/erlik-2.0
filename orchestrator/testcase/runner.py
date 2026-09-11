@@ -576,9 +576,14 @@ async def _run_evaluator(
         corroborated = (owner_step is not None
                         and _http_status_ok(owner_step.output)
                         and _asserted_owner(owner_step.output, owner_field) == asserted)
-        # "Refused" means refused. An anonymous 200 is publication, and an
-        # anonymous step that never ran tells us nothing — neither is a finding.
-        anonymous_refused = anon_step is not None and not _http_status_ok(anon_step.output)
+        # "Refused" means REFUSED BY THE APPLICATION. An anonymous 200 is publication, an
+        # anonymous step that never ran tells us nothing, and — the case this missed — an
+        # arm the egress proxy refused or that timed out tells us nothing either, while
+        # looking exactly like a refusal: `_http_status_ok("")` is False, and so is
+        # `_http_status_ok` of erlik's own proxy-refusal text.
+        anonymous_refused = (anon_step is not None
+                             and http_capture.answered(anon_step.output)
+                             and not _http_status_ok(anon_step.output))
 
         matched = bool(
             owner_field and subject not in (None, "")
@@ -648,7 +653,15 @@ async def _run_evaluator(
         anonymous = next((st for st in (prior_steps or [])
                           if st.step == str(ev.anonymous_step or "")), None)
         if ev.anonymous_step:
-            anonymous_excluded = anonymous is not None and marker not in anonymous.output
+            # THE ARM MUST HAVE ANSWERED. An arm that received nothing trivially does not
+            # contain the marker, so this clause passed on silence: measured, a real
+            # `curl --max-time 0.001` returning zero bytes produced a HIGH `confirmed`
+            # Broken Access Control finding on Juice Shop's PUBLIC reviews endpoint — the
+            # exact content this clause exists to refuse. And the marker is matched against
+            # the BODY, because a marker echoed into a header is not disclosed data.
+            anonymous_excluded = (anonymous is not None
+                                  and http_capture.answered(anonymous.output)
+                                  and marker not in _response_body(anonymous.output))
         else:
             anonymous_excluded = True
 
@@ -688,7 +701,14 @@ async def _run_evaluator(
         from http.cookies import SimpleCookie
         from urllib.parse import urlsplit
         is_https = urlsplit(endpoint_of(target)).scheme == "https"
-        for value in re.findall(r"(?im)^Set-Cookie:\s*([^\r\n]+)", step_result.output):
+        # THE HEADER BLOCK, not the whole capture. `_response_headers` exists in this file
+        # for exactly this reason and this call did not use it: measured on DVWA,
+        # `?name=%0ASet-Cookie:+JSESSIONID%3Dforged%0A` made the application print the line
+        # into its BODY and this emitted a MEDIUM "Insecure Cookie Attributes" quoting a
+        # cookie the server never set. WSTG-SESS-02 is the one case runnable without
+        # `active`, and it runs against every discovered URL.
+        for value in re.findall(r"(?im)^Set-Cookie:\s*([^\r\n]+)",
+                                _response_headers(step_result.output)):
             parsed = SimpleCookie()
             try:
                 parsed.load(value)
