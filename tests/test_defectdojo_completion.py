@@ -1,4 +1,5 @@
 """Network-free synchronization tests against a stateful API double."""
+import asyncio
 import copy
 import json
 import pytest
@@ -19,7 +20,11 @@ async def dojo(tmp_path, monkeypatch):
     await service.register('s', 'https://app.test', AssessmentConfig(scope={'allow_hosts': ['app.test'], 'allow_ports': [443]}))
     class FakeSandbox:
         def __init__(self, *a, **kw):
-            assert kw['services'] == ['https://dojo.test']
+            # Exactly ONE service, and it is the export's own server — the sandbox
+            # must never be opened onto anything else. Asserted by shape rather than
+            # by a literal, so a test can use a second server to check that a block
+            # scoped to one does not reach the other.
+            assert len(kw['services']) == 1 and kw['services'][0].startswith('https://')
         async def __aenter__(self): return self
         async def __aexit__(self, *a): pass
     monkeypatch.setattr(defectdojo, 'Sandbox', FakeSandbox)
@@ -312,21 +317,26 @@ async def test_a_rejected_reimport_stays_uncertain_because_a_read_preceded_it(do
     assert 'HTTP 400' in result['detail']
 
 
-async def test_a_lost_first_import_does_not_block_a_direct_reimport(dojo, monkeypatch):
-    """The narrowness of the block, pinned so it cannot change silently.
+async def test_a_lost_first_import_blocks_a_direct_reimport(dojo, monkeypatch):
+    """E-026: the block missed the one case it exists for.
 
-    docs/integrations.md used to promise that an uncertain write "blocks until
-    someone looks". It does — but the block matches on destination, or on
-    `remote_test_id` for that server, and a first `import` whose response was
-    lost NEVER LEARNED a test ID. Its row carries `remote_test_id = NULL`, so
-    `remote_test_id = ?` cannot match, and the operator who follows the doc's own
-    advice — look the test up in the UI, then address it with
-    `action: "reimport"` and its `test_id` — sails straight past the block and
-    writes a changed report over a write nobody established.
+    It matched an export whose DESTINATION was the same, or whose REMOTE TEST ID was
+    the same on that server. A first `import` whose response was lost — a 202, a
+    timeout, a cancellation — never learns a test ID, so its row carried
+    `remote_test_id = NULL`, `remote_test_id = ?` could not match, and only a repeat
+    of the byte-identical body was blocked.
 
-    This test does not assert that the behaviour is right. It asserts what the
-    behaviour IS, because the documentation now describes it and a reader will
-    plan around it.
+    So an operator who did what the documentation advises — find the test in the
+    DefectDojo UI and address it directly with `action: "reimport"` and its
+    `test_id` — sailed past the block and wrote a changed report over a write nobody
+    had established. That is precisely the papering-over the block exists to prevent,
+    in precisely the scenario it was written for.
+
+    The added clause is narrow on purpose: an unresolved export **for this session,
+    to this server, whose destination is not yet known** blocks further exports to
+    that server. Not session-wide-and-forever, and not across sessions — my own note
+    warned that a wider block would lock out more operators rather than fewer. It
+    lifts as soon as the row is resolved, because reconciling it fills in the test ID.
     """
     await put_finding()
     initial = defectdojo.ExportConfig(server='https://dojo.test', secret_id=dojo.secret,
@@ -342,33 +352,126 @@ async def test_a_lost_first_import_does_not_block_a_direct_reimport(dojo, monkey
     assert lost['remote_test_id'] is None, "the premise: no test ID was ever learned"
 
     monkeypatch.setattr(defectdojo, 'rpc', dojo.rpc)
-    # The same body IS blocked — same destination.
+    # The same body is blocked, as it always was.
     assert (await defectdojo.export('s', initial))['id'] == lost['id']
 
-    # Addressing the test directly is NOT.
+    # And so is addressing the test directly, which is the fix.
     await put_finding(title='Changed while the first write was in flight')
     direct = defectdojo.ExportConfig(server='https://dojo.test', secret_id=dojo.secret,
                                      action='reimport', test_id=42)
     after = await defectdojo.export('s', direct)
-    assert after['id'] != lost['id'], "if this now blocks, the docs need updating"
-    assert after['status'] == 'completed', _why(after)
-    assert [f['title'] for f in dojo.findings.values()] == ['Changed while the first write was in flight']
+    assert after['id'] == lost['id'], (
+        "a direct reimport wrote over an export whose outcome nobody established")
+    assert not dojo.findings, "the changed report reached the remote"
 
 
-async def test_a_local_failure_before_any_request_is_uncertain_and_blocks(dojo, monkeypatch):
-    """Zero requests sent, and the destination is blocked anyway.
+async def test_reconciling_the_lost_import_unblocks_the_destination(dojo, monkeypatch):
+    """The escape hatch has to work, or the block is a trap.
 
-    `export()` marks `uncertain` for any non-RemoteError exception, which
-    includes ones raised before a single byte leaves the machine — the sandbox
-    failing to start because Docker is down, or a cancelled run. Reconciliation
-    cannot clear such a row: there is no remote write to verify against.
-
-    Pinned because docs/integrations.md now warns operators about it. It is a
-    sharp edge, recorded in docs/future-plan.md, not a design decision.
+    Reconciliation is read-only and fills in the test ID it verified, which is what
+    lifts the block — so an operator is never stuck, they are required to establish
+    what happened first.
     """
     await put_finding()
+    initial = defectdojo.ExportConfig(server='https://dojo.test', secret_id=dojo.secret,
+                                      action='import', engagement_id=7, test_title='Client app')
 
-    working = defectdojo.Sandbox      # the fixture's FakeSandbox
+    async def queued(sandbox, request):
+        dojo.calls.append(copy.deepcopy(request))
+        if request.get('method', 'POST') == 'POST':
+            # The import DID land; only the response was lost.
+            for finding in request['report']['findings']:
+                key = len(dojo.findings) + 1
+                dojo.findings[key] = dict(finding, id=key, test=42)
+        return {'status': 202, 'body': json.dumps({'message': 'queued'})}
+
+    monkeypatch.setattr(defectdojo, 'rpc', queued)
+    lost = await defectdojo.export('s', initial)
+    assert lost['status'] == 'uncertain'
+
+    monkeypatch.setattr(defectdojo, 'rpc', dojo.rpc)
+    resolved = await defectdojo.reconcile(lost['id'], defectdojo.ExportConfig(
+        server='https://dojo.test', secret_id=dojo.secret, action='reimport', test_id=42))
+    assert resolved['status'] == 'completed', _why(resolved)
+    assert resolved['remote_test_id'] == 42
+
+    # Now a direct reimport proceeds, because there is nothing unestablished left.
+    await put_finding(title='A later revision')
+    after = await defectdojo.export('s', defectdojo.ExportConfig(
+        server='https://dojo.test', secret_id=dojo.secret, action='reimport', test_id=42))
+    assert after['id'] != lost['id'], "the block did not lift after reconciliation"
+
+
+async def test_the_block_does_not_reach_another_server(dojo, monkeypatch):
+    """Narrowness, checked. An unresolved export to one server says nothing about
+    another, and blocking it would be punishing the operator for the wrong thing."""
+    await put_finding()
+    initial = defectdojo.ExportConfig(server='https://dojo.test', secret_id=dojo.secret,
+                                      action='import', engagement_id=7, test_title='Client app')
+
+    async def queued(sandbox, request):
+        dojo.calls.append(copy.deepcopy(request))
+        return {'status': 202, 'body': json.dumps({'message': 'queued'})}
+
+    monkeypatch.setattr(defectdojo, 'rpc', queued)
+    lost = await defectdojo.export('s', initial)
+    assert lost['status'] == 'uncertain'
+
+    monkeypatch.setattr(defectdojo, 'rpc', dojo.rpc)
+    elsewhere = defectdojo.ExportConfig(server='https://other.test', secret_id=dojo.secret,
+                                        action='reimport', test_id=9)
+    result = await defectdojo.export('s', elsewhere)
+    assert result['id'] != lost['id'], "an unresolved export blocked a different server"
+
+
+async def test_a_failed_export_does_not_block_by_the_new_clause(dojo, monkeypatch):
+    """E-025 and E-026 interact, and this is the interaction.
+
+    The new clause keys on an unresolved export with no known destination. A local
+    failure that sent nothing is `failed`, not `uncertain`, so it is not unresolved
+    and must not block — otherwise widening the block would lock out exactly the
+    operators E-025 freed.
+    """
+    await put_finding()
+    working = defectdojo.Sandbox
+
+    class Exploding:
+        def __init__(self, *a, **kw):
+            raise RuntimeError('docker daemon not running')
+
+    monkeypatch.setattr(defectdojo, 'Sandbox', Exploding)
+    with pytest.raises(RuntimeError):
+        await defectdojo.export('s', defectdojo.ExportConfig(
+            server='https://dojo.test', secret_id=dojo.secret,
+            action='import', engagement_id=7, test_title='Client app'))
+
+    monkeypatch.setattr(defectdojo, 'Sandbox', working)
+    after = await defectdojo.export('s', defectdojo.ExportConfig(
+        server='https://dojo.test', secret_id=dojo.secret, action='reimport', test_id=42))
+    assert after['status'] == 'completed', _why(after)
+
+
+async def test_a_local_failure_before_any_request_is_failed_not_uncertain(dojo, monkeypatch):
+    """E-025. Zero requests sent, so there is nothing to be uncertain about.
+
+    `export()` marked `uncertain` from a blanket
+    `except (Exception, CancelledError)`, which fires for failures raised before a
+    single byte leaves the machine — the sandbox not starting because Docker is
+    down, or a cancelled run. The row then blocked that destination like any real
+    uncertain write, and reconciliation could not clear it: there is no remote write
+    to verify, so it answered `Remote state differs` and left the row blocked.
+    Every later export to that destination was a permanent no-op, and an operator
+    whose Docker daemon hiccuped was locked out of exporting that assessment with no
+    documented way back.
+
+    `wrote` already distinguishes the two cases and this branch simply did not
+    consult it, while the `RemoteError` branch directly above it did. `wrote = True`
+    is set immediately before each of the two write requests, and the only requests
+    that precede it are the inventory GETs, which are reads — so "nothing was sent"
+    is knowable rather than assumed.
+    """
+    await put_finding()
+    working = defectdojo.Sandbox
 
     class Exploding:
         def __init__(self, *a, **kw):
@@ -379,16 +482,64 @@ async def test_a_local_failure_before_any_request_is_uncertain_and_blocks(dojo, 
         await defectdojo.export('s', dojo.config)
 
     row = (await db.rows('SELECT * FROM integration_exports'))[0]
-    assert row['status'] == 'uncertain', _why(row)
-    assert row['detail'] == 'Check the remote test before retrying'
+    assert row['status'] == 'failed', _why(row)
     assert not [c for c in dojo.calls if 'url' in c], "nothing should have been sent"
+    # The audit evidence is still recorded — the `finally` runs either way, and a
+    # failed attempt is still something an operator may need to read.
+    assert row['evidence_id']
 
-    # Restore only the sandbox: monkeypatch.undo() would also revert the
-    # fixture's DB_PATH patch and the export would fail looking for its
-    # assessment, which looks like a blocked export and is not one.
+    # And it does NOT block: the export can simply be retried once Docker is back.
     monkeypatch.setattr(defectdojo, 'Sandbox', working)
+    retried = await defectdojo.export('s', dojo.config)
+    assert retried['id'] != row['id'], "a failure that sent nothing blocked the retry"
+    assert retried['status'] == 'completed', _why(retried)
+
+
+async def test_a_local_failure_after_a_write_is_still_uncertain_and_still_blocks(dojo, monkeypatch):
+    """The other side, and the reason not to simply widen the `failed` branch.
+
+    Once a write has been issued its outcome is unknown, and a cancellation at that
+    moment is exactly when uncertainty is most warranted. This must stay blocking.
+    """
+    await put_finding()
+
+    async def cancel_mid_write(sandbox, request):
+        if request.get('method', 'POST') != 'POST':
+            return await dojo.rpc(sandbox, request)
+        dojo.calls.append(copy.deepcopy(request))
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(defectdojo, 'rpc', cancel_mid_write)
+    with pytest.raises(asyncio.CancelledError):
+        await defectdojo.export('s', dojo.config)
+
+    row = (await db.rows('SELECT * FROM integration_exports'))[0]
+    assert row['status'] == 'uncertain', _why(row)
+
+    monkeypatch.setattr(defectdojo, 'rpc', dojo.rpc)
     blocked = await defectdojo.export('s', dojo.config)
-    assert blocked['id'] == row['id'], "the destination is blocked by a local failure"
+    assert blocked['id'] == row['id'], "a cancelled WRITE must still block the destination"
+
+
+async def test_a_read_that_fails_locally_sends_nothing_and_is_failed(dojo, monkeypatch):
+    """The inventory GET precedes `wrote`, so a failure there is also `failed`.
+
+    This is what makes the premise checkable rather than asserted: if any request
+    could escape before `wrote` was set, a read failure would have to be uncertain
+    too. The only pre-`wrote` requests are reads, and a read changes nothing.
+    """
+    await put_finding()
+
+    async def explode_on_read(sandbox, request):
+        if request.get('method', 'POST') == 'GET':
+            raise RuntimeError('connection reset during inventory')
+        return await dojo.rpc(sandbox, request)
+
+    monkeypatch.setattr(defectdojo, 'rpc', explode_on_read)
+    with pytest.raises(RuntimeError):
+        await defectdojo.export('s', dojo.config)
+    row = (await db.rows('SELECT * FROM integration_exports'))[0]
+    assert row['status'] == 'failed', _why(row)
 
 
 async def test_reconcile_reports_a_remote_error_instead_of_a_bare_500(dojo, monkeypatch):

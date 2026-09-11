@@ -435,7 +435,7 @@ What the status means:
 |--------|---------|------------|
 | `completed` | Every field Erlik reads back is present remotely | nothing |
 | `failed` | Nothing was written, and the destination is not blocked | fix the body or the token and export again |
-| `uncertain` | The outcome of a write is unknown — **or the export failed locally before sending anything** | reconcile, or see below |
+| `uncertain` | A write was issued and its outcome is unknown | reconcile |
 
 `completed` is about the fields that are read back, which is not all of them: a
 finding's `endpoints` are never compared after the import, and `title` is matched
@@ -443,14 +443,18 @@ case-insensitively against its first 511 characters because DefectDojo titlecase
 and truncates it. So `completed` does not by itself tell you the URL a finding is
 about arrived intact.
 
-`uncertain` also covers a failure that sent **nothing** — the sandbox not starting
-because Docker is down, or a cancelled run. The row records
-`Check the remote test before retrying`, and it blocks that destination like any
-other uncertain row. Reconciliation cannot clear it: there is no remote write to
-verify, so it answers `Remote state differs from intended export` and the row
-stays blocked. Such a row has to be inspected and cleared directly. This is a
-known sharp edge rather than intended design — it is recorded in
-`docs/future-plan.md`.
+**Uncertainty requires a write.** A failure that sent nothing — the sandbox not
+starting because Docker is down, a cancelled run, a connection reset during the
+inventory read — is `failed`, with `Failed before any request was issued; nothing was
+written and this destination is not blocked`. Retry it.
+
+That distinction matters because an uncertain row blocks its destination and
+reconciliation cannot clear one that has no remote write to verify against: it would
+answer `Remote state differs from intended export` for ever. Marking a local failure
+uncertain therefore locked an operator out of exporting the assessment at all, with
+no way back. Only the two requests that actually write — the import POST and a
+finding PATCH — can produce uncertainty; the inventory GETs that precede them are
+reads, and a read changes nothing.
 
 A 202 is uncertain, not successful: the import was queued, and nothing has
 confirmed it landed. Treating it as a failure would invite a retry that silently
@@ -458,35 +462,25 @@ imports twice.
 
 #### What "blocks" actually covers
 
-An uncertain write is never retried automatically, and it blocks further exports —
-but the block is narrower than it sounds, and the gap is in the case this section
-exists for.
+An uncertain write is never retried automatically, and it blocks further exports. The
+block matches an export by destination, by remote test ID on that server, **and** —
+for the session that made it — by the mere existence of an unresolved export to that
+server whose destination is not yet known.
 
-It matches an export whose destination is the same, or whose remote test ID is the
-same on that server. **An import whose response was lost never learned a test ID**,
-so its row carries `remote_test_id = NULL` and only a repeat of the identical body
-is blocked. Do what the rest of this section advises — find the test in the
-DefectDojo UI and address it directly with `action: "reimport"` and its `test_id` —
-and that export is *not* blocked. It will write, over a write nobody established.
+That third clause exists because the first two missed the case the guard is for. An
+import whose response was lost never learned a test ID, so its row carries
+`remote_test_id = NULL` and neither of the first two clauses can match it. Finding the
+test in the DefectDojo UI and reimporting into it by ID then sailed straight past the
+guard and wrote a changed report over a write nobody had established — the exact
+papering-over the guard prevents, in the exact scenario it was written for.
 
-**Reconcile the uncertain row before addressing the test directly.** Measured, not
-inferred: `test_a_lost_first_import_does_not_block_a_direct_reimport` in
-`tests/test_defectdojo_completion.py` pins it, and `docs/future-plan.md` carries it
-as E-026.
+It is narrow on three counts, because a wider block would lock out more operators
+rather than fewer: it is scoped to the session that made the unresolved export, scoped
+to that server, and lifts as soon as the row is resolved, since reconciling it fills in
+the test ID it verified. A `failed` export does not block at all.
 
-`failed` is narrower than "the remote said no", and the difference is worth
-knowing before you wait on a reconcile you do not need:
-
-- A **read** that fails — the inventory GET, say — wrote nothing, so the export
-  is `failed` and you can simply export again.
-- A **first import** whose POST is rejected 4xx is also `failed`: that POST was
-  the first request made, so nothing preceded it.
-- A **reimport** whose POST is rejected 4xx is `uncertain`, even though a 4xx
-  means nothing was written. A reimport reads the remote inventory before
-  writing, and once any request has gone out the lane stops inferring from a
-  status code the remote chose that no partial processing happened. It blocks
-  until someone looks. This asymmetry is deliberate; both sides are pinned in
-  `tests/test_defectdojo_completion.py`.
+**So reconcile the uncertain row before addressing the test directly.** That is now
+enforced rather than advised.
 
 Reconciliation is **read-only**. It lists the remote test's findings, compares
 them against the evidence recorded for that export, and marks the export completed

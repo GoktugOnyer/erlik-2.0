@@ -452,44 +452,60 @@ Design delivery as at-least-once: side-effecting scan stages must not be blindly
 retried after lease loss. A remotely lost worker means interrupted/unknown until
 its execution has been accounted for.
 
-### E-025: an uncertain export can block a destination that was never written to
+### E-025: an uncertain export could block a destination never written to — CLOSED
 
-Found while writing the E-006 export documentation, and pinned by
-`test_a_local_failure_before_any_request_is_uncertain_and_blocks`.
+`export()` marked the row `uncertain` from a blanket
+`except (Exception, CancelledError)`, which fires for failures raised before a single
+byte leaves the machine — the sandbox not starting because Docker is down, a cancelled
+run, a connection reset during the inventory read. An uncertain row blocks its
+destination, and reconciliation cannot clear one with no remote write to verify
+against: it answers `Remote state differs from intended export` for ever. So every
+later export to that destination was a permanent no-op, and an operator whose Docker
+daemon hiccuped was locked out of exporting that assessment with no way back.
 
-`export()` marks the row `uncertain` from `except (Exception, CancelledError)`,
-which fires for failures raised before a single request leaves the machine — the
-sandbox not starting because Docker is down, a cancelled run. The row then blocks
-that destination like any other uncertain write, and reconciliation cannot clear
-it: reconcile verifies the intended findings against the remote test, and a remote
-that never received them answers `Remote state differs`. Every later export to
-that destination is a permanent no-op, so an operator whose Docker daemon hiccuped
-is locked out of exporting that assessment with no documented way back.
+`wrote` already drew the distinction, and the `RemoteError` branch directly above
+already consulted it — only this branch hardcoded uncertainty. The premise was checked
+rather than assumed: `wrote = True` is set immediately before each of the two write
+requests (the import POST and a finding PATCH), and the only requests that can precede
+it are the inventory GETs, which are reads. So "nothing was sent" is knowable, and
+`failed` is the honest status — with `Failed before any request was issued; nothing was
+written and this destination is not blocked`, so the operator knows to retry.
 
-The narrow fix is to distinguish "no request was ever issued" from "a write may
-have landed" — `export()` already tracks `wrote`, and the local-failure branch
-does not consult it. `failed` is the honest status when nothing was sent. Worth
-confirming there is no path where a request escapes without `wrote` being set
-before changing it; the conservative default exists for a reason.
+Pinned from both sides, because widening the `failed` branch too far would be worse
+than the original defect: a local failure before any request is `failed` and retryable;
+a cancellation *during* a write is still `uncertain` and still blocks; a read that fails
+locally is `failed`, which is the test that holds the premise about `wrote`.
 
-### E-026: the uncertainty block misses the case it most needs to cover
+One existing test had to be rewritten, and it was mis-scoped rather than merely stale.
+`test_defectdojo_uncertain_write_is_not_retried` set up a sandbox that failed to open —
+which sends nothing at all — so its name and its scenario disagreed. It now makes the
+write leave and then kills the connection, which is what the name describes, with a
+sibling covering the other half.
 
-Found alongside E-025, pinned by
-`test_a_lost_first_import_does_not_block_a_direct_reimport`.
+### E-026: the uncertainty block missed the case it existed for — CLOSED
 
-The block matches an export by destination, or by `remote_test_id` on that
-server. A first `import` whose response was lost — the 202, the timeout, the
-cancellation — never learns a test ID, so its row carries `remote_test_id = NULL`
-and only the byte-identical body is blocked. The operator who does what the
-documentation advises (find the test in the DefectDojo UI, then reimport into it
-by ID) is not blocked, and writes a changed report over a write whose outcome
-nobody established. That is the exact papering-over the block exists to prevent,
-in the exact scenario it was written for.
+The block matched an export by DESTINATION, or by REMOTE TEST ID on that server. A
+first `import` whose response was lost — a 202, a timeout, a cancellation — never
+learns a test ID, so its row carries `remote_test_id = NULL`, `remote_test_id = ?`
+cannot match, and only a repeat of the byte-identical body was blocked. An operator who
+did what the documentation advises — find the test in the DefectDojo UI, then reimport
+into it by ID — sailed past the guard and wrote a changed report over a write nobody had
+established. That is the exact papering-over the guard prevents, in the exact scenario
+it was written for.
 
-A destination-level guard would cover it: an uncertain row for engagement E should
-block exports to any test under E for that session, not only to the destination
-hash. Note this interacts with E-025 — fix that first, or the wider block will
-lock out more operators, not fewer.
+A third clause now blocks on an unresolved export **for this session, to this server,
+whose destination is not yet known**. Narrow on three counts, because my own note
+warned that a wider block would lock out more operators rather than fewer: scoped to
+the session that made it, scoped to the server, and lifting the moment the row is
+resolved, since reconciling fills in the test ID it verified. Tests cover all three
+boundaries — the block does not reach another server, it lifts after reconciliation,
+and a `failed` export does not trigger it.
+
+**The two were only safe to fix together, and in this order.** Widening the block while
+every local failure still produced an `uncertain` row would have locked out exactly the
+operators E-025 freed: one Docker hiccup would have blocked the whole server for that
+session instead of one destination hash. The note recording E-026 said so, and it was
+right.
 
 ### E-027: the shipped AUTHZ-04 check reported findings on clean endpoints — CLOSED
 

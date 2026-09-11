@@ -9,6 +9,7 @@ from orchestrator.integrations.egress_policy import EgressPolicy
 from orchestrator.integrations.security import SecretStore, redact, secret_values
 from orchestrator.integrations.adapters import Context, parse_zap, json_lines, ZapAdapter
 from orchestrator.integrations.interactsh import correlate
+from orchestrator.integrations import persistence as db
 
 
 def config(**overrides):
@@ -186,18 +187,63 @@ async def test_defectdojo_repeated_export_no_duplicate(database, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_defectdojo_uncertain_write_is_not_retried(database, monkeypatch):
+    """An export that may have WRITTEN is never silently retried.
+
+    This previously set up a sandbox that failed to open — which sends nothing at all
+    — and asserted `uncertain`, so the test's name and its scenario disagreed. E-025
+    made a failure that issued no request `failed`, because an uncertain row blocks
+    its destination and reconciliation cannot clear one with no remote write to
+    verify; an operator whose Docker daemon hiccuped was locked out of exporting the
+    assessment. So the scenario now matches the name: the write goes out and then the
+    connection dies.
+    """
     from orchestrator.integrations import service, defectdojo
     await service.register("s", "https://app.test", config(stages=["zap"]))
-    class BrokenSandbox:
+    await db.execute("INSERT OR REPLACE INTO integration_findings VALUES(?,?,?)",
+                     ("s", "fp-one", json.dumps(
+                         {"fingerprint": "fp-one", "title": "t", "basis": "b",
+                          "severity": "medium", "confidence": "confirmed",
+                          "url": "https://app.test/x", "triage_state": "open"})))
+
+    class FakeSandbox:
         def __init__(self, *a, **kw): pass
-        async def __aenter__(self): raise RuntimeError("connection lost")
+        async def __aenter__(self): return self
         async def __aexit__(self, *a): pass
-    monkeypatch.setattr(defectdojo, "Sandbox", BrokenSandbox)
+
+    monkeypatch.setattr(defectdojo, "Sandbox", FakeSandbox)
+
+    async def dies_after_writing(sandbox, request):
+        if request.get("method", "POST") == "GET":
+            return {"status": 200, "body": json.dumps({"results": [], "next": None})}
+        raise RuntimeError("connection lost")      # the POST left, the answer did not
+
+    monkeypatch.setattr(defectdojo, "rpc", dies_after_writing)
     secret = SecretStore().put({"token": "private"})
     cfg = defectdojo.ExportConfig(server="https://dojo.test", secret_id=secret, test_id=42)
     with pytest.raises(RuntimeError):
         await defectdojo.export("s", cfg)
-    assert (await defectdojo.export("s", cfg))["status"] == "uncertain"
+    blocked = await defectdojo.export("s", cfg)
+    assert blocked["status"] == "uncertain"
+
+
+async def test_defectdojo_failure_before_any_request_is_retryable(database, monkeypatch):
+    """The other half of E-025, kept beside its sibling so the pair reads together."""
+    from orchestrator.integrations import service, defectdojo
+    await service.register("s2", "https://app.test", config(stages=["zap"]))
+
+    class BrokenSandbox:
+        def __init__(self, *a, **kw): pass
+        async def __aenter__(self): raise RuntimeError("connection lost")
+        async def __aexit__(self, *a): pass
+
+    monkeypatch.setattr(defectdojo, "Sandbox", BrokenSandbox)
+    secret = SecretStore().put({"token": "private"})
+    cfg = defectdojo.ExportConfig(server="https://dojo.test", secret_id=secret, test_id=42)
+    with pytest.raises(RuntimeError):
+        await defectdojo.export("s2", cfg)
+    rows = await db.rows("SELECT status,detail FROM integration_exports WHERE session_id=?", ("s2",))
+    assert rows[0]["status"] == "failed", rows[0]
+    assert "nothing was written" in rows[0]["detail"]
 
 
 def test_http_and_websocket_require_same_token(monkeypatch):

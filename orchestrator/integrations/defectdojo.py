@@ -256,9 +256,28 @@ async def export(session_id, config: ExportConfig):
         test_id = mapping[0]["remote_test_id"] if mapping else config.test_id
         # Guard the remote destination, not merely one session/hash. A changed
         # report must not bypass uncertainty about a previous remote write.
+        #
+        # E-026 added the third clause, and it covers the case the first two missed
+        # — the one this guard exists for. They match an export by DESTINATION, or by
+        # REMOTE TEST ID on that server. A first `import` whose response was lost
+        # never learns a test ID, so its row carries `remote_test_id = NULL`,
+        # `remote_test_id = ?` cannot match, and only a repeat of the byte-identical
+        # body was blocked. An operator who did what the documentation advises — find
+        # the test in the DefectDojo UI, then reimport into it by ID — sailed past the
+        # guard and wrote a changed report over a write nobody had established.
+        #
+        # So an unresolved export for THIS SESSION to THIS SERVER whose destination is
+        # not yet known blocks further exports to that server. Narrow on three counts,
+        # because a wider block would lock out more operators rather than fewer: it is
+        # scoped to the session, scoped to the server, and lifts the moment the row is
+        # resolved, since reconciling it fills in the test ID. It also cannot fire for
+        # a local failure that sent nothing — E-025 made those `failed`, not
+        # `uncertain`, and the two changes are only safe together.
         blocking = await db.rows("SELECT * FROM integration_exports WHERE status IN ('running','uncertain') "
-            "AND (destination=? OR (remote_test_id=? AND instr(destination,?)=1)) ORDER BY rowid DESC",
-            (destination, test_id, config.server + "/"))
+            "AND (destination=? OR (remote_test_id=? AND instr(destination,?)=1) "
+            "     OR (session_id=? AND remote_test_id IS NULL AND instr(destination,?)=1)) "
+            "ORDER BY rowid DESC",
+            (destination, test_id, config.server + "/", session_id, config.server + "/"))
         if blocking:
             return blocking[0]
         prior = await db.rows("SELECT * FROM integration_exports WHERE status='completed' "
@@ -328,7 +347,27 @@ async def export(session_id, config: ExportConfig):
             if exc.status < 500 and exc.status != 202 and len(audit) == 2 and audit[-1].get("method") == "POST":
                 status = "failed"  # initial request explicitly rejected
         except (Exception, asyncio.CancelledError):
-            await db.execute("UPDATE integration_exports SET status='uncertain',detail='Check the remote test before retrying' WHERE id=?", (key,))
+            # E-025: uncertainty requires a WRITE. This branch marked every local
+            # failure `uncertain` — the sandbox not starting because Docker is down,
+            # a cancelled run — and an uncertain row blocks its destination while
+            # reconciliation cannot clear it, because there is no remote write to
+            # verify against. Every later export to that destination was then a
+            # permanent no-op, and an operator whose daemon hiccuped was locked out
+            # of exporting the assessment at all.
+            #
+            # `wrote` already draws the distinction and the `RemoteError` branch
+            # above already consults it. It is set immediately before each of the two
+            # write requests, and the only requests that can precede it are the
+            # inventory GETs — reads, which change nothing. So "nothing was sent" is
+            # knowable here rather than assumed, and `failed` is the honest answer:
+            # retry it.
+            if wrote:
+                await db.execute("UPDATE integration_exports SET status='uncertain',"
+                                 "detail='Check the remote test before retrying' WHERE id=?", (key,))
+            else:
+                await db.execute("UPDATE integration_exports SET status='failed',"
+                                 "detail='Failed before any request was issued; nothing was "
+                                 "written and this destination is not blocked' WHERE id=?", (key,))
             raise
         finally:
             evidence_id = await db.evidence(session_id, "defectdojo-" + key, "defectdojo_export", json.dumps(audit), [token] if token else ())

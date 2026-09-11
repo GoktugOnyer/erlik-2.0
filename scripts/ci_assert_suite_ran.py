@@ -28,7 +28,7 @@ DEFAULT_FLOOR = 2000
 # runner that has neither. This is the fraction of COLLECTED tests that must
 # actually run, and it is what catches a change that silently skips the suite.
 #
-# Measured on a FRESH CLONE, which is what CI actually checks out: 68 of 2369
+# Measured on a FRESH CLONE, which is what CI actually checks out: 68 of 2375
 # skip on the first run, which is 3.0%. A developer's tree skips 35 (1.6%), and
 # calibrating against that figure would have set this threshold too tight.
 #
