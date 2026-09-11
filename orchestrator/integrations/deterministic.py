@@ -821,7 +821,15 @@ class CatalogueAdapter(BaseAdapter):
             # still answer differently to `?id=1'`. Measured, no pruned URL carried a
             # discovered parameter at all — but the safety is structural rather than resting
             # on that: `parameters_by_url` pairs are never touched.
-            indistinct = indistinct_urls((url, capture) for url, capture in bodies)
+            # `keep`: URLs the lane has discovered PARAMETERS for. The parameter cases build
+            # their targets from `parameters_by_url` and never consult this result, so this is
+            # belt and braces — it makes the safety independent of that separation holding.
+            # Measured on DVWA, the two pairs it protects: `/vulnerabilities/fi/` carries
+            # `page`, whose probe reads /etc/passwd, and `/vulnerabilities/xss_r/` carries
+            # `name`, whose probe reflects unencoded — and each is byte-identical to junk
+            # spellings that sort first.
+            indistinct = indistinct_urls(((url, capture) for url, capture in bodies),
+                                         keep=set(parameters))
             if indistinct:
                 result.metadata["indistinct_urls"] = {
                     "count": len(indistinct),

@@ -1417,6 +1417,41 @@ Same 21 probes, every one now on a distinct response. The other half is the repo
 gained an `indistinct` state, so a URL with nothing left to test no longer reads as `not_run`.
 Endpoint rows are untouched, so the authorization comparison is unaffected.
 
+**Increment 14 — the last `confirmed`-from-one-response path, and two corrections to Increment
+13.** `SecurityAssertion` emits HIGH `confidence="confirmed"` from one response to one identity.
+Two of its three measured ways to fire on nothing were closed in Increment 9; this is the third.
+A single-page application serves its shell for every route its server does not know, and that
+shell carries the product's own name — measured, `/administration`, `/accounting`, `/Edge/`, `/`
+and a path that cannot exist all produce ONE response signature on Juice Shop, so "must not see
+'Juice Shop' at /administration" was a HIGH confirmed finding made out of index.html.
+
+The control is a path that cannot exist: whatever the application answers there is its generic
+response. `adapters.generic_response` fetches one per origin at a path derived from the session
+id — stable within a run, unpredictable across them. It discriminates rather than
+blanket-refusing: `/api/Users`, `/api/Users/1` and `/rest/user/whoami` all differ from it, and on
+DVWA `/` differs while `/administration` does not. A refused or errored control is not a control,
+because returning erlik's own 403 would suppress every assertion on that origin. The comparison
+reuses `worker_response_signature`, so there is one rule for "the same response" and not two.
+
+**Increment 13's adversarial pass landed after it was committed and found two real things.** Its
+two BLOCKING claims — that pruning removes DVWA's LFI and XSS pairs — do not hold against the
+implementation: the parameter cases build their targets from `parameters_by_url` and never consult
+the pruned set. I verified that by reading AND by building the agent's exact scenario as a test
+whose ablation (extending pruning to the parameter branch) fails it. But the pass was right about
+the survivor: on DVWA the junk spellings `/./vulnerabilities/fi/` and `//vulnerabilities/fi/` are
+byte-identical to the real URL and SORT FIRST, so first-spelling-wins kept a junk spelling and
+reported it as the representative. So the most canonical spelling now survives
+(`inventory.canonicality`), and a parameter carrier outranks any spelling via a `keep` set.
+
+Writing that introduced a defect of its own, caught by an existing test: `/` splits to
+`["", ""]`, so counting every empty segment penalised the ROOT and handed the survivor slot to
+`/about` — and `/` is the one member of the 36-strong shell group where the path-appending cases
+find anything. A trailing slash is not a junk segment.
+
+Fourteen clauses ablated across both pieces, all fourteen measured. One was dead code and was
+removed rather than kept: a filter protecting `keep` URLs from being reported as duplicates,
+which `outranks` already guarantees.
+
 **Two verified defects are named rather than fixed, because both need lane plumbing.**
 The anonymous stage cannot carry application configuration (`service.py` passes `None` for
 it and the proxy then injects nothing), so on an application whose configuration lives in a

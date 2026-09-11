@@ -1443,16 +1443,62 @@ _VOLATILE_HEADERS = re.compile(
     r"|x-request-id|x-correlation-id|x-runtime|x-response-time|server-timing|report-to):")
 
 
-def response_signature(capture: str) -> str:
+def _signature(status, header_lines, body: str) -> str:
     """What makes two responses the same response: the status, the stable headers, the body."""
-    stable = sorted(line.strip() for line in http_capture.headers(capture).splitlines()[1:]
+    stable = sorted(line.strip() for line in header_lines
                     if line.strip() and not _VOLATILE_HEADERS.match(line.strip()))
-    material = f"{http_capture.status(capture)}\n" + "\n".join(stable) + "\n\n" + \
-        http_capture.body(capture)
+    material = f"{status}\n" + "\n".join(stable) + "\n\n" + (body or "")
     return hashlib.sha256(material.encode("utf-8", "replace")).hexdigest()
 
 
-def indistinct_urls(captures) -> dict:
+def response_signature(capture: str) -> str:
+    """The signature of a raw `curl -i` capture."""
+    return _signature(http_capture.status(capture),
+                      http_capture.headers(capture).splitlines()[1:],
+                      http_capture.body(capture))
+
+
+def worker_response_signature(response: dict) -> str:
+    """The signature of the dict `worker.request` returns.
+
+    The same rule by construction rather than by a second implementation: the adapter that
+    evaluates SecurityAssertions never sees a raw capture, and two ways of deciding whether
+    two responses are the same response would be one defect waiting to happen.
+    """
+    headers = (response or {}).get("headers") or {}
+    return _signature(response.get("status"),
+                      [f"{name}: {value}" for name, value in headers.items()],
+                      response.get("body") or "")
+
+
+def canonicality(url: str) -> tuple:
+    """How canonical a spelling is, lowest first. Used to pick which of several spellings of
+    one response survives.
+
+    Alphabetical order picks the wrong one. Measured on DVWA, three spellings of one Apache
+    resource that all return a byte-identical 5235-byte body:
+
+        /./vulnerabilities/fi/?page=include.php     <- sorts first
+        //vulnerabilities/fi/?page=include.php
+        /vulnerabilities/fi/?page=include.php       <- the one the inventory knows about
+
+    First-spelling-wins therefore kept a junk spelling and reported it as the representative of
+    that response. Dot segments and empty segments are what make a spelling junk, so they rank
+    last; length and then alphabetical order settle the rest, so the choice stays deterministic.
+    """
+    segments = (urlsplit(url).path or "/").split("/")
+    # A TRAILING SLASH IS NOT JUNK. `/` splits to ["", ""], so counting every empty segment
+    # penalised the ROOT as if it were a junk spelling and handed the survivor slot to
+    # `/about` — and `/` is the one member of Juice Shop's 36-strong shell group where the
+    # path-appending cases find anything at all (`/robots.txt`, `/.well-known/security.txt`).
+    # Caught by the test that asserts `/` survives.
+    if len(segments) > 1 and segments[-1] == "":
+        segments = segments[:-1]
+    odd = sum(1 for segment in segments[1:] if segment in ("", ".", ".."))
+    return (odd, len(url), url)
+
+
+def indistinct_urls(captures, keep=()) -> dict:
     """URLs whose response the lane has ALREADY SEEN, mapped to the URL that had it first.
 
     WHY THIS IS THE BINDING CONSTRAINT. Everything the lane does is rationed by `max_urls`,
@@ -1477,27 +1523,58 @@ def indistinct_urls(captures) -> dict:
     something before its absence of difference means anything.
 
     Only 2xx, because a shared 401 or 404 is the application declining rather than answering,
-    and every refusal looks alike. `captures` is ordered and the FIRST spelling wins, so the
-    caller controls which URL survives by the order it reads in.
+    and every refusal looks alike.
+
+    THE MOST CANONICAL SPELLING SURVIVES, not the first one read — see `canonicality`. And a URL
+    in `keep` is never pruned: the caller passes the URLs it has discovered PARAMETERS for,
+    because a spelling that carries a parameter is the one the lane knows something about.
+    Measured on DVWA, both cases this protects: `/vulnerabilities/fi/` carries `page`, whose
+    probe reads `/etc/passwd`, and `/vulnerabilities/xss_r/` carries `name`, whose probe
+    reflects unencoded — and each is byte-identical to junk spellings that sort first. The
+    parameter cases already build their targets from `parameters_by_url` and never consult this
+    result, so this is belt and braces rather than the only guard; it makes the safety
+    independent of that separation holding.
 
     "The same response" includes the STABLE HEADERS, not only the body — see
     `response_signature`. `WSTG-SESS-02` decides on `Set-Cookie` and `WSTG-CONF-06` on
     `Allow`, so a rule that compared bodies alone could prune the only URL whose finding lives
     in a header.
     """
-    first_seen, duplicates = {}, {}
+    protected = set(keep)
+
+    def outranks(candidate, incumbent) -> bool:
+        """Should `candidate` replace `incumbent` as the spelling that survives?"""
+        if (candidate in protected) != (incumbent in protected):
+            return candidate in protected     # a parameter carrier outranks any spelling
+        return canonicality(candidate) < canonicality(incumbent)
+
+    survivor, duplicates = {}, {}
     for url, capture in captures:
         if not http_capture.ok(capture):
             continue
-        body = http_capture.body(capture)
-        if not body.strip():
+        if not http_capture.body(capture).strip():
             continue
         key = response_signature(capture)
-        if key in first_seen:
-            if url != first_seen[key]:
-                duplicates[url] = first_seen[key]
+        incumbent = survivor.get(key)
+        if incumbent is None:
+            survivor[key] = url
+            continue
+        if url == incumbent:
+            continue
+        if outranks(url, incumbent):
+            survivor[key] = url
+            duplicates[incumbent] = url
+            # Everything that pointed at the old incumbent now points at the new survivor,
+            # or a reader would be sent to a URL that is itself recorded as a duplicate.
+            for earlier, same in list(duplicates.items()):
+                if same == incumbent and earlier != url:
+                    duplicates[earlier] = url
+            duplicates.pop(url, None)
         else:
-            first_seen[key] = url
+            duplicates[url] = incumbent
+    # No filter for `protected` here: `outranks` already guarantees a protected URL wins
+    # whenever it meets a plain spelling, so it can never become a key. A filter would be code
+    # that cannot fire, which reads as a protection that is not there.
     return duplicates
 
 

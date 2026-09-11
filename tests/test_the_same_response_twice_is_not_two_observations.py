@@ -251,3 +251,197 @@ async def test_coverage_calls_it_indistinct(stage, tmp_path):
     rows = await coverage("s")
     states = {r["url"]: r["state"] for r in rows}
     assert states.get(spa) == "indistinct", states
+
+
+async def test_dvwas_lfi_and_xss_pairs_survive_pruning(tmp_path, monkeypatch):
+    """The attack an adversarial pass raised against this rule, run end to end.
+
+    Two spellings of one Apache resource are byte-identical and one sorts first, so the
+    SURVIVOR can be the spelling that carries no parameters while the pruned one carried all
+    of them. Measured on DVWA at security=low: `/vulnerabilities/xss_r/`,
+    `//vulnerabilities/xss_r/`, `/./vulnerabilities/xss_r/` and
+    `/vulnerabilities/xss_r/index.php` all return 200 with identical 4748-byte bodies and one
+    signature — and `/vulnerabilities/xss_r/` is simultaneously a surface-read target AND the
+    `parameters_by_url` key carrying `name`. The same shape holds for `/vulnerabilities/fi/`
+    and `page`, which is DVWA's critical LFI.
+
+    If pruning reached the parameter pairs, both vulnerabilities would disappear. It does not:
+    the parameter branch builds its targets from `parameters_by_url` and never consults the
+    pruned set. This asserts that on the real shape rather than by reading the source.
+    """
+    import orchestrator.database as original
+    from orchestrator.integrations import deterministic as det
+    from orchestrator.integrations import persistence as db
+    from orchestrator.integrations.adapters import Context
+    from orchestrator.integrations.contracts import AssessmentConfig, Identity
+    from orchestrator.integrations.security import SecretStore
+
+    monkeypatch.setenv("ERLIK_INTEGRATION_DATA", str(tmp_path / "runtime"))
+    monkeypatch.setattr(original, "DB_DIR", tmp_path)
+    monkeypatch.setattr(original, "DB_PATH", tmp_path / "test.db")
+    await original.init_db()
+    await db.migrate()
+
+    XSS = "http://dvwa/vulnerabilities/xss_r/"
+    ALIAS = "http://dvwa//vulnerabilities/xss_r/"      # sorts first, same resource
+    PAGE = "<html>" + "x" * 200 + "</html>"
+
+    class _Sandbox:
+        policy = {"scope": {"allow_hosts": ["dvwa"], "allow_ports": [80]},
+                  "state_changing": False, "excluded_paths": []}
+        proxy_url, images = "http://proxy:8080", {}
+        directory, output = tmp_path / "job", tmp_path / "job" / "output"
+
+        async def run(self, argv):
+            class _Output:
+                code, stderr = 0, ""
+                stdout = capture(PAGE)          # every spelling answers identically
+            return _Output()
+
+        async def audit(self):
+            return []
+
+    monkeypatch.setattr(det, "seeds",
+                        lambda ctx, policy, include_form_actions=False: _done([ALIAS, XSS]))
+    monkeypatch.setattr(det, "form_urls", lambda ctx: _done(set()))
+    # The parameter the reflected-XSS case needs lives on the spelling that will be pruned.
+    monkeypatch.setattr(det, "parameters_by_url", lambda ctx, policy: _done({XSS: ["name"]}))
+
+    handle = SecretStore().put(Identity.model_validate({
+        "name": "admin", "target_origin": "http://dvwa", "role": "admin",
+        "check": {"url": "http://dvwa/index.php", "body_contains": "admin"}}).model_dump())
+    config = AssessmentConfig(
+        scope={"allow_hosts": ["dvwa"], "allow_ports": [80]}, identity_ids=[handle],
+        active=True, max_urls=200, test_cases=["WSTG-INPV-05.2"],
+        budget={"stage_seconds": 60, "assessment_seconds": 120})
+    ctx = Context("s", "st", "http://dvwa/", config, handle, {"name": "admin"})
+    await db.execute("INSERT INTO integration_stages(id,session_id,adapter,identity_id,"
+                     "status,result) VALUES(?,?,?,?,?,?)",
+                     ("st", "s", "testcases", handle, "running", "{}"))
+    result = await det.CatalogueAdapter().run(ctx, _Sandbox())
+
+    # The duplicate spelling IS pruned — the rule fired.
+    assert result.metadata["indistinct_urls"]["count"] == 1
+
+    # ...and the parameter pair survived it.
+    probed = [(o["url"], o.get("parameter")) for o in result.observations
+              if o.get("type") == "test_case"]
+    assert (XSS, "name") in probed, probed
+
+
+# ------------------------------------------- which spelling survives, and which never goes
+
+@pytest.mark.parametrize("urls,survivor,why", [
+    (["http://d/./v/fi/?page=x", "http://d//v/fi/?page=x", "http://d/v/fi/?page=x"],
+     "http://d/v/fi/?page=x",
+     "measured on DVWA: three spellings of one Apache resource, byte-identical 5235-byte "
+     "bodies, and the junk ones sort FIRST — so first-spelling-wins kept a junk spelling and "
+     "reported it as the representative"),
+    (["http://d/about", "http://d/"], "http://d/",
+     "the root is the best base for the cases that append a path — measured, `/` is the only "
+     "member of the 36-strong shell group where /robots.txt and /.well-known/security.txt "
+     "find anything"),
+])
+def test_the_most_canonical_spelling_survives(urls, survivor, why):
+    body = capture("x" * 200)
+    pruned = indistinct_urls([(u, body) for u in urls])
+    assert set(pruned.values()) == {survivor}, why
+    assert survivor not in pruned
+
+
+def test_a_trailing_slash_is_not_a_junk_segment():
+    """`/` splits to ["", ""], so counting every empty segment penalised the ROOT."""
+    from orchestrator.integrations.inventory import canonicality
+
+    assert canonicality("http://d/")[0] == 0
+    assert canonicality("http://d/v/fi/")[0] == 0
+    assert canonicality("http://d//v/fi/")[0] == 1
+    assert canonicality("http://d/./v/fi/")[0] == 1
+
+
+def test_a_url_carrying_a_parameter_is_never_pruned():
+    """Belt and braces: the parameter cases already build from `parameters_by_url`, but a URL
+    the lane knows a parameter for must not be prunable even by accident. Measured on DVWA,
+    the two this protects: `/vulnerabilities/fi/` carries `page` (its probe reads /etc/passwd)
+    and `/vulnerabilities/xss_r/` carries `name` (its probe reflects unencoded)."""
+    body = capture("x" * 200)
+    carrier = "http://d/vulnerabilities/xss_r/"
+    pruned = indistinct_urls([("http://d/./vulnerabilities/xss_r/", body), (carrier, body)],
+                             keep={carrier})
+    assert carrier not in pruned
+    assert pruned == {"http://d/./vulnerabilities/xss_r/": carrier}
+
+
+def test_a_parameter_carrier_outranks_even_a_more_canonical_spelling():
+    body = capture("x" * 200)
+    carrier = "http://d/./x"        # the junk spelling, but it is what carries the parameter
+    pruned = indistinct_urls([("http://d/x", body), (carrier, body)], keep={carrier})
+    assert pruned == {"http://d/x": carrier}
+
+
+def test_every_duplicate_points_at_the_final_survivor():
+    """When a later spelling outranks the incumbent, the entries that already pointed at the
+    incumbent have to be repointed — or a reader is sent to a URL that is itself a duplicate."""
+    body = capture("x" * 200)
+    pruned = indistinct_urls([("http://d/./a", body), ("http://d//a", body),
+                              ("http://d/a", body)])
+    assert set(pruned.values()) == {"http://d/a"}
+    assert not (set(pruned.values()) & set(pruned)), "a survivor is also listed as a duplicate"
+
+
+async def test_the_stage_protects_the_urls_it_knows_parameters_for(tmp_path, monkeypatch):
+    """The wiring, not just the rule: the adapter must pass its parameter carriers as `keep`.
+    Here the carrier is the LESS canonical spelling, so nothing but `keep` saves it."""
+    import orchestrator.database as original
+    from orchestrator.integrations import deterministic as det
+    from orchestrator.integrations import persistence as db
+    from orchestrator.integrations.adapters import Context
+    from orchestrator.integrations.contracts import AssessmentConfig, Identity
+    from orchestrator.integrations.security import SecretStore
+
+    monkeypatch.setenv("ERLIK_INTEGRATION_DATA", str(tmp_path / "runtime"))
+    monkeypatch.setattr(original, "DB_DIR", tmp_path)
+    monkeypatch.setattr(original, "DB_PATH", tmp_path / "test.db")
+    await original.init_db()
+    await db.migrate()
+
+    CARRIER = "http://dvwa/./vulnerabilities/xss_r/"     # junk spelling, but it has the param
+    PLAIN = "http://dvwa/vulnerabilities/xss_r/"         # more canonical, no parameters
+
+    class _Sandbox:
+        policy = {"scope": {"allow_hosts": ["dvwa"], "allow_ports": [80]},
+                  "state_changing": False, "excluded_paths": []}
+        proxy_url, images = "http://proxy:8080", {}
+        directory, output = tmp_path / "job", tmp_path / "job" / "output"
+
+        async def run(self, argv):
+            class _Output:
+                code, stderr = 0, ""
+                stdout = capture("<html>" + "y" * 200 + "</html>")
+            return _Output()
+
+        async def audit(self):
+            return []
+
+    monkeypatch.setattr(det, "seeds",
+                        lambda ctx, policy, include_form_actions=False: _done([PLAIN, CARRIER]))
+    monkeypatch.setattr(det, "form_urls", lambda ctx: _done(set()))
+    monkeypatch.setattr(det, "parameters_by_url", lambda ctx, policy: _done({CARRIER: ["name"]}))
+
+    handle = SecretStore().put(Identity.model_validate({
+        "name": "admin", "target_origin": "http://dvwa", "role": "admin",
+        "check": {"url": "http://dvwa/index.php", "body_contains": "admin"}}).model_dump())
+    config = AssessmentConfig(
+        scope={"allow_hosts": ["dvwa"], "allow_ports": [80]}, identity_ids=[handle],
+        active=True, max_urls=200, test_cases=["WSTG-INPV-05.2"],
+        budget={"stage_seconds": 60, "assessment_seconds": 120})
+    ctx = Context("s", "st", "http://dvwa/", config, handle, {"name": "admin"})
+    await db.execute("INSERT INTO integration_stages(id,session_id,adapter,identity_id,"
+                     "status,result) VALUES(?,?,?,?,?,?)",
+                     ("st", "s", "testcases", handle, "running", "{}"))
+    result = await det.CatalogueAdapter().run(ctx, _Sandbox())
+
+    pruned = result.metadata["indistinct_urls"]
+    assert pruned["count"] == 1
+    assert pruned["survivors"] == [CARRIER], (
+        "the parameter carrier must survive even as the less canonical spelling")

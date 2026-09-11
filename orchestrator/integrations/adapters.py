@@ -697,12 +697,21 @@ class SchemathesisAdapter(BaseAdapter):
             result.observations.append({"type": "workflow", **detail})
             if detail.get("error") or any(not c.get("ok") for c in detail.get("cleanup", [])):
                 result.status, result.reason = "partial", "workflow or cleanup failed; inspect evidence before retry"
+        # ONE CONTROL PER ORIGIN: what this application answers for a path that cannot exist.
+        # See `assertion_verdict` — a single-page application returns its shell for every route
+        # its server does not know, and that shell carries the product's own name, so a
+        # forbidden-marker assertion fired on index.html. The path is derived from the session
+        # id, so it is stable within a run and unpredictable across them.
+        controls: dict = {}
+
         for assertion in ctx.config.security_assertions:
             if assertion.identity_id != ctx.identity_id:
                 continue
             response = await rpc(sandbox, {"action": "request", "request": assertion.request.model_dump()})
             result.observations.append({"type": "security_assertion", "response": response})
-            fires, refused = assertion_verdict(assertion, response)
+            fires, refused = assertion_verdict(
+                assertion, response,
+                await generic_response(sandbox, assertion.request.url, ctx.session_id, controls))
             if refused:
                 result.observations.append({"type": "security_assertion_refused",
                                             "url": assertion.request.url, **refused})
@@ -725,7 +734,36 @@ class SchemathesisAdapter(BaseAdapter):
         return await record(ctx, sandbox, output, result, accepted_codes=(0, 1))
 
 
-def assertion_verdict(assertion, response) -> tuple[bool, dict | None]:
+async def generic_response(sandbox, url, session_id, cache: dict):
+    """What this application answers for a path that cannot exist, fetched once per origin.
+
+    Module level, not a closure, so the decision has a test: it is what keeps a
+    SecurityAssertion from firing on a single-page application's shell, and that assertion
+    emits HIGH `confirmed`.
+
+    The probe path is derived from the session id, so it is stable within a run — two
+    assertions on one origin share one fetch — and unpredictable across runs, so a target
+    cannot special-case it.
+
+    A REFUSED OR ERRORED CONTROL IS NOT A CONTROL. Returning it would make every assertion on
+    that origin compare against erlik's own 403, which is the "our own refusal is not the
+    target's answer" defect this project has now found four times. `None` leaves the assertion
+    evaluated exactly as it was before the control existed.
+    """
+    origin = canonical_origin(url)
+    if origin not in cache:
+        token = hashlib.sha256(str(session_id).encode()).hexdigest()[:16]
+        probe = f"{origin}/erlik-control-{token}"
+        try:
+            answer = await rpc(sandbox, {"action": "request", "request": {"url": probe}})
+        except Exception:
+            answer = None
+        cache[origin] = (None if not answer or answer.get("blocked") or answer.get("error")
+                         else answer)
+    return cache[origin]
+
+
+def assertion_verdict(assertion, response, control=None) -> tuple[bool, dict | None]:
     """Does one SecurityAssertion fire on one response, and if not, why not?
 
     Extracted from the adapter so the decision can be tested without a sandbox — it emits a
@@ -742,6 +780,8 @@ def assertion_verdict(assertion, response) -> tuple[bool, dict | None]:
     A BLOCKED RESPONSE ESTABLISHES NOTHING either, and it is reported rather than quietly
     treated as a clean assertion.
     """
+    from .inventory import worker_response_signature
+
     landed = str(response.get("url") or "")
     asserted = assertion.request.url
     if response.get("blocked"):
@@ -752,6 +792,25 @@ def assertion_verdict(assertion, response) -> tuple[bool, dict | None]:
         return False, {"landed_on": landed,
                        "reason": "the response came from a different URL, so it is not "
                                  "evidence about the asserted one"}
+    # THE APPLICATION'S GENERIC ANSWER IS NOT AN ANSWER ABOUT THIS URL.
+    #
+    # A single-page application serves its shell for every route its server does not know, and
+    # that shell contains the product's own name — so an operator asserting "this identity must
+    # not see 'Juice Shop' at /administration" got a HIGH `confirmed` finding out of
+    # index.html. Measured: `/administration`, `/accounting`, `/Edge/` and `/` all produce one
+    # response signature, and so does a path that cannot exist. `control` is a fetch of such a
+    # path; if the asserted URL answered with the same response, the marker was found in a
+    # document that is not about the asserted URL at all.
+    #
+    # It discriminates rather than blanket-refusing: on the same application `/api/Users`,
+    # `/api/Users/1` and `/rest/user/whoami` all differ from the control, and on DVWA `/`
+    # differs while `/administration` does not.
+    if control is not None and (worker_response_signature(response)
+                                == worker_response_signature(control)):
+        return False, {"reason": "the asserted URL answered with the application's generic "
+                                 "response — the same one a path that cannot exist returns — "
+                                 "so the marker was not found in anything specific to it",
+                       "control_url": str(control.get("url") or "")}
     if response.get("status") != assertion.request.expected_status:
         return False, None
     if assertion.forbidden_marker not in (response.get("body") or ""):

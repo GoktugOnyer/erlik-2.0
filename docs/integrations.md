@@ -865,9 +865,25 @@ the whole surface.
 
 **Only the no-parameter cases are pruned.** A parameter probe is a different request from the
 bare read that grouped, so a URL whose base response is the shell could still answer differently
-to `?id=1'`. Measured, no pruned URL carried a discovered parameter at all — but the safety is
-structural rather than resting on that: `parameters_by_url` pairs are never consulted against
-the pruned set.
+to `?id=1'`. The parameter cases build their targets from `parameters_by_url` and never consult
+the pruned set — and a URL the lane has discovered a parameter for is additionally passed as
+`keep`, so it cannot be pruned even by accident.
+
+That second guard came from an adversarial pass, and the case is worth recording. On DVWA,
+`/vulnerabilities/fi/?page=include.php` and `/vulnerabilities/xss_r/` are each byte-identical to
+`/./…` and `//…` spellings that Apache serves as the same resource — and those junk spellings
+**sort first**, so first-spelling-wins kept one of them and reported it as the representative of
+that response. `page` is the parameter whose probe reads `/etc/passwd` and `name` is the one
+whose probe reflects unencoded, so the two spellings between them carry a critical and a high
+finding. Two changes followed: the **most canonical spelling survives** rather than the first one
+read (`inventory.canonicality` ranks dot and empty segments last), and a parameter carrier
+outranks any spelling.
+
+A trailing slash is not a junk segment, which sounds obvious and was not: `/` splits to
+`["", ""]`, so counting every empty segment penalised the **root** and handed the survivor slot
+to `/about`. `/` is the one member of Juice Shop's 36-strong shell group where the path-appending
+cases find anything (`/robots.txt`, `/.well-known/security.txt`), so that would have cost real
+findings. The test that asserts `/` survives caught it.
 
 **What it buys is better targets, not fewer probes** — and the first framing of this was wrong,
 so it is worth being exact. A case takes its *share* of the budget (`case_targets =
@@ -884,6 +900,40 @@ It does *not* free the surface read's own budget — the read cannot know a URL 
 it has read it. The other half of the win is the **report**: `coverage()` has an `indistinct`
 state, so a URL with nothing left to test no longer reads as `not_run`. Endpoint rows are
 untouched, so the cross-arm authorization comparison sees exactly what it saw before.
+
+### An assertion needs a response about its own URL
+
+`SecurityAssertion` emits `severity="high"`, `confidence="confirmed"` and
+`methodology=["WSTG-AUTHZ-04"]` from one response to one identity — `confirmed` being the grade
+that marks a finding verified on a client's tracker. It had three measured ways to fire on
+nothing. Two were closed earlier: the marker must not be the operator's own input echoed back,
+and the response must come from the asserted URL rather than from wherever a redirect landed.
+This is the third.
+
+**A single-page application serves its shell for every route its server does not know, and that
+shell contains the product's own name.** Measured on Juice Shop: `/administration`,
+`/accounting`, `/Edge/`, `/` and a path that cannot exist all produce one response signature. So
+"this identity must not see 'Juice Shop' at `/administration`" was a HIGH confirmed finding made
+out of `index.html`.
+
+**The control is a path that cannot exist.** Whatever the application answers there is its
+generic response; if the asserted URL answered the same way, the marker was not found in anything
+specific to it. `adapters.generic_response` fetches one per origin, at a path derived from the
+session id — stable within a run so two assertions share one fetch, unpredictable across runs so
+a target cannot special-case it.
+
+It discriminates rather than blanket-refusing. Measured on the same application, `/api/Users`,
+`/api/Users/1` and `/rest/user/whoami` all differ from the control; on DVWA `/` differs while
+`/administration` does not.
+
+**A refused or errored control is not a control.** Returning erlik's own 403 would make every
+assertion on that origin compare against it and be suppressed — the "our own refusal is not the
+target's answer" defect this project has now found four times. `None` leaves the assertion
+evaluated exactly as it was before the control existed.
+
+The comparison is `inventory.worker_response_signature`, the same rule the inventory pruning uses
+and reached through the same function: two ways of deciding whether two responses are the same
+response would be one defect waiting to happen.
 
 ### What the matrix does not unlock
 
