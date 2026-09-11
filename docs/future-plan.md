@@ -920,6 +920,46 @@ its evidence. The identity-isolation half of E-008 belongs in Increment 1 or 2
 instead — §3 explains why it gates R0. Expand browser journeys and business
 workflows after this works.
 
+**Increment 7 — authorization compared across stages.** E-011's remaining half, and the
+work Increment 6 named after stopping at its boundary: a lane stage carries exactly one
+identity, so the `ownership` evaluator's three arms cannot meet inside one. So the question
+is asked of what each STAGE recorded instead.
+
+`inventory.cross_arm_authorization` applies the same four clauses to the stored run
+evidence of two arms, exposed as `POST /sessions/{id}/authorization`. It **composes on the
+isolation gate rather than repeating it**: `compare_arms` runs first, so an operation both
+arms reached at different concrete URLs — the case the operation key introduces — is
+refused instead of compared. Comparing responses from arms that issued different requests
+measures the request.
+
+Every clause was verified load-bearing by removing it, and the refusals are explicit
+rather than silent: arms that are not comparable, an identity with no declared
+`subject_id`, and a missing anonymous arm each return a named reason with an empty findings
+list — and the payload says in as many words that a refusal is not a clean result. That
+matters more here than anywhere else in the lane, because an empty list is exactly what a
+caller wants to read as "no authorization flaws".
+
+Measured end to end on Juice Shop, three stages, three identities, the real proxy
+injecting each arm's material:
+
+    arm jim        HTTP 200   asserted owner 1      (declared subject_id 2)
+    arm admin      HTTP 200   asserted owner 1      (corroborates)
+    arm anonymous  HTTP 401                         (refused, so not published)
+
+    -> 1 finding, refused_because [], and no bearer token anywhere in the verdict
+
+The safety asymmetry is unchanged and is why this was worth building at all: who each
+caller IS comes from the operator via `Identity.subject_id`, and the asserted owner comes
+from the target. A target can cost itself a finding and cannot manufacture one.
+
+**What remains of E-011** is the function-level half, where there is no object to attribute
+and so no ownership field to read. DVWA offers no level that is authenticated-but-
+unauthorized — measured: at `security=low` its authbypass module serves the user table to
+anybody carrying the level cookie, which is missing authentication rather than broken
+authorization, and at `impossible` it enforces correctly. Juice Shop's `/api/Users` is the
+real shape. That needs a privileged-function declaration on the matrix rather than an
+object one, and it is the next increment.
+
 **Increment 6 — the identity matrix, and the boundary it does not cross.** The slice
 sentence opens with "an operator selects two lab identities", and by now every later
 clause was built: the hidden API operation is discovered (Increment 4), its coverage is

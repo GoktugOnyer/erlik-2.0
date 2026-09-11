@@ -306,6 +306,36 @@ sweep, so they survive into a finding's evidence. That matters: the ownership fi
 quotes "the caller is declared to be '2'", and a comparison whose own terms were redacted
 could not be checked by whoever reads it.
 
+### Checking authorization across two arms
+
+`POST /api/integrations/sessions/{id}/authorization` compares what two arms of a finished
+assessment received for the same object:
+
+```json
+{ "caller": "<identity handle>", "owner": "<identity handle>",
+  "owner_field": "data.UserId", "anonymous": "anonymous" }
+```
+
+A finding needs all four clauses, the same ones the `ownership` evaluator applies — the
+caller received the object and an owner is asserted; that owner is not the caller's
+declared `subject_id`; the declared owner corroborates it; and an anonymous arm was
+refused.
+
+**Read `refused_because` before `findings`.** A refusal means the comparison did not run,
+and an empty `findings` list is then not a clean result. It refuses when the two arms did
+not describe the same surface — it calls `compare_arms` first, so an operation both arms
+reached at *different* URLs is refused rather than compared — when an identity declared no
+`subject_id`, and when there is no anonymous arm, because a clause nobody ran is not a
+clause that passed.
+
+Measured end to end on Juice Shop with three stages, three identities and the real proxy:
+
+    arm jim        HTTP 200   asserted owner 1       (declared subject_id 2)
+    arm admin      HTTP 200   asserted owner 1       (declared subject_id 1 — corroborates)
+    arm anonymous  HTTP 401                          (refused, so not published)
+
+    -> 1 finding, refused_because [], and no bearer token anywhere in the verdict
+
 ### What the matrix does not unlock
 
 A lane stage carries exactly **one** identity — it resolves it from its own row, and the
@@ -314,9 +344,10 @@ arms in one case execution (the caller, the declared owner, anonymous), so no si
 can satisfy it however the identity is declared. `subject_id` reaching a case is
 groundwork, not a working lane check.
 
-The lane-native shape is a comparison **across** stages — which `compare_arms` already
-does for surfaces and does not yet do for responses. Run the three-arm authorization
-checks through the sweep or the CLI, where per-role credentials can be supplied.
+The lane-native shape is a comparison **across** stages, which is what
+`POST /sessions/{id}/authorization` above does. Run a stage per identity, then compare. The
+three-arm checks that live inside a single case — WSTG-AUTHZ-04 — still belong to the sweep
+or the CLI, where per-role credentials can be supplied to one execution.
 
 ## Coverage: what ran, what did not, and why
 

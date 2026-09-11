@@ -496,6 +496,124 @@ async def preview(session_id, config, identity_id=None) -> dict:
     }
 
 
+async def cross_arm_authorization(session_id, caller, owner, owner_field,
+                                  anonymous=None) -> dict:
+    """Object-level authorization, compared ACROSS stages. E-011's remaining half.
+
+    A lane stage carries exactly ONE identity, so the `ownership` evaluator — which needs
+    the caller, the declared owner and an anonymous arm in a single case execution — can
+    never run inside one. This asks the same four-clause question of what each STAGE
+    recorded instead, which is the lane-native shape.
+
+    IT COMPOSES ON THE ISOLATION GATE RATHER THAN REPEATING IT. `compare_arms` already
+    establishes whether two arms describe the same surface, including the case the
+    operation key introduces — both arms reaching an operation at DIFFERENT concrete URLs
+    because one carried a single-use token. Comparing responses from arms that issued
+    different requests measures the request, so this refuses out loud instead of reporting
+    no finding, because those are not the same answer.
+
+    THE SAFETY ASYMMETRY IS THE REASON IT IS SAFE TO BUILD. Who each caller IS comes from
+    the OPERATOR, via `Identity.subject_id`; the asserted owner comes from the TARGET. A
+    target can cost itself a finding and cannot manufacture one. The anonymous arm is what
+    stops it calling published content a leak — measured on Juice Shop,
+    `/rest/products/1/reviews` hands every reviewer's email address to anybody who asks.
+
+    Returns `{findings, refused_because, checked}`. A refusal is not a clean result, and
+    callers must not read an empty `findings` list as one.
+    """
+    from orchestrator.testcase.runner import _asserted_owner, _http_status_ok
+    from .security import SecretStore
+
+    def declared(identity_id):
+        if identity_id in (None, "", "anonymous"):
+            return {}
+        try:
+            return SecretStore().get(identity_id) or {}
+        except Exception:
+            return {}
+
+    refused = []
+    caller_subject = str(declared(caller).get("subject_id") or "").strip()
+    owner_subject = str(declared(owner).get("subject_id") or "").strip()
+    if not caller_subject:
+        refused.append("caller_has_no_subject_id")
+    if not owner_subject:
+        refused.append("owner_has_no_subject_id")
+    if anonymous is None:
+        # The clause cannot be evaluated without the arm, and a clause nobody ran is not
+        # a clause that passed.
+        refused.append("no_anonymous_arm")
+
+    surfaces = await compare_arms(session_id, caller, owner)
+    if not surfaces["comparable"]:
+        refused += [reason for reason in surfaces["refused_because"]
+                    if reason != "arms_share_one_identity"]
+
+    async def responses(identity_id):
+        """url -> the body this arm recorded for it, from the stored run evidence."""
+        out = {}
+        stages = {row["id"] for row in await db.rows(
+            "SELECT id FROM integration_stages WHERE session_id=? AND identity_id=?",
+            (session_id, identity_id))}
+        for row in await db.rows(
+                "SELECT id,stage_id,kind FROM integration_evidence WHERE session_id=?",
+                (session_id,)):
+            if row["stage_id"] not in stages or not row["kind"].startswith("testcase:"):
+                continue
+            try:
+                run = json.loads((await db.evidence_bytes(row["id"])).decode("utf-8", "replace"))
+            except Exception:
+                continue            # an unreadable artifact is not a verdict
+            url = (run.get("target") or {}).get("url")
+            for step in run.get("steps") or []:
+                if url and step.get("output"):
+                    out.setdefault(url, step["output"])
+        return out
+
+    caller_saw = await responses(caller)
+    owner_saw = await responses(owner)
+    anonymous_saw = await responses(anonymous) if anonymous is not None else {}
+
+    findings, checked = [], 0
+    if not refused:
+        for url, body in sorted(caller_saw.items()):
+            checked += 1
+            if not _http_status_ok(body):
+                continue
+            asserted = _asserted_owner(body, owner_field)
+            if asserted in (None, "") or str(asserted) == caller_subject:
+                continue
+            if str(asserted) != owner_subject:
+                # The target named somebody who is not either declared identity, so
+                # nothing here can corroborate the claim.
+                continue
+            corroborating = owner_saw.get(url, "")
+            if not (_http_status_ok(corroborating)
+                    and _asserted_owner(corroborating, owner_field) == asserted):
+                continue
+            unauthenticated = anonymous_saw.get(url, "")
+            if _asserted_owner(unauthenticated, owner_field) == asserted:
+                continue            # published, not leaked
+            findings.append({
+                "url": url, "owner_field": owner_field,
+                "caller": caller, "caller_subject_id": caller_subject,
+                "owner": owner, "asserted_owner": asserted,
+                "detail": (f"the caller is declared to be {caller_subject!r} and the "
+                           f"application attributed this object to {asserted!r}, which the "
+                           f"declared owner corroborated; an anonymous arm did not receive "
+                           f"it, so it is not published content"),
+            })
+
+    return {
+        "findings": findings,
+        "refused_because": refused,
+        "checked": checked,
+        "surfaces": surfaces["summary"],
+        "establishes": ("nothing, when `refused_because` is non-empty — an empty findings "
+                        "list is not a clean result unless the comparison actually ran"),
+    }
+
+
 async def coverage(session_id, identity_id=None) -> list[dict]:
     """Per (operation, parameter, identity): what happened, and why not.
 

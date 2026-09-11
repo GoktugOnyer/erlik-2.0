@@ -103,6 +103,37 @@ async def launch_preview(session_id: str, identity_id: str | None = None):
     return await preview(session_id, config, identity_id)
 
 
+class AuthorizationCheck(BaseModel):
+    """Which arms to compare, and where the application names an object's owner."""
+    caller: str = Field(min_length=1)
+    owner: str = Field(min_length=1)
+    # A dotted path into the response body: Juice Shop answers GET /rest/basket/1 with
+    # {"status":"success","data":{"id":1,"UserId":1,...}}, so "data.UserId".
+    owner_field: str = Field(min_length=1, max_length=200)
+    anonymous: str | None = None
+
+
+@router.post("/sessions/{session_id}/authorization")
+async def authorization_check(session_id: str, body: AuthorizationCheck):
+    """Object-level authorization, compared across two arms of a finished assessment.
+
+    A lane stage carries one identity, so the three-arm check cannot run inside one. This
+    asks the same question of what each stage recorded.
+
+    READ `refused_because` BEFORE `findings`. A refusal means the comparison did not run —
+    the arms described different surfaces, an identity declared no `subject_id`, there was
+    no anonymous arm — and an empty `findings` list is then not a clean result. The payload
+    says so in `establishes` for the same reason.
+    """
+    from .inventory import cross_arm_authorization
+
+    if not await db.rows("SELECT 1 FROM integration_assessments WHERE session_id=?",
+                         (session_id,)):
+        raise HTTPException(404, "integration assessment not found")
+    return await cross_arm_authorization(session_id, body.caller, body.owner,
+                                        body.owner_field, body.anonymous)
+
+
 @router.get("/sessions/{session_id}/coverage")
 async def coverage_report(session_id: str, identity_id: str | None = None):
     """What the run did, what it did not, and why — per operation and identity.
