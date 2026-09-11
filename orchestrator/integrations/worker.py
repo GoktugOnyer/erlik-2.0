@@ -88,8 +88,18 @@ def main():
             # through the proxy, which refuses anything out of scope.
             origin = page.url.split("/")[0] + "//" + page.url.split("/")[2] if "//" in page.url else ""
             seen_pages = {page.url}
+            # A cap that is not reported reads as "we visited everything". This one
+            # is worse than most: two arms publishing different menus truncate at
+            # different places, so the cap manufactures a surface difference — and
+            # when they publish the SAME menu it truncates identically and HIDES a
+            # real one. Measured on DVWA, where changing only the crawl root moved
+            # the boundary one link and revealed a form that exists at one security
+            # level and not the other. So the count travels with the result.
+            capped = 0
             for href in links:
                 if len(seen_pages) > int(config.get("form_pages", 20)):
+                    capped = sum(1 for u in links
+                                 if u.startswith(origin) and u not in seen_pages)
                     break
                 if not href.startswith(origin) or href in seen_pages:
                     continue
@@ -100,7 +110,8 @@ def main():
                 except Exception:
                     continue                       # an unreachable link is not a failure
             print(json.dumps({"requests": observed, "links": links, "forms": forms,
-                              "pages_visited": len(seen_pages), "url": config["url"]}))
+                              "pages_visited": len(seen_pages),
+                              "pages_not_visited": capped, "url": config["url"]}))
             browser.close()
     elif action == "baseline_browser":
         # Execute the repository's original crawler with transport-only shims:

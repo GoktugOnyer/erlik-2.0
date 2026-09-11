@@ -155,6 +155,16 @@ four situations outright:
 | `different_operations` | one arm reached something the other never did |
 | `per_arm_value_in_operation` | both arms reached the operation, at **different URLs** — each issued its own request |
 | `no_shared_operations` | two arms that discovered nothing agree vacuously |
+| `different_schema` | the arms were assessed against different API documents |
+
+`different_schema` catches something a schema URL makes easy to miss. `schema_input`
+accepts a `url` as well as inline `content`, and that document is fetched through the
+egress proxy — which injects the identity's headers and cookies. A target serving a
+different OpenAPI per role therefore forks the schema-derived operations exactly as a
+rendered form does. The recorded `schema_sha256` of each arm is compared, and a digest
+present for one arm and absent for the other counts as disagreement: a document served
+to one identity and refused to another is not a shared surface. Supply inline
+`content` when you need the arms to be certain of sharing it.
 
 Every one-sided operation also comes back classified, under `divergence`, because
 "an operation only one arm saw" is the same sentence whether the crawl missed a page
@@ -166,6 +176,23 @@ way:
 | `method_changed` | both arms reached the endpoint, by different methods — a form that is GET for one identity and POST for another |
 | `parameters_changed` | both reached it with a different injectable surface; the entry names the inputs that appeared or vanished |
 | `not_reached_by_other_arm` | there is genuinely nothing at that endpoint in the other arm |
+
+### When the crawl stops early
+
+The rendered pass visits one level past the landing page, bounded by `form_pages`
+(default 20). When that bound is reached the stage records a `crawl_truncated`
+observation naming how many same-origin links were left unvisited.
+
+It is worth reading rather than skipping. A cap is normally just lost coverage, but
+this one distorts a differential in both directions: two identities whose menus differ
+truncate at different places, so the cap manufactures a surface difference — and two
+whose menus match truncate identically, so the cap hides a real one beyond its
+boundary. Measured on DVWA, which publishes 31 links from its landing page: at the
+default the crawl stops at 20 and says so, and moving the boundary by a single link
+reveals a form that exists at one security level and not the other.
+
+Raise `form_pages` to cover them. The observation appears only when the cap actually
+fired.
 
 ### Links the crawler refuses
 

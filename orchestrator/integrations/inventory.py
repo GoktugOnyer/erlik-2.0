@@ -467,7 +467,41 @@ async def compare_arms(session_id, first_identity, second_identity) -> dict:
     divergence = ([classify(left[k], right, "first") for k in only_left]
                   + [classify(right[k], left, "second") for k in only_right])
 
+    # DID THE TWO ARMS ASSESS THE SAME API? `SchemaInput` accepts a URL as well as
+    # inline content, and `schema_file` fetches that document through the egress
+    # proxy — which injects the identity's headers and cookies. So a target serving
+    # a different OpenAPI document per role forks the schema-derived operations
+    # exactly as a rendered form does.
+    #
+    # The information already existed and nothing compared it: the ZAP and
+    # Schemathesis adapters both record `schema_sha256` in their stage metadata.
+    # Detection rather than prevention, deliberately — refusing a per-identity fetch
+    # would break a schema that is itself behind authentication, and fetching it once
+    # anonymously would break it differently. An absent digest on ONE side is not
+    # agreement either: a target that serves the document to one identity and refuses
+    # it to another has given the arms different surfaces.
+    async def schema_digest(identity_id):
+        digests = set()
+        for row in await db.rows(
+                "SELECT result FROM integration_stages WHERE session_id=? AND identity_id=?",
+                (session_id, identity_id)):
+            try:
+                metadata = json.loads(row["result"] or "{}").get("metadata") or {}
+            except (ValueError, TypeError):
+                continue
+            if metadata.get("schema_sha256"):
+                digests.add(metadata["schema_sha256"])
+        return sorted(digests)
+
+    schema = {}
+    for identity_id in (first_identity, second_identity):
+        found = await schema_digest(identity_id)
+        if found:
+            schema[identity_id] = found[0] if len(found) == 1 else found
+
     reasons = []
+    if schema and (len(schema) != 2 or len(set(map(str, schema.values()))) != 1):
+        reasons.append("different_schema")
     if first_identity == second_identity:
         reasons.append("arms_share_one_identity")
     if only_left or only_right:
@@ -485,6 +519,8 @@ async def compare_arms(session_id, first_identity, second_identity) -> dict:
         "per_arm_value_in_operation": per_arm_value,
         # Each one-sided operation with a reason, where the data supports one.
         "divergence": divergence,
+        # The schema digest each arm was assessed against, when one was recorded.
+        "schema": schema,
         "comparable": not reasons,
         "refused_because": reasons,
         # Stated as a fraction because that is how the original defect was

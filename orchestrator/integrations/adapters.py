@@ -366,6 +366,36 @@ class ZapAdapter(BaseAdapter):
         return await record(ctx, sandbox, output, result, accepted_codes=(0, 2))
 
 
+def crawl_truncation(browser: dict) -> dict | None:
+    """The rendered crawl's page cap, stated rather than left to be inferred.
+
+    The cap is worse than most caps, and in both directions. Two arms publishing
+    DIFFERENT menus truncate at different places, so the cap manufactures a surface
+    difference; two arms publishing the SAME menu truncate identically and the cap
+    HIDES a real one. Measured on DVWA: changing only the crawl root from
+    `/index.php` to `/` moved the boundary by one link and revealed
+    `/vulnerabilities/cryptography/`, a GET form at `security=impossible` and not at
+    `low`. An earlier audit had called the cap benign precisely because both arms
+    truncated identically, which is the reading this observation exists to prevent.
+
+    Returns None when the cap did not fire — an observation on every run is how an
+    observation stops being read.
+    """
+    remaining = browser.get("pages_not_visited") or 0
+    if not remaining:
+        return None
+    visited = browser.get("pages_visited")
+    return {
+        "type": "crawl_truncated", "url": None, "steps": [],
+        "pages_visited": visited, "pages_not_visited": remaining,
+        "detail": (f"the rendered crawl stopped at {visited} pages with {remaining} "
+                   f"same-origin link(s) unvisited; raise form_pages to cover them. "
+                   f"Two arms that truncate at different points are not the same "
+                   f"surface, and two that truncate identically can still be hiding "
+                   f"a difference beyond the cap"),
+    }
+
+
 def wants_rendered_pass(config) -> bool:
     """Should this ASSESSMENT run the rendered (Playwright) discovery pass?
 
@@ -410,6 +440,7 @@ class KatanaAdapter(BaseAdapter):
                 "-c", str(ctx.config.budget.concurrency), "-rl", str(max(1, int(ctx.config.budget.requests_per_second))),
                 "-proxy", sandbox.proxy_url, "-cs", re.escape(ctx.target.rstrip("/")) + ".*", "-duc"]
         browser_endpoints = []
+        browser_truncation = None
         if wants_rendered_pass(ctx.config):
             browser = await rpc(sandbox, {"action": "browser", "url": ctx.target, "storage_state": (ctx.identity or {}).get("storage_state")})
             for request in browser["requests"]:
@@ -438,6 +469,7 @@ class KatanaAdapter(BaseAdapter):
             # finds the parameters on them, which is the whole point of form
             # discovery and produced the run's only true positives. They simply
             # are not pages to visit.
+            browser_truncation = crawl_truncation(browser)
             crawlable = [e.url for e in browser_endpoints if e.source != "form"]
             seeds = [ctx.target, *browser["links"], *crawlable]
             from .egress_policy import EgressPolicy
@@ -466,6 +498,8 @@ class KatanaAdapter(BaseAdapter):
                 if len(result.endpoints) < ctx.config.max_urls:
                     result.endpoints.append(Endpoint(url=url, method=method, source="katana",
                                                      identity=ctx.identity_id, parameters=parameter_names(url)))
+        if browser_truncation:
+            result.observations.append(browser_truncation)
         if len(seen) > ctx.config.max_urls:
             result.status, result.reason = "partial", "URL inventory limit reached"
         elif not result.endpoints:

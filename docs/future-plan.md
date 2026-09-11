@@ -659,7 +659,7 @@ Python's `http.cookiejar`, which silently drops cookies for dotless hosts like
 reason. The verified precondition in the final script — assert the session is live
 before trusting anything downstream of it — is what turned the result over.
 
-### E-030: fork points an operation-level identity does not absorb — PARTLY CLOSED
+### E-030: fork points an operation-level identity does not absorb — CLOSED
 
 The eight findings were not one defect. Some are genuine application differences
 that must stay VISIBLE — E-008 asks for differences to be distinguishable, not
@@ -719,34 +719,65 @@ in one session, changing only the `security` cookie:
       parameters_changed        /vulnerabilities/brute/, /csrf/, /cryptography/, /xss_r/
       not_reached_by_other_arm  /vulnerabilities/csp/source/impossible.js
 
-**Still open, and why each is left.**
+**The remaining four, and two of them were my own wrong diagnoses.**
 
-- **The row key has no `source` column**, so a page row and a form row for one URL
-  cannot coexist — `INSERT OR REPLACE` keeps the last writer. That is what remains
-  at `/vulnerabilities/xss_r/`: the vulnerable arm collapses page and action into
-  one row while the hardened arm has two, so the arms still differ by one
-  operation there. The withholding asymmetry is gone; this is the schema half, and
-  it belongs to E-007's operations/observations tables rather than to a patch here.
-- **A state-dependent PATH survives normalisation** —
-  `/vulnerabilities/csp/source/impossible.js`, and in general locale prefixes,
-  tenant prefixes and per-user ids. Path templating is E-007's work; the comparison
-  now reports it as `not_reached_by_other_arm`, which is accurate.
-- **The page-visit cap.** Changing the crawl cap is an execution-policy change and
-  §3 says to keep at most one of those in progress. Worth recording that the first
-  audit called the cap benign because both arms truncate identically, and an
-  adversarial pass measured the opposite: with the ordinary crawl root `/` rather
-  than `/index.php` the cap lands one link later, `/vulnerabilities/cryptography/`
-  is visited, and it is a GET form at `impossible` — a second one-sided operation
-  the first measurement's root spelling hid. Identical truncation is the worse case,
-  because the asymmetry it conceals is real. The run above reached cryptography and
-  reported it.
-- **Schema-derived operations are not fork-free.** `SchemaInput` accepts a URL as
-  well as inline content, and `schema_file` fetches it through the egress proxy,
-  which injects the identity's headers and cookies — so a target serving a different
-  OpenAPI document per role forks the schema-derived operations exactly as a
-  rendered form does. Only an operator-supplied inline `content` is identity-
-  independent. Refusing a per-identity schema fetch, or fetching it once
-  anonymously and reusing it, is a configuration decision rather than a bug fix.
+- **The row key's missing `source` column was not data loss.** I recorded that "a
+  page row and a form row for one URL cannot coexist — `INSERT OR REPLACE` keeps the
+  last writer". `persist_result` in fact UNIONS both `sources` and `parameters`, and
+  nothing is lost in either arrival order — measured, and now pinned by
+  `test_a_page_row_and_a_form_row_at_one_url_both_survive`. The claim was plausible
+  from the SQL statement alone and wrong once the code around it was read.
+
+  What genuinely remains at `/vulnerabilities/xss_r/` is an operation-identity
+  question, not a storage one. The vulnerable arm merges page and form into one row
+  (that form adds no named companion, so the two URLs coincide) while the hardened arm
+  has two (its form URL carries a token), so the hardened arm holds one extra
+  parameter-free operation. **Absorbing that would reintroduce the page/action merge
+  an adversarial pass called blocking** — `/vulnerabilities/csrf/` and
+  `/vulnerabilities/csrf/?Change=Change` differ only in their parameter sets, and
+  merging them puts a request that changes the admin password under the same identity
+  as the page that displays the form. It is reported as `parameters_changed`, which is
+  what it is, and that is the right answer rather than a deferral.
+
+- **The state-dependent path is not templatable.** I recorded
+  `/vulnerabilities/csp/source/impossible.js` as wanting path templating, on the
+  assumption that the vulnerable arm had a counterpart to template against. Measured:
+  at `security=low` that page loads **no** `source/*.js` at all — the hardened level
+  genuinely loads an extra script. There is nothing to absorb, and
+  `not_reached_by_other_arm` is the complete and correct answer. Path templating is
+  still E-007's work for locale and tenant prefixes; it was never what this
+  particular divergence needed.
+
+- **The page-visit cap now reports itself. FIXED.** The cap was silent, and silence is
+  the wrong default in both directions: two arms publishing different menus truncate
+  at different places, so the cap MANUFACTURES a difference, and two publishing the
+  same menu truncate identically so the cap HIDES one. `adapters.crawl_truncation`
+  emits a `crawl_truncated` observation naming how many same-origin links were left
+  and why a truncated arm cannot be compared, and stays silent when the cap did not
+  fire — an observation on every run is how an observation stops being read. Verified
+  end to end against real DVWA with the rebuilt worker image:
+
+        form_pages=5    31 links published, 6 visited, 20 unvisited  -> observation
+        form_pages=60   31 links published, 26 visited, 0 unvisited  -> none
+
+  Note the default is 20 and DVWA publishes 31 links, so the default truncates there.
+  That was the hidden asymmetry; it is now stated. Raising the cap remains an
+  execution-policy decision and is not made here.
+
+- **A schema fetched by URL is identity-dependent. DETECTED.** `SchemaInput` accepts a
+  URL, and `schema_file` fetches it through the proxy, which injects the identity's
+  headers and cookies — so a target serving a different OpenAPI per role forks the
+  schema-derived operations. The information to catch it already existed and nothing
+  compared it: both the ZAP and Schemathesis adapters record `schema_sha256` in their
+  stage metadata. `compare_arms` now refuses with `different_schema` when the two arms'
+  digests disagree, and an absent digest on ONE side counts as disagreement — a target
+  that serves the document to one identity and refuses it to another has given the arms
+  different surfaces.
+
+  Detection rather than prevention, deliberately. Refusing a per-identity fetch would
+  break a schema that is itself behind authentication; fetching it once anonymously
+  would break it differently. Which of those an operator wants is their decision, and
+  they could not make it while the fork was invisible.
 
 ## 10. Shared technical contracts
 

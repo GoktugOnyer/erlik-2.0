@@ -269,3 +269,46 @@ def test_zap_is_told_about_the_sign_out_paths_too():
     # And the same precision the proxy guard keeps.
     for path in ("/about", "/blog/how-to-logout-safely", "/docs/signout-api"):
         assert not zap_excludes("http://app.test" + path), f"{path} was excluded from the crawl"
+
+
+# ------------------------------------- the diagnosis that turned out to be wrong
+
+async def test_a_page_row_and_a_form_row_at_one_url_both_survive(store):
+    """E-030 recorded this as data loss. It is not, and the record was corrected.
+
+    My note said the row key "has no `source` column, so a page row and a form row
+    for one URL cannot coexist — `INSERT OR REPLACE` keeps the last writer".
+    `persist_result` in fact UNIONS both `sources` and `parameters`, so nothing is
+    lost in either arrival order. Pinned here because the claim was plausible from
+    reading the SQL statement alone and wrong once the surrounding code was read —
+    and because a future reader of that note needs the correction next to the
+    behaviour.
+
+    What genuinely remains at `/vulnerabilities/xss_r/` is an operation-identity
+    question rather than a storage one: the vulnerable arm merges the page and the
+    form into one row (the form adds no companion, so the URLs coincide) while the
+    hardened arm has two rows (its form URL carries a token), so the hardened arm
+    has one extra parameter-free operation. Absorbing that difference would
+    reintroduce the page/action merge an adversarial pass called blocking — see
+    `test_a_page_never_merges_with_that_path_s_form_action`. It is reported as
+    `parameters_changed`, which is what it is.
+    """
+    from orchestrator.integrations.contracts import Endpoint, StageResult
+
+    page = Endpoint(url=XSS, source="playwright", identity="a", parameters=[])
+    form = Endpoint(url=XSS, source="form", identity="a", parameters=["name"])
+    flipped_page = Endpoint(url=XSS, source="playwright", identity="b", parameters=[])
+    flipped_form = Endpoint(url=XSS, source="form", identity="b", parameters=["name"])
+
+    await store.persist_result("s", "stage-1", StageResult(endpoints=[page, form]))
+    await store.persist_result("s", "stage-2", StageResult(endpoints=[flipped_form, flipped_page]))
+
+    rows = {r["identity_id"]: r for r in await store.rows(
+        "SELECT identity_id,sources,parameters FROM integration_endpoints WHERE url=?", (XSS,))}
+    for identity, label in (("a", "page then form"), ("b", "form then page")):
+        sources = json.loads(rows[identity]["sources"])
+        parameters = json.loads(rows[identity]["parameters"])
+        assert sorted(sources) == ["form", "playwright"], (label, sources)
+        assert parameters == ["name"], (
+            f"{label}: the form's parameter was lost, so the merge really is "
+            f"last-writer-wins after all: {parameters}")
