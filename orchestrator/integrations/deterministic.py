@@ -21,7 +21,8 @@ from .security import redact, safe_evidence
 # A finding's evidence is target-controlled text that travels into a report and
 # into a client's issue tracker. The runner already caps it; this is the bound on
 # the other side of the seam.
-MAX_EVIDENCE_CHARS = 1500
+# Re-exported: the bound lives beside the field it bounds.
+from .contracts import MAX_EVIDENCE_CHARS  # noqa: F401
 from . import persistence as db
 
 

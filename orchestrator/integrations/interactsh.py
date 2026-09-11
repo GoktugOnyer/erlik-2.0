@@ -15,7 +15,8 @@ from .security import SecretStore, redact, safe_evidence
 
 # The callback record is written by whatever made the callback — the target, or
 # anything the target's request reached. Same provenance as a response body.
-MAX_EVIDENCE_CHARS = 1500
+# Re-exported: the bound lives beside the field it bounds.
+from .contracts import MAX_EVIDENCE_CHARS  # noqa: F401
 
 
 def _callback_evidence(host, probe, protocol, event, context) -> str:

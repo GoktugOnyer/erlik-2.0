@@ -399,6 +399,35 @@ marker is not a usable comparison — it is held to `declared.validate`, the sam
 governs `private_object_marker` in the catalogue, rather than to a second rule invented
 here.
 
+**And when the session already says the opposite.** Privilege is an *order*: `admin` above
+`customer` and `customer` above `admin` cannot both hold. Nothing checked, so swapping the
+two handles was accepted and produced the inverse of every finding. Measured on the real
+Juice Shop session:
+
+    privileged=admin, unprivileged=customer   refused=[]  2 findings
+    privileged=customer, unprivileged=admin   refused=[]  2 findings
+      -> 4 high/confirmed rows for 2 violations, two of them titled
+         "admin reached a privileged function"
+
+An export carrying that tells a client the administrator broke into a function the
+administrator owns. The product still cannot tell which direction was meant — `role` is a
+label it does not interpret — but it can tell it is being asked to hold both, so it refuses
+with `arms_already_compared_in_the_opposite_direction` and **names the contradicting rows**
+under `contradicting_findings`. The recovery path is triage: a row marked `false_positive`
+is the operator saying they already know it was wrong, so it stops contradicting and the
+other direction runs. Measured after: 4 rows became 2, and triaging both away let the
+swapped call through.
+
+Detecting this needed `IntegrationFinding.compared_with`, because `identity` alone carries
+half an ordered pair. Matching on the privileged arm alone would have been wrong: a
+three-tier engagement legitimately records `manager` under `admin` and then asks about
+`manager` over `customer`, and that is not a contradiction.
+
+The sibling object-level route gets **no** such rule, deliberately. "jim read a record the
+application attributes to the administrator" and the reverse are two findings that can both
+be true; there is no order to contradict, and a symmetry rule there would suppress a real
+one.
+
 **Entitlement is the one thing no response can express**, so the operator declares it.
 `Identity.may_access` — a field that until now was validated and read by nothing — lists
 paths an identity is entitled to reach, and a declared path removes a finding. It is read
@@ -965,6 +994,39 @@ export body.
 
 A refused check records nothing. A refusal means the comparison did not run, and turning that into
 zero rows would be indistinguishable from a clean result.
+
+**One finding per operation, and it names every URL it covers.** `fingerprint` drops query
+*values* and keeps names on purpose — a value is the payload, so two injection probes at `?id=1`
+and `?id=2` are one finding at one operation. But the check emitted one record per URL and
+`persist_findings` writes with `INSERT OR REPLACE`, so the records collided and the later one took
+the earlier one's row. Measured:
+
+    violations at /rest/order?id=1 and ?id=2   -> 1 fingerprint, 1 row, url == "?id=2"
+    the 189 operations both arms of the real run shared
+                                              -> 176 keys, 5 colliding groups,
+                                                 13 urls dropped without a word
+
+Collapsing is right — the largest group is ten `/redirect?to=…` URLs, which *are* one finding, and
+ten rows of them would be ten times the noise. Losing nine silently was not. The group is named in
+the evidence now, bounded at twelve with a count of the rest, and the surviving row is the most
+canonical member by the same `canonicality` rule the duplicate-response pruner uses rather than
+whichever URL sorted last. Re-measured on the same 189: **176 findings naming all 189 URLs, none
+lost.**
+
+**And the findings are redacted like every other producer's.** `adapters`, `interactsh` and
+`deterministic` all build evidence as `safe_evidence(redact(text, ctx.known))[:MAX_EVIDENCE_CHARS]`.
+The cross-arm checks are asked for on demand rather than run as a stage, so they never had a
+`JobContext`, had no `known` set at all, and quoted discovery's URLs straight into a description
+whose banner reads "Evidence (credentials redacted)". The realistic leak is not a planted one: an
+application that puts a session token in a link is committing an ordinary reportable bug, katana
+follows the link, and the URL becomes the finding's own `endpoints` value. Measured — a URL carrying
+a JWT reached `IntegrationFinding.url` verbatim while `redact()` on the same string yields
+`?token=[REDACTED]`. `inventory._arm_secrets` now builds the `known` set from the declarations of
+the arms being compared (12 values on the real session), and `basis` stays exempt because it is
+lane-authored prose, which is the distinction `IntegrationFinding.evidence` documents.
+
+`MAX_EVIDENCE_CHARS` moved to `contracts`, beside the field it bounds. It was three copies of
+`1500` and this was about to write a fourth.
 
 **Two gaps the work exposed, both fixed.**
 

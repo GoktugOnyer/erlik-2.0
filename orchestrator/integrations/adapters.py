@@ -62,7 +62,8 @@ async def rpc(sandbox, request):
 
 # A finding's evidence is target-controlled text that travels into a report and
 # into a client's issue tracker. Bounded here as well as at the runner seam.
-MAX_EVIDENCE_CHARS = 1500
+# Re-exported: the bound lives beside the field it bounds.
+from .contracts import MAX_EVIDENCE_CHARS  # noqa: F401
 
 
 def _marker_window(body: str, marker: str, window: int = 200) -> str:

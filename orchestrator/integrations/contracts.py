@@ -698,6 +698,15 @@ class Endpoint(StrictModel):
     parameters: list[str] = Field(default_factory=list)
 
 
+# HOW MUCH TARGET-CONTROLLED TEXT A FINDING MAY QUOTE.
+#
+# It lived as three separate copies of `1500`, in `adapters`, `interactsh` and
+# `deterministic`, and a fourth was about to be written for the cross-arm path.
+# It belongs next to the field it bounds: every producer now imports it from
+# here, and the three modules re-export it so existing importers still resolve.
+MAX_EVIDENCE_CHARS = 1500
+
+
 class IntegrationFinding(StrictModel):
     fingerprint: str
     title: str
@@ -707,6 +716,18 @@ class IntegrationFinding(StrictModel):
     method: str = "GET"
     parameter: str = ""
     identity: str = "anonymous"
+    # THE OTHER ARM, when the claim is a comparison between two of them.
+    #
+    # `identity` alone cannot carry a differential claim: a privileged-function
+    # finding says "this arm reached something it should not have", and "should
+    # not have" is only meaningful relative to the arm it was compared against.
+    # Recording half of an ordered pair also made the pair unverifiable — nothing
+    # could notice that a session held the SAME comparison asserted in both
+    # directions, which is how a swapped declaration produced four confirmed rows
+    # for two violations with the roles inverted on two of them.
+    #
+    # Empty for every single-arm finding, which is all of the catalogue ones.
+    compared_with: str = ""
     severity: str = "medium"
     confidence: Literal["suspected", "likely", "confirmed"] = "suspected"
     # WHY THE CLAIM WAS MADE — lane-authored, and safe to render as-is.

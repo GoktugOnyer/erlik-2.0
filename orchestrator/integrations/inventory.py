@@ -6,8 +6,9 @@ from functools import lru_cache
 from urllib.parse import unquote_plus, urldefrag, urlsplit, urlunsplit
 from orchestrator import http_capture
 from orchestrator.engagement import looks_injectable
-from .contracts import (PARAMETER_NAME, IntegrationFinding, fingerprint,
-                        parameter_names)
+from .contracts import (MAX_EVIDENCE_CHARS, PARAMETER_NAME, IntegrationFinding,
+                        fingerprint, parameter_names)
+from .security import SecretStore, redact, safe_evidence, secret_values
 from . import persistence as db
 from .egress_policy import EgressPolicy
 
@@ -815,6 +816,52 @@ async def cross_arm_authorization(session_id, caller, owner, owner_field,
     }
 
 
+async def _already_compared_the_other_way(session_id, rule, privileged,
+                                          unprivileged) -> list:
+    """Fingerprints of findings in this session that assert the OPPOSITE privilege order.
+
+    Privilege is an ORDER, so `X is above Y` and `Y is above X` cannot both hold. The
+    product cannot tell which one the operator meant — `role` is a label it deliberately
+    does not interpret, and guessing from a name is the assumption-driven finding that
+    `role_not_declared` already refuses to make. But it can tell that it is being asked
+    to hold both, and holding both means at least one recorded finding is wrong.
+
+    Measured before this existed: running the real Juice Shop check with `privileged` and
+    `unprivileged` swapped was not refused, found the same two violations, and wrote two
+    more rows titled "admin reached a privileged function" — four confirmed, high,
+    exported rows for two violations, two of them naming the administrator as the
+    intruder into a function the administrator owns.
+
+    THE PAIR, not one half of it. A three-tier engagement legitimately records `manager`
+    as the unprivileged arm against `admin` and then asks about `manager` against
+    `customer`; matching on the privileged arm alone would refuse that, which is why
+    `IntegrationFinding.compared_with` had to exist.
+
+    FALSE POSITIVES DO NOT BLOCK THE OPERATOR. A row triaged `false_positive` is the
+    operator saying they already know it was wrong, so it stops contradicting anything
+    and the correct direction can be run. That is the recovery path: triage the bad row,
+    re-run.
+
+    THE SIBLING OBJECT CHECK GETS NO SUCH RULE, deliberately. "jim read a record the
+    application attributes to the administrator" and "the administrator read a record it
+    attributes to jim" are two different findings that can both be true; there is no
+    order to contradict.
+    """
+    found = []
+    for row in await db.rows("SELECT payload FROM integration_findings WHERE session_id=?",
+                             (session_id,)):
+        try:
+            payload = json.loads(row["payload"])
+        except (ValueError, TypeError):
+            continue
+        if (payload.get("rule") == rule
+                and payload.get("identity") == privileged
+                and payload.get("compared_with") == unprivileged
+                and payload.get("triage_state") != "false_positive"):
+            found.append(payload.get("fingerprint", ""))
+    return sorted(found)
+
+
 async def cross_arm_privileged_function(session_id, privileged, unprivileged, marker,
                                         anonymous=None) -> dict:
     """Privileged-function access, compared ACROSS stages. E-011's last clause.
@@ -899,6 +946,13 @@ async def cross_arm_privileged_function(session_id, privileged, unprivileged, ma
         # would be reporting that mistake as a vulnerability. This also subsumes the
         # degenerate case of one identity passed twice.
         refused.append("arms_share_a_role")
+    # AND THE SESSION MUST NOT ALREADY SAY THE OPPOSITE. Two identities cannot each be
+    # the more privileged one, and a swapped declaration is otherwise indistinguishable
+    # from a correct one — see `_already_compared_the_other_way`.
+    contradicted = await _already_compared_the_other_way(
+        session_id, AUTHORIZATION_RULES["function"], privileged, unprivileged)
+    if contradicted:
+        refused.append("arms_already_compared_in_the_opposite_direction")
     anonymous = _arm_name(anonymous)
     if anonymous is None:
         refused.append("no_anonymous_arm")
@@ -1025,6 +1079,10 @@ async def cross_arm_privileged_function(session_id, privileged, unprivileged, ma
         "findings": findings,
         "refused_because": refused,
         "checked": checked,
+        # NAMED, so the refusal is actionable. The operator has to be able to find the rows
+        # that contradict this call in order to triage one of them away, and a bare reason
+        # token would have left them searching.
+        "contradicting_findings": contradicted,
         # Named and listed, not counted silently: these operations were NOT evaluated,
         # and a report that omitted them would read as a clean result for them.
         "skipped_reflected_marker": reflected,
@@ -1056,6 +1114,45 @@ AUTHORIZATION_RULES = {
 }
 
 
+# How many of a collapsed group's URLs a finding names before it stops listing and
+# says how many more there were. Enough to show the shape of the group — the largest
+# real one measured was ten `/redirect?to=…` URLs — and bounded because the list is
+# built from target-supplied strings.
+MAX_URLS_NAMED = 12
+
+
+def _arm_secrets(result: dict) -> tuple:
+    """Every secret value carried by the arms this result compares.
+
+    The cross-arm path had no `known` set at all, because it is the one finding
+    producer that is not a stage and so never had a `JobContext`. Every other
+    producer redacts against the identities in play (`adapters`, `interactsh`,
+    `deterministic`), and this one quoted URLs straight from discovery into a
+    description whose banner reads "Evidence (credentials redacted)".
+
+    The realistic leak is not a planted one. An application that puts a session
+    token in a link is committing an ordinary, reportable bug; katana follows the
+    link, the URL lands in an endpoint row, and the token travels into the export as
+    the finding's own `endpoints` value. Measured: a URL carrying a JWT reached
+    `IntegrationFinding.url` verbatim while `redact()` on the same string yields
+    `?token=[REDACTED]`.
+    """
+    known = []
+    for finding in result.get("findings") or []:
+        for field in ("privileged", "unprivileged", "caller", "owner"):
+            arm = finding.get(field)
+            if not arm or arm == "anonymous":
+                continue
+            try:
+                known += list(secret_values(SecretStore().get(arm) or {}))
+            except Exception:
+                # A missing or unreadable declaration means one fewer value to
+                # redact against, never a finding withheld. The header-level rules
+                # inside `redact` do not depend on this set.
+                continue
+    return tuple(known)
+
+
 def authorization_findings(target, check: str, result: dict) -> list:
     """Turn a cross-arm check's result into findings the product can actually carry.
 
@@ -1080,11 +1177,45 @@ def authorization_findings(target, check: str, result: dict) -> list:
     if result.get("refused_because"):
         return []
     rule = AUTHORIZATION_RULES[check]
-    out = []
-    for finding in result.get("findings") or []:
-        url = finding.get("url", "")
+    known = _arm_secrets(result)
+
+    def arms_of(finding):
+        """(the arm the claim is about, the arm it was compared against)."""
         if check == "function":
-            arm = finding.get("unprivileged", "")
+            return finding.get("unprivileged", ""), finding.get("privileged", "")
+        return finding.get("caller", ""), finding.get("owner", "")
+
+    # ONE FINDING PER KEY, BECAUSE THE KEY IS WHAT THE DATABASE STORES.
+    #
+    # `fingerprint` deliberately drops query VALUES and keeps names: a value is the
+    # payload, and two SQL injection probes at `?id=1` and `?id=2` are one finding at
+    # one operation. That is right, and it is right here too — an IDOR is a property of
+    # `/rest/order`, not of order 1 — but the check emits one record per URL, and
+    # `persist_findings` writes them with `INSERT OR REPLACE`. So the second silently
+    # took the first's row. Measured: violations at `/rest/order?id=1` and `?id=2` built
+    # ONE fingerprint and left ONE row, whose `url` was `?id=2`; across the 189
+    # operations both arms of a real Juice Shop run shared, five groups collapsed and 13
+    # URLs would have been dropped, the largest group being ten `/redirect?to=…`.
+    #
+    # Collapsing is the answer rather than distinguishing, because the ten redirect URLs
+    # ARE one finding and ten rows of them would be ten times the noise. What was wrong
+    # was losing the other nine without saying so — so the group is named in the
+    # evidence and the row that survives is the most canonical member, chosen by the
+    # same `canonicality` rule the duplicate-response pruner already uses rather than by
+    # whichever URL happened to sort last.
+    groups = {}
+    for finding in result.get("findings") or []:
+        arm, _ = arms_of(finding)
+        key = fingerprint(target, rule, "GET", finding.get("url", ""), "", arm)
+        groups.setdefault(key, {}).setdefault(finding.get("url", ""), finding)
+
+    out = []
+    for key, members in groups.items():
+        urls = sorted(members, key=canonicality)
+        finding = members[urls[0]]
+        url = urls[0]
+        arm, other = arms_of(finding)
+        if check == "function":
             title = (f"{finding.get('unprivileged_role') or 'a less privileged role'} reached a "
                      f"privileged function")
             evidence = (
@@ -1099,7 +1230,6 @@ def authorization_findings(target, check: str, result: dict) -> list:
                      "what privileged data looks like; that both arms received it and an "
                      "anonymous arm asked and did not is the application's own answer.")
         else:
-            arm = finding.get("caller", "")
             title = "One identity read an object the application attributes to another"
             evidence = (
                 "erlik compared an ownership claim the application made against the identity it\n"
@@ -1113,10 +1243,24 @@ def authorization_findings(target, check: str, result: dict) -> list:
             basis = ("Three-arm differential. Who the caller IS comes from the operator via "
                      "Identity.subject_id and the asserted owner comes from the target, so a "
                      "target can cost itself a finding and cannot manufacture one.")
+        if len(urls) > 1:
+            shown = urls[:MAX_URLS_NAMED]
+            evidence += (
+                f"\n  this operation was reached at {len(urls)} urls that a fingerprint\n"
+                "  does not distinguish, so they are one finding and named here:\n"
+                + "".join(f"    {one}\n" for one in shown)
+                + (f"    and {len(urls) - len(shown)} more\n" if len(urls) > len(shown) else ""))
         out.append(IntegrationFinding(
-            fingerprint=fingerprint(target, rule, "GET", url, "", arm),
-            title=title, url=url, rule=rule, source="cross-arm", identity=arm,
-            severity="high", confidence="confirmed", basis=basis, evidence=evidence,
+            fingerprint=key,
+            # REDACTED AND SANITISED LIKE EVERY OTHER PRODUCER'S. This path quoted
+            # discovery's URLs and the target's own owner value into a description whose
+            # banner says "Evidence (credentials redacted)", and nothing redacted them.
+            # `basis` is exempt because it is lane-authored, which is the distinction
+            # `IntegrationFinding.evidence` already documents.
+            title=safe_evidence(title), url=redact(url, known),
+            rule=rule, source="cross-arm", identity=arm, compared_with=other,
+            severity="high", confidence="confirmed", basis=basis,
+            evidence=safe_evidence(redact(evidence, known))[:MAX_EVIDENCE_CHARS],
             methodology=["WSTG-AUTHZ-04"],
             # A BARE NUMBER, matching what the ZAP adapter already stores and what DefectDojo's
             # Finding.cwe expects (an integer). 639 is authorization bypass through a

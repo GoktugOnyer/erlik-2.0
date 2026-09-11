@@ -168,8 +168,9 @@ async def privileged_function_check(session_id: str, body: PrivilegedFunctionChe
 
     READ `refused_because` BEFORE `findings`, for the same reason as the sibling route: a
     refusal means the comparison never ran — the arms share a declared role, a role was
-    never declared, there was no anonymous arm — and an empty `findings` list is then not
-    a clean result.
+    never declared, there was no anonymous arm, or this session already records the
+    OPPOSITE privilege order for these two arms, in which case `contradicting_findings`
+    names the rows to triage — and an empty `findings` list is then not a clean result.
     """
     from .inventory import authorization_findings, cross_arm_privileged_function
 
