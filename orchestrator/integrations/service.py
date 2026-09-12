@@ -8,7 +8,8 @@ import time
 import uuid
 from urllib.parse import urlsplit
 import yaml
-from .contracts import AssessmentConfig, Identity, StageResult, canonical_origin
+from .contracts import (FINISHED_STAGE_STATUSES, AssessmentConfig, Identity, StageResult,
+                        canonical_origin)
 from .security import SecretStore, redact
 from .runtime import Sandbox, availability, recover_orphans, JobOutput
 from .adapters import ADAPTERS, Context, rpc, record
@@ -94,6 +95,40 @@ async def recover():
     await db.execute("UPDATE integration_assessments SET status='partial' WHERE status='running'")
     await db.execute("UPDATE sessions SET status='partial',updated_at=CURRENT_TIMESTAMP WHERE status='running' AND id IN (SELECT session_id FROM integration_assessments WHERE status='partial')")
     await db.execute("UPDATE integration_exports SET status='uncertain',detail='Interrupted during remote write; check remote test' WHERE status='running'")
+    # AND AN ASSESSMENT CANNOT STAY `completed` OVER A STAGE THAT DID NOT FINISH.
+    #
+    # The two statements above repair stage rows for every session and the assessment row
+    # only `WHERE status='running'` — so a row that already said `completed` over a stage
+    # this function just rewrote to `partial` kept saying `completed`, and a restart is
+    # exactly when that would be noticed. The write-time defect that produced the state is
+    # fixed (see the `except Exception` in `run`), but a store already holding one is not
+    # repaired by fixing the writer.
+    #
+    # The rule is `run`'s own rollup, from the one list both now read: any stage not
+    # `completed` or `skipped` means the assessment is `partial`. Scoped to rows that
+    # currently claim `completed`, so nothing else is touched — a `needs_auth` pause has
+    # non-finished stages BY DESIGN and is the reason this is not simply applied to every
+    # row, and a `cancelled` or already-`partial` assessment keeps the more specific word it
+    # has. Measured on both recorded real stores: zero rows change, because every stage in
+    # them is `completed`.
+    placeholders = ",".join("?" * len(FINISHED_STAGE_STATUSES))
+    stranded = [row["session_id"] for row in await db.rows(
+        f"SELECT session_id FROM integration_assessments WHERE status='completed' "
+        f"AND session_id IN (SELECT session_id FROM integration_stages "
+        f"WHERE status NOT IN ({placeholders}))", FINISHED_STAGE_STATUSES)]
+    for session_id in stranded:
+        await db.execute("UPDATE integration_assessments SET status='partial' "
+                         "WHERE session_id=?", (session_id,))
+        # AND THE SESSION ROW WITH IT. The repair above stopped at the assessment, and the
+        # `sessions` table is what the dashboard list reads — so every repaired session still
+        # said `completed` there, which is the same contradiction one table over. The two
+        # statements above this block already keep the pair in step for the `running` case;
+        # this keeps it in step for the one they do not cover.
+        #
+        # `AND status='completed'`, so a session row that already says something more specific
+        # — cancelled, needs_auth — keeps its own word.
+        await db.execute("UPDATE sessions SET status='partial',updated_at=CURRENT_TIMESTAMP "
+                         "WHERE id=? AND status='completed'", (session_id,))
     if not cleaned:
         # Launching new jobs while old scanners might remain alive is unsafe.
         return False
@@ -563,7 +598,11 @@ async def run(session_id, notify=None):
                 await db.persist_result(session_id, stage["id"], result)
                 await publish({"stage": "interactsh", "status": result.status, "reason": result.reason})
             outcomes = await db.rows("SELECT status FROM integration_stages WHERE session_id=?", (session_id,))
-            if status != "needs_auth" and any(s["status"] not in ("completed", "skipped") for s in outcomes):
+            # THE SAME LIST `recover()` rolls up from, and `inventory.unfinished_stages`
+            # reports from. It was a literal tuple here and nowhere else, so the three places
+            # that ask "did this stage finish" could drift apart one edit at a time.
+            if status != "needs_auth" and any(
+                    s["status"] not in FINISHED_STAGE_STATUSES for s in outcomes):
                 status = "partial"
             if config.ai_summary and status != "needs_auth":
                 # Optional reasoning consumes redacted observations; it has no separate

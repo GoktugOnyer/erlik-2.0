@@ -26,15 +26,23 @@ from fixtures import blind_injection_app
 
 pytestmark = pytest.mark.skipif(shutil.which("curl") is None, reason="needs a real curl")
 
-PORT = 9096
+# A KERNEL-CHOSEN PORT, NOT A FIXED ONE. These fixtures bound a hard-coded number, and two
+# full-suite runs inside the TIME_WAIT window left it in `TIME_WAIT` from the first — so the
+# second errored every test in the file with `OSError: [Errno 48] Address already in use`, and
+# a third minutes later passed. Measured three times in one sitting, once on a fresh clone
+# where it read as a product regression and was a socket. `SO_REUSEADDR` does not help: the
+# listening socket is gone and what remains are the closed connections to it.
+#
+# Binding 0 asks for a free one; `server.server_address[1]` is what was given.
 BOOLEAN, TIMING = "WSTG-INPV-05.3", "WSTG-INPV-05.4"
 
 
 @pytest.fixture(scope="module")
 def app():
-    server = HTTPServer(("127.0.0.1", PORT), blind_injection_app.Handler)
+    server = HTTPServer(("127.0.0.1", 0), blind_injection_app.Handler)
+    port = server.server_address[1]
     threading.Thread(target=server.serve_forever, daemon=True).start()
-    yield f"http://localhost:{PORT}"
+    yield f"http://localhost:{port}"
     server.shutdown()
 
 

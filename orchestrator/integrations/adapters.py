@@ -78,7 +78,9 @@ def _marker_window(body: str, marker: str, window: int = 200) -> str:
 async def record(context, sandbox, output, result, accepted_codes=(0,)):
     result.exit_code = output.code
     result.metadata["images"] = sandbox.images
-    result.metadata["erlik_output_truncated"] = False
+    # NO `erlik_output_truncated` FLAG. It was assigned the constant False on every stage
+    # and set True nowhere, so it reported "nothing was truncated" whether or not anything
+    # was — a protection-shaped field that could not fire. Nothing read it either.
     # An EMPTY artifact is not evidence, and must not be cited as if it were.
     # Every finding inherits result.evidence_ids below, so a scanner that
     # exited cleanly with nothing on stderr was attaching a zero-byte

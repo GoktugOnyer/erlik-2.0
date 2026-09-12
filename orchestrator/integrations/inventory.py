@@ -6,8 +6,8 @@ from functools import lru_cache
 from urllib.parse import unquote_plus, urldefrag, urlsplit, urlunsplit
 from orchestrator import http_capture
 from orchestrator.engagement import looks_injectable
-from .contracts import (MAX_EVIDENCE_CHARS, PARAMETER_NAME, IntegrationFinding,
-                        fingerprint, parameter_names)
+from .contracts import (FINISHED_STAGE_STATUSES, MAX_EVIDENCE_CHARS, PARAMETER_NAME,
+                        IntegrationFinding, fingerprint, parameter_names)
 from .security import (SecretStore, marker_digest, redact, safe_evidence,
                        secret_values)
 from . import persistence as db
@@ -386,6 +386,11 @@ async def operations(session_id, identity_id=None) -> dict[str, dict]:
 # The states a known operation can be in, worst-known-first. Order matters: a pair can
 # attract more than one observation — truncated by the URL budget AND refused for a
 # forgeable name — and the reader needs the one that explains why nothing was learned.
+# Observations about an ARM's whole surface rather than one case's pairs. They skip
+# `coverage`'s eligibility filter, because the work they say did not happen was not scoped to
+# a case in the first place.
+ARM_WIDE_OBSERVATIONS = ("surface_read_truncated", "crawl_truncated")
+
 COVERAGE_STATES = ("verified", "answered", "unreachable", "refused", "not_run",
                    "indistinct", "inferred", "not_attempted")
 
@@ -465,7 +470,23 @@ async def preview(session_id, config, identity_id=None) -> dict:
                           "not_reached": 0, "note": "this case is not in the catalogue"})
             continue
         budget = target_budget(config.max_urls, len(selected), len(tc.steps))
-        if case_needs_parameter(tc):
+        if case_id in COLLECTOR_CASES:
+            # ITS TARGETS ARE THE OPERATOR'S, NOT DISCOVERY'S. A collector case runs against
+            # `config.callback.probes`, which `eligible_test_cases` knows nothing about — so
+            # the parameter branch below counted zero and this surface, whose whole job is to
+            # say what the run will NOT do, told the operator before launch that the case
+            # "will run against nothing and report nothing". Measured: a session with one
+            # declared probe and WSTG-INPV-19 selected reported `eligible_pairs=0` and that
+            # sentence, for a case that was about to run against the probe.
+            #
+            # A confident wrong prediction in the preview is worse than no prediction: the
+            # operator's remedy for it is to deselect the case.
+            # NO "none declared" BRANCH, because that state cannot be built: selecting this
+            # case requires the Interactsh stage, and `AssessmentConfig` refuses that without
+            # "active testing, a self-hosted server, and explicit probes". A note for it would
+            # be a sentence no run can produce.
+            eligible, note = len(config.callback.probes), ""
+        elif case_needs_parameter(tc):
             eligible = len([1 for url, name in probeable
                             if case_id in eligible_test_cases(url, "GET", [name])])
             note = ("" if eligible else
@@ -499,6 +520,83 @@ async def preview(session_id, config, identity_id=None) -> dict:
                    if not_reached else
                    f"every eligible case-target fits within max_urls={config.max_urls}"),
     }
+
+
+def _incompleteness_caveat(unfinished: dict, not_probed: list) -> str:
+    """What `establishes` must add when the comparison had blind spots.
+
+    `establishes` was a constant, so the one sentence a caller is told to read said the same
+    thing whether every arm had finished or one had stopped halfway. These two conditions are
+    the difference between "no findings" and "no findings that this run could have seen", and
+    a caller cannot be expected to cross-reference two other keys to learn which they have.
+    """
+    if not unfinished and not not_probed:
+        return ""
+    parts = []
+    if unfinished:
+        parts.append(f"{len(unfinished)} arm(s) have stages that did not finish")
+    if not_probed:
+        parts.append(f"{len(set(not_probed))} operation(s) the other arm never probed")
+    return (". AND NOT A CLEAN RESULT EITHER: " + ", and ".join(parts)
+            + " — an incomplete arm loses findings without inventing any, so read "
+              "`arms_with_unfinished_stages` and "
+              "`operations_the_other_arm_did_not_probe` before treating a zero as clean")
+
+
+# The adapters whose output a cross-arm comparison actually reads.
+#
+# `arm_responses` takes only evidence whose kind starts with `testcase:`, and the catalogue
+# adapter is the one that writes it. Every other stage feeds something else: katana fills the
+# endpoint inventory, zap and schemathesis contribute findings, interactsh owns the callback.
+#
+# THIS SCOPING IS THE DIFFERENCE BETWEEN A SIGNAL AND NOISE, and it was measured the wrong way
+# first. A real three-arm Juice Shop run has all three arms' katana stages `partial` with
+# "request or URL budget exhausted" — the crawler doing exactly what `max_urls` told it — while
+# every testcases stage is `completed`. Unscoped, `unfinished_stages` named all three arms on
+# that run and `establishes` called a correct result unclean. Across the eleven lane databases
+# on this machine, 7 of 57 stage rows are `partial` and ALL SEVEN are that same budget message.
+#
+# A truncated crawl is not invisible; it is reported where it belongs, as the arm-wide
+# truncation `coverage()` now indexes.
+COMPARED_STAGE_ADAPTERS = ("testcases",)
+
+
+async def unfinished_stages(session_id, *identity_ids) -> dict:
+    """Which of these arms have a stage that did not read everything it was going to.
+
+    NOTHING IN THIS MODULE EVER SELECTED `integration_stages.status`. It selected `id` and
+    `result`, so every consumer here — `coverage`, `arm_responses`, both cross-arm checks —
+    was blind to whether an arm finished. Measured on a copy of the real Juice Shop run, with
+    the customer arm's stages marked `partial` and its two decisive captures deleted:
+
+        complete run   findings=2 checked=225 refused=[] not_shared=5 not_comparable=15
+        half run       findings=0 checked=225 refused=[] not_shared=5 not_comparable=15
+
+    Every count byte-identical, two true positives gone, and nothing said so.
+
+    IT IS REPORTED, NOT REFUSED, and that is a deliberate reversal of this module's usual
+    answer. A refusal means `authorization_findings` persists nothing — and an incomplete arm
+    can only LOSE findings, never invent one, because a finding still needs positive evidence
+    from both arms plus an anonymous arm that asked and was refused. So refusing would
+    discard the true positives a half run did find in order to report the ones it missed,
+    which is strictly worse than the defect. The zero is what must not read as clean, and
+    saying so is what makes that true.
+    """
+    out = {}
+    for identity_id in identity_ids:
+        if identity_id in (None, ""):
+            continue
+        placeholders = ",".join("?" * len(COMPARED_STAGE_ADAPTERS))
+        outstanding = [(row["adapter"], row["status"], row["reason"] or "")
+                       for row in await db.rows(
+                           f"SELECT adapter,status,reason FROM integration_stages "
+                           f"WHERE session_id=? AND identity_id=? "
+                           f"AND adapter IN ({placeholders}) ORDER BY rowid",
+                           (session_id, identity_id, *COMPARED_STAGE_ADAPTERS))
+                       if row["status"] not in FINISHED_STAGE_STATUSES]
+        if outstanding:
+            out[identity_id] = outstanding
+    return out
 
 
 async def arm_responses(session_id, identity_id) -> tuple[dict, set, dict]:
@@ -727,6 +825,8 @@ async def cross_arm_authorization(session_id, caller, owner, owner_field,
     refused += [reason for reason in surfaces["refused_because"]
                 if reason not in PER_OPERATION_REFUSALS]
 
+    unfinished = await unfinished_stages(session_id, caller, owner,
+                                        anonymous)
     caller_saw, caller_split, caller_art = await arm_responses(session_id, caller)
     owner_saw, owner_split, owner_art = await arm_responses(session_id, owner)
     anonymous_saw, anonymous_split, anonymous_art = ((await arm_responses(session_id, anonymous))
@@ -742,6 +842,26 @@ async def cross_arm_authorization(session_id, caller, owner, owner_field,
         # operator passing the lane's own name for it would otherwise get findings whose
         # load-bearing clause was never evaluated.
         refused.append("anonymous_arm_did_not_run")
+    # AND THE SAME GUARD FOR THE ARMS BEING COMPARED. `anonymous_arm_did_not_run` has
+    # protected the third arm all along and the other two had no equivalent, so an arm with NO
+    # evidence at all produced a clean-looking zero over nothing. Measured with one arm's stage
+    # set `skipped` and its artifacts removed: the object-level check reported
+    # `checked=0 findings=0 refused=[]`, `arms_with_unfinished_stages={}` and no caveat —
+    # nothing anywhere said that arm had done nothing.
+    #
+    # THIS ONE REFUSES, where the half-run case reports, and the difference is real: an arm
+    # that read PART of the surface still produces findings as interpretable as a complete
+    # run's, so refusing there would discard evidenced HIGHs — an adversarial pass measured one
+    # surviving a 60-of-117 truncation and confirmed all three of its cited artifacts. An arm
+    # with NOTHING has no findings to discard and no comparison to interpret.
+    #
+    # It reads EVIDENCE rather than stage status, which is why it catches `skipped` — a status
+    # `FINISHED_STAGE_STATUSES` calls finished, and rightly, because an adapter nobody selected
+    # lost nothing; an arm whose evidence is absent is a different fact.
+    if not caller_saw:
+        refused.append("caller_arm_did_not_run")
+    if not owner_saw:
+        refused.append("owner_arm_did_not_run")
 
     # Only URLs the isolation gate actually looked at. `compare_arms` reads the endpoint
     # rows; without this, evidence could report a finding for a URL those rows never held.
@@ -767,6 +887,7 @@ async def cross_arm_authorization(session_id, caller, owner, owner_field,
     read_urls = {key[0] for key in caller_saw}
     not_shared = len(read_urls - gated)
     findings, checked, allowed, reported = [], 0, [], set()
+    not_probed = []
     if not refused:
         for key, body in sorted(caller_saw.items()):
             url = key[0]
@@ -783,7 +904,17 @@ async def cross_arm_authorization(session_id, caller, owner, owner_field,
                 # nothing here can corroborate the claim.
                 continue
             # The SAME request, as recorded by the other arm — not merely the same URL.
-            corroborating = owner_saw.get(key, "")
+            #
+            # AND A REQUEST THAT ARM NEVER MADE IS NOT A FAILURE TO CORROBORATE. The same
+            # `.get(key, "")` defect as the sibling check's clause 2: an absent capture read
+            # as "the owner's arm did not see this object", which is indistinguishable from
+            # "the owner's arm never asked". Counted and listed instead, because a
+            # comparison that silently drops operations reports its own blind spot as a
+            # clean result.
+            if key not in owner_saw:
+                not_probed.append(url)
+                continue
+            corroborating = owner_saw[key]
             if not (_http_status_ok(corroborating)
                     and _asserted_owner(corroborating, owner_field) == asserted):
                 continue
@@ -830,10 +961,19 @@ async def cross_arm_authorization(session_id, caller, owner, owner_field,
         # Instances the lane derived, excluded because this check would read its own input
         # back as the asserted owner. The function-level check uses them.
         "derived_urls_excluded": len(invented),
+        # OPERATIONS THE OTHER ARM NEVER PROBED, so the comparison had nothing to compare.
+        # Not a denial and not a clean result: this is the number that stayed at 0 while two
+        # true findings disappeared, because an absent capture was read as "did not receive
+        # it". Listed rather than counted, because an operator has to be able to see WHICH.
+        "operations_the_other_arm_did_not_probe": sorted(set(not_probed)),
+        # ARMS THAT DID NOT FINISH READING. Reported rather than refused — see
+        # `unfinished_stages` for why discarding a half run's true positives would be worse
+        # than the defect. `{identity_id: [(adapter, status, reason)]}`.
+        "arms_with_unfinished_stages": unfinished,
         "ambiguous_evidence": ambiguous,
         "surfaces": surfaces["summary"],
         "establishes": ("nothing, when `refused_because` is non-empty — an empty findings "
-                        "list is not a clean result unless the comparison actually ran"),
+                        "list is not a clean result unless the comparison actually ran" + _incompleteness_caveat(unfinished, not_probed)),
     }
 
 
@@ -1021,6 +1161,8 @@ async def cross_arm_privileged_function(session_id, privileged, unprivileged, ma
     refused += [reason for reason in surfaces["refused_because"]
                 if reason not in PER_OPERATION_REFUSALS]
 
+    unfinished = await unfinished_stages(session_id, privileged, unprivileged,
+                                        anonymous)
     privileged_saw, high_split, high_art = await arm_responses(session_id, privileged)
     unprivileged_saw, low_split, low_art = await arm_responses(session_id, unprivileged)
     anonymous_saw, anonymous_split, anonymous_art = ((await arm_responses(session_id, anonymous))
@@ -1028,6 +1170,26 @@ async def cross_arm_privileged_function(session_id, privileged, unprivileged, ma
     ambiguous = len(high_split | low_split | anonymous_split)
     if anonymous is not None and not anonymous_saw:
         refused.append("anonymous_arm_did_not_run")
+    # AND THE SAME GUARD FOR THE ARMS BEING COMPARED. `anonymous_arm_did_not_run` has
+    # protected the third arm all along and the other two had no equivalent, so an arm with NO
+    # evidence at all produced a clean-looking zero over nothing. Measured with one arm's stage
+    # set `skipped` and its artifacts removed: the object-level check reported
+    # `checked=0 findings=0 refused=[]`, `arms_with_unfinished_stages={}` and no caveat —
+    # nothing anywhere said that arm had done nothing.
+    #
+    # THIS ONE REFUSES, where the half-run case reports, and the difference is real: an arm
+    # that read PART of the surface still produces findings as interpretable as a complete
+    # run's, so refusing there would discard evidenced HIGHs — an adversarial pass measured one
+    # surviving a 60-of-117 truncation and confirmed all three of its cited artifacts. An arm
+    # with NOTHING has no findings to discard and no comparison to interpret.
+    #
+    # It reads EVIDENCE rather than stage status, which is why it catches `skipped` — a status
+    # `FINISHED_STAGE_STATUSES` calls finished, and rightly, because an adapter nobody selected
+    # lost nothing; an arm whose evidence is absent is a different fact.
+    if not privileged_saw:
+        refused.append("privileged_arm_did_not_run")
+    if not unprivileged_saw:
+        refused.append("unprivileged_arm_did_not_run")
 
     # Only URLs the isolation gate looked at, and a COUNT of the operations it says are not
     # comparable rather than a subtraction of them — see the sibling check for why the
@@ -1057,7 +1219,7 @@ async def cross_arm_privileged_function(session_id, privileged, unprivileged, ma
     read_urls = {key[0] for key in privileged_saw}
     not_shared = len(read_urls - gated)
     findings, checked, reflected, allowed, reported = [], 0, [], [], set()
-    caller_named, redirected = [], []
+    caller_named, redirected, not_probed = [], [], []
     if not refused:
         for key, response in sorted(privileged_saw.items()):
             url = key[0]
@@ -1086,7 +1248,24 @@ async def cross_arm_privileged_function(session_id, privileged, unprivileged, ma
             # 2. The unprivileged arm received the SAME marked data. This is the crossing,
             #    and it is also what makes a denial — in any dialect, at any status — not
             #    a finding, and a dead session not a finding either.
-            if not carries(unprivileged_saw.get(key, "")):
+            #
+            #    "DID NOT RECEIVE IT" AND "NEVER ASKED" ARE DIFFERENT, and `.get(key, "")`
+            #    made them the same. Clause 3 below already draws this distinction for the
+            #    ANONYMOUS arm, in as many words — "`get` with a default would read 'the
+            #    anonymous arm never probed this' as 'the anonymous arm was refused', which
+            #    is the unrun-clause defect this project keeps removing" — and the arm the
+            #    finding is ABOUT did not get the same care.
+            #
+            #    Measured: on a copy of the real Juice Shop run, marking the customer arm's
+            #    stages `partial` and deleting its two captures for the operations that
+            #    matter took the check from 2 findings to 0 with `checked=225`,
+            #    `refused_because=[]`, `urls_not_shared_by_both_arms=5` and
+            #    `not_comparable=15` all BYTE-IDENTICAL to the complete run. An operator
+            #    reading that sees 225 operations checked and nothing refused.
+            if key not in unprivileged_saw:
+                not_probed.append(url)
+                continue
+            if not carries(unprivileged_saw[key]):
                 continue
             # 3. An anonymous arm ASKED and did not receive it. `get` with a default would
             #    read "the anonymous arm never probed this" as "the anonymous arm was
@@ -1199,6 +1378,15 @@ async def cross_arm_privileged_function(session_id, privileged, unprivileged, ma
         # Operations where the anonymous arm was REDIRECTED rather than refused. Not
         # evaluated, because an unfollowed 3xx says nothing about what that arm could read.
         "skipped_anonymous_was_redirected": redirected,
+        # OPERATIONS THE OTHER ARM NEVER PROBED, so the comparison had nothing to compare.
+        # Not a denial and not a clean result: this is the number that stayed at 0 while two
+        # true findings disappeared, because an absent capture was read as "did not receive
+        # it". Listed rather than counted, because an operator has to be able to see WHICH.
+        "operations_the_other_arm_did_not_probe": sorted(set(not_probed)),
+        # ARMS THAT DID NOT FINISH READING. Reported rather than refused — see
+        # `unfinished_stages` for why discarding a half run's true positives would be worse
+        # than the defect. `{identity_id: [(adapter, status, reason)]}`.
+        "arms_with_unfinished_stages": unfinished,
         # Operations the LANE addressed to the unprivileged identity's own declared
         # principal id. Not evaluated, and named for the same reason as the reflected ones:
         # the rule cannot tell an identity id from an unrelated object id that happens to
@@ -1226,7 +1414,8 @@ async def cross_arm_privileged_function(session_id, privileged, unprivileged, ma
         "surfaces": surfaces["summary"],
         "establishes": ("nothing, when `refused_because` is non-empty. What the marker "
                         "means is the operator's claim; that both arms received it and an "
-                        "anonymous arm did not is the application's answer"),
+                        "anonymous arm did not is the application's answer"
+                        + _incompleteness_caveat(unfinished, not_probed)),
     }
 
 
@@ -1484,9 +1673,23 @@ async def coverage(session_id, identity_id=None) -> list[dict]:
             continue
         for item in observations:
             kind, case = item.get("type"), item.get("test_case_id") or ""
+            # `surface_read_truncated` AND `crawl_truncated` WERE DROPPED HERE, and they are
+            # the two that say the most. Measured on the real Juice Shop run, whose coverage
+            # report this module exists to produce:
+            #
+            #     124 of 182 in-scope URLs were not read as the admin arm
+            #     123 of 181 as the customer arm, 126 of 184 as the anonymous arm
+            #     2 to 4 object instances per arm never fetched
+            #
+            # six observations in total, one of them saying in its own reason "so the
+            # cross-arm authorization checks have no evidence for them" — and `coverage()`
+            # indexed none of them. Two thirds of the in-scope surface went unread and the
+            # report could not attribute a single row of it, so those pairs came out
+            # `not_attempted`: "no catalogue check ran against this pair", which is the
+            # sentence for an endpoint nothing was eligible for, not for one the budget cut.
             if kind not in ("test_case", "test_case_unreachable", "test_case_not_run",
                             "test_case_truncated", "parameter_refused", "form_url_withheld",
-                            "indistinct_url"):
+                            "indistinct_url", "surface_read_truncated", "crawl_truncated"):
                 continue
             record = (kind, case, item.get("reason") or "", item.get("parameters") or [])
             if item.get("url"):
@@ -1498,6 +1701,10 @@ async def coverage(session_id, identity_id=None) -> list[dict]:
     def state_of(kind):
         return {"test_case": "answered", "test_case_unreachable": "unreachable",
                 "test_case_not_run": "not_run", "test_case_truncated": "not_run",
+                # Both are "this work did not happen", which is what `not_run` means. They
+                # rank below `answered`, so a pair some case DID probe keeps its own state —
+                # an arm-wide truncation cannot downgrade an operation that was read.
+                "surface_read_truncated": "not_run", "crawl_truncated": "not_run",
                 "parameter_refused": "refused", "form_url_withheld": "refused",
                 # Not untested work. This URL answered with a response another URL had
                 # already given, so there is nothing here left to test — see
@@ -1505,6 +1712,20 @@ async def coverage(session_id, identity_id=None) -> list[dict]:
                 # measured on a real run, 461 of 566 coverage rows were `not_run` and a
                 # third of the arm's reads were spellings of one document.
                 "indistinct_url": "indistinct"}[kind]
+
+    # AND WHICH ARMS DID NOT FINISH READING. A stage that TRUNCATED says so in an
+    # observation, which the arm-wide indexing above now carries onto its rows. A stage that
+    # FAILED records no observations at all — so every pair it never reached came out
+    # `not_attempted`, whose reason reads "no catalogue check ran against this pair — it may
+    # not have been selected, or no selected case tests a parameter". That is a by-design
+    # cause offered with confidence for an accident. Measured with one arm's catalogue stage
+    # set `failed` and its evidence removed: 176 of that arm's 185 rows carried that sentence
+    # and NOT ONE mentioned the failure.
+    #
+    # Read from the stage rows, which this function already queries and never looked at.
+    incomplete = await unfinished_stages(session_id, *sorted(
+        {row["identity_id"] for row in await db.rows(
+            f"SELECT DISTINCT identity_id FROM integration_endpoints {where}", tuple(args))}))
 
     # Grouped into probeable pairs first, so one probe is credited once.
     grouped: dict[tuple, dict] = {}
@@ -1538,7 +1759,15 @@ async def coverage(session_id, identity_id=None) -> list[dict]:
                 # run where no selected case was eligible for them at all — "the budget
                 # cut this" and "nothing selected tests this" are different answers, and
                 # only the second is true there.
-                if case and case not in eligible_test_cases(
+                # AN ARM-WIDE TRUNCATION IS ELIGIBLE FOR EVERYTHING, unlike a catalogue
+                # case. The filter below exists because applying a case's budget truncation
+                # to the whole inventory labelled 41 pairs `not_run` on a run where no
+                # selected case was eligible for them — "the budget cut this" and "nothing
+                # selected tests this" are different answers. The surface read is the
+                # exception that proves the rule: its scope IS every in-scope URL, so its
+                # truncation applies to every pair and `ERLIK-SURFACE-READ` is deliberately
+                # absent from `eligible_test_cases`, which would otherwise have dropped it.
+                if kind not in ARM_WIDE_OBSERVATIONS and case and case not in eligible_test_cases(
                         row["url"], row["method"], [name] if name else ()):
                     continue
                 records.append((kind, case, reason, parameters))
@@ -1570,14 +1799,52 @@ async def coverage(session_id, identity_id=None) -> list[dict]:
                         "a finding was made on this pair without a catalogue check running "
                         "against it: " + ", ".join(sorted(set(matched))))
             else:
-                ranked = sorted(records, key=lambda r: COVERAGE_STATES.index(state_of(r[0])))
+                # AN ARM-WIDE RECORD LOSES EVERY TIE, and is APPENDED rather than chosen.
+                #
+                # Ranking on state alone let one displace a better reason: measured on the
+                # real run, the 459 `not_run` rows carried "161 of 182 in-scope URLs were not
+                # tested; this check's share of the budget is …" from `WSTG-INFO-03`, and
+                # indexing the surface read's truncation replaced it with "2 of 30 object
+                # instances … were not fetched" — the same state, a narrower fact, and it won
+                # on insertion order. So the case-specific reason stays primary and the
+                # arm-wide one is added to it.
+                #
+                # Adding rather than choosing is also the honest shape. The two say different
+                # things: one catalogue case's share of the budget ran out, AND this arm's
+                # surface read did not reach this URL — and it is the second that decides
+                # whether the cross-arm authorization checks had any evidence here, which is
+                # the question the report exists to answer.
+                def _rank(record):
+                    return (COVERAGE_STATES.index(state_of(record[0])),
+                            record[0] in ARM_WIDE_OBSERVATIONS)
+
+                ranked = sorted(records, key=_rank)
                 kind, case, reason, _ = ranked[0]
                 state = state_of(kind)
+                arm_wide = [r for k, _c, r, _p in records
+                            if k in ARM_WIDE_OBSERVATIONS and r and r != reason]
                 if matched:
                     state = "verified"
                     reason = "a finding came out of this pair: " + ", ".join(sorted(set(matched)))
                 elif state == "answered":
                     reason = reason or _ANSWERED_CAVEAT
+                # ONLY WHERE NOTHING PROBED THE PAIR. `not_run` and `not_attempted` are the
+                # two states that say "not reached" without saying what stopped the
+                # authorization checks from seeing it. `unreachable` and `refused` are the
+                # opposite: a check ran and decided something specific about this pair, and an
+                # arm-wide truncation elsewhere does not explain its verdict — appending there
+                # is noise, which a first version of this did for both.
+                if arm_wide and state in ("not_run", "not_attempted"):
+                    reason = "; also ".join([reason or ""] + sorted(set(arm_wide))).lstrip("; ")
+            # THE ARM'S OWN STATE, on every row it could not speak for. Outside the `else`
+            # above because a pair with NO record at all is the case that most needs it — that
+            # is the branch whose reason blames the case selection.
+            if state in ("not_run", "not_attempted") and row["identity_id"] in incomplete:
+                stages = ", ".join(f"{adapter}: {status}" + (f", {why}" if why else "")
+                                   for adapter, status, why in incomplete[row["identity_id"]])
+                reason = (f"{reason or ''}; also this arm did not finish reading ({stages}), so "
+                          f"a pair it never reached is not evidence that nothing tests it"
+                          ).lstrip("; ")
             out.append({
                 "operation": operation_key(row["url"], row["method"], [n for n in names if n]),
                 "url": row["url"], "method": row["method"], "identity": row["identity_id"],

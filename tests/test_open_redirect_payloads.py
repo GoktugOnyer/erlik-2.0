@@ -27,16 +27,25 @@ from fixtures import open_redirect_validators as validators
 
 pytestmark = pytest.mark.skipif(shutil.which("curl") is None, reason="needs a real curl")
 
-PORT = 9094
+# A KERNEL-CHOSEN PORT, NOT A FIXED ONE. These fixtures bound a hard-coded number, and two
+# full-suite runs inside the TIME_WAIT window left it in `TIME_WAIT` from the first — so the
+# second errored every test in the file with `OSError: [Errno 48] Address already in use`, and
+# a third minutes later passed. Measured three times in one sitting, once on a fresh clone
+# where it read as a product regression and was a socket. `SO_REUSEADDR` does not help: the
+# listening socket is gone and what remains are the closed connections to it.
+#
+# Binding 0 asks for a free one; `server.server_address[1]` is what was given.
 
 
 @pytest.fixture(scope="module")
 def naive_app():
-    validators.OWN_ORIGIN = f"http://localhost:{PORT}"
-    server = HTTPServer(("127.0.0.1", PORT), validators.Handler)
+    server = HTTPServer(("127.0.0.1", 0), validators.Handler)
+    port = server.server_address[1]
+    # AFTER the bind, because the origin is only known once the kernel has assigned a port.
+    validators.OWN_ORIGIN = f"http://localhost:{port}"
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
-    yield f"http://localhost:{PORT}"
+    yield f"http://localhost:{port}"
     server.shutdown()
 
 

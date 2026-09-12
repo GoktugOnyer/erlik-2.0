@@ -932,53 +932,61 @@ All measured, none fixed. Listed so none is rediscovered as new.
   `forbidden_marker` fix above is the pattern to follow, not a reason to think the problem
   is gone.
 
-### E-033: the callback lifecycle, and what the fixes did not reach — OPEN
+### E-033: the callback lifecycle, and what the fixes did not reach — PARTLY CLOSED
 
-Six defects were reported against the callback lifecycle, the benchmark and CI; two were
-refuted as stated and one of those led to the largest finding of the set. All the fixes are
-in `docs/integrations.md` ("What a run says when it did not finish"). These are what remains,
-all measured.
+Four of the eight items are fixed; see `docs/integrations.md` ("What the report could not
+see") for the measurements. Closed: `recover()`'s rollup, including the `sessions` row it
+stopped short of; the three pieces of write-only state; the coverage report's blind spot for
+arm-wide truncations, plus the comma-joined truncation id found while fixing it; and — not in
+the original list — the cross-arm checks' blindness to `integration_stages.status`, which
+turned a half run into a byte-identical clean result.
 
-- **`coverage()` cannot see the SSRF case at all.** Its targets come from
-  `config.callback.probes`, not from `integration_endpoints`, and `WSTG-INPV-19` never
-  appears in `eligible_test_cases` for any url or parameter. A per-url observation is keyed
-  `(url, parameter, identity)` and indexes against a pair no endpoint row produces; a
-  case-wide one is filtered to pairs the case was eligible for. Both were tried and both
-  reported `not_attempted`. So the skip is recorded in the stage result — where it now
-  survives the next case overwriting the reason — and coverage still does not mention it.
-  Fixing it means modelling the declared callback probes as a surface coverage knows about.
+Still open from the original eight:
+
+- **`coverage()` cannot see the SSRF case at all.** Unchanged and still asserted by
+  `tests/test_a_skipped_callback_case_is_recorded_as_skipped.py`. Its targets come from
+  `config.callback.probes`, not from `integration_endpoints`, and `WSTG-INPV-19` never appears
+  in `eligible_test_cases` for any url or parameter. The arm-wide exemption added this
+  increment does NOT reach it: that exemption is keyed on the observation KIND, and this is a
+  per-case record whose url is a probe no endpoint row holds. Fixing it means modelling the
+  declared callback probes as a surface coverage knows about — and the warning from the
+  increment that looked at it stands: an endpoint row that makes a case testable somewhere it
+  should not be is a worse defect than the one being fixed.
 - **An arm can lose its collector and never get it back.** Three pass-1 paths leave the
-  interactsh stage at a status no resume can select (`Collector.start()` failing -> `failed`,
-  the probe timing out -> `partial`, a `probe_refused` pre-stage verdict -> `failed`) while
-  the testcases row stays resumable, so the resume runs it with `collector=None` again.
-  Reported, not silent — but there is no way for the operator to recover the check short of a
-  new assessment.
-- **`recover()` cannot repair a wrongly-finished assessment.** It sets
-  `integration_stages` to `partial` WHERE `status='running'` for every session, but
-  `integration_assessments` only WHERE `status='running'`. The write-time defect that produced
-  `completed` assessments over `running` stages is fixed, but any row already in that state
-  survives a restart and comes out `completed` over `partial` "Interrupted by orchestrator
-  restart" — a misattribution. A rollup in `recover()` would repair it.
-- **The mutation refusal is a lane opt-in, not the runner's floor.** `run_test_case`'s
-  `step_policy` seam is passed only by the integrations adapter; `main.py`'s
-  `POST /api/v2/testcases/{id}/run`, `testcase/cli.py` and `chain.py` all call it with no
-  policy. Safe mode now covers the gap for every lane — a shell-wrapped upload or write verb
-  is denied wherever it runs — but that is a second gate agreeing with the first by
-  coincidence rather than one floor. Moving `mutating_request` into the runner, deciding with
-  the SAME `curl_request` parser the assessment lane uses, would make them unable to disagree.
-- **No test case can clean up after itself.** `TestCase` and `TestStep` have no `cleanup` or
-  `teardown` field at either level, across all 32 cases, and BUSL-09's header tells a human to
-  run `find / -name 'erlik-upload-*'` afterwards. Safe mode refusing uploads by default makes
-  that acceptable rather than fixed: an authorised engagement still leaves files behind with
-  no record of which.
-- **`POST /stop` has no debounce.** `if task and not task.done(): task.cancel()`, returning
-  before the run unwinds. The damage two clicks used to do is fixed in the teardown, which is
-  the right layer — but nothing tells an operator the second click did anything.
-- **The actual-services CI job produces no build manifest.** §11 asks for recorded tool,
-  rule and schema versions, and the real-Interactsh and live-DefectDojo runs are the evidence
-  a release most rests on. The Docker job writes `build-manifest.json`; this one does not.
-- **`result.metadata["catalogue"]` is write-only** — initialised and appended to in
-  `deterministic.py` and read nowhere.
+  interactsh stage at a status no resume can select while the testcases row stays resumable.
+  Reported, not silent, but unrecoverable short of a new assessment.
+- **The mutation refusal is a lane opt-in, not the runner's floor.** Safe mode now covers every
+  lane, so this is two gates agreeing rather than one floor.
+- **No test case can clean up after itself.** `TestCase` and `TestStep` have no such field.
+  Safe mode refusing uploads by default makes that acceptable rather than fixed.
+- **`POST /stop` has no debounce.** The damage two clicks did is fixed in the teardown, which
+  is the right layer; nothing tells an operator the second click did anything.
+- **The actual-services CI job produces no build manifest**, which §11 asks for and which the
+  Docker job does write.
+
+### E-034: the three answers a comparison can give, and where the line sits — OPEN
+
+This increment drew a distinction worth recording, because the next person to touch these
+checks will have to place a new case on one side of it.
+
+A cross-arm comparison now answers in three ways, and the rule for choosing is the question
+"could this have invented a finding, or only lost one?"
+
+- **Refuse** when there is no comparison to interpret: no anonymous arm, an arm with no
+  evidence at all, contradictory privilege orders, an unusable marker. `refused_because`, and
+  `authorization_findings` persists nothing.
+- **Report** when the comparison ran but had blind spots: an arm that finished part of the
+  surface, operations the other arm never probed. The findings stand, because a missing capture
+  cannot manufacture one — measured, a finding surviving a 60-of-117 truncation with all three
+  cited artifacts checking out — and the zero is what must not read as clean.
+- **Skip one operation and list it** when that operation alone is uninterpretable: a reflected
+  marker, a URL that names the caller, an anonymous arm that was redirected rather than
+  refused.
+
+What is NOT resolved: whether `partial` should ever refuse. It is currently reported, on the
+strength of that measurement. If a real run is found where a `partial` arm produces a finding
+that inspection cannot stand behind, the line moves — and the measurement to redo is the
+truncation sweep, not the reasoning.
 
 ## 10. Shared technical contracts
 

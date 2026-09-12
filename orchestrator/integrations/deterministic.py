@@ -554,7 +554,12 @@ class CatalogueAdapter(BaseAdapter):
 
     async def run(self, ctx, sandbox, collector=None):
         started_at = time.monotonic()
-        result = StageResult(metadata={"catalogue": [], "executed_checks": 0})
+        # NO `catalogue` LIST. It was initialised here and appended to twice and read by
+        # nothing — not a route, not the report, not the export, not a test — and it was
+        # redundant besides: its contents on the two recorded runs are `config.test_cases`
+        # minus whatever the deadline cut, which the truncation observations already say.
+        # Code that cannot be read implies a record that is not there.
+        result = StageResult(metadata={"executed_checks": 0})
         policy = EgressPolicy(sandbox.policy)
         def check(command, scope, primary_url=None):
             _, url, method = curl_request(command)
@@ -884,10 +889,18 @@ class CatalogueAdapter(BaseAdapter):
                 result.status = "partial"
                 result.reason = ("stage time budget reached with "
                                  f"{len(remaining)} of {len(ctx.config.test_cases)} selected checks unrun")
-                result.observations.append({
-                    "type": "test_case_not_run", "test_case_id": ",".join(remaining), "url": None, "steps": [],
-                    "reason": "the stage ran out of time before these were reached; findings above are complete "
-                              "for the checks that did run"})
+                # ONE RECORD PER CASE. This joined the unrun ids with commas, and
+                # `coverage()` filters a case-wide record by `case not in
+                # eligible_test_cases(...)` — which returns individual ids, so
+                # "WSTG-INPV-18,WSTG-CONF-06" matched nothing and the whole truncation was
+                # dropped for every pair. The stage reason still said so; the coverage report,
+                # which is where an operator goes to ask what was not tested, did not.
+                for unrun in remaining:
+                    result.observations.append({
+                        "type": "test_case_not_run", "test_case_id": unrun, "url": None,
+                        "steps": [],
+                        "reason": "the stage ran out of time before this was reached; findings "
+                                  "above are complete for the checks that did run"})
                 break
             tc = find_by_id(case_id)
             if not tc:
@@ -954,7 +967,6 @@ class CatalogueAdapter(BaseAdapter):
                                "tests one" if case_needs_parameter(tc) else
                                "no in-scope URL this case can be executed against; "
                                "see inventory.executable_test_cases")})
-                result.metadata["catalogue"].append(case_id)
                 continue
             for position, target in enumerate(case_targets):
                 current.clear()
@@ -1083,7 +1095,6 @@ class CatalogueAdapter(BaseAdapter):
                     result.reason = "one or more catalogue checks never reached their target"
                 if any(not s.success and not s.skipped for s in run.steps):
                     result.status, result.reason = "partial", "one or more catalogue checks could not complete"
-            result.metadata["catalogue"].append(case_id)
         # ONE VULNERABILITY, ONE FINDING. A step that declares `subsumed_by`
         # produces the vaguer account of something another case described better;
         # drop it once that other case has actually reported on the same

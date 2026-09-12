@@ -771,6 +771,18 @@ class IntegrationFinding(StrictModel):
 
 StageStatus = Literal["queued", "running", "needs_auth", "completed", "partial", "failed", "cancelled", "skipped"]
 
+# A STAGE THAT READ EVERYTHING IT WAS GOING TO READ.
+#
+# `service.run` computes its own rollup from exactly this set — "any stage not completed or
+# skipped means the assessment is partial" — and two other places needed the same question
+# answered and each had its own idea, or none. It lives here so they cannot disagree.
+#
+# `skipped` belongs with `completed`: an adapter the operator did not select read nothing and
+# lost nothing. `partial` does NOT: it read a surface and stopped, which is the case that
+# matters — a comparison against an arm that stopped early cannot tell "this arm was denied"
+# from "this arm never asked".
+FINISHED_STAGE_STATUSES = ("completed", "skipped")
+
 
 class StageResult(StrictModel):
     status: StageStatus = "completed"

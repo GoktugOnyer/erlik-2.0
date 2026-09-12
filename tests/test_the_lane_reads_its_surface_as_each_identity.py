@@ -276,13 +276,51 @@ async def test_what_it_did_is_on_the_record(stage):
     assert "nothing on its own" in record["establishes"]
 
 
-def test_it_does_not_report_itself_as_coverage():
-    """The truncation observation it DOES emit must be of a type `coverage()` ignores."""
-    import inspect
+async def test_it_cannot_raise_any_pair_above_not_run(tmp_path, monkeypatch):
+    """THE PROPERTY, not the source text.
 
-    from orchestrator.integrations import inventory
+    This asserted `"surface_read_truncated" not in inspect.getsource(inventory.coverage)` —
+    a proxy for the real rule, which is that a READ must never be credited as a check. The
+    sibling test above keeps that rule where it belongs, on the `test_case` observation.
 
-    assert "surface_read_truncated" not in inspect.getsource(inventory.coverage)
+    The proxy forbade more than the rule does. `coverage()` now indexes the TRUNCATION, which
+    is a statement that work did NOT happen: it maps to `not_run`, it loses every tie so it
+    cannot displace a better state, and its reason is appended only to pairs nothing reached.
+    Measured on the real Juice Shop run, states before and after: verified 8, answered 99,
+    not_run 459 — identical — while 459 rows gained the sentence "126 of 184 in-scope URLs
+    were not read as this identity, so the cross-arm authorization checks have no evidence for
+    them", which no row carried before and which is the fact that decides whether the
+    authorization findings could have seen an operation at all.
+
+    So what must hold is the DIRECTION: a surface-read observation can only ever make a pair
+    look less tested, never more.
+    """
+    import orchestrator.database as original
+    from orchestrator.integrations import persistence as db
+    from orchestrator.integrations.deterministic import SURFACE_READ_ID
+    from orchestrator.integrations.inventory import coverage
+
+    monkeypatch.setenv("ERLIK_INTEGRATION_DATA", str(tmp_path / "runtime"))
+    monkeypatch.setattr(original, "DB_DIR", tmp_path)
+    monkeypatch.setattr(original, "DB_PATH", tmp_path / "test.db")
+    await original.init_db()
+    await db.migrate()
+    await db.execute("INSERT INTO integration_assessments(session_id,target,status,config) "
+                     "VALUES(?,?,?,?)", ("s", "http://app.test/", "completed", "{}"))
+    await db.execute("INSERT INTO integration_endpoints"
+                     "(session_id,url,method,identity_id,sources) VALUES(?,?,?,?,?)",
+                     ("s", "http://app.test/a", "GET", "anonymous", '["katana"]'))
+    await db.execute("INSERT INTO integration_stages"
+                     "(id,session_id,adapter,identity_id,status,result) VALUES(?,?,?,?,?,?)",
+                     ("st", "s", "testcases", "anonymous", "completed", json.dumps({
+                         "observations": [{"type": "surface_read_truncated",
+                                           "test_case_id": SURFACE_READ_ID, "url": None,
+                                           "steps": [], "reason": "9 of 10 were not read"}]})))
+    rows = await coverage("s")
+    assert rows, "no coverage row at all; this would prove nothing"
+    assert {r["state"] for r in rows} == {"not_run"}, (
+        "a surface READ must never be credited as a check having run")
+    assert "9 of 10 were not read" in rows[0]["reason"]
 
 
 def test_the_operator_can_turn_it_off():

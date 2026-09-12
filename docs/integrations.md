@@ -1805,3 +1805,180 @@ every variable the job does not set is supplied by the tests themselves via
 now, with floors measured against what pytest actually selects (35 for `-m docker` of which 3
 always skip there, 13, 1), every upload fails when it finds nothing, and four tests assert
 the wiring so the next gap fails in the suite rather than in a release.
+
+## What the report could not see
+
+Four measured blind spots, all of the same shape: a gap that reads as a clean result. The
+theme is one question — when the lane did not look at something, does the report say so?
+
+### `inventory` never read `integration_stages.status`
+
+It selected `id` and `result`, so `coverage`, `arm_responses` and both cross-arm checks were
+blind to whether an arm finished reading. On a copy of the real Juice Shop run, with the
+customer arm's stages marked `partial` and its two decisive captures deleted:
+
+    complete run   findings=2 checked=225 refused=[] not_shared=5 not_comparable=15
+    half run       findings=0 checked=225 refused=[] not_shared=5 not_comparable=15
+
+Every count byte-identical, two true positives gone, nothing refused. An operator reading
+that sees 225 operations checked and a clean zero.
+
+**The mechanism was one `.get`.** Clause 2 asked `carries(unprivileged_saw.get(key, ""))`, so
+an absent capture read as "this arm did not receive the data" — which is what a denial looks
+like. Clause 3, three lines below, already drew that distinction for the ANONYMOUS arm and
+says so in as many words: "`get` with a default would read 'the anonymous arm never probed
+this' as 'the anonymous arm was refused', which is the unrun-clause defect this project keeps
+removing." The arm the finding is *about* never got the same care, and neither did the
+object-level check's owner arm. Both now separate the two and list
+`operations_the_other_arm_did_not_probe`; on the half run that names exactly
+`/api/Users` and `/api/Users/1`, and on both complete runs it is empty.
+
+**It reports rather than refuses, and that reverses this module's usual answer on purpose.** A
+refusal makes `authorization_findings` persist nothing, and an incomplete arm can only LOSE
+findings, never invent one — a finding still needs positive evidence from both arms plus an
+anonymous arm that asked and was refused. An adversarial pass built a realistic truncation
+(the customer arm stopping after the first N of its 117 artifacts) and swept N: at 60 of 117 a
+finding survives at `/api/Users`, and all three of its cited artifacts check out — admin 200
+with the marker, customer 200 byte-identical, anonymous 401 with `answered()` true and no
+marker. Refusing would have discarded that evidenced HIGH in order to report the ones the
+truncation lost. So `arms_with_unfinished_stages` names the arms and their reasons, and
+`establishes` — the one sentence the route's docstring tells a caller to read first — now says
+"AND NOT A CLEAN RESULT EITHER" when either condition holds, and nothing extra when neither
+does.
+
+**And the signal is scoped to what the comparison reads**, which is the difference between a
+signal and noise — measured the wrong way first. A real three-arm Juice Shop run has all three
+arms' katana stages `partial` with "request or URL budget exhausted", the crawler doing exactly
+what `max_urls` told it, while every testcases stage is `completed`. Unscoped,
+`arms_with_unfinished_stages` named all three arms on that run and `establishes` called a
+correct result unclean; across the eleven lane databases on this machine, 7 of 57 stage rows
+are `partial` and all seven carry that same budget message. `arm_responses` reads only evidence
+whose kind starts with `testcase:`, so a truncated crawl is not a fact about the comparison's
+inputs — it is reported where it belongs, as the arm-wide truncation `coverage()` now indexes.
+Re-measured: silent on all three recorded real runs, still naming the arm and the two
+operations on the half run.
+
+**An arm with NOTHING is a third answer, and that one refuses.** `anonymous_arm_did_not_run`
+has guarded the third arm all along; the two being compared had no equivalent. With one arm's
+stage `skipped` — which `FINISHED_STAGE_STATUSES` calls finished, and rightly, because an
+adapter nobody selected lost nothing — and its artifacts absent, the object-level check
+reported `checked=0 findings=0 refused=[]` with no caveat and no unfinished arm. Four lines
+close it, reading EVIDENCE rather than status so `skipped` is caught too. An arm with nothing
+has no findings to discard and no comparison to interpret, which is exactly when refusing is
+right.
+
+### `recover()` rewrote the stages and left the assessment claiming it had finished
+
+It repairs `integration_stages` for every session and `integration_assessments` only
+`WHERE status='running'` — so a row already saying `completed` over a stage this function just
+rewrote kept saying `completed`. The write-time defect that produced the state is fixed; that
+does not repair a store already holding one.
+
+The rule is `run`'s own rollup, and it now lives in one place — `FINISHED_STAGE_STATUSES` in
+`contracts` — that `run`, `recover` and `inventory.unfinished_stages` all read. It was a
+literal tuple in `run` and nowhere else, so three questions of the same kind could drift apart
+one edit at a time. Scoped to rows that currently claim `completed`, which is what keeps it
+from rewriting history: measured on both recorded real stores, zero rows change, and on a
+13-session synthetic store it repairs exactly the five contradictory ones and leaves the
+`needs_auth` pause, the `cancelled` run, the already-`partial` one and the assessment with no
+stages alone. The repair carries to the `sessions` row too — it stopped at the assessment, and
+`sessions` is what the dashboard list reads, so five of five repaired sessions still said
+`completed` there.
+
+### Six notices that two thirds of the surface went unread, indexed by nothing
+
+`coverage()` allow-lists seven observation kinds and dropped the two that say the most.
+Measured on the run the product's findings are judged on:
+
+    124 of 182 in-scope URLs were not read as the admin arm
+    123 of 181 as the customer arm, 126 of 184 as the anonymous arm
+
+six `surface_read_truncated` observations, one of whose reasons says outright "so the cross-arm
+authorization checks have no evidence for them" — and not one reached a coverage row.
+`crawl_truncated` went the same way.
+
+**The first version of the fix made the report worse**, which is why the shape is additive.
+Ranking on state alone let an arm-wide record displace a better reason: those 459 `not_run`
+rows carried "161 of 182 in-scope URLs were not tested; this check's share of the 260 URL
+budget is …" from `WSTG-INFO-03`, and indexing the surface read replaced it with "2 of 30
+object instances … were not fetched" — same state, narrower fact, winning on insertion order.
+So an arm-wide record loses every tie and its reason is *appended*, and only on `not_run` and
+`not_attempted` pairs: `unreachable` and `refused` mean a check ran and decided something, and
+an arm-wide truncation elsewhere does not explain its verdict. Re-measured: all 459 rows keep
+their original reason and gain the arm-wide one, and the state counts are byte-identical —
+verified 8, answered 99, not_run 459.
+
+They are exempt from the eligibility filter, and that exemption is the interesting part. The
+filter exists because applying one case's truncation to the whole inventory labelled 41 pairs
+`not_run` where no selected case was eligible for them. The surface read is the case that
+proves the rule rather than breaking it: its scope IS every in-scope URL, and
+`ERLIK-SURFACE-READ` is deliberately absent from `eligible_test_cases`, which would otherwise
+have dropped every one of these records — an adversarial pass measured exactly that, 0 of 566
+rows changing, for the naive allow-list-only version.
+
+**A stage that FAILED is worse than one that truncated**, because it records no observation for
+the arm-wide path to carry. Every pair it never reached came out `not_attempted`, whose reason
+reads "no catalogue check ran against this pair — it may not have been selected, or no selected
+case tests a parameter": a by-design cause offered with confidence for an accident. Measured
+with one arm's catalogue stage set `failed` and its evidence removed, 176 of that arm's 185
+rows carried that sentence and not one mentioned the failure; four read `verified`. `coverage()`
+reads the stage rows it was already querying now, and adds the arm's own state to the rows it
+could not speak for — per arm, so the other arms' 381 rows stay untouched, and only where
+nothing reached the pair, because `answered` means a probe ran against it. Zero rows on all
+three recorded real runs.
+
+**And a budget truncation named all its cases in one string.** `test_case_id` was
+`",".join(remaining)`, while `coverage()` filters a case-wide record by
+`case not in eligible_test_cases(...)`, which returns individual ids — so
+`"WSTG-INPV-18,WSTG-CONF-06"` matched nothing and the whole truncation was dropped for every
+pair. One record per case now.
+
+The class is guarded rather than the two instances: a test enumerates every observation kind
+the lane writes and requires each to be either indexed by `coverage()` or listed with the
+reason it is not coverage, so the next kind fails in the suite instead of disappearing.
+
+### The preview predicted a case would do nothing, about a case about to run
+
+`preview()` exists to say what a run will NOT do before it starts. `WSTG-INPV-19`'s targets
+are the operator's `callback.probes`, which `eligible_test_cases` knows nothing about — so the
+parameter branch counted zero and the preview reported, for a session with a declared probe
+and the case selected:
+
+    eligible_pairs=0
+    "no discovered parameter to test — this case needs one, so it will run against nothing
+     and report nothing"
+
+A confident wrong prediction in the one surface whose job is prediction, and the operator's
+remedy for that sentence is to deselect the case. A collector case now counts its declared
+probes. There is deliberately no "none declared" note to go with it: selecting the case
+requires the Interactsh stage, and `AssessmentConfig` refuses that without "active testing, a
+self-hosted server, and explicit probes", so the state is unbuildable and a sentence for it
+would be one no run can produce.
+
+`coverage()` still cannot see those probes, which is the open half of the same gap and stays
+in E-033. An adversarial pass measured two further consequences worth having written down
+before anyone fixes it: three constructed variants of the same session — collector present,
+collector unavailable, case not selected — produce byte-identical coverage histograms with no
+row mentioning the probe pair at all; and merely selecting the case moved another case's
+`target_budget` from 21 to 14, so it consumes a share of the URL budget it can never spend.
+
+### And a suite that could not run twice
+
+Not a product defect, but it cost real time this increment and it would cost CI more: three
+test fixtures bound a hard-coded port, so two full-suite runs inside the TIME_WAIT window left
+it in `TIME_WAIT` from the first — and the second errored every test in those files with
+`OSError: [Errno 48] Address already in use`. It read as a product regression three separate
+times, once on a fresh clone during a release measurement, and a run minutes later passed.
+`SO_REUSEADDR` is not the answer: the listening socket is gone and what remains are the closed
+connections to it. Binding 0 asks the kernel for a free port. Measured after: two full-suite
+runs back to back, 2921 passed and zero errors both times.
+
+### Three pieces of state that could not be read
+
+`metadata["catalogue"]` was initialised, appended to twice, and read by no route, report,
+export or test — and redundant besides: its contents on both recorded runs are
+`config.test_cases` minus whatever the deadline cut, which the truncation observations already
+say. `metadata["erlik_output_truncated"]` was assigned the constant `False` on every stage and
+set `True` nowhere: a truncation flag that could not report truncation. `runtime.py` wrote the
+same constant into its recovery blob. All three are gone, on the rule this codebase applies to
+code that cannot fire — it implies a record that is not there.

@@ -107,7 +107,7 @@ async def recover_orphans():
                                               path.read_text(errors="replace"), known)
                 await db.evidence(context["session_id"], context["stage_id"], "recovery",
                                   json.dumps({"reason": "Orchestrator interrupted; scanner stopped without replay",
-                                              "images": manifest.get("images", {}), "output_truncated": False}))
+                                              "images": manifest.get("images", {})}))
             # Discard credential-bearing inputs only after scanners are gone and
             # available redacted evidence has been preserved successfully.
             shutil.rmtree(directory)
