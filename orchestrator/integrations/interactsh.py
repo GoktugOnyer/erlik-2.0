@@ -7,7 +7,7 @@ import time
 from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
 import yaml
 from orchestrator.testcase.scope import check_url
-from .adapters import Context, rpc, record, json_lines
+from .adapters import Context, rpc, record, audit_events, json_lines
 from .contracts import StageResult, IntegrationFinding, fingerprint
 from .runtime import Sandbox, JobOutput
 from .security import SecretStore, redact, safe_evidence
@@ -225,7 +225,11 @@ class Collector:
         result = correlate(events, {host: self.payloads[host] for host in self.issued_payloads}, self.ctx)
         result.observations.extend(self.probe_evidence)
         audit = self.sandbox.directory / "audit" / "requests.jsonl"
-        history = json_lines(audit.read_text()) if audit.exists() else []
+        # TOLERANTLY. A truncated last line — what a killed mitmproxy leaves — raised
+        # `json.JSONDecodeError` straight out of this method, and nothing between here and
+        # `service.run`'s `finally` caught it, so the whole assessment was recorded
+        # `completed`. A half-written diagnostic line must not be able to do that.
+        history, unreadable_audit = audit_events(audit)
         polls = [e for e in history if "/poll?" in e.get("url", "") and ("status" in e or "error" in e)]
         if early_exit:
             result.status, result.reason = "partial", "callback collector exited before the observation window ended"
@@ -236,6 +240,15 @@ class Collector:
         elif not result.findings:
             result.reason = "no correlated callback within the configured observation window; not proof of absence"
         result.metadata["malformed_callback_records"] = malformed
+        # A HOLE IN THE POLL HISTORY IS NOT A CLEAN POLL HISTORY. The branch above decides
+        # whether polling worked by reading that history, so lines it could not read make
+        # its verdict a floor rather than a fact.
+        if unreadable_audit:
+            result.metadata["unreadable_audit_lines"] = unreadable_audit
+            if result.status == "completed":
+                result.status, result.reason = "partial", (
+                    "the proxy request history had unreadable lines, so whether callback "
+                    "polling covered the whole window cannot be established from it")
         return await record(self.ctx, self.sandbox, JobOutput(0, json.dumps(events), ""), result)
 
     async def close(self):
@@ -251,6 +264,20 @@ class Collector:
                 await self.task
             except asyncio.CancelledError:
                 pass
-        sandbox, self.sandbox = self.sandbox, None
-        if sandbox:
+        # THE REFERENCE IS DROPPED ONLY ONCE THE EXIT SUCCEEDS. Clearing it first made
+        # `close()` idempotent — which is what it is for — but it also made a FAILED close
+        # unrecoverable: measured on the real class, a cancellation delivered during
+        # `sandbox.__aexit__` escapes with `self.sandbox` already None, so the retry the
+        # caller makes is a silent no-op ("sandbox exits attempted 1, completed 0"). What is
+        # left behind has no other owner: the proxy container and the internal network are
+        # removed by `Sandbox.close()` and nothing else, and they carry no timeout, so they
+        # live until `recover_orphans()` sweeps at the next orchestrator start — and if that
+        # sweep cannot clear them, `recover()` returns False and the startup gate refuses to
+        # launch new jobs at all.
+        #
+        # Still safe to call twice: a successful exit clears the reference, so the second
+        # call finds nothing to do.
+        if self.sandbox:
+            sandbox = self.sandbox
             await sandbox.__aexit__(None, None, None)
+            self.sandbox = None

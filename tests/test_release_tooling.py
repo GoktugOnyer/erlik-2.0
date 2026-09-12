@@ -4,6 +4,7 @@ E-005 asks for CI that covers the Docker suites and produces release evidence;
 E-006 asks for a pinned build manifest. Both are only worth having if they fail
 when they should, so both are tested rather than trusted.
 """
+import re
 import json
 import subprocess
 import sys
@@ -360,3 +361,87 @@ def test_the_readme_fresh_clone_total_matches_what_the_suite_collects():
         f"README claims {stated.group(1)} passed + {stated.group(2)} skipped = "
         f"{claimed_total}, but the suite collects {collected.group(1)}. Re-measure "
         f"from a fresh clone: tests were added or removed since that figure was taken.")
+
+
+# ===========================================================================
+# The wiring, not just the scripts.
+#
+# This file's own docstring says both CI scripts are "tested rather than
+# trusted" — and nothing in the suite read the file that CALLS them, which is
+# exactly how `ci_assert_suite_ran.py` came to guard one of the four junit
+# reports CI writes while README.md described it as protecting against a run
+# that "silently skipped itself". A docker job that built the images and then
+# skipped every test was green and proved nothing.
+# ===========================================================================
+
+def _workflow() -> dict:
+    import yaml
+    return yaml.safe_load((ROOT / ".github/workflows/tests.yml").read_text())
+
+
+def _steps(workflow):
+    for name, job in workflow["jobs"].items():
+        for step in job.get("steps", []):
+            yield name, step
+
+
+def test_every_junit_report_ci_writes_is_guarded():
+    """A report nobody asserts on is a green job that proves nothing."""
+    workflow = _workflow()
+    written, guarded = set(), set()
+    for _, step in _steps(workflow):
+        run = str(step.get("run") or "")
+        written |= set(re.findall(r"--junitxml=(\S+)", run))
+        if "ci_assert_suite_ran.py" in run:
+            guarded |= set(re.findall(r"ci_assert_suite_ran\.py\s+(\S+)", run))
+    assert written, "no junit report is produced at all; this test is vacuous"
+    assert written <= guarded, (
+        f"CI writes {sorted(written)} and guards {sorted(guarded)}; "
+        f"unguarded: {sorted(written - guarded)}")
+
+
+def test_each_guard_runs_even_when_its_suite_failed():
+    """`if: always()`. The case the guard exists for — everything skipped — often
+    travels with a non-zero exit, and a guard that only runs on success cannot see it."""
+    for job, step in _steps(_workflow()):
+        if "ci_assert_suite_ran.py" in str(step.get("run") or ""):
+            assert step.get("if") == "always()", (
+                f"{job}: {step.get('name')!r} does not run unconditionally")
+
+
+def test_an_upload_that_finds_nothing_fails():
+    """The default for `if-no-files-found` is a warning, so a step that never produced
+    its release evidence uploaded nothing and the job stayed green."""
+    for job, step in _steps(_workflow()):
+        if str(step.get("uses") or "").startswith("actions/upload-artifact"):
+            assert step.get("with", {}).get("if-no-files-found") == "error", (
+                f"{job}: the {step['with'].get('name')!r} upload tolerates finding nothing")
+
+
+def test_the_floors_are_below_what_the_suites_actually_select():
+    """A floor above the real count cries wolf and gets removed; one at zero guards
+    nothing. Checked against what pytest SELECTS, so the numbers cannot drift silently."""
+    import subprocess
+    import sys
+    selections = {"junit-docker.xml": ["-m", "docker"],
+                  "junit-interactsh.xml": ["tests/test_interactsh_completion.py"],
+                  "junit-defectdojo.xml": ["tests/test_defectdojo_live.py"]}
+    floors = {}
+    for _, step in _steps(_workflow()):
+        found = re.search(r"ci_assert_suite_ran\.py\s+(\S+).*?--floor\s+(\d+)",
+                          str(step.get("run") or ""), re.S)
+        if found:
+            floors[found.group(1)] = int(found.group(2))
+    assert set(selections) <= set(floors), f"no floor for {sorted(set(selections) - set(floors))}"
+    for report, args in selections.items():
+        done = subprocess.run([sys.executable, "-m", "pytest", "--collect-only", "-q",
+                               "-p", "no:cacheprovider", *args],
+                              cwd=ROOT, capture_output=True, text=True)
+        # `test` singular, `tests` plural, and `N/M tests collected` when a marker
+        # deselects — the live-DefectDojo file collects exactly one, which a
+        # plural-only pattern read as "could not tell", i.e. as a passing test.
+        count = re.search(r"(\d+)(?:/\d+)? tests? collected", done.stdout)
+        assert count, f"could not read the selection for {args}: {done.stdout[-400:]}"
+        selected = int(count.group(1))
+        assert 0 < floors[report] <= selected, (
+            f"{report}: floor {floors[report]} against {selected} selected by {args}")

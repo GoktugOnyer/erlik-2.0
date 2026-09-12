@@ -575,17 +575,32 @@ class TestTheSixNewCases:
                 assert st.tool in _TOOLS_ALL, f"{cid}::{st.name} uses {st.tool!r}"
 
     def test_no_case_trips_safe_mode(self):
-        """A case blocked by safe mode reports nothing and looks like a clean
-        result. DELETE/PUT/PATCH are refused; POST is not."""
+        """A case blocked by safe mode reports nothing and looks like a clean result.
+
+        EXCEPT THE ONE THAT WRITES. `test_the_upload_case_is_the_only_one_that_writes` below
+        establishes that BUSL-09 is the only case here that sends a file, and calls that
+        unavoidable — "does this endpoint accept a file it should refuse" cannot be answered
+        without sending one. Safe mode refusing it is therefore correct, and it was not
+        refusing it: every conjunction rule opened with `(?:^|\s)curl(?:\s|$)`, a quote is
+        not whitespace, and BUSL-09's steps wrap curl in `bash -c '...'` because they need a
+        pipe. Measured: `curl -X DELETE` denied, `bash -c 'curl -X DELETE'` allowed.
+
+        So the claim this test makes is narrower than it was and now says what it means: no
+        case that does NOT write trips safe mode, and the writer does.
+        """
         from orchestrator.testcase.runner import _render
         from orchestrator.tool_executor import _safe_mode_violation
         cat = self._cat()
         ctx = {"url": "http://t.example/s", "parameter": "q", "client_id": "cid"}
+        blocked = {}
         for cid in self.NEW:
             for st in cat[cid].steps:
-                cmd = _render(st.command, ctx)
-                why = _safe_mode_violation(cmd, enabled=True)
-                assert why is None, f"{cid}::{st.name} blocked by safe mode: {why}"
+                why = _safe_mode_violation(_render(st.command, ctx), enabled=True)
+                if why:
+                    blocked.setdefault(cid, []).append(st.name)
+        assert set(blocked) == {"WSTG-BUSL-09"}, blocked
+        assert len(blocked["WSTG-BUSL-09"]) == 3, (
+            f"every upload step must be refused, not some: {blocked}")
 
     def test_the_upload_case_is_the_only_one_that_writes(self):
         """It is unavoidable there — "does this endpoint accept a file it

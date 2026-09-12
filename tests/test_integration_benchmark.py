@@ -58,10 +58,33 @@ async def metrics(session_id, duration, stages):
             predictions.add((kind, urlsplit(f["url"]).path))
         else:
             unscored += 1
-    audit = []
+    # THROUGH THE DIGEST CHECK, like the evidence count below, and not straight off disk.
+    # These bytes produce `schema_operation_coverage` and `request_count`, and the loop read
+    # them with a bare `read_text()` while `_intact` sat ten lines away — the same defect
+    # one commit fixed for evidence completeness and left here. Measured: appending two
+    # lines to the stored `requests` artifact moved coverage 0.5 -> 1.0 and request_count
+    # 2 -> 4, straight past this file's own `assert schema_operation_coverage == 1`, and the
+    # only trace was an unrelated count dropping.
+    #
+    # An artifact that fails its digest is NAMED and excluded rather than raising: a
+    # benchmark that aborts tells you nothing, and one that quietly includes unverified
+    # bytes tells you something false.
+    audit, unverified = [], []
     for e in evidence:
-        if e["kind"] == "requests":
-            audit.extend(json.loads(line) for line in (runtime_root() / "evidence" / e["id"]).read_text().splitlines())
+        if e["kind"] != "requests":
+            continue
+        try:
+            raw = await db.evidence_bytes(e["id"])
+        except Exception as exc:
+            unverified.append({"id": e["id"], "error": type(exc).__name__})
+            continue
+        for line in raw.decode("utf-8", "replace").splitlines():
+            if not line.strip():
+                continue
+            try:
+                audit.append(json.loads(line))
+            except ValueError:
+                unverified.append({"id": e["id"], "error": "unreadable audit line"})
     requested = {urlsplit(e["url"]).path for e in audit if "allowed" in e and e["allowed"] and e.get("method") == "GET"}
     # INTACT, not merely present. This read `size` from the DATABASE ROW and
     # called that a resolvable reference — the row compared against itself, so a
@@ -74,7 +97,23 @@ async def metrics(session_id, duration, stages):
         return path.is_file() and hashlib.sha256(path.read_bytes()).hexdigest() == row["sha256"]
 
     existing = {e["id"] for e in evidence if _intact(e)}
-    supported = sum(bool(f["evidence_ids"]) and all(key in existing for key in f["evidence_ids"]) for f in findings)
+    # AND AN EMPTY ARTIFACT IS NOT PROOF. `existing` is deliberately size-blind — an empty
+    # scanner log is a valid retained attachment, which is the clause a `size > 0` conjunct
+    # here once contradicted — but "this finding has substantive evidence" is a different
+    # question, and `bool(f["evidence_ids"])` answered it about the LIST rather than the
+    # bytes. A finding whose only citation is a zero-byte file was counted as supported.
+    #
+    # The size comes from the FILE, never from the database row: the row compared against
+    # itself is exactly what the digest lesson above is about.
+    substantive = {key for key in existing
+                   if (runtime_root() / "evidence" / key).stat().st_size > 0}
+    supported = sum(bool(f["evidence_ids"])
+                    and all(key in existing for key in f["evidence_ids"])
+                    and any(key in substantive for key in f["evidence_ids"])
+                    for f in findings)
+    empty_only = [f["rule"] for f in findings
+                  if f["evidence_ids"] and all(key in existing for key in f["evidence_ids"])
+                  and not any(key in substantive for key in f["evidence_ids"])]
     # "0 of 17" is not a finding anyone can act on. A finding that cited NO
     # evidence and one that cited an id which does not resolve are different
     # defects with different fixes, so the metric distinguishes them.
@@ -92,7 +131,14 @@ async def metrics(session_id, duration, stages):
             why[key] = f"artifact failed its digest check (kind={row['kind']}, stage={row['stage_id']})"
         else:
             why[key] = "unknown"
-    return {"duration_seconds": duration, "endpoints": sorted({i["url"] for i in inventory}),
+    return {"duration_seconds": duration,
+        # Audit artifacts excluded from the coverage and request counts below because they
+        # could not be verified, and lines inside them that could not be read. Non-empty
+        # here means every request and coverage number in this payload is a FLOOR — which
+        # is the difference between a benchmark that is silent about unverified bytes and
+        # one that is honest about them.
+        "unverified_audit_artifacts": unverified,
+        "endpoints": sorted({i["url"] for i in inventory}),
         "endpoint_count": len({i["url"] for i in inventory}), "schema_operations_reached": sorted(requested & OPERATIONS),
         "schema_operation_coverage": len(requested & OPERATIONS) / len(OPERATIONS),
         "expected_findings": sorted(EXPECTED), "expected_findings_recovered": sorted(predictions & EXPECTED),
@@ -102,6 +148,10 @@ async def metrics(session_id, duration, stages):
             "findings_without_substantive_evidence": sorted(
                 f["rule"] for f in findings if not (f.get("evidence") or "").strip()),
             "findings_citing_no_evidence": sorted(set(uncited)), "unresolvable_evidence_ids": sorted(dangling),
+            # Named separately, in the house style of the two above: a finding citing
+            # nothing, one citing an id that does not resolve, and one whose every citation
+            # is an empty file are three different defects with three different fixes.
+            "findings_citing_only_empty_artifacts": sorted(set(empty_only)),
             "unresolvable_reasons": sorted(set(why.values())),
             "stored_evidence_rows": len(evidence), "resolvable_evidence_rows": len(existing)},
         "request_count": sum(e.get("allowed", False) for e in audit), "blocked_request_count": sum(e.get("allowed") is False for e in audit),

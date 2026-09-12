@@ -932,6 +932,54 @@ All measured, none fixed. Listed so none is rediscovered as new.
   `forbidden_marker` fix above is the pattern to follow, not a reason to think the problem
   is gone.
 
+### E-033: the callback lifecycle, and what the fixes did not reach — OPEN
+
+Six defects were reported against the callback lifecycle, the benchmark and CI; two were
+refuted as stated and one of those led to the largest finding of the set. All the fixes are
+in `docs/integrations.md` ("What a run says when it did not finish"). These are what remains,
+all measured.
+
+- **`coverage()` cannot see the SSRF case at all.** Its targets come from
+  `config.callback.probes`, not from `integration_endpoints`, and `WSTG-INPV-19` never
+  appears in `eligible_test_cases` for any url or parameter. A per-url observation is keyed
+  `(url, parameter, identity)` and indexes against a pair no endpoint row produces; a
+  case-wide one is filtered to pairs the case was eligible for. Both were tried and both
+  reported `not_attempted`. So the skip is recorded in the stage result — where it now
+  survives the next case overwriting the reason — and coverage still does not mention it.
+  Fixing it means modelling the declared callback probes as a surface coverage knows about.
+- **An arm can lose its collector and never get it back.** Three pass-1 paths leave the
+  interactsh stage at a status no resume can select (`Collector.start()` failing -> `failed`,
+  the probe timing out -> `partial`, a `probe_refused` pre-stage verdict -> `failed`) while
+  the testcases row stays resumable, so the resume runs it with `collector=None` again.
+  Reported, not silent — but there is no way for the operator to recover the check short of a
+  new assessment.
+- **`recover()` cannot repair a wrongly-finished assessment.** It sets
+  `integration_stages` to `partial` WHERE `status='running'` for every session, but
+  `integration_assessments` only WHERE `status='running'`. The write-time defect that produced
+  `completed` assessments over `running` stages is fixed, but any row already in that state
+  survives a restart and comes out `completed` over `partial` "Interrupted by orchestrator
+  restart" — a misattribution. A rollup in `recover()` would repair it.
+- **The mutation refusal is a lane opt-in, not the runner's floor.** `run_test_case`'s
+  `step_policy` seam is passed only by the integrations adapter; `main.py`'s
+  `POST /api/v2/testcases/{id}/run`, `testcase/cli.py` and `chain.py` all call it with no
+  policy. Safe mode now covers the gap for every lane — a shell-wrapped upload or write verb
+  is denied wherever it runs — but that is a second gate agreeing with the first by
+  coincidence rather than one floor. Moving `mutating_request` into the runner, deciding with
+  the SAME `curl_request` parser the assessment lane uses, would make them unable to disagree.
+- **No test case can clean up after itself.** `TestCase` and `TestStep` have no `cleanup` or
+  `teardown` field at either level, across all 32 cases, and BUSL-09's header tells a human to
+  run `find / -name 'erlik-upload-*'` afterwards. Safe mode refusing uploads by default makes
+  that acceptable rather than fixed: an authorised engagement still leaves files behind with
+  no record of which.
+- **`POST /stop` has no debounce.** `if task and not task.done(): task.cancel()`, returning
+  before the run unwinds. The damage two clicks used to do is fixed in the teardown, which is
+  the right layer — but nothing tells an operator the second click did anything.
+- **The actual-services CI job produces no build manifest.** §11 asks for recorded tool,
+  rule and schema versions, and the real-Interactsh and live-DefectDojo runs are the evidence
+  a release most rests on. The Docker job writes `build-manifest.json`; this one does not.
+- **`result.metadata["catalogue"]` is write-only** — initialised and appended to in
+  `deterministic.py` and read nowhere.
+
 ## 10. Shared technical contracts
 
 Prefer additive schema migrations and small services with explicit interfaces.

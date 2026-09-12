@@ -203,11 +203,33 @@ class TestAgainstRealCommandCorpora:
                 cmd = st.get("command") or ""
                 if cmd and T._safe_mode_violation(cmd):
                     denied.append((p.name, st.get("name")))
-        # CONF-06's put_probe writes a file to the target. Denying it is
-        # correct: the case still detects the issue from its OPTIONS step and
-        # reports at medium rather than confirming at high by writing to a
-        # client server. Any OTHER denial is a regression.
-        assert denied == [("CONF-06_http_methods.yaml", "put_probe")], denied
+        # CONF-06's put_probe writes a file to the target. Denying it is correct: the case
+        # still detects the issue from its OPTIONS step and reports at medium rather than
+        # confirming at high by writing to a client server.
+        #
+        # BUSL-09's THREE UPLOAD STEPS JOINED IT, and the reason they were missing is the
+        # defect this list now guards. Every conjunction rule opened with
+        # `(?:^|\s)curl(?:\s|$)`, and a quote is not whitespace — so
+        # `bash -c 'curl ...'`, which nine catalogue files use because a step needing a pipe
+        # or a shell variable must, was not recognised as a curl at all. Measured through
+        # `_safe_mode_violation` itself: `curl -X DELETE` DENIED,
+        # `bash -c 'curl -X DELETE'` ALLOWED — the same request. BUSL-09 posts a file with
+        # `-F "param=@-;filename=erlik-upload-canary.php"` inside exactly that wrapper, and
+        # POST was additionally not a write verb, so it was refused nowhere.
+        #
+        # Denying it is right for the same reason as put_probe, and more so: NO catalogue
+        # case has a cleanup step — `TestCase` and `TestStep` have no such field at either
+        # level — and BUSL-09's own header tells a human to run
+        # `find / -name 'erlik-upload-*'` afterwards. Running it needs ERLIK_SAFE_MODE=0,
+        # which `runconfig` guards behind a `safe_mode_ack` naming the engagement. That is
+        # the authorisation model working, not a capability lost.
+        #
+        # Any OTHER denial is a regression.
+        assert denied == [
+            ("BUSL-09_file_upload.yaml", "double_extension_upload"),
+            ("BUSL-09_file_upload.yaml", "content_type_spoof_upload"),
+            ("BUSL-09_file_upload.yaml", "rejection_names_the_allowlist"),
+            ("CONF-06_http_methods.yaml", "put_probe")], denied
 
     def test_playbook_write_verb_is_the_only_denial(self):
         src = (pathlib.Path(__file__).resolve().parents[1]
@@ -217,3 +239,84 @@ class TestAgainstRealCommandCorpora:
             src)
         denied = [c for c in cmds if T._safe_mode_violation(c)]
         assert all("-X PUT" in c or "-X DELETE" in c for c in denied), denied
+
+
+class TestAShellWrapperIsStillACommand:
+    """Safe mode's conjunction rules were bypassed by a quote.
+
+    Every rule of the form "is a curl AND names a write verb" opened with
+    `(?:^|\s)curl(?:\s|$)`, and a quote is not whitespace. Measured through
+    `_safe_mode_violation` itself, before the fix:
+
+        curl -X DELETE http://t/a              DENIED
+        bash -c 'curl -X DELETE http://t/a'    ALLOWED       <- the same request
+
+    That is not an exotic spelling. Nine catalogue files wrap curl in `bash -c '...'`,
+    because a step that needs a pipe or a shell variable has to — including all three of
+    WSTG-BUSL-09's file-upload steps, which were refused nowhere: POST is deliberately not a
+    write verb, and the wrapper hid the client.
+    """
+
+    WRAPPED = [
+        ("bash -c 'curl -X DELETE http://t/a'", "a shell-quoted DELETE"),
+        ('sh -c "curl -X PUT --data x http://t/a"', "a double-quoted PUT"),
+        ("printf x | curl -X PATCH http://t/a", "piped into curl"),
+        ("(curl -X DELETE http://t/a)", "a subshell"),
+        ("true; curl -X DELETE http://t/a", "after a semicolon"),
+        ("sh -c 'sqlmap -u http://t/ --os-shell'", "sqlmap takeover, wrapped"),
+        ("sh -c 'sqlmap -u http://t/ --risk=3'", "sqlmap risk 3, wrapped"),
+    ]
+
+    @pytest.mark.parametrize("command,why", WRAPPED)
+    def test_a_wrapped_destructive_command_is_still_denied(self, command, why):
+        assert T._safe_mode_violation(command, enabled=True), why
+
+    def test_the_bare_form_was_always_denied(self):
+        """The positive control: if this ever fails the rules themselves are broken, and
+        every assertion above would pass for the wrong reason."""
+        assert T._safe_mode_violation("curl -X DELETE http://t/a", enabled=True)
+
+    @pytest.mark.parametrize("command,why", [
+        ("curl -s -i http://t/", "a plain GET"),
+        ("bash -c 'curl -s -i -X POST -d user=a http://t/login'", "a login POST"),
+        ("bash -c 'curl -s -F \"name=value\" http://t/u'", "a form field that is not a file"),
+        ("mycurl -X DELETE http://t/a", "a different tool whose name ends in curl"),
+    ])
+    def test_the_boundary_did_not_become_a_substring_match(self, command, why):
+        assert T._safe_mode_violation(command, enabled=True) is None, why
+
+    def test_an_upload_is_a_write_even_though_post_is_not(self):
+        """POST stays allowed on purpose — a login and a search are both POSTs — but `-F`
+        with an `@` and `-T` are unambiguous, and no test case has a cleanup step that could
+        remove what they leave behind."""
+        upload = 'bash -c \'curl -F "f=@-;filename=erlik-upload-canary.php" http://t/u\''
+        why = T._safe_mode_violation(upload, enabled=True)
+        assert why and "http-file-upload" in why
+        assert T._safe_mode_violation("curl -T ./p.txt http://t/u", enabled=True)
+        assert T._safe_mode_violation(
+            "bash -c 'curl -X POST -d q=1 http://t/search'", enabled=True) is None
+
+    def test_safe_mode_off_still_allows_everything(self):
+        """The gate is the authorisation model, not a ban: these run with
+        ERLIK_SAFE_MODE=0, which `runconfig` guards behind a `safe_mode_ack`."""
+        for command, _ in self.WRAPPED:
+            assert T._safe_mode_violation(command, enabled=False) is None
+
+    def test_the_over_denial_this_buys_and_why_it_is_the_right_way_round(self):
+        """A MENTION inside quotes is now refused too, and that is a real cost.
+
+            echo 'curl -X DELETE http://t/a' > notes.txt     ->  denied
+
+        Telling that apart from `bash -c 'curl -X DELETE ...'` needs shell parsing, and the
+        two failure directions are not symmetric: an over-denial refuses a command that
+        writes nothing and names the rule that fired, so the operator rewrites it or
+        authorises the engagement; an under-denial sends a DELETE to a client's system. Safe
+        mode errs toward refusing.
+
+        Asserted rather than left out, so nobody reads the boundary as exact.
+        """
+        why = T._safe_mode_violation("echo 'curl -X DELETE http://t/a' > notes.txt",
+                                     enabled=True)
+        assert why and "http-write-verb" in why, (
+            "the known over-denial changed shape; if it has been narrowed, check that "
+            "bash -c 'curl -X DELETE' is still denied")

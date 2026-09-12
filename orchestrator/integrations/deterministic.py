@@ -975,6 +975,43 @@ class CatalogueAdapter(BaseAdapter):
                 if case_id == "WSTG-INPV-19":
                     if not collector:
                         result.status, result.reason = "partial", "SSRF check incomplete: callback collector unavailable"
+                        # AND IT IS RECORDED AS NOT RUN, which the stage reason alone does not
+                        # do. `coverage()` is built from these observations, so without one
+                        # this pair reported `not_attempted` — indistinguishable from an
+                        # endpoint no case was ever eligible for — and the stage reason is a
+                        # single string that the next case to set one overwrites.
+                        #
+                        # THE ARM CAN LOSE ITS COLLECTOR AND NOT GET IT BACK. A resume
+                        # re-selects only stages at `queued` or `needs_auth`; if this arm's
+                        # interactsh stage ended `failed` (callback registration refused, or
+                        # the pre-stage verdict was `probe_refused`) or `partial` (the probe
+                        # timed out), the resume runs THIS stage again with no collector
+                        # again. Measured: three such pass-1 paths, and in each the resume
+                        # selected only the testcases row.
+                        # WHAT THIS DOES AND DOES NOT REACH, because the obvious claim
+                        # is wrong. It reaches the stage result, so the skip survives in
+                        # `GET /sessions/{id}` and in the report — where before, the stage
+                        # `reason` was the only trace and the next case to set one
+                        # overwrote it.
+                        #
+                        # It does NOT reach `coverage()`, and no shape of this observation
+                        # would: a per-url record is keyed `(url, parameter, identity)` and
+                        # this url is the operator's declared callback PROBE rather than a
+                        # discovered endpoint, so it indexes against a pair no endpoint row
+                        # produces; and a case-wide record is filtered to pairs the case was
+                        # eligible for, while `WSTG-INPV-19` never appears in
+                        # `eligible_test_cases` at all — measured, for every url and
+                        # parameter combination. This case's targets come from
+                        # `config.callback.probes`, which is a surface `coverage()` does not
+                        # model. Tried both; both reported `not_attempted`. See E-033.
+                        result.observations.append({
+                            "type": "test_case_not_run", "test_case_id": case_id,
+                            "url": target["url"],
+                            "parameter": target.get("parameter") or None, "steps": [],
+                            "reason": ("the callback collector for this arm is unavailable, "
+                                       "so no out-of-band payload was issued and nothing was "
+                                       "probed — read this arm's interactsh stage. A zero "
+                                       "here is untested, not clean")})
                         continue
                     run = await collector.run_test_case(tc, target, sandbox)
                 else:

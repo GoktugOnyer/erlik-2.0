@@ -1648,3 +1648,160 @@ proxy/driver shims against the same fixed fixture as Katana. It compares reporte
 endpoint inventories, not all requests the browser could reach, and does not
 measure vulnerability precision or recall. Client-target and public callback
 acceptance are not implied by the local HTTPS protocol fixtures.
+
+## What a run says when it did not finish
+
+Six defects were reported against the callback lifecycle, the benchmark and CI. Each was
+reproduced or refuted before anything was changed; two of the six were refuted as stated and
+turned out to be about something else, and one of those made the largest finding of the set.
+
+### `status` was "completed" from the top of `run()`, with nothing in between
+
+`service.run` sets `status = "completed"`, runs the stage loop, finalizes each registered
+collector, and only then rolls the stage statuses up into `partial`. The enclosing `try` had
+handlers for `asyncio.TimeoutError` and `asyncio.CancelledError` and a `finally` that writes
+`status` — and none for an ordinary exception. So anything raised after the last assignment
+wrote `completed` on the way out, and the rollup that would have said otherwise is the
+statement after the one that raised. Measured, with a `Collector.finish` that raises:
+
+    integration_assessments.status   'completed'
+    the interactsh stage row         'running', reason ''
+    report()'s engagement status     'completed'
+
+A record that contradicts itself. `persist_result` raising does the same, and so does the
+broadcast in the sweep — there `finish()` succeeds, the stage row correctly reads `partial`,
+and the assessment still says `completed`.
+
+**And the trigger is ordinary.** `Collector.finish` parsed the proxy audit log with
+`json_lines(audit.read_text())`, which raises on the first line it cannot parse — and a
+truncated last line is what a killed mitmproxy leaves. `record()` had the identical unguarded
+parse over the same file, and both read it without `errors=`, so invalid UTF-8 raised out of
+`read_text` itself. Measured: a clean log gives one event, a truncated line gives
+`json.JSONDecodeError`, invalid bytes give `UnicodeDecodeError`. A half-written diagnostic
+line could take an assessment's verdict with it.
+
+Both readers go through `adapters.audit_events` now, which returns `(events, unreadable)` and
+counts what it could not read instead of raising — the treatment `finish()` already gave
+malformed *callback* lines. A history with holes makes its counts floors, so `finish()` says
+so rather than reporting a clean poll window. And `run()` degrades to `partial`, gives the
+stages it abandoned a terminal status, records the reason in an evidence artifact — the row
+has no `reason` column — and still **re-raises**, because the caller's error is the only place
+an unexpected failure is visible and swallowing it would trade a wrong status for a silent one.
+
+### Two clicks of Stop left the assessment unresumable
+
+The reported claim was that collector cleanup can be missed during cancellation. The stated
+mechanism is wrong — Python runs a `finally` even when an exception escapes the `except`, and
+a single `task.cancel()` leaves the whole teardown free to run, measured. What is real needs
+no exotic input at all: `POST /stop` is `if task and not task.done(): task.cancel()` with no
+debounce and it returns before the run unwinds, so two clicks two milliseconds apart gave
+
+    closed=[False, False]    integration_assessments.status='running'
+                             sessions.status='running'    no terminal publish
+
+because the second delivery lands inside the first collector's release, and that window is
+~0.4s per collector — a `docker rm -f` of one container measures 207ms — against 0.8ms for a
+SQLite write. `running` is not untidy, it is terminal: `POST /start` permits a resume only
+while the row says `queued` or `needs_auth` and 409s otherwise, so two clicks made the
+assessment permanently unresumable and un-rerunnable.
+
+A failing `close()` did the same with no cancellation involved: with two collectors and a
+first release that raises, `released=[False, False]` and both updates skipped.
+
+The teardown is now one shielded task — a cancellation delivered inside it stops us waiting
+rather than stopping the work — with the status write first inside it, and each release its
+own attempt through `service.release`, which shields for the same reason. Measured on three
+cleanups with the second cancel landing inside the first: bare completes `[2, 3]`, shielded
+completes `[1, 2, 3]`. A collector that still could not be released is named in an evidence
+artifact with the stage that owned it, because it holds a container and a client task until
+`recover_orphans()` sweeps at the next orchestrator start.
+
+### Safe mode was bypassed by a quote
+
+This one was not reported. Looking for the claimed "catalogue PUT probes can execute without
+cleanup" turned up something larger: every safe-mode rule of the form "is a curl AND names a
+write verb" opened with `(?:^|\s)curl(?:\s|$)`, and a quote is not whitespace. Measured
+through `_safe_mode_violation` itself:
+
+    curl -X DELETE http://t/a              DENIED
+    bash -c 'curl -X DELETE http://t/a'    ALLOWED      <- the same request
+
+Nine catalogue files wrap curl in `bash -c '...'`, because a step needing a pipe or a shell
+variable must. Both sqlmap rules had the same hole.
+
+The reported half resolved into three facts. **No catalogue case has a cleanup step, or can
+have one** — `TestCase` and `TestStep` have no such field at either level, across all 32
+cases; the only `cleanup` in the system is `Workflow.cleanup`, the operator's declaration for
+the Schemathesis lane. BUSL-09's own header tells a human to run `find / -name
+'erlik-upload-*'` afterwards. **The PUT probe is gated twice over** and needs a deliberate
+`ERLIK_SAFE_MODE=0`. **The unconditional leak was POST**, because POST is deliberately not a
+write verb — a login and a search are both POSTs — and an upload therefore walked through:
+BUSL-09 posts a file with `-F "param=@-;filename=erlik-upload-canary.php"` inside exactly the
+wrapper that hid the client, and an adversarial pass ran that shape against a throwaway
+server with every default in place and watched the file persist.
+
+So the boundary is any shell punctuation that can precede a command, still a boundary so
+`mycurl` does not match, and there is a new `http-file-upload` rule for `-F` carrying an `@`
+and for `-T`. `-d` POSTs stay allowed. The cost is named rather than hidden: a *mention* of
+curl inside quotes is now refused too, and telling that apart needs shell parsing — the two
+directions are not symmetric, because an over-denial refuses a command that writes nothing
+and names the rule that fired, while an under-denial sends a DELETE to a client's system.
+
+### A skipped callback case, and the limit of recording it
+
+When the catalogue stage runs with no collector it sets the stage `partial` with a reason and
+moves on. The reported claim — that a resume after a credential replacement loses callback
+support — is refuted in its stated form: on every pause path where the collector reached
+`collectors`, the `needs_auth` sweep rewrites the interactsh row to `needs_auth` and the
+resume re-selects it. What is real is narrower: three pass-1 paths leave that stage at a
+status no resume can select (`start()` failing, the probe timing out, a `probe_refused`
+pre-stage verdict) while the testcases row stays resumable, so the resume runs it with no
+collector again and the SSRF check never runs for that session.
+
+The skip is recorded as an observation now, so it survives in `GET /sessions/{id}` and the
+report rather than living in a stage `reason` that the next case overwrites. **It does not
+reach `coverage()`, and no shape of it would** — a per-url record is keyed
+`(url, parameter, identity)` and this url is the operator's declared callback *probe* rather
+than a discovered endpoint, while a case-wide record is filtered to pairs the case was
+eligible for and `WSTG-INPV-19` never appears in `eligible_test_cases` at all. Both were
+tried; both reported `not_attempted`. That gap is E-033.
+
+### The benchmark's own numbers came from bytes nothing checked
+
+The reported lead — a `size > 0` conjunct contradicting the empty-diagnostic clause — is
+refuted: it was removed in the same commit that made `record()` retain an empty file, and the
+comment describing it is past tense about its own predecessor. The real residuals run the
+other way.
+
+`schema_operation_coverage` and `request_count` were computed from
+`(runtime_root()/"evidence"/id).read_text()` straight off disk, while `_intact()` — a digest
+check over the same artifacts — sat ten lines below. Appending two lines to the stored
+artifact moved coverage 0.5 → 1.0 and request_count 2 → 4, straight past this file's own
+`assert schema_operation_coverage == 1`. They go through `db.evidence_bytes` now, and an
+artifact that fails its digest is named in `unverified_audit_artifacts` and excluded rather
+than raising: a benchmark that aborts tells you nothing, and one that quietly includes
+unverified bytes tells you something false.
+
+And `findings_with_nonempty_resolvable_evidence` answered its question about the id LIST
+rather than the bytes, so a finding whose only citation is a zero-byte file counted as
+supported. An empty diagnostic FILE stays a valid retained attachment — that clause is right
+and `adapters.keep` implements it — but "is this finding supported" is a different question,
+so it gets a different set and `findings_citing_only_empty_artifacts` names the difference.
+
+### CI guarded one of the four reports it writes
+
+`scripts/ci_assert_suite_ran.py` exists because a run where everything skipped is green and
+worthless. It was wired to `junit.xml` only — and README.md describes it as protecting
+against a run that "silently skipped itself" one sentence after describing the Docker job. So
+a Docker job that built the images and then skipped every test was green and proved nothing,
+as were both actual-service jobs.
+
+The literal claim that CI omits newer suites is refuted: `pytest tests/ -q` runs everything,
+every suite added in the last week is hermetic, and all five files gating on
+`ERLIK_DOCKER_TESTS` carry the `docker` marker. The env-coverage hypothesis is refuted too —
+every variable the job does not set is supplied by the tests themselves via
+`monkeypatch.setenv`. The gap was the wiring, and nothing in the suite read
+`.github/workflows/tests.yml`, which is how it stayed invisible. All four reports are guarded
+now, with floors measured against what pytest actually selects (35 for `-m docker` of which 3
+always skip there, 13, 1), every upload fails when it finds nothing, and four tests assert
+the wiring so the next gap fails in the suite rather than in a release.

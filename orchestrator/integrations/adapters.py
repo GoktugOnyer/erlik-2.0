@@ -107,11 +107,14 @@ async def record(context, sandbox, output, result, accepted_codes=(0,)):
             await keep(path.name, path.read_text(errors="replace"), artifact=True)
     audit = sandbox.directory / "audit" / "requests.jsonl"
     if audit.exists():
-        audit_text = audit.read_text()
-        await keep("requests", audit_text)
-        events = [json.loads(line) for line in audit_text.splitlines() if line.strip()]
+        await keep("requests", audit.read_text(errors="replace"))
+        events, unreadable = audit_events(audit)
         result.metadata["request_count"] = sum("allowed" in e for e in events)
         result.metadata["blocked_requests"] = sum(e.get("allowed") is False for e in events)
+        # SAID, not dropped. With holes in the log these counts are floors, and a reader
+        # comparing `request_count` against a budget needs to know which it is.
+        if unreadable:
+            result.metadata["unreadable_audit_lines"] = unreadable
         if any(e.get("reason") in ("request budget exhausted", "URL budget exhausted") for e in events):
             result.status, result.reason = "partial", "request or URL budget exhausted"
     for finding in result.findings:
@@ -135,6 +138,50 @@ async def record(context, sandbox, output, result, accepted_codes=(0,)):
         result.status = "partial" if result.findings or result.observations else "failed"
         result.reason = f"scanner exited with {output.code}"
     return result
+
+
+def audit_events(path) -> tuple[list, int]:
+    """The proxy audit log, read tolerantly: `(events, unreadable_lines)`.
+
+    THE AUDIT LOG IS WRITTEN BY A PROCESS THAT CAN BE KILLED. `json_lines` raises on the
+    first line it cannot parse, and both readers of this file called it bare — so one
+    truncated last line, which is exactly what a killed mitmproxy leaves, raised
+    `json.JSONDecodeError` out of `Collector.finish()` and out of `record()`. Measured:
+
+        a clean log                           1 event
+        a truncated last line                 JSONDecodeError: Unterminated string
+        invalid utf-8                         UnicodeDecodeError out of read_text()
+
+    Out of `finish()` that was the whole assessment: the exception escaped the stage loop
+    and the run was recorded `completed` (see the `except Exception` in `service.run`). A
+    half-written diagnostic line must not be able to do that.
+
+    `errors="replace"`, because the bytes are a diagnostic record rather than a protocol,
+    and a log that cannot be decoded should still yield the lines that can.
+
+    IT RETURNS THE COUNT rather than dropping quietly. `finish()` already counts malformed
+    CALLBACK lines and degrades the stage to `partial` for them; the audit log gets the
+    same treatment, because a request history with holes in it is a request history whose
+    counts are floors and the caller has to be able to say so.
+    """
+    try:
+        text = path.read_text(errors="replace")
+    except OSError:
+        return [], 0
+    events, unreadable = [], 0
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        try:
+            item = json.loads(line)
+        except ValueError:
+            unreadable += 1
+            continue
+        if not isinstance(item, dict):
+            unreadable += 1
+            continue
+        events.append(item)
+    return events, unreadable
 
 
 def json_lines(text):

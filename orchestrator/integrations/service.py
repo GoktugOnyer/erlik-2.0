@@ -308,6 +308,42 @@ async def operation_routes(config, sandbox, target):
     return routes
 
 
+def _leak(stage, failure) -> dict:
+    """One unreleased collector, named by the stage that owned it."""
+    return {"stage_id": stage["id"], "adapter": stage["adapter"],
+            "identity_id": stage["identity_id"],
+            "error": redact(f"{type(failure).__name__}: {failure}")}
+
+
+async def release(collector):
+    """Release a collector and return what stopped it, or None.
+
+    SHIELDED, and that is the whole point. A release is cleanup, so every caller runs it
+    from an `except` or a `finally` — and in a task that has been cancelled a second time
+    the bare `await collector.close()` raises CancelledError at once, before the close has
+    done anything. Measured on three cleanups with a second cancellation landing inside the
+    first:
+
+        bare        completed [2, 3]        — the one it landed in was lost
+        shielded    completed [1, 2, 3]
+
+    `ensure_future` puts the close in its own task, which our cancellation does not reach;
+    the CancelledError is raised in the WAITER, so the close still finishes.
+
+    It RETURNS the failure instead of raising, because a release must never replace the
+    exception it is cleaning up after — and returns it rather than swallowing it, because
+    the two call sites both used a bare `except BaseException: pass` and a collector that
+    was never released holds a container and an interactsh-client task until
+    `recover_orphans()` sweeps at the next orchestrator start. An operator has to be able
+    to find out one is out there.
+    """
+    try:
+        await asyncio.shield(asyncio.ensure_future(collector.close()))
+    except BaseException as exc:
+        return exc
+    return None
+
+
 async def run(session_id, notify=None):
     async def publish(payload):
         if notify:
@@ -321,6 +357,7 @@ async def run(session_id, notify=None):
     remaining = max(0, config.budget.assessment_seconds - assessment["elapsed_seconds"])
     deadline = started + remaining
     collectors = []
+    leaked = []
     status = "completed"
     try:
         async with asyncio.timeout(remaining):
@@ -423,10 +460,16 @@ async def run(session_id, notify=None):
                                                 await db.persist_result(session_id, stage["id"], interrupted)
                                             except BaseException:
                                                 pass
-                                            try:
-                                                await collector.close()
-                                            except BaseException:
-                                                pass
+                                            # The release still must not replace the
+                                            # failure it is cleaning up after — `release`
+                                            # returns what stopped it rather than raising
+                                            # — but a swallowed failure used to leave no
+                                            # trace at all, and under a second
+                                            # cancellation the close had not even been
+                                            # attempted.
+                                            failure = await release(collector)
+                                            if failure:
+                                                leaked.append(_leak(stage, failure))
                                             raise
                                         collectors.append((collector, stage))
                                         result.status = "running"
@@ -544,12 +587,100 @@ async def run(session_id, notify=None):
         status = "cancelled"
         await db.execute("UPDATE integration_stages SET status='cancelled',reason='Operator cancelled; inspect workflow cleanup evidence' WHERE session_id=? AND status IN ('queued','running')", (session_id,))
         raise
+    # ANYTHING ELSE IS NOT A COMPLETED ASSESSMENT. `status` is "completed" from the top, and
+    # there was no handler here — so an exception anywhere after the last assignment wrote
+    # `completed` to the row on the way out. Measured: with a `Collector.finish` that raises,
+    #
+    #     integration_assessments.status = 'completed'
+    #     the interactsh stage row        = 'running', no reason
+    #     report()'s engagement status    = 'completed'
+    #
+    # a record that contradicts itself, and the rollup that would have set `partial` — it
+    # runs after the finish sweep — never ran at all. `persist_result` raising gives the same
+    # shape. This is the project's signature defect in the one function whose whole job is to
+    # say what happened.
+    #
+    # The exception still PROPAGATES, exactly as it did before: the caller's 500 is the only
+    # place an unexpected failure is visible, and swallowing it here would trade a wrong
+    # status for a silent one. What changes is that the row no longer lies, and the reason
+    # is recorded where an assessment can carry one — `integration_assessments` has no
+    # `reason` column, so it goes in an evidence artifact, the way the optional summary does.
+    except Exception as exc:
+        status = "partial"
+        try:
+            # AND THE STAGES IT ABANDONED GET A TERMINAL STATUS. Degrading only the
+            # assessment left the row it was finalizing at `running` forever — the same
+            # self-contradiction one level down, and `recover()` repairs stage rows on the
+            # next start while leaving the assessment's own status alone, so a `running`
+            # stage under a finished assessment is a state nothing ever resolves. Scoped to
+            # rows that never reached a verdict, so a stage that genuinely failed keeps its
+            # own reason.
+            await db.execute(
+                "UPDATE integration_stages SET status='partial',reason=? "
+                "WHERE session_id=? AND status IN ('queued','running')",
+                ("the assessment stopped during finalization; see the finalization-error "
+                 "evidence for this session", session_id))
+            await db.evidence(session_id, "assessment", "finalization-error", json.dumps({
+                "stage": "post-stage finalization",
+                "error": redact(f"{type(exc).__name__}: {exc}"),
+                "establishes": ("the assessment did not finish. Stages left `running` were "
+                                "not rolled up, and a callback observation may not have been "
+                                "ingested — re-read the stage rows rather than this status"),
+            }))
+        except Exception:
+            # Recording the reason must never replace the reason. If even this fails the
+            # status is still degraded below, which is the half that matters.
+            pass
+        raise
     finally:
-        for collector, stage in collectors:
-            await collector.close()
-        await db.execute("UPDATE integration_assessments SET status=?,elapsed_seconds=elapsed_seconds+? WHERE session_id=?", (status, time.monotonic() - started, session_id))
-        await db.execute("UPDATE sessions SET status=?,updated_at=CURRENT_TIMESTAMP WHERE id=?", (status, session_id))
-        await publish({"status": status})
+        # THE WHOLE TEARDOWN IS UNCANCELLABLE, because the trigger is a button.
+        #
+        # `POST /stop` is `if task and not task.done(): task.cancel()` with no debounce, and
+        # it returns before the run unwinds. Two clicks two milliseconds apart — no
+        # exception anywhere — measured on the committed code as:
+        #
+        #     closed=[False, False]   integration_assessments.status='running'
+        #                             sessions.status='running'   no terminal publish
+        #
+        # because the second delivery lands inside the first collector's release, and that
+        # window is ~0.4s per collector (a `docker rm -f` of one container measures 207ms)
+        # against 0.8ms for a sqlite write. `running` is not merely untidy: `POST /start`
+        # permits a resume only while the row says `queued` or `needs_auth` and 409s
+        # otherwise, so two clicks left the assessment permanently unresumable.
+        #
+        # Shielded as ONE task, so a cancellation delivered anywhere inside it stops us
+        # waiting rather than stopping the work. The status write comes FIRST inside it for
+        # the same reason the order mattered before — if anything does truncate the
+        # teardown, the row is already terminal. `elapsed_seconds` therefore excludes the
+        # release time, which is the right trade: it is a budget figure, not a stopwatch.
+        async def teardown():
+            await db.execute("UPDATE integration_assessments SET status=?,elapsed_seconds=elapsed_seconds+? WHERE session_id=?", (status, time.monotonic() - started, session_id))
+            await db.execute("UPDATE sessions SET status=?,updated_at=CURRENT_TIMESTAMP WHERE id=?", (status, session_id))
+            # AND ONE FAILED RELEASE MUST NOT STRAND THE REST. Measured with two collectors
+            # and a first `close()` that raises: `released=[False, False]` — the second was
+            # never reached. Each release is its own attempt.
+            for collector, stage in collectors:
+                failure = await release(collector)
+                if failure:
+                    leaked.append(_leak(stage, failure))
+            if leaked:
+                try:
+                    await db.evidence(session_id, "assessment", "collector-not-released",
+                                      json.dumps({"leaked": leaked, "establishes": (
+                                          "these collectors were not released by this run. "
+                                          "Their containers and client tasks survive until "
+                                          "recover_orphans() runs at the next orchestrator "
+                                          "start, which stops every job labelled for this "
+                                          "workspace")}))
+                except Exception:
+                    pass
+            await publish({"status": status})
+
+        try:
+            await asyncio.shield(asyncio.ensure_future(teardown()))
+        except BaseException:
+            # We stopped waiting; the shielded task did not stop working.
+            pass
     return status
 
 

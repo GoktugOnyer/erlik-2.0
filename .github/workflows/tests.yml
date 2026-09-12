@@ -77,6 +77,7 @@ jobs:
         if: always()
         with:
           name: junit-${{ matrix.python-version }}
+          if-no-files-found: error
           path: junit.xml
 
   # -------------------------------------------------------------- local Docker
@@ -132,6 +133,20 @@ jobs:
           ERLIK_BENCHMARK_OUTPUT: discovery-comparison.json
         run: python -m pytest -m docker -q --junitxml=junit-docker.xml
 
+      # THE SAME GUARD, ON THIS REPORT TOO. It was wired to junit.xml only, and
+      # README.md says it protects against a run that "silently skipped itself"
+      # one sentence after describing this job — so three of the four reports CI
+      # writes were unguarded, and a docker job that built the images and then
+      # skipped every test was green and proved nothing. Floor from the measured
+      # composition: `-m docker` selects 35 and exactly 3 always skip here
+      # (the live-DefectDojo case and the two real-Interactsh cases need opt-ins
+      # that only the actual-services job supplies), so 32 run; 30 leaves room
+      # for one more always-skipping case without crying wolf, because a guard
+      # that fires on a healthy run gets removed.
+      - name: Assert the Docker suites actually ran
+        if: always()
+        run: python scripts/ci_assert_suite_ran.py junit-docker.xml --floor 30 --ratio 0.85
+
       # "produce release evidence" — these reports are what a release is judged
       # on, and they are worthless if nobody can find the run that produced
       # them. build-manifest.json is what makes the other three legible later:
@@ -141,6 +156,11 @@ jobs:
         if: always()
         with:
           name: release-evidence
+          # A MISSING REPORT IS NOT AN EMPTY UPLOAD. The default is a warning, so
+          # a step that never produced its evidence uploaded nothing and the job
+          # stayed green — release evidence that is judged by its presence has to
+          # fail loudly when it is absent.
+          if-no-files-found: error
           path: |
             junit-docker.xml
             coverage-report.json
@@ -187,6 +207,13 @@ jobs:
           ERLIK_REAL_INTERACTSH_TESTS: "1"
         run: python -m pytest tests/test_interactsh_completion.py -q --junitxml=junit-interactsh.xml
 
+      # FOR THIS ONE THE FLOOR IS THE GUARD, not the ratio: 11 of 13 is 84.6%,
+      # which any ratio loose enough not to cry wolf would wave through — and the
+      # two that would be missing are the real-service cases this job exists for.
+      - name: Assert the real Interactsh acceptance actually ran
+        if: always()
+        run: python scripts/ci_assert_suite_ran.py junit-interactsh.xml --floor 13 --ratio 0.95
+
       # No secrets, and no gate. Both were mine, and both were wrong.
       #
       # The fixture in tests/test_defectdojo_live.py mints every credential the
@@ -211,6 +238,10 @@ jobs:
           ERLIK_DEFECTDOJO_LIVE_TESTS: "1"
         run: python -m pytest tests/test_defectdojo_live.py -q --junitxml=junit-defectdojo.xml
 
+      - name: Assert the live DefectDojo acceptance actually ran
+        if: always()
+        run: python scripts/ci_assert_suite_ran.py junit-defectdojo.xml --floor 1 --ratio 0.95
+
       # Client evidence must never reach a public CI artifact (§11). These
       # suites run against lab fixtures only, and the junit files carry test
       # names and durations — not captured responses.
@@ -218,4 +249,5 @@ jobs:
         if: always()
         with:
           name: actual-service-evidence
+          if-no-files-found: error
           path: junit-*.xml

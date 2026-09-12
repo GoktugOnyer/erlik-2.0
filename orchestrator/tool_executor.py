@@ -368,11 +368,63 @@ def _rx(pattern: str):
     return re.compile(pattern, re.IGNORECASE).search
 
 
+# WHETHER A COMMAND INVOKES A TOOL, SEEN THROUGH A SHELL WRAPPER.
+#
+# Every rule below that is a conjunction — "is a curl AND names a write verb" — opened with
+# `(?:^|\s)curl(?:\s|$)`, and a quote is not whitespace. So:
+#
+#     curl -X DELETE http://t/a              DENIED
+#     bash -c 'curl -X DELETE http://t/a'    ALLOWED        <- the same request
+#
+# measured through `_safe_mode_violation` itself. That is not a hypothetical spelling: the
+# catalogue wraps curl in `bash -c '...'` in nine of its case files, because a step that
+# needs a pipe or a shell variable has to. Safe mode's HTTP write protection, and both
+# sqlmap rules, were bypassed by a quote.
+#
+# The boundary is now any shell punctuation that can precede a command — quote, pipe,
+# semicolon, ampersand, parenthesis — and still a BOUNDARY, so `mycurl` does not match.
+_CLIENT_EDGE_L = r"(?:^|[\s'\"|;&(])"
+_CLIENT_EDGE_R = r"(?:[\s'\"|;&)]|$)"
+
+
+def _invokes(tools: str, cmd: str) -> bool:
+    return bool(_rx(_CLIENT_EDGE_L + f"(?:{tools})" + _CLIENT_EDGE_R)(cmd))
+
+
 def _http_write_verb(cmd: str) -> bool:
     """A write verb explicitly requested of an HTTP client."""
-    if not _rx(r"(?:^|\s)(?:curl|http|https|wget|httpie)(?:\s|$)")(cmd):
+    if not _invokes("curl|http|https|wget|httpie", cmd):
         return False
     return bool(_rx(r"(?:-X|--request)[=\s]+['\"]?(?:DELETE|PUT|PATCH)\b")(cmd))
+
+
+def _http_file_upload(cmd: str) -> bool:
+    """A file sent to the target, which leaves something behind on it.
+
+    POST IS DELIBERATELY NOT A WRITE VERB above, and that is right: a login step and a
+    search probe are both POSTs, and refusing every one of them would refuse most of the
+    catalogue. But an UPLOAD is not ambiguous, and it was walking straight through —
+    `_http_write_verb` matches only `-X DELETE|PUT|PATCH`.
+
+    Measured: `WSTG-BUSL-09`'s steps are `curl -F "param=@-;filename=erlik-upload-canary.php"`
+    inside a `bash -c`, and an adversarial pass ran that shape against a throwaway server
+    with every default in place — the file was POSTed and it persisted. The PUT probe in the
+    same family is refused twice over; the upload was refused nowhere.
+
+    AND NO CATALOGUE CASE CAN CLEAN UP AFTER ITSELF. `TestCase` and `TestStep` have no
+    `cleanup` or `teardown` field at either level, across all 32 cases — the only cleanup in
+    the system is `Workflow.cleanup`, which is the operator's declaration for the
+    Schemathesis lane. BUSL-09's own header tells a human to run
+    `find / -name 'erlik-upload-*'` afterwards. So a refused upload is not a lost capability
+    with a tidy-up cost; it is a capability that had no tidy-up at all.
+
+    Narrow on purpose: `-F/--form` carrying `@` (multipart from a file or from stdin) and
+    `-T/--upload-file`. A `-d`/`--data` POST is left alone, because that is the login.
+    """
+    if not _invokes("curl|http|https|wget|httpie", cmd):
+        return False
+    return bool(_rx(r"(?:-F|--form)[=\s]+['\"]?[^'\" ]*=@")(cmd)
+                or _rx(r"(?:-T|--upload-file)[=\s]")(cmd))
 
 
 def _sql_ddl_dml(cmd: str) -> bool:
@@ -387,7 +439,7 @@ def _sql_ddl_dml(cmd: str) -> bool:
 
 
 def _sqlmap_os_takeover(cmd: str) -> bool:
-    if not _rx(r"(?:^|\s)sqlmap(?:\s|$)")(cmd):
+    if not _invokes("sqlmap", cmd):
         return False
     return bool(_rx(r"--(?:os-shell|os-pwn|os-cmd|file-write|file-dest|sql-shell)\b")(cmd))
 
@@ -398,7 +450,7 @@ def _sqlmap_max_risk(cmd: str) -> bool:
     # own default BEUSTQ and the literal `--technique BEUST` in
     # tests_catalog/wstg/INPV-05_sqli.yaml, gutting the smallest and
     # highest-value finding class in the corpus.
-    if not _rx(r"(?:^|\s)sqlmap(?:\s|$)")(cmd):
+    if not _invokes("sqlmap", cmd):
         return False
     return bool(_rx(r"--risk[=\s]+3\b")(cmd))
 
@@ -409,6 +461,9 @@ def _sqlmap_max_risk(cmd: str) -> bool:
 _SAFE_MODE_RULES: list[tuple[str, "callable", str]] = [
     ("http-write-verb", _http_write_verb,
      "HTTP write verb (DELETE/PUT/PATCH) — can modify or destroy client data"),
+    ("http-file-upload", _http_file_upload,
+     "HTTP file upload — leaves a file on the client's system, and no test case has a "
+     "cleanup step that could remove it"),
     ("sql-ddl-dml", _sql_ddl_dml,
      "SQL statement that writes or drops data"),
     ("sqlmap-os-takeover", _sqlmap_os_takeover,

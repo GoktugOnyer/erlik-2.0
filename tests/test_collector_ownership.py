@@ -268,3 +268,38 @@ async def test_a_failing_cleanup_does_not_replace_the_failure_it_cleaned_up_afte
     assert rows[0]["status"] != "running", (
         f"{why}: the stage was left mid-flight because the cleanup error "
         f"displaced the original and skipped the handler that records it")
+
+
+async def test_a_close_that_was_interrupted_can_be_retried():
+    """`close()` dropped the sandbox reference BEFORE exiting it.
+
+    That made it idempotent, which is what it is for — but it also made a FAILED close
+    unrecoverable. Measured on the real class: a cancellation delivered during
+    `sandbox.__aexit__` escapes with `self.sandbox` already None, so the retry every caller
+    makes is a silent no-op ("sandbox exits attempted 1, completed 0").
+
+    What is stranded has no other owner. The proxy container and the internal network are
+    removed by `Sandbox.close()` and by nothing else, and they carry no timeout — they live
+    until `recover_orphans()` sweeps at the next orchestrator start, and if that sweep cannot
+    clear them `recover()` returns False and the startup gate refuses to launch new jobs.
+    """
+    from orchestrator.integrations.interactsh import Collector
+
+    attempts = []
+
+    class _Sandbox:
+        async def __aexit__(self, *a):
+            attempts.append(1)
+            if len(attempts) == 1:
+                raise asyncio.CancelledError()
+
+    collector = Collector.__new__(Collector)
+    collector.task, collector.sandbox = None, _Sandbox()
+    with pytest.raises(asyncio.CancelledError):
+        await collector.close()
+    assert collector.sandbox is not None, "the only handle on the container was discarded"
+    await collector.close()
+    assert len(attempts) == 2, "the retry did nothing"
+    # ...and it is still idempotent, which is the property the old order was protecting.
+    await collector.close()
+    assert len(attempts) == 2
