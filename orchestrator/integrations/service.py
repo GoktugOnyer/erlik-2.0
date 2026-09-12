@@ -379,6 +379,74 @@ async def release(collector):
     return None
 
 
+async def requeue_lost_collectors(session_id, config):
+    """An arm must not be able to lose its collector for the rest of the session.
+
+    THE COLLECTOR IS A DEPENDENCY, NOT A SIBLING. `CatalogueAdapter` runs the
+    out-of-band case through the collector its arm's interactsh stage started, and a resume
+    selects stages at `queued` or `needs_auth` only — so a pass-1 path that left the
+    interactsh row at any other status removed that dependency permanently while leaving the
+    catalogue row resumable. Measured on the committed code, with `Collector.start()` raising
+    and the next stage pausing on authentication:
+
+        pass 1   interactsh failed "callback registration refused" / testcases queued
+        resume   selects katana + testcases, NOT interactsh
+        pass 2   testcases partial "SSRF check incomplete: callback collector unavailable"
+
+    and the assessment is `partial` afterwards, which `POST /start` refuses — so the check
+    could never run for that session at all. Three pass-1 paths reach it: `start()` failing
+    (`failed`), the probe timing out (`partial`), and a `probe_refused` pre-stage verdict
+    (`failed`); a `cancelled` interactsh row under a catalogue row left `needs_auth` by an
+    earlier pause is a fourth.
+
+    So the dependency is re-queued with the catalogue work that needs it. NARROWLY, because a
+    stage that is re-run for no reason costs a container and an authentication probe:
+
+    - only when the configuration selects a case that needs a collector, which is the only
+      thing in the catalogue that uses one;
+    - only for an arm whose own catalogue stage is selectable in THIS pass, so a finished arm
+      and a healthy run are untouched;
+    - only from a status that is neither finished nor already selectable, so the `needs_auth`
+      pause path — which already rewrites the interactsh row and is covered by
+      `tests/test_callback_resume.py` — keeps working exactly as it does.
+
+    THIS IS NOT A PROMISE THAT THE RETRY SUCCEEDS. A cause that persists — an
+    `indiscriminate` check, a budget still exhausted — fails pass 2 identically, and the
+    catalogue then records the skip it records today. What changes is that a transient cause
+    is no longer permanent. The pass-1 status and reason are carried into the new reason
+    rather than dropped, because "why is this queued again" is the question a reader asks,
+    and into an evidence artifact, because `persist_result` overwrites the reason.
+    """
+    from .inventory import COLLECTOR_CASES
+    if not set(config.test_cases or ()) & set(COLLECTOR_CASES):
+        return []
+    placeholders = ",".join("?" * len(FINISHED_STAGE_STATUSES))
+    lost = await db.rows(
+        f"SELECT id, identity_id, status, reason FROM integration_stages "
+        f"WHERE session_id=? AND adapter='interactsh' "
+        f"AND status NOT IN ({placeholders}) AND status NOT IN ('queued','needs_auth') "
+        f"AND identity_id IN (SELECT identity_id FROM integration_stages "
+        f"WHERE session_id=? AND adapter='testcases' AND status IN ('queued','needs_auth'))",
+        (session_id, *FINISHED_STAGE_STATUSES, session_id))
+    requeued = []
+    for stage in lost:
+        await db.execute(
+            "UPDATE integration_stages SET status='queued',reason=?,finished_at=NULL WHERE id=?",
+            (f"re-queued by a resume: this arm's catalogue work needs the callback collector "
+             f"this stage starts, and pass 1 left it {stage['status']}"
+             f"{' — ' + stage['reason'] if stage['reason'] else ''}", stage["id"]))
+        requeued.append({"stage_id": stage["id"], "identity_id": stage["identity_id"],
+                         "pass_1_status": stage["status"], "pass_1_reason": stage["reason"] or ""})
+    if requeued:
+        await db.evidence(session_id, "assessment", "collector-requeued", json.dumps({
+            "stages": requeued,
+            "establishes": ("the out-of-band case was unreachable for these arms because their "
+                            "collector stage ended at a status no resume selects. This resume "
+                            "re-runs it. If it fails again the catalogue records the case as "
+                            "not run, which is where a zero must be read from"),
+        }))
+    return requeued
+
 async def run(session_id, notify=None):
     async def publish(payload):
         if notify:
@@ -396,6 +464,9 @@ async def run(session_id, notify=None):
     status = "completed"
     try:
         async with asyncio.timeout(remaining):
+            # Before anything is selected: an arm whose collector stage is no longer
+            # selectable, while the catalogue work that needs it still is.
+            await requeue_lost_collectors(session_id, config)
             stages = await db.rows("SELECT * FROM integration_stages WHERE session_id=? AND status IN ('queued','needs_auth') ORDER BY rowid", (session_id,))
             # ONE identity-free probe of every authentication check, before any arm runs.
             # `authenticate` compares each identity's own answer against it; see there for

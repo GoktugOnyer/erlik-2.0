@@ -6,15 +6,17 @@ stage `reason` is a single string that the next case to set one overwrites, and 
 is built from OBSERVATIONS, so the pair reported `not_attempted`: indistinguishable from an
 endpoint no case was ever eligible for.
 
-AND THE ARM CAN LOSE ITS COLLECTOR WITHOUT GETTING IT BACK. The reported claim was that a
+AND THE ARM COULD LOSE ITS COLLECTOR WITHOUT GETTING IT BACK. The reported claim was that a
 resume after a credential replacement loses callback support, and the headline mechanism is
 refuted — on every pause path where the collector reached `collectors`, the `needs_auth`
-sweep rewrites the interactsh row to `needs_auth` and the resume re-selects it. What is real
+sweep rewrites the interactsh row to `needs_auth` and the resume re-selects it. What was real
 is narrower: three pass-1 paths leave the interactsh stage at a status no resume can select
 (`Collector.start()` failing -> `failed`; the probe timing out -> `partial`; a
 `probe_refused` pre-stage verdict -> `failed`) while the testcases row stays resumable. The
-resume then runs this stage with `collector=None` again, and the SSRF check never runs for
-that session at all.
+resume then ran this stage with `collector=None` again, and the SSRF check never ran for that
+session at all. That half is fixed in `service.requeue_lost_collectors`, tested by
+`test_an_arm_does_not_lose_its_collector_for_good.py` — which also guards the property THIS
+file is about, because the retry is not a promise and a persistent cause still lands here.
 
 So the skip is recorded where coverage can see it: `test_case_not_run`, which
 `inventory.coverage` already maps to the `not_run` state. A zero there reads as untested

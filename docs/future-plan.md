@@ -934,12 +934,40 @@ All measured, none fixed. Listed so none is rediscovered as new.
 
 ### E-033: the callback lifecycle, and what the fixes did not reach — PARTLY CLOSED
 
-Four of the eight items are fixed; see `docs/integrations.md` ("What the report could not
+Six of the eight items are fixed; see `docs/integrations.md` ("What the report could not
 see") for the measurements. Closed: `recover()`'s rollup, including the `sessions` row it
 stopped short of; the three pieces of write-only state; the coverage report's blind spot for
-arm-wide truncations, plus the comma-joined truncation id found while fixing it; and — not in
-the original list — the cross-arm checks' blindness to `integration_stages.status`, which
-turned a half run into a byte-identical clean result.
+arm-wide truncations, plus the comma-joined truncation id found while fixing it; the arm that
+could lose its collector for good; the actual-services job's missing build manifest; and —
+not in the original list — the cross-arm checks' blindness to `integration_stages.status`,
+which turned a half run into a byte-identical clean result.
+
+**An arm losing its collector for good** is fixed by `service.requeue_lost_collectors`, which
+re-queues the interactsh stage along with the catalogue work that depends on it. Measured on
+the committed code with `Collector.start()` raising and the next stage pausing on
+authentication: pass 1 left the arm's interactsh row `failed` and its testcases row `queued`,
+the resume selected katana and testcases but not interactsh, and pass 2 recorded `partial`,
+"SSRF check incomplete: callback collector unavailable" — after which the assessment is
+`partial`, which `POST /start` refuses, so the check could not run for that session by any
+route. With the retry the same pass 2 runs the case: the interactsh row reaches `completed`,
+the arm mints a second correlation host, and the catalogue records `test_case` rather than
+`test_case_not_run`. It is deliberately not a promise: a cause that persists fails pass 2
+identically and the case is still recorded as not run, which is guarded.
+
+The retry is narrow by construction, and the five places it must NOT fire are what
+`tests/test_an_arm_does_not_lose_its_collector_for_good.py` mostly tests: a healthy arm, an
+arm whose catalogue work is done, another arm's stage, an assessment selecting no collector
+case, and a row a resume can already select — rewriting a `needs_auth` row would destroy the
+pause marker `tests/test_callback_resume.py` depends on. Measured against both recorded real
+stores: zero rows change, because neither selected a callback case.
+
+**The actual-services build manifest** is written by the step the docker job already had.
+It needed one addition: `release_manifest.py --also-image`, because the image that job's
+acceptance actually runs against — `erlik-interactsh-lab:1` — is a fixture and so is absent
+from `IMAGES`. A manifest naming every image except that one reads as complete, which is the
+failure mode this repository keeps finding; fixtures are recorded under their own key so a
+lab server is never counted in `images_missing`. `zap` is recorded absent in that job and
+that is correct: it is neither pulled nor used there.
 
 Still open from the original eight:
 
@@ -952,17 +980,12 @@ Still open from the original eight:
   declared callback probes as a surface coverage knows about — and the warning from the
   increment that looked at it stands: an endpoint row that makes a case testable somewhere it
   should not be is a worse defect than the one being fixed.
-- **An arm can lose its collector and never get it back.** Three pass-1 paths leave the
-  interactsh stage at a status no resume can select while the testcases row stays resumable.
-  Reported, not silent, but unrecoverable short of a new assessment.
 - **The mutation refusal is a lane opt-in, not the runner's floor.** Safe mode now covers every
   lane, so this is two gates agreeing rather than one floor.
 - **No test case can clean up after itself.** `TestCase` and `TestStep` have no such field.
   Safe mode refusing uploads by default makes that acceptable rather than fixed.
 - **`POST /stop` has no debounce.** The damage two clicks did is fixed in the teardown, which
   is the right layer; nothing tells an operator the second click did anything.
-- **The actual-services CI job produces no build manifest**, which §11 asks for and which the
-  Docker job does write.
 
 ### E-034: the three answers a comparison can give, and where the line sits — OPEN
 

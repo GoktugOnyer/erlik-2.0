@@ -1632,10 +1632,17 @@ meaningless without six months later:
 ```sh
 python scripts/release_manifest.py --out build-manifest.json
 python scripts/release_manifest.py --skip-tools   # skip the in-image probe
+python scripts/release_manifest.py --also-image erlik-interactsh-lab:1
 ```
 
 It reads no configuration, contacts no service, and never touches the evidence
 store. An image it cannot find is recorded as absent rather than omitted.
+
+`--also-image` records an image the lane does not ship. The real-service CI job
+runs its acceptance against `erlik-interactsh-lab:1`, which is a fixture and so
+is not in `IMAGES` — without this its manifest named every image except the one
+the measurement depended on. Fixtures are kept under their own key, because
+`images_missing` means "this build is incomplete" and a lab server is not that.
 
 The Docker tests create and remove their own target and recording server. They
 check redirect refusal, direct-egress denial, authentication isolation, actual
@@ -1753,10 +1760,20 @@ When the catalogue stage runs with no collector it sets the stage `partial` with
 moves on. The reported claim — that a resume after a credential replacement loses callback
 support — is refuted in its stated form: on every pause path where the collector reached
 `collectors`, the `needs_auth` sweep rewrites the interactsh row to `needs_auth` and the
-resume re-selects it. What is real is narrower: three pass-1 paths leave that stage at a
+resume re-selects it. What was real is narrower: three pass-1 paths leave that stage at a
 status no resume can select (`start()` failing, the probe timing out, a `probe_refused`
-pre-stage verdict) while the testcases row stays resumable, so the resume runs it with no
-collector again and the SSRF check never runs for that session.
+pre-stage verdict) while the testcases row stays resumable, so the resume ran it with no
+collector again and the SSRF check never ran for that session.
+
+That half is now fixed: `service.requeue_lost_collectors` re-queues an arm's interactsh stage
+along with the catalogue work that depends on it, measured as the same pass 2 going from
+`partial`, "SSRF check incomplete: callback collector unavailable" to a `completed` collector
+stage and a `test_case` observation on a fresh correlation host. It fires only for an arm with
+pending catalogue work on an assessment that selected a collector case, and never on a row a
+resume can already select — rewriting a `needs_auth` row would destroy the pause marker. On
+both recorded real stores it changes zero rows, because neither selected a callback case. It
+is not a promise: a cause that persists fails the retry identically and the case is recorded
+as not run, which is where a zero has to be read from.
 
 The skip is recorded as an observation now, so it survives in `GET /sessions/{id}` and the
 report rather than living in a stage `reason` that the next case overwrites. **It does not

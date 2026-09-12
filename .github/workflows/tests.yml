@@ -201,6 +201,20 @@ jobs:
       - name: Build the Interactsh lab
         run: docker build -t erlik-interactsh-lab:1 docker/interactsh-lab
 
+      # §11 asks every release artifact to name what it was measured against, and the
+      # docker job above writes one while this job — the only one that runs against real
+      # pinned services — wrote none. Its junit files then said which acceptance cases
+      # passed and nothing about the Interactsh server or the worker they passed against,
+      # which is the half that stops being reconstructable after a rebuild.
+      #
+      # `--also-image` because the lab server is a fixture, not a lane image, so `IMAGES`
+      # does not carry it. `zap` WILL be recorded absent here and that is correct: this job
+      # does not pull it and no check in it uses one.
+      - name: Record what was pinned
+        run: >-
+          python scripts/release_manifest.py --out build-manifest.json
+          --also-image erlik-interactsh-lab:1
+
       - name: Real Interactsh acceptance
         env:
           ERLIK_DOCKER_TESTS: "1"
@@ -250,4 +264,6 @@ jobs:
         with:
           name: actual-service-evidence
           if-no-files-found: error
-          path: junit-*.xml
+          path: |
+            junit-*.xml
+            build-manifest.json

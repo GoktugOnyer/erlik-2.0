@@ -11,7 +11,7 @@ Records only what is already public about the build — image digests, tool
 versions, the commit. It reads no configuration, contacts no service, and never
 touches data/ or an evidence store.
 
-    release_manifest.py [--out build-manifest.json]
+    release_manifest.py [--out build-manifest.json] [--also-image REF ...]
 """
 from __future__ import annotations
 
@@ -97,6 +97,17 @@ def main() -> int:
     parser.add_argument("--out", default="build-manifest.json")
     parser.add_argument("--skip-tools", action="store_true",
                         help="skip the in-image tool probe, which starts containers")
+    # A JOB CAN TEST AGAINST AN IMAGE THE LANE DOES NOT SHIP. The real-Interactsh
+    # acceptance runs against `erlik-interactsh-lab:1`, which is a fixture rather than a
+    # lane image and so is absent from `IMAGES` — a manifest for that job without it names
+    # every image except the one the acceptance was measured against.
+    #
+    # Recorded under its own key, NOT merged into `images`. A fixture server and a shipped
+    # lane image are different claims, `images_missing` is read as "this build is
+    # incomplete", and a reader who cannot tell which is which has a manifest that is worse
+    # than a short one.
+    parser.add_argument("--also-image", action="append", default=[], metavar="REF",
+                        help="also record this image, as a test fixture rather than a lane image")
     args = parser.parse_args()
 
     sys.path.insert(0, str(ROOT))
@@ -108,14 +119,23 @@ def main() -> int:
         "python": sys.version.split()[0],
         "images": {role: image(reference) for role, reference in IMAGES.items()},
         "worker_tools": {} if args.skip_tools else worker_tools(),
+        "fixture_images": {reference: image(reference) for reference in args.also_image},
     }
     missing = sorted(role for role, info in manifest["images"].items() if not info["present"])
     manifest["images_missing"] = missing
+    absent_fixtures = sorted(reference for reference, info in manifest["fixture_images"].items()
+                             if not info["present"])
+    manifest["fixture_images_missing"] = absent_fixtures
     Path(args.out).write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
     print(f"wrote {args.out}: commit {manifest['commit_describe']}, "
           f"{len(manifest['images']) - len(missing)}/{len(manifest['images'])} images present")
     if missing:
         print("  images not on this host:", ", ".join(missing))
+    if absent_fixtures:
+        # NOT a failure: the caller asked for a record, and "absent" is the record. The
+        # suite that needed the fixture has its own junit guard, which is the layer that
+        # should fail when an acceptance run did not happen.
+        print("  fixture images not on this host:", ", ".join(absent_fixtures))
     return 0
 
 

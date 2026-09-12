@@ -993,13 +993,18 @@ class CatalogueAdapter(BaseAdapter):
                         # endpoint no case was ever eligible for — and the stage reason is a
                         # single string that the next case to set one overwrites.
                         #
-                        # THE ARM CAN LOSE ITS COLLECTOR AND NOT GET IT BACK. A resume
+                        # AND THE ARM USED TO LOSE ITS COLLECTOR FOR GOOD. A resume
                         # re-selects only stages at `queued` or `needs_auth`; if this arm's
                         # interactsh stage ended `failed` (callback registration refused, or
                         # the pre-stage verdict was `probe_refused`) or `partial` (the probe
-                        # timed out), the resume runs THIS stage again with no collector
-                        # again. Measured: three such pass-1 paths, and in each the resume
-                        # selected only the testcases row.
+                        # timed out), the resume ran THIS stage again with no collector
+                        # again — measured on three such pass-1 paths, and in each the
+                        # resume selected only the testcases row. `service.
+                        # requeue_lost_collectors` now re-queues the interactsh stage with
+                        # the catalogue work that needs it, so a transient cause is no
+                        # longer permanent. THIS BRANCH IS STILL REACHED, and must be: the
+                        # retry is not a promise, and a cause that persists arrives here
+                        # exactly as before.
                         # WHAT THIS DOES AND DOES NOT REACH, because the obvious claim
                         # is wrong. It reaches the stage result, so the skip survives in
                         # `GET /sessions/{id}` and in the report — where before, the stage

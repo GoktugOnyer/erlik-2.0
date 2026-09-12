@@ -445,3 +445,87 @@ def test_the_floors_are_below_what_the_suites_actually_select():
         selected = int(count.group(1))
         assert 0 < floors[report] <= selected, (
             f"{report}: floor {floors[report]} against {selected} selected by {args}")
+
+
+def _manifest_args(job) -> list[str] | None:
+    """The arguments of this job's manifest step, or None if it writes no manifest."""
+    for step in job.get("steps", []):
+        run = str(step.get("run") or "")
+        if "release_manifest.py" in run:
+            return run.split()
+    return None
+
+
+def test_a_job_that_builds_images_records_what_it_built():
+    """E-033: the actual-services job built images, ran real-service acceptance against
+    them, and uploaded junit files that named none of it.
+
+    §11 asks release artifacts to say what they were measured against, and the docker job
+    already did — so the evidence from the ONE job that exercises real pinned services was
+    the only evidence nobody could reconstruct after a rebuild. Asserted for every job that
+    builds or pulls an image, so a fourth job cannot be added without one.
+    """
+    for name, job in _workflow()["jobs"].items():
+        builds = [str(step.get("run") or "") for step in job.get("steps", [])
+                  if re.search(r"docker (compose .*)?(build|pull)", str(step.get("run") or ""))]
+        if not builds:
+            continue
+        assert _manifest_args(job) is not None, (
+            f"{name}: builds images ({len(builds)} steps) and records none of them; "
+            f"add a release_manifest.py step")
+
+
+def test_every_image_a_job_builds_by_name_appears_in_its_manifest():
+    """A manifest naming every image EXCEPT the one the acceptance ran against is the
+    shape this project keeps finding: an artifact that reads as complete.
+
+    `erlik-interactsh-lab:1` is a fixture, not a lane image, so `IMAGES` does not carry
+    it — it has to be passed explicitly. Read out of the workflow's own `-t` arguments so
+    adding a second fixture image cannot drift past this.
+    """
+    from orchestrator.integrations.runtime import IMAGES
+    checked = 0
+    for name, job in _workflow()["jobs"].items():
+        args = _manifest_args(job)
+        if args is None:
+            continue
+        tagged = set()
+        for step in job.get("steps", []):
+            tagged |= set(re.findall(r"docker build\s+-t\s+(\S+)", str(step.get("run") or "")))
+        recorded = set(IMAGES.values()) | {
+            args[i + 1] for i, token in enumerate(args[:-1]) if token == "--also-image"}
+        assert tagged <= recorded, (
+            f"{name}: builds {sorted(tagged - recorded)} and its manifest names neither "
+            f"those nor a lane image covering them")
+        checked += 1
+    assert checked, "no job writes a manifest at all; this test is vacuous"
+
+
+def test_the_manifest_a_job_writes_is_uploaded_with_its_evidence():
+    """A manifest written into the runner's workspace and left there is not evidence."""
+    for name, job in _workflow()["jobs"].items():
+        if _manifest_args(job) is None:
+            continue
+        uploaded = "\n".join(
+            str(step.get("with", {}).get("path") or "") for step in job.get("steps", [])
+            if str(step.get("uses") or "").startswith("actions/upload-artifact"))
+        assert "build-manifest.json" in uploaded, (
+            f"{name}: writes a build manifest that no upload step collects")
+
+
+def test_a_fixture_image_is_not_recorded_as_a_lane_image(tmp_path):
+    """`images_missing` is read as "this build is incomplete". A fixture merged into it
+    would make the lane look broken, and a lane image merged the other way would let an
+    absent one pass as a test dependency."""
+    from orchestrator.integrations.runtime import IMAGES
+    out = tmp_path / "m.json"
+    done = subprocess.run([sys.executable, str(MANIFEST), "--out", str(out), "--skip-tools",
+                           "--also-image", "erlik-does-not-exist:0"],
+                          capture_output=True, text=True, cwd=ROOT)
+    assert done.returncode == 0, done.stderr
+    manifest = json.loads(out.read_text())
+    assert set(manifest["images"]) == set(IMAGES), (
+        "a fixture image was merged into the lane image set")
+    assert manifest["fixture_images"]["erlik-does-not-exist:0"]["present"] is False
+    assert manifest["fixture_images_missing"] == ["erlik-does-not-exist:0"]
+    assert "erlik-does-not-exist:0" not in manifest["images_missing"]
