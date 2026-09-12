@@ -877,10 +877,43 @@ See E-032 for what follows from it.
 
 ### E-032: what the authorization work still does not do — PARTLY CLOSED
 
-Three are fixed, all three grades that nothing had earned. A fourth item — "nothing reads
-`integration_stages.status`" — was still listed here as open after E-033 closed it (the
-half-run fix), and has been removed; the measurement it recorded is in E-033 and in
-`docs/integrations.md`. The rest are measured and listed so none is rediscovered as new.
+Five are fixed: three grades that nothing had earned, and the two ways the client's tracker
+stopped receiving findings at all. A sixth item — "nothing reads `integration_stages.status`"
+— was still listed here as open after E-033 closed it (the half-run fix), and has been
+removed; the measurement it recorded is in E-033 and in `docs/integrations.md`. The rest are
+measured and listed so none is rediscovered as new.
+
+**Both delivery defects are about a finding erlik got right and never delivered**, which is
+worth nothing to whoever has to fix it.
+
+- **Deduplication no longer kills the destination.** Reproduced against the API double at the
+  shape measured on the live 2.58.4: the importer stores every finding and marks its
+  duplicates `duplicate=True, active=False`, and a PATCH setting `active: true` on one is
+  refused HTTP 400. Before: export 1 `uncertain`; export 2 returned export 1's row, so a
+  triage to `false_positive` could not propagate; export 3 issued zero requests. Two defects
+  in one, and both are fixed. The `raise` abandoned every remaining finding over one refusal
+  — all three were in the remote test and only the first was mapped locally, so the cross-arm
+  findings sat behind a catalogue triplet — and a refused PATCH changes nothing remotely, so
+  continuing is safe. And `uncertain` was the wrong word: uncertainty is "a write may have
+  landed and we cannot tell", while this is the server answering, declining, with a reason
+  `reconcile` can do nothing about. A <500 answer to a PATCH is a KNOWN non-write; the export
+  is `partial`, which neither blocks the destination nor short-circuits the next attempt, and
+  the refusals are named per finding in the export evidence with what the remote said. 5xx and
+  transport failures keep their uncertainty and their block, which
+  `test_ambiguous_update_blocks_changed_payload_and_other_action` already guarded and still
+  does.
+- **Re-registering an identity says what it costs.** Measured: `POST /identities` again gives
+  a new handle and a different fingerprint; `PUT /identities/{id}` gives the same handle, the
+  same fingerprint, and the credential replaced — so the rotation route already existed and
+  nothing said so, and nothing flagged that two identities now shared a name and an origin.
+  `POST` still registers, because the operator is the authority on who the caller is, and now
+  names the earlier handle and what will happen to its findings.
+
+  **The fingerprint is not the place to fix this**, which is the fix that first suggests
+  itself. Keying the identity term on `(name, target_origin)` would make rotation free and
+  would also collapse two genuinely distinct callers who share a name, so a finding about one
+  arm would arrive as a finding about the other. The whole lane rests on telling arms apart,
+  and the distinctness is now guarded by a test of its own rather than left as a consequence.
 
 **Three paths awarded `confirmed` with no comparison behind it**, and `confirmed` is not a
 word in a report: `defectdojo.py` maps it to `"verified": True`, the grade that tells a
@@ -916,21 +949,11 @@ source rather than measured; measuring them confirmed both and turned up a third
   `-i` could never have fired anyway. All 114 tests across the idor suites, including the
   three seeded violations and eleven negative controls, still pass.
 
-- **A stock DefectDojo with deduplication enabled blocks the destination permanently.**
-  Measured against a live 2.58.4: with `System_Settings.enable_deduplication=True` and
-  DefectDojo's default algorithm for this parser, 6 of 9 catalogue findings come back
-  `duplicate, active=False`; erlik's PATCH of `active: true` is refused with HTTP 400
-  `"Duplicate findings cannot be verified or active"`; the export row goes `uncertain`,
-  which matches `export()`'s blocking query, so every later export to that server for that
-  session writes nothing, and `reconcile` cannot clear it because the duplicates' state
-  genuinely differs. Pre-existing — the catalogue triplets cause it — but the cross-arm
-  findings are then stranded behind it and a later triage to `false_positive` can never
-  propagate. This is the steady-state client configuration.
-- **Re-registering an identity orphans its findings.** A fresh handle is a fresh
-  `identity`, which is in the fingerprint, so the same violation exports as a NEW DefectDojo
-  finding rather than updating the old one. Token expiry makes re-registration the normal
-  operating rhythm, so exports to one test accumulate a fresh copy per rotation, each
-  starting at `triage_state` open.
+- **Deduplication still costs the duplicates their state.** The destination survives and the
+  rest synchronize, but a finding DefectDojo marks duplicate cannot be made active or
+  verified, so it sits in the client's tracker inactive. The remaining answer is the client's
+  product configuration, not erlik's export — recorded so the `partial` status is not
+  mistaken for a defect in the writer.
 - **`may_access` is unusable as the defence it is presented as.** It works — declaring
   `/api/Users/2` suppresses exactly that — but the plausible coarser declaration
   `/api/Users/` suppresses the two true findings as well, the operator must name 2 exact

@@ -346,6 +346,7 @@ async def export(session_id, config: ExportConfig):
                   "close_old_findings": False, "local_triage_authoritative": True}]
         token = None
         wrote = False
+        refused: list[dict] = []
         status, detail = "completed", "Synchronized by stable fingerprint"
         try:
             token = SecretStore().get(config.secret_id)["token"]
@@ -383,15 +384,73 @@ async def export(session_id, config: ExportConfig):
                     patch = {k: v for k, v in finding.items() if k != "endpoints"}
                     if not matches_remote(item, patch):
                         wrote = True
-                        updated = await remote(sandbox, config, token, audit, f"/api/v2/findings/{item['id']}/", method="PATCH", body=patch)
+                        try:
+                            updated = await remote(sandbox, config, token, audit, f"/api/v2/findings/{item['id']}/", method="PATCH", body=patch)
+                        except RemoteError as exc:
+                            # A REFUSED UPDATE IS A KNOWN NON-WRITE, AND IT MUST NOT
+                            # STRAND THE OTHER FINDINGS.
+                            #
+                            # E-032: a stock DefectDojo with
+                            # `System_Settings.enable_deduplication=True` — the steady-state
+                            # client configuration — imports every finding and marks the ones
+                            # its algorithm considers duplicates `duplicate=True,
+                            # active=False`. PATCHing `active: true` onto one is refused HTTP
+                            # 400 "Duplicate findings cannot be verified or active". Measured
+                            # against a live 2.58.4 with 6 of 9 catalogue findings coming back
+                            # duplicate, and reproduced against the API double here:
+                            #
+                            #     export 1   uncertain, "DefectDojo PATCH returned HTTP 400"
+                            #     export 2   returns export 1's row; the operator's triage to
+                            #                false_positive cannot propagate
+                            #     export 3   zero requests issued
+                            #
+                            # Two defects in one. First, `raise` abandoned the remaining
+                            # findings over one refusal: all three were in the remote test and
+                            # only the first was mapped locally, so the cross-arm findings were
+                            # stranded behind a catalogue triplet. A refused PATCH changed
+                            # nothing remotely, so continuing is safe.
+                            #
+                            # Second, `uncertain` was the wrong word. Uncertainty is "a write
+                            # may have landed and we cannot tell"; this is a response from the
+                            # server declining the request, with a reason. Nothing is unknown,
+                            # `reconcile` has nothing to verify — the duplicates' state
+                            # genuinely differs — and an `uncertain` row blocks every later
+                            # export to that server for that session. A <500 answer to a PATCH
+                            # is a KNOWN non-write; 5xx and transport failures keep their
+                            # uncertainty below.
+                            if exc.status >= 500:
+                                raise
+                            refused.append({"fingerprint": fingerprint,
+                                            "remote_finding_id": item["id"],
+                                            "status": exc.status,
+                                            "remote_said": audit[-1].get("body", "")[:500]})
+                            continue
                         if updated.get("id") != item["id"] or updated.get("unique_id_from_tool") != fingerprint:
                             raise RemoteError(502, "DefectDojo returned a mismatched finding after update")
                         drifted = remote_mismatches(updated, patch)
                         if drifted:
                             raise RemoteError(502, "DefectDojo did not retain the locally authoritative finding "
                                                    "fields: " + ", ".join(drifted))
+                    # NOT for a refused one. This table records what the remote is believed to
+                    # hold, and a refused PATCH means it holds something else — recording
+                    # `digest(finding)` would make the next export treat the stale remote row
+                    # as current and stop trying.
                     await db.execute("INSERT OR REPLACE INTO integration_remote_findings(server,remote_test_id,fingerprint,remote_finding_id,payload_hash) VALUES(?,?,?,?,?)",
                                      (config.server, test_id, fingerprint, item["id"], digest(finding)))
+                if refused:
+                    # `partial`, which neither blocks the destination (the blocking query
+                    # matches `running` and `uncertain`) nor short-circuits the next export
+                    # (that query matches `completed`). So the operator can turn deduplication
+                    # off for the product, or accept the duplicates, and re-export — and
+                    # meanwhile every finding the remote DID accept is synchronized.
+                    status = "partial"
+                    detail = (f"{len(refused)} of {len(report['findings'])} findings were "
+                              f"refused by the remote and are not in the state this "
+                              f"assessment asserts; the rest are synchronized. Commonly "
+                              f"DefectDojo deduplication: a finding it marks duplicate "
+                              f"cannot be made active or verified. See the export evidence "
+                              f"for each refusal. Re-exporting retries exactly these")
+                    audit.append({"refused_updates": refused})
         except RemoteError as exc:
             # A rejected read has not changed anything; after any successful or
             # ambiguous write, retain uncertainty even if a later PATCH fails.

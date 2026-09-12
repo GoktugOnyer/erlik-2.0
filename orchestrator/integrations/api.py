@@ -21,9 +21,41 @@ async def get_availability():
 
 @router.post("/identities")
 async def create_identity(body: Identity):
+    """Register an identity. A SECOND registration of the same one orphans its findings.
+
+    E-032: the handle is in every finding's fingerprint, so a rotated credential registered
+    here is a different identity as far as the export is concerned — the same violation
+    arrives at the client's tracker as a NEW finding at `triage_state` open, and the old row
+    stays active forever. Token expiry makes rotation the normal rhythm, so one test
+    accumulates a copy per rotation. Measured: `POST` again gives a new handle and a
+    different fingerprint; `PUT /identities/{id}` gives the same handle, the same
+    fingerprint, and the credential replaced.
+
+    So `PUT` is the rotation route, and this one stops being silent about it. The
+    registration still happens — two genuinely different callers may share a name, and the
+    operator is the authority on who the caller is — but the collision is named in the
+    response.
+
+    THE FINGERPRINT IS NOT THE PLACE TO FIX THIS, which is the fix that first suggests
+    itself. Keying the identity term on `(name, target_origin)` instead of the handle would
+    make rotation free and would also collapse two genuinely distinct callers who share a
+    name into one fingerprint — so a finding about one arm would arrive as a finding about
+    the other. The whole lane rests on telling arms apart; `test_identity_rotation_keeps_its
+    _findings` guards the distinctness as well as the collision.
+    """
     key = SecretStore().put(body.model_dump())
+    existing = await db.rows("SELECT id FROM integration_identities WHERE name=? AND target_origin=?",
+                            (body.name, body.target_origin))
     await db.execute("INSERT INTO integration_identities VALUES(?,?,?)", (key, body.name, body.target_origin))
-    return {"id": key, "name": body.name, "target_origin": body.target_origin}
+    out = {"id": key, "name": body.name, "target_origin": body.target_origin}
+    if existing:
+        out["already_registered"] = [row["id"] for row in existing]
+        out["note"] = ("an identity with this name and origin is already registered. This is "
+                       "a NEW identity: its handle is in every finding's fingerprint, so "
+                       "findings from it will not update the earlier one's rows on an export "
+                       "destination. To rotate a credential and keep its findings attached, "
+                       "PUT the replacement to the existing identity instead")
+    return out
 
 
 @router.put("/identities/{identity_id}")

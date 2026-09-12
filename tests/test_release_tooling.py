@@ -529,3 +529,31 @@ def test_a_fixture_image_is_not_recorded_as_a_lane_image(tmp_path):
     assert manifest["fixture_images"]["erlik-does-not-exist:0"]["present"] is False
     assert manifest["fixture_images_missing"] == ["erlik-does-not-exist:0"]
     assert "erlik-does-not-exist:0" not in manifest["images_missing"]
+
+
+def test_every_export_status_the_code_can_write_is_in_the_documented_table():
+    """E-032 added `partial`, and nothing held the table to the code.
+
+    docs/integrations.md tells an operator what to DO about each status — reconcile, retry,
+    or read the refusals — so a status the code can write and the table omits leaves them
+    with a row they have no instruction for. The statuses exist only as literals, so the
+    module source is the honest place to read them from; the alternative is trusting the
+    table, which is what went wrong.
+    """
+    source = (ROOT / "orchestrator" / "integrations" / "defectdojo.py").read_text()
+    written = set(re.findall(r"status\s*=\s*[\"']([a-z]+)[\"']", source))
+    written |= set(re.findall(r"SET status='([a-z]+)'", source))
+    written -= {"running"}      # the row is inserted `running`; it is never a resting state
+    assert written, "no status literal found at all; this test is vacuous"
+
+    # The export status table, not every table in the file: scoped to its own section, so
+    # another table's first column cannot satisfy this by accident.
+    doc = (ROOT / "docs" / "integrations.md").read_text()
+    section = doc[doc.index("### Reconciling an uncertain export"):]
+    table = section[section.index("| Status | Meaning | What to do |"):]
+    table = table[:table.index("\n\n")]
+    documented = set(re.findall(r"^\| `([a-z]+)` \|", table, re.M))
+    assert written == documented, (
+        f"export() writes {sorted(written)} and the table explains {sorted(documented)}; "
+        f"undocumented: {sorted(written - documented)}; "
+        f"documented but never written: {sorted(documented - written)}")

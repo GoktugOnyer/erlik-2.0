@@ -1531,7 +1531,14 @@ What the status means:
 |--------|---------|------------|
 | `completed` | Every field Erlik reads back is present remotely | nothing |
 | `failed` | Nothing was written, and the destination is not blocked | fix the body or the token and export again |
+| `partial` | Every finding is in the remote test; the remote REFUSED to put some of them in the state this assessment asserts | read the refusals in the export evidence — commonly deduplication, below — then fix that and export again |
 | `uncertain` | A write was issued and its outcome is unknown | reconcile |
+
+**`partial` does not block the destination, and does not short-circuit the next export.**
+The refused updates are retried on every export, because the remote genuinely does not hold
+what the assessment asserts; the findings the remote DID accept stay synchronized meanwhile.
+Each refusal is recorded in the export's evidence artifact with its fingerprint, the remote
+finding id, the status, and what the remote said.
 
 `completed` is about the fields that are read back, which is not all of them: a
 finding's `endpoints` are never compared after the import, and `title` is matched
@@ -1555,6 +1562,49 @@ reads, and a read changes nothing.
 A 202 is uncertain, not successful: the import was queued, and nothing has
 confirmed it landed. Treating it as a failure would invite a retry that silently
 imports twice.
+
+**And a refusal is not an uncertainty.** A response below 500 to a finding PATCH is the
+server declining that request — it answered, so nothing about the write is unknown and there
+is nothing for `reconcile` to verify. Those are `partial`. 5xx answers and transport failures
+after a write stay `uncertain` and keep the block, because those are the cases where the
+outcome really is unknown.
+
+#### Deduplication, the steady-state client configuration
+
+A stock DefectDojo has `System_Settings.enable_deduplication=True`. Its importer stores every
+finding and marks the ones its algorithm considers duplicates `duplicate=True, active=False`,
+and a PATCH setting `active: true` or `verified: true` on one of those is refused HTTP 400
+`"Duplicate findings cannot be verified or active"`. Measured against a live 2.58.4: 6 of 9
+catalogue findings came back duplicate — the catalogue's triplets cause it.
+
+This used to kill the destination. The first export went `uncertain` on the first refusal,
+abandoning every finding after it; the second returned the first export's row, so a later
+triage to `false_positive` could not propagate; the third issued no requests at all. It is
+`partial` now, and the findings the remote accepts are synchronized and stay synchronizable.
+
+What remains is the client's configuration rather than erlik's export: a finding DefectDojo
+considers a duplicate will sit inactive in the tracker until deduplication is turned off for
+that product, or the duplicates are accepted as such. `partial` says which findings those are
+so the choice is an informed one.
+
+### Rotating an identity without orphaning its findings
+
+The identity handle is part of every finding's fingerprint. So **rotate a credential with
+`PUT /api/integrations/identities/{id}`, not by registering again.** Measured: `PUT` keeps the
+handle, keeps the fingerprint, and replaces the stored credential, so the next export updates
+the remote rows that already exist; a second `POST /identities` mints a new handle, and the
+same violation arrives as a NEW remote finding at `triage_state` open while the old row stays
+active for ever. Token expiry makes rotation routine, so this compounds.
+
+`POST` still accepts a name and origin that are already registered — two genuinely different
+callers may share a name, and the operator is the authority on who the caller is — but it
+returns `already_registered` with the earlier handle and a note saying what will happen to its
+findings.
+
+**The fingerprint is deliberately not keyed on the name and origin instead.** That would make
+rotation free and would also merge two distinct callers who share a name into one fingerprint,
+so a finding about one arm would arrive as a finding about the other. Telling arms apart is
+what the whole lane rests on.
 
 #### What "blocks" actually covers
 
