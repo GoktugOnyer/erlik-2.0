@@ -932,12 +932,13 @@ untouched, so the cross-arm authorization comparison sees exactly what it saw be
 
 ### An assertion needs a response about its own URL
 
-`SecurityAssertion` emits `severity="high"`, `confidence="confirmed"` and
-`methodology=["WSTG-AUTHZ-04"]` from one response to one identity — `confirmed` being the grade
+`SecurityAssertion` emits `severity="high"` and `methodology=["WSTG-AUTHZ-04"]` from one
+response to one identity, and it used to emit `confidence="confirmed"` with them — the grade
 that marks a finding verified on a client's tracker. It had three measured ways to fire on
 nothing. Two were closed earlier: the marker must not be the operator's own input echoed back,
 and the response must come from the asserted URL rather than from wherever a redirect landed.
-This is the third.
+This is the third. **The grade itself is now earned rather than asserted** — see "what a fired
+assertion establishes" below.
 
 **A single-page application serves its shell for every route its server does not know, and that
 shell contains the product's own name.** Measured on Juice Shop: `/administration`,
@@ -954,6 +955,37 @@ a target cannot special-case it.
 It discriminates rather than blanket-refusing. Measured on the same application, `/api/Users`,
 `/api/Users/1` and `/rest/user/whoami` all differ from the control; on DVWA `/` differs while
 `/administration` does not.
+
+### What a fired assertion establishes, and the grade that follows
+
+The generic-404 control above rules out a catch-all route. It does not ask whether the content
+was gated at all — and the basis on the finding said so, in capitals, while `confidence` beside
+it read `confirmed` and `defectdojo.py` exported that as `"verified": True`. The grade and the
+prose in the same object contradicted each other, and the export believed the grade.
+
+The rule that settles it is this repository's own, stated in `login._verify` and again in
+`authenticate`: **an assertion that holds WITHOUT the credential establishes nothing.** The
+counter-example is one this document already records — Juice Shop returns
+`/rest/products/1/reviews`, author addresses included, to admin, to jim and to nobody at all.
+
+`service.assertion_controls` probes each declared assertion's URL with NO identity, twice,
+once per assessment in the identity-free sandbox pattern `authentication_controls` already
+uses — the answer is a property of the URL and the application, not of an arm, so two arms
+asserting on one URL share one probe and an assessment declaring no assertion starts no
+container. The asserted URLs go in as `control_urls`, because erlik's own differential traffic
+is not part of the surface the operator asked for. `adapters.assertion_grade` then decides:
+
+| the identity-free answer | grade | what the finding says |
+|---|---|---|
+| does not carry the marker | `confirmed` | the content is gated on this credential and was returned to an identity the operator declared must not receive it |
+| carries the marker | `likely` | the application publishes it; this is a disclosure, and the `erlik:authorization` rule and WSTG methodology on the finding describe the wrong thing |
+| blocked, errored, absent, or only half obtained | `likely` | a missing control is not a pass, the same answer `authenticate` gives with `control_unavailable` |
+
+The marker in EITHER of the two samples withholds the grade, so a target answering
+non-deterministically cannot earn `verified` on one lucky fetch. The finding fires in all
+three cases — the operator declared the marker forbidden there and it came back, which is
+worth a reader's time. What changed is that it stops arriving pre-verified, and the two
+non-confirmed outcomes each add an observation naming which one it was.
 
 **A refused or errored control is not a control.** Returning erlik's own 403 would make every
 assertion on that origin compare against it and be suppressed — the "our own refusal is not the

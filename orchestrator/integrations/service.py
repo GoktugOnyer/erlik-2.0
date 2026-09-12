@@ -207,6 +207,58 @@ async def authentication_controls(session_id, config):
         [SecretStore().get(identity_id) for identity_id in config.identity_ids])
 
 
+async def assertion_controls(session_id, config):
+    """What each declared SecurityAssertion's URL answers with NO IDENTITY at all.
+
+    The assertion path emits HIGH findings and used to grade every one `confirmed`, which
+    `defectdojo.py` exports as `"verified": True`. `assertion_grade` decides that on whether
+    the content was gated at all, and this is the only thing that can tell it: the same
+    request, carrying no credential.
+
+    ONE sandbox for the whole assessment, for the reason `authentication_controls` gives —
+    the answer is a property of the URL and the application, not of a stage, so probing it
+    per arm would cost a container per arm to learn the same thing. Two arms declaring
+    assertions on one URL share one probe.
+
+    TWO samples, as the authentication control takes, so a target that answers
+    non-deterministically cannot decide a grade on one lucky fetch. `confirmed` requires the
+    marker to be absent from BOTH.
+
+    The asserted URLs are passed as `control_urls` so this differential traffic does not
+    consume the operator's URL budget — erlik's own probe is not part of the surface it was
+    asked to assess.
+
+    A FAILURE HERE IS NOT AN ASSESSMENT FAILURE. What was obtained is returned, and
+    `assertion_grade` answers `likely` with a caveat for any URL that is missing, the same
+    way `authenticate` answers `control_unavailable`. Raising would lose a whole run over a
+    control for a clause that may not even fire.
+    """
+    urls = sorted({assertion.request.url for assertion in config.security_assertions})
+    if not urls:
+        return {}
+    out: dict = {}
+    try:
+        sandbox = Sandbox(config, None, control_urls=urls)
+        sandbox.assessment_context = {"session_id": session_id,
+                                      "stage_id": "assertion-control"}
+        async with sandbox:
+            for assertion in config.security_assertions:
+                url = assertion.request.url
+                if url in out:
+                    continue
+                samples = []
+                for _ in range(CONTROL_SAMPLES):
+                    try:
+                        samples.append(await rpc(sandbox, {
+                            "action": "request", "request": assertion.request.model_dump()}))
+                    except Exception:
+                        break
+                if len(samples) == CONTROL_SAMPLES:
+                    out[url] = samples
+    except Exception:
+        pass
+    return out
+
 async def authenticate(ctx, sandbox, controls=None) -> str:
     """Is this arm actually the identity it claims to be? Asked DIFFERENTIALLY.
 
@@ -472,6 +524,9 @@ async def run(session_id, notify=None):
             # `authenticate` compares each identity's own answer against it; see there for
             # why an assertion that holds without the credential establishes nothing.
             controls = await authentication_controls(session_id, config)
+            # And what each declared assertion's URL answers with no identity at all, which
+            # is what decides whether a fired assertion is graded `confirmed`.
+            assertion_answers = await assertion_controls(session_id, config)
             # The declared check URLs, so the proxy can keep erlik's own liveness traffic
             # out of the operator's URL budget.
             control_urls = sorted({
@@ -479,7 +534,9 @@ async def run(session_id, notify=None):
                 for identity_id in config.identity_ids} - {None})
             for stage in stages:
                 identity = SecretStore().get(stage["identity_id"]) if stage["identity_id"] != "anonymous" else None
-                ctx = Context(session_id, stage["id"], assessment["target"], config, stage["identity_id"], identity)
+                ctx = Context(session_id, stage["id"], assessment["target"], config,
+                              stage["identity_id"], identity,
+                              assertion_controls=assertion_answers)
                 await db.execute("UPDATE integration_stages SET status='running',started_at=CURRENT_TIMESTAMP WHERE id=?", (stage["id"],))
                 await publish({"stage": stage["adapter"], "status": "running", "identity": stage["identity_id"]})
                 result = None

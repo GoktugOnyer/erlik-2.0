@@ -27,6 +27,11 @@ class Context:
     config: AssessmentConfig
     identity_id: str = "anonymous"
     identity: dict | None = None
+    # What each declared SecurityAssertion's URL answers with NO identity, probed once per
+    # assessment in the identity-free sandbox `authentication_controls` already builds. A
+    # property of the URL and the application rather than of a stage, for the same reason
+    # given there — and the only thing that can tell a gated record from a public one.
+    assertion_controls: dict | None = None
 
     @property
     def known(self):
@@ -747,42 +752,60 @@ class SchemathesisAdapter(BaseAdapter):
             result.observations.append({"type": "workflow", **detail})
             if detail.get("error") or any(not c.get("ok") for c in detail.get("cleanup", [])):
                 result.status, result.reason = "partial", "workflow or cleanup failed; inspect evidence before retry"
-        # ONE CONTROL PER ORIGIN: what this application answers for a path that cannot exist.
-        # See `assertion_verdict` — a single-page application returns its shell for every route
-        # its server does not know, and that shell carries the product's own name, so a
-        # forbidden-marker assertion fired on index.html. The path is derived from the session
-        # id, so it is stable within a run and unpredictable across them.
-        controls: dict = {}
-
-        for assertion in ctx.config.security_assertions:
-            if assertion.identity_id != ctx.identity_id:
-                continue
-            response = await rpc(sandbox, {"action": "request", "request": assertion.request.model_dump()})
-            result.observations.append({"type": "security_assertion", "response": response})
-            fires, refused = assertion_verdict(
-                assertion, response,
-                await generic_response(sandbox, assertion.request.url, ctx.session_id, controls))
-            if refused:
-                result.observations.append({"type": "security_assertion_refused",
-                                            "url": assertion.request.url, **refused})
-            if fires:
-                rule = "erlik:authorization:" + hashlib.sha256(assertion.description.encode()).hexdigest()[:16]
-                result.findings.append(IntegrationFinding(fingerprint=fingerprint(ctx.target, rule, "GET", assertion.request.url, identity=ctx.identity_id),
-                    title=assertion.description, url=assertion.request.url, rule=rule, source="schemathesis", identity=ctx.identity_id,
-                    confidence="confirmed",
-                    basis=("Explicit forbidden-content assertion reproduced with the "
-                           "configured identity. ONE ARM, ONE RESPONSE: there is no second "
-                           "identity and no anonymous control here, so this does not "
-                           "establish that the content is private — only that the operator "
-                           "declared it forbidden for this identity and it was returned"),
-                    severity="high",
-                    # The marker's neighbourhood, so the reader can see the
-                    # forbidden content rather than be told it was there.
-                    evidence=safe_evidence(redact(_marker_window(response["body"], assertion.forbidden_marker),
-                                    ctx.known))[:MAX_EVIDENCE_CHARS],
-                    methodology=["WSTG-AUTHZ-04"]))
+        arm_findings, arm_observations = await assertion_findings(ctx, sandbox)
+        result.findings.extend(arm_findings)
+        result.observations.extend(arm_observations)
         return await record(ctx, sandbox, output, result, accepted_codes=(0, 1))
 
+
+async def assertion_findings(ctx, sandbox):
+    """Every SecurityAssertion for THIS arm: does it fire, and what does firing prove?
+
+    Extracted from the adapter for the reason `assertion_verdict` and
+    `generic_response` were before it: this emits HIGH findings whose grade decides
+    `verified` on a client's tracker, and while it lived inside a method that needs
+    schemathesis output and a container, the only thing a test could reach was the
+    decision functions it calls. Replacing the grade here with a constant — which is
+    what the defect was — broke nothing.
+
+    Returns (findings, observations). The caller owns the StageResult.
+    """
+    findings, observations = [], []
+    # ONE CONTROL PER ORIGIN: what this application answers for a path that cannot exist.
+    # See `assertion_verdict` — a single-page application returns its shell for every route
+    # its server does not know, and that shell carries the product's own name, so a
+    # forbidden-marker assertion fired on index.html. The path is derived from the session
+    # id, so it is stable within a run and unpredictable across them.
+    controls: dict = {}
+
+    for assertion in ctx.config.security_assertions:
+        if assertion.identity_id != ctx.identity_id:
+            continue
+        response = await rpc(sandbox, {"action": "request", "request": assertion.request.model_dump()})
+        observations.append({"type": "security_assertion", "response": response})
+        fires, refused = assertion_verdict(
+            assertion, response,
+            await generic_response(sandbox, assertion.request.url, ctx.session_id, controls))
+        if refused:
+            observations.append({"type": "security_assertion_refused",
+                                        "url": assertion.request.url, **refused})
+        if fires:
+            rule = "erlik:authorization:" + hashlib.sha256(assertion.description.encode()).hexdigest()[:16]
+            confidence, basis, caveat = assertion_grade(
+                assertion, (ctx.assertion_controls or {}).get(assertion.request.url))
+            if caveat:
+                observations.append(caveat)
+            findings.append(IntegrationFinding(fingerprint=fingerprint(ctx.target, rule, "GET", assertion.request.url, identity=ctx.identity_id),
+                title=assertion.description, url=assertion.request.url, rule=rule, source="schemathesis", identity=ctx.identity_id,
+                confidence=confidence,
+                basis=basis,
+                severity="high",
+                # The marker's neighbourhood, so the reader can see the
+                # forbidden content rather than be told it was there.
+                evidence=safe_evidence(redact(_marker_window(response["body"], assertion.forbidden_marker),
+                                ctx.known))[:MAX_EVIDENCE_CHARS],
+                methodology=["WSTG-AUTHZ-04"]))
+    return findings, observations
 
 async def generic_response(sandbox, url, session_id, cache: dict):
     """What this application answers for a path that cannot exist, fetched once per origin.
@@ -812,6 +835,83 @@ async def generic_response(sandbox, url, session_id, cache: dict):
                          else answer)
     return cache[origin]
 
+
+def assertion_grade(assertion, identity_free) -> tuple[str, str, dict | None]:
+    """What a fired SecurityAssertion ESTABLISHES, and the grade that follows from it.
+
+    Separate from `assertion_verdict` because they are two questions: whether the operator's
+    assertion held, and what holding proves. The first was tested; the second was a constant.
+
+    IT WAS `confirmed` WHILE ITS OWN BASIS SAID OTHERWISE. The basis read "ONE ARM, ONE
+    RESPONSE: there is no second identity and no anonymous control here, so this does not
+    establish that the content is private" — and the grade beside it was `confirmed`, which
+    `defectdojo.py` maps straight to `"verified": True` on a client's tracker. The two
+    contradicted each other in the same object, and the export believed the grade.
+
+    The repository's own rule decides it, stated twice already — in `login._verify` and in
+    `authenticate`: AN ASSERTION THAT HOLDS WITHOUT THE CREDENTIAL ESTABLISHES NOTHING. The
+    generic-404 control that already guards this path rules out a single-page application's
+    shell; it does not ask whether the content was gated at all. Measured on the canonical
+    counter-example this repository already documents — Juice Shop returns
+    `/rest/products/1/reviews`, author addresses included, "to admin, to jim and to nobody at
+    all" — an operator asserting that the customer must not see jim's email there got HIGH
+    `confirmed`, exported verified, about content that is public.
+
+    So the differential is run and the grade follows it:
+
+    - the marker is NOT in any identity-free answer -> the content is gated on this
+      credential and was returned to an identity the operator declared must not see it.
+      That is a differential, and `confirmed` is earned.
+    - the marker IS in an identity-free answer -> anybody can read it. The disclosure is
+      real and still reported, but the claim is not per-identity authorization, and the
+      `erlik:authorization` rule this finding carries is not what was established.
+    - no usable control -> A MISSING CONTROL IS NOT A PASS, the same answer `authenticate`
+      gives with `control_unavailable`.
+
+    Either non-confirmed outcome is `likely` rather than dropped: the operator declared the
+    marker forbidden there and it was returned, which is worth a reader's time. What changes
+    is that it stops arriving pre-verified.
+    """
+    usable = [sample for sample in (identity_free or [])
+              if sample and not sample.get("blocked") and not sample.get("error")]
+    if not usable:
+        return ("likely",
+                "Explicit forbidden-content assertion reproduced with the configured "
+                "identity. The same request with the identity DROPPED could not be made, so "
+                "nothing here distinguishes content gated on this credential from content "
+                "the application publishes to anybody — a clause nobody ran is not a clause "
+                "that passed. Re-run with the control reachable before treating this as an "
+                "authorization failure",
+                {"type": "security_assertion_control_unavailable",
+                 "url": assertion.request.url,
+                 "reason": "the identity-free control for this URL was not obtained, so the "
+                           "finding is graded on one arm and one response"})
+    # ANY sample, and the status is deliberately not required to match. This decides whether
+    # a grade that sets `verified` on a client's tracker is awarded, so the marker appearing
+    # in an identity-free answer at all is enough to withhold it.
+    public = [sample for sample in usable
+              if assertion.forbidden_marker in (sample.get("body") or "")]
+    if public:
+        return ("likely",
+                "Explicit forbidden-content assertion reproduced with the configured "
+                "identity — AND with no identity at all. The same request with the identity "
+                "dropped returned the same forbidden content, so the application publishes "
+                "it: this is a disclosure, not a failure of authorization for this "
+                "identity, and the rule and methodology on this finding describe the wrong "
+                "thing. Decide whether the content should be public before triaging it as "
+                "an access-control defect",
+                {"type": "security_assertion_marker_is_public",
+                 "url": assertion.request.url,
+                 "reason": "the forbidden marker was returned to a caller carrying no "
+                           "credential, so nothing was gated"})
+    return ("confirmed",
+            "Explicit forbidden-content assertion reproduced with the configured identity, "
+            "and REFUTED with the identity dropped: the same request carrying no credential "
+            f"did not return the forbidden content in {len(usable)} attempt(s). The content "
+            "is therefore gated on this credential and was returned to an identity the "
+            "operator declared must not receive it, which is a differential rather than one "
+            "arm's say-so",
+            None)
 
 def assertion_verdict(assertion, response, control=None) -> tuple[bool, dict | None]:
     """Does one SecurityAssertion fire on one response, and if not, why not?

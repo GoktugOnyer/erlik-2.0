@@ -14,7 +14,7 @@ from orchestrator.testcase.schema import TestCase, TestStep, Evaluator
 from orchestrator.testcase.scope import Scope, ScopeViolation, check_command, from_target
 from orchestrator.tool_executor import execute_tool
 from orchestrator.testcase.schema import endpoint_of
-from urllib.parse import urlsplit
+from urllib.parse import unquote_plus, urlsplit
 
 
 class Finding(BaseModel):
@@ -634,6 +634,24 @@ async def _run_evaluator(
         low = (target.get("low_priv_token"), target.get("low_priv_cookie"))
         high = (target.get("high_priv_token"), target.get("high_priv_cookie"))
 
+        # THE MARKER MUST NOT BE THE CALLER'S OWN INPUT. The cross-arm check applies this
+        # as its clause 0 and this evaluator — the only one hard-graded `confirmed`, which
+        # sets `verified` on a client's tracker — had no equivalent. An endpoint that echoes
+        # input satisfies every clause below without disclosing anything, because the target
+        # would be supplying the evidence for its own verdict.
+        #
+        # Measured, both firing HIGH `confirmed` before this:
+        #
+        #     marker 99999 at /rest/track-order/99999 answering {"data":[{"orderId":"99999"}]}
+        #     marker "Vulnerability: Reflected" at ?name=Vulnerability%3A+Reflected on DVWA
+        #
+        # `unquote_plus`, not `unquote`, for the second: a form-encoded marker carries `+`
+        # for space. `url_template` as well as `url`, because the access-control cases name
+        # their endpoint in the template and a marker reflected from it is reflected just
+        # the same.
+        probed = " ".join(str(target.get(field) or "") for field in ("url", "url_template"))
+        reflected = bool(marker) and (marker in probed or marker in unquote_plus(probed))
+
         # THE ANONYMOUS ARM. "The low-privilege identity read the object" is only a
         # finding if reading it required BEING somebody. Without this clause the
         # evaluator reports public content as a critical authorization failure: on
@@ -665,11 +683,24 @@ async def _run_evaluator(
         else:
             anonymous_excluded = True
 
+        # THE BODY, NOT THE CAPTURE. The anonymous clause above already reads the body and
+        # says why — "a marker echoed into a header is not disclosed data" — and the
+        # positive side did not, so the rule was applied to the arm that can only REFUSE a
+        # finding and not to the arm that makes one. Measured: a marker echoed into an
+        # `X-Requested-User:` header on both arms, with `{"data":{}}` — an empty record —
+        # as the body, produced a HIGH `confirmed` Broken Access Control finding.
+        #
+        # This costs no true positive. `_http_status_ok` is already required of both arms
+        # and is False for a capture with no status line, so a case whose curl omits `-i`
+        # could never reach here in the first place; measured on all three arms of
+        # tests_catalog/wstg/AUTHZ-04_idor.yaml, each of which passes `-i`.
         matched = bool(
             marker and baseline is not None
             and _http_status_ok(baseline.output) and _http_status_ok(step_result.output)
-            and marker in baseline.output and marker in step_result.output
+            and marker in _response_body(baseline.output)
+            and marker in _response_body(step_result.output)
             and any(low) and any(high) and low != high
+            and not reflected
             and anonymous_excluded)
         if matched:
             # A DIFFERENTIAL claim needs BOTH sides. This is the only evaluator

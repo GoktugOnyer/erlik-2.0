@@ -340,27 +340,55 @@ def test_the_proxys_own_403_does_not_count_as_an_answer():
     assert http_capture.answered(echo) is True
 
 
-def test_a_security_assertion_says_what_one_arm_can_establish():
-    """It has no second identity and no anonymous control, so it cannot tell a privilege
-    crossing from published content. The finding is still emitted — the operator declared
-    it — but `basis` must not let a reader think a differential was run. Measured: Juice Shop
-    answers `/administration` with index.html, which contains "Juice Shop", so a badly chosen
-    marker fires on a catch-all route and no single response can detect that."""
-    import inspect
+def test_a_security_assertion_with_no_control_says_so_and_is_not_confirmed():
+    """It used to state this in prose and contradict it with the grade.
 
-    from orchestrator.integrations import adapters
+    One arm and one response cannot tell a privilege crossing from published content —
+    measured: Juice Shop answers `/administration` with index.html, which contains "Juice
+    Shop", so a badly chosen marker fires on a catch-all route and no single response can
+    detect that. The basis said exactly that, in capitals, while `confidence` beside it was
+    `confirmed`, which `defectdojo.py` exports as `"verified": True`.
 
-    basis = inspect.getsource(adapters.SchemathesisAdapter)
-    assert "ONE ARM, ONE RESPONSE" in basis, (
-        "the finding's own basis must state what it rests on")
+    The assertion is graded on the differential now (see
+    `test_an_assertion_is_graded_on_what_the_credential_changes`); what this keeps is the
+    half that was right — when the control is missing, the finding says so rather than
+    reading as verified.
+    """
+    from orchestrator.integrations.adapters import assertion_grade
+
+    confidence, basis, caveat = assertion_grade(assertion(), None)
+    assert confidence != "confirmed", (
+        f"graded {confidence!r} with no identity-free control at all, which is the "
+        f"contradiction this test exists for")
+    assert "DROPPED" in basis and "nobody ran" in basis, basis
+    assert caveat and caveat["type"] == "security_assertion_control_unavailable"
 
 
-def test_a_refused_assertion_is_reported_rather_than_passed_over():
+async def test_a_refused_assertion_is_reported_rather_than_passed_over(monkeypatch):
     """A refusal has to reach the stage record, or an operator reads "no finding" as "the
-    assertion held"."""
-    import inspect
-
+    assertion held". Asserted on the observations rather than on the source text, because
+    the block moved into `assertion_findings` and a string search followed it without
+    checking that anything still happens."""
     from orchestrator.integrations import adapters
+    from orchestrator.integrations.contracts import AssessmentConfig
 
-    source = inspect.getsource(adapters.SchemathesisAdapter)
-    assert "security_assertion_refused" in source
+    async def _rpc(sandbox, payload):
+        url = payload["request"]["url"]
+        if "erlik-control-" in url:
+            return {"url": url, "status": 404, "blocked": False, "body": "nope"}
+        # The proxy refused the asserted request: the target was never contacted.
+        return {"url": url, "status": 403, "blocked": True, "body": "admin@app.test"}
+
+    monkeypatch.setattr(adapters, "rpc", _rpc)
+    config = AssessmentConfig(
+        scope={"allow_hosts": ["app.test"], "allow_ports": [80]}, active=True,
+        identity_ids=["h"],
+        security_assertions=[{"identity_id": "h", "description": "d",
+                              "forbidden_marker": "admin@app.test",
+                              "request": {"url": "http://app.test/api/orders",
+                                          "expected_status": 200}}])
+    ctx = adapters.Context("s", "stage", "http://app.test/", config, "h", {"name": "h"})
+    findings, observations = await adapters.assertion_findings(ctx, object())
+    assert findings == [], "a refused request must not produce a finding"
+    refusals = [o for o in observations if o["type"] == "security_assertion_refused"]
+    assert refusals and "never contacted" in refusals[0]["reason"], observations

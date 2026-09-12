@@ -542,6 +542,14 @@ anonymous one? The asymmetry is the safety property, the same one the `ownership
 evaluator rests on: the marker is ours and the responses are the target's, so a
 target can cost itself a finding and cannot manufacture one.
 
+> That last sentence was too strong, and E-032 records the measurement that refutes it.
+> The marker is the operator's, but the URL can be too: with the marker in the request
+> — `/rest/track-order/99999`, or a query DVWA reflects — an endpoint that echoes input
+> and requires a session satisfied every clause here, and the target WAS supplying the
+> evidence for its own verdict. The reflection clause `cross_arm_privileged_function`
+> already applied as its clause 0 is ported here now, and the marker is matched against
+> the response BODY rather than the whole capture. The asymmetry holds only with both.
+
 The evaluator was missing the anonymous arm entirely, which the ablation above shows
 is worth three of the five. A case that declares no `anonymous_step` keeps the old
 behaviour, so the clause is additive; a case that declares one whose step is missing
@@ -867,9 +875,46 @@ forbidden", and showing the neighbourhood IS the proof. That is a defensible cho
 different path, and the constraint should be stated per path rather than as a system property.
 See E-032 for what follows from it.
 
-### E-032: what the authorization work still does not do — OPEN
+### E-032: what the authorization work still does not do — PARTLY CLOSED
 
-All measured, none fixed. Listed so none is rediscovered as new.
+Three are fixed, all three grades that nothing had earned. A fourth item — "nothing reads
+`integration_stages.status`" — was still listed here as open after E-033 closed it (the
+half-run fix), and has been removed; the measurement it recorded is in E-033 and in
+`docs/integrations.md`. The rest are measured and listed so none is rediscovered as new.
+
+**Three paths awarded `confirmed` with no comparison behind it**, and `confirmed` is not a
+word in a report: `defectdojo.py` maps it to `"verified": True`, the grade that tells a
+client's tracker a human need not look. Two of the three were recorded here as reasoned from
+source rather than measured; measuring them confirmed both and turned up a third.
+
+- `SecurityAssertion` fired on one arm and one response and graded every hit `confirmed`.
+  The generic-404 control already on that path rules out a single-page application's shell;
+  nothing asked whether the content was gated at all. The counter-example is one this
+  repository already documents: Juice Shop returns `/rest/products/1/reviews`, author
+  addresses included, "to admin, to jim and to nobody at all" — so an operator asserting
+  that the customer must not see jim's email there got HIGH, exported verified, about
+  content that is public. `service.assertion_controls` now probes each asserted URL with NO
+  identity, once per assessment in its own identity-free sandbox, and `assertion_grade`
+  follows the rule this repository states twice already, in `login._verify` and in
+  `authenticate`: an assertion that holds WITHOUT the credential establishes nothing.
+  Measured — gated: `confirmed`; returned to a caller with no credential: `likely`, and the
+  basis says the rule and methodology on the finding describe the wrong thing; control
+  blocked, errored, missing, or only half obtained: `likely`, because a missing control is
+  not a pass. The finding still fires in all three cases; it stops arriving pre-verified.
+- The `idor` evaluator — the only evaluator hard-graded `confirmed` — had no reflection
+  clause. Measured, both firing HIGH `confirmed` before this: marker `99999` at
+  `/rest/track-order/99999` answering `{"data":[{"orderId":"99999"}]}`, and marker
+  `Vulnerability: Reflected` at `?name=Vulnerability%3A+Reflected` on DVWA. Ported from
+  `cross_arm_privileged_function`'s clause 0, `unquote_plus` included, and reading
+  `url_template` as well as `url` because the access-control cases name their endpoint there.
+- And it matched the marker against the whole capture rather than the body — so a marker
+  echoed into a response HEADER, with `{"data":{}}` as the body, produced a HIGH `confirmed`
+  Broken Access Control finding. The anonymous clause three lines below already read the body
+  and said why; the rule had been applied to the arm that can only REFUSE a finding and not
+  to the arm that makes one. It costs no true positive: `_http_status_ok` is already required
+  of both arms and is False for a capture with no status line, so a case whose curl omits
+  `-i` could never have fired anyway. All 114 tests across the idor suites, including the
+  three seeded violations and eleven negative controls, still pass.
 
 - **A stock DefectDojo with deduplication enabled blocks the destination permanently.**
   Measured against a live 2.58.4: with `System_Settings.enable_deduplication=True` and
@@ -886,21 +931,12 @@ All measured, none fixed. Listed so none is rediscovered as new.
   finding rather than updating the old one. Token expiry makes re-registration the normal
   operating rhythm, so exports to one test accumulate a fresh copy per rotation, each
   starting at `triage_state` open.
-- **Nothing reads `integration_stages.status`.** Marking one arm's stages `partial` and
-  deleting two captures took a real run from 2 findings to 0 with `refused_because=[]`,
-  `checked=225`, `not_shared=5` and `not_comparable=15` all byte-identical to the complete
-  run. A half-run reports absence as a clean result. Any automatic path for these checks
-  must gate on the rollup; the on-demand routes should say what they were working from.
 - **`may_access` is unusable as the defence it is presented as.** It works — declaring
   `/api/Users/2` suppresses exactly that — but the plausible coarser declaration
   `/api/Users/` suppresses the two true findings as well, the operator must name 2 exact
   paths out of 189 gated operations, the object id is not derivable from `subject_id`
   (jim's is 2 while his address ids are 4 and 5), and they can only learn which after
   reading the false finding. Keep the clause; stop calling it the answer.
-- **`SecurityAssertion` grades `confirmed` while its own `basis` says it establishes
-  nothing of the kind** — one arm, one response, no control beyond a synthetic 404. The
-  grade and the prose in the same object contradict each other. Not changed here because it
-  was reasoned from source rather than measured, and it is a different producer.
 - **The marker is quoted by two other producers, by design, and nothing says so.**
   `SecurityAssertion` evidence is 200 bytes centred on the `forbidden_marker`, and the
   catalogue's marker-based evaluators match in the response the same way. For those the
@@ -918,10 +954,6 @@ All measured, none fixed. Listed so none is rediscovered as new.
   captures separating 2-3x better. Not adopted, because the counter-example is real and
   unresolved: a genuinely broad leak (the administrator's email on twenty endpoints) is twenty
   true findings, and breadth cannot tell that from a marker that matches everything.
-- **The catalogue's `idor` evaluator has no reflection clause**, so the gate that
-  `cross_arm_privileged_function` applies as clause 0 — refuse when the marker appears in the
-  request URL — is absent on a path that also grades `confirmed`. Reasoned from source by an
-  adversarial pass, not measured here.
 - **Per-assessment labels churn the export.** A re-run in a new session keeps the fingerprint
   and changes the label, so the description differs and the next export PATCHes. Cosmetic, and
   the alternative — one global key — would make labels comparable across every client's
