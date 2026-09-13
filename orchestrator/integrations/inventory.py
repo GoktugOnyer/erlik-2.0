@@ -7,7 +7,7 @@ from urllib.parse import unquote_plus, urldefrag, urlsplit, urlunsplit
 from orchestrator import http_capture
 from orchestrator.engagement import looks_injectable
 from .contracts import (FINISHED_STAGE_STATUSES, MAX_EVIDENCE_CHARS, PARAMETER_NAME,
-                        IntegrationFinding, fingerprint, parameter_names)
+                        AssessmentConfig, IntegrationFinding, fingerprint, parameter_names)
 from .security import (SecretStore, marker_digest, redact, safe_evidence,
                        secret_values)
 from . import persistence as db
@@ -1617,6 +1617,66 @@ def authorization_findings(target, check: str, result: dict) -> list:
     return out
 
 
+async def declared_probe_pairs(session_id, identity_id=None) -> list[dict]:
+    """One coverage row per declared callback probe per arm, shaped like an endpoint row.
+
+    The probe is a surface the OPERATOR nominated rather than one a crawler found, and it is
+    the only surface the out-of-band case can test — `config.callback.probes`, which
+    `integration_endpoints` never holds. See `coverage` for why it is not given an endpoint
+    row instead.
+
+    `eligible` carries `COLLECTOR_CASES`, because `eligible_test_cases` lists what the curl
+    dialect can execute and never names one; without it a probe row would drop the budget
+    truncation of the very case that owns it.
+
+    A row is emitted for every arm the assessment registered, not only for arms with a
+    catalogue stage: an assessment that declared probes and did NOT select the case has no
+    catalogue stage at all, and that is precisely the case the report has to distinguish.
+    """
+    rows = await db.rows("SELECT config FROM integration_assessments WHERE session_id=?",
+                         (session_id,))
+    if not rows:
+        return []
+    try:
+        config = AssessmentConfig.model_validate_json(rows[0]["config"])
+    except (ValueError, TypeError):
+        return []
+    # No early return for "no probes": the loop below yields nothing, so a guard here would
+    # be a clause no ablation can catch — measured, and removed rather than kept.
+    probes = list(getattr(config.callback, "probes", None) or []) if config.callback else []
+    drivers = sorted(set(config.test_cases or ()) & set(COLLECTOR_CASES))
+    arms = sorted({row["identity_id"] for row in await db.rows(
+        "SELECT DISTINCT identity_id FROM integration_stages WHERE session_id=?",
+        (session_id,))} or {"anonymous"})
+    if identity_id is not None:
+        arms = [arm for arm in arms if arm == identity_id]
+    # The reason a probe NOBODY recorded carries. Two different facts, and the difference is
+    # the whole point of the row: a selected case that reported nothing about its own probe
+    # means the stage did not get there, while an unselected case means the catalogue was
+    # never going to.
+    declared_reason = (
+        (f"declared as a callback probe and driven by {', '.join(drivers)}, which reported "
+         f"nothing about it — read this arm's interactsh and testcases stages; a zero here is "
+         f"untested, not clean")
+        if drivers else
+        ("declared as a callback probe, and no out-of-band case is selected for this "
+         "assessment — the callback engine still issues it, but no catalogue check drove it, "
+         "so nothing here has been evaluated against a response"))
+    out = []
+    for probe in probes:
+        url = probe.get("url") if isinstance(probe, dict) else getattr(probe, "url", "")
+        name = (probe.get("parameter") if isinstance(probe, dict)
+                else getattr(probe, "parameter", "")) or ""
+        if not url:
+            continue
+        for arm in arms:
+            out.append({"url": url, "method": "GET", "identity_id": arm,
+                        "sources": {"callback"}, "parameters": [name],
+                        "eligible": COLLECTOR_CASES,
+                        "declared_reason": declared_reason})
+    return out
+
+
 async def coverage(session_id, identity_id=None) -> list[dict]:
     """Per (operation, parameter, identity): what happened, and why not.
 
@@ -1723,9 +1783,17 @@ async def coverage(session_id, identity_id=None) -> list[dict]:
     # and NOT ONE mentioned the failure.
     #
     # Read from the stage rows, which this function already queries and never looked at.
+    #
+    # AND FROM THE ARMS THAT HAVE NO ENDPOINT ROWS AT ALL. The identity set was read from
+    # `integration_endpoints`, so an arm whose crawl found nothing was absent from it — and
+    # katana finding nothing is not hypothetical, it is what it does on DVWA. That arm can
+    # still have a declared probe, and its probe row would then be the one row in the report
+    # that could not say the arm's catalogue stage had failed.
+    probes = await declared_probe_pairs(session_id, identity_id)
     incomplete = await unfinished_stages(session_id, *sorted(
         {row["identity_id"] for row in await db.rows(
-            f"SELECT DISTINCT identity_id FROM integration_endpoints {where}", tuple(args))}))
+            f"SELECT DISTINCT identity_id FROM integration_endpoints {where}", tuple(args))}
+        | {probe["identity_id"] for probe in probes}))
 
     # Grouped into probeable pairs first, so one probe is credited once.
     grouped: dict[tuple, dict] = {}
@@ -1743,8 +1811,33 @@ async def coverage(session_id, identity_id=None) -> list[dict]:
             if name not in entry["parameters"]:
                 entry["parameters"].append(name)
 
+    # THE DECLARED CALLBACK PROBES ARE A SURFACE, AND COVERAGE COULD NOT SEE ONE.
+    #
+    # `coverage` enumerates `integration_endpoints`; the out-of-band case's targets come from
+    # `config.callback.probes`, which no endpoint row holds. Measured on three sessions that
+    # differ only in what happened to that case — it ran, it was skipped because the arm had
+    # no collector, it was never selected — the reports were BYTE-IDENTICAL: one row, one
+    # `not_attempted`, the probe URL absent and `WSTG-INPV-19` absent. So the one check whose
+    # whole purpose is to detect what an in-band response cannot show was invisible to the
+    # report that exists to say what was tested.
+    #
+    # NOT FIXED BY GIVING THE PROBE AN ENDPOINT ROW, which is the fix that first suggests
+    # itself and is the worse defect. Measured: `eligible_test_cases` returns 12 cases for a
+    # URL carrying a parameter, so the probe would become a target for every catalogue check
+    # — SQL injection, XSS, the client-side cases — at a URL the operator nominated for ONE
+    # out-of-band payload, and those 12 would draw from a URL budget shared with the real
+    # surface. A case testable somewhere it should not be is worse than a case nobody can see.
+    #
+    # So the probes are enumerated HERE, beside the endpoint rows and not inside them.
+    # `integration_endpoints` is untouched, so nothing else that reads it changes: measured on
+    # both recorded real stores, zero rows move.
+    covered = {pair(row["url"], name, row["identity_id"])
+               for row in grouped.values() for name in (row["parameters"] or [""])}
+
     out = []
-    for row in grouped.values():
+    for row in list(grouped.values()) + [p for p in probes
+                                         if pair(p["url"], p["parameters"][0],
+                                                 p["identity_id"]) not in covered]:
         sources = sorted(row["sources"])
         names = row["parameters"] or [""]
         for name in names:
@@ -1767,8 +1860,15 @@ async def coverage(session_id, identity_id=None) -> list[dict]:
                 # exception that proves the rule: its scope IS every in-scope URL, so its
                 # truncation applies to every pair and `ERLIK-SURFACE-READ` is deliberately
                 # absent from `eligible_test_cases`, which would otherwise have dropped it.
-                if kind not in ARM_WIDE_OBSERVATIONS and case and case not in eligible_test_cases(
-                        row["url"], row["method"], [name] if name else ()):
+                # `eligible` is the declared-probe rows' own answer. `eligible_test_cases`
+                # lists what the curl dialect can execute and deliberately never names a
+                # COLLECTOR_CASE, so asking it about a probe row would filter out the very
+                # case that owns the probe — including that case's own budget truncation.
+                eligible = row.get("eligible")
+                if eligible is None:
+                    eligible = eligible_test_cases(row["url"], row["method"],
+                                                   [name] if name else ())
+                if kind not in ARM_WIDE_OBSERVATIONS and case and case not in eligible:
                     continue
                 records.append((kind, case, reason, parameters))
 
@@ -1794,6 +1894,12 @@ async def coverage(session_id, identity_id=None) -> list[dict]:
                 state, case, reason = "not_attempted", "", (
                     "no catalogue check ran against this pair — it may not have been "
                     "selected, or no selected case tests a parameter")
+                if row.get("eligible") is not None:
+                    # A DECLARED PROBE WITH NO RECORD IS NOT "nothing tests this". The
+                    # operator nominated it, so the only question is whether the case that
+                    # drives it was selected — and the sentence above would blame the
+                    # selection of cases that have nothing to do with it.
+                    reason = row["declared_reason"]
                 if matched:
                     state, reason = "verified", (
                         "a finding was made on this pair without a catalogue check running "

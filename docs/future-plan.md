@@ -1003,7 +1003,7 @@ source rather than measured; measuring them confirmed both and turned up a third
 
 ### E-033: the callback lifecycle, and what the fixes did not reach — PARTLY CLOSED
 
-Six of the eight items are fixed; see `docs/integrations.md` ("What the report could not
+Seven of the eight items are fixed; see `docs/integrations.md` ("What the report could not
 see") for the measurements. Closed: `recover()`'s rollup, including the `sessions` row it
 stopped short of; the three pieces of write-only state; the coverage report's blind spot for
 arm-wide truncations, plus the comma-joined truncation id found while fixing it; the arm that
@@ -1038,17 +1038,36 @@ failure mode this repository keeps finding; fixtures are recorded under their ow
 lab server is never counted in `images_missing`. `zap` is recorded absent in that job and
 that is correct: it is neither pulled nor used there.
 
+**`coverage()` could not see the out-of-band case at all — CLOSED.** Measured on three
+sessions differing only in what happened to that case — it ran against the probe, it was
+skipped because the arm had no collector, it was never selected — the reports were
+BYTE-IDENTICAL: one row, one `not_attempted`, the probe URL absent and `WSTG-INPV-19` absent.
+So the one check whose purpose is to detect what an in-band response cannot show was invisible
+to the report that exists to say what was tested, and the honest `test_case_not_run`
+observation added for the skipped case reached nothing.
+
+The warning recorded here was right and is why the obvious fix was not taken. Measured:
+`eligible_test_cases` returns 12 cases for a URL carrying a parameter, so an endpoint row for
+the probe would make it a target for every catalogue check — SQL injection, XSS, the
+client-side cases — at a URL the operator nominated for ONE out-of-band payload, and those 12
+would draw from a URL budget shared with the real surface. A case testable somewhere it should
+not be is worse than a case nobody can see.
+
+So `inventory.declared_probe_pairs` enumerates the probes BESIDE the endpoint rows, and
+`integration_endpoints` is untouched — measured on both recorded real stores, which declare no
+probes: zero rows move. The three outcomes are now three distinct reports, and the per-arm
+question the cross-arm work made load-bearing is answered per arm. The probe's row carries
+`COLLECTOR_CASES` as its own eligibility, because `eligible_test_cases` lists what the curl
+dialect can execute and deliberately never names one — without that the row would drop the
+budget truncation of the very case that owns the probe, while still correctly ignoring another
+case's.
+
+One measurement here corrected a claim: the 21→14 `target_budget` figure an earlier pass
+recorded is a consequence of the number of SELECTED cases (`max_urls // selected // steps`),
+not of endpoint rows, so it is true today and no fix moves it.
+
 Still open from the original eight:
 
-- **`coverage()` cannot see the SSRF case at all.** Unchanged and still asserted by
-  `tests/test_a_skipped_callback_case_is_recorded_as_skipped.py`. Its targets come from
-  `config.callback.probes`, not from `integration_endpoints`, and `WSTG-INPV-19` never appears
-  in `eligible_test_cases` for any url or parameter. The arm-wide exemption added this
-  increment does NOT reach it: that exemption is keyed on the observation KIND, and this is a
-  per-case record whose url is a probe no endpoint row holds. Fixing it means modelling the
-  declared callback probes as a surface coverage knows about — and the warning from the
-  increment that looked at it stands: an endpoint row that makes a case testable somewhere it
-  should not be is a worse defect than the one being fixed.
 - **The mutation refusal is a lane opt-in, not the runner's floor.** Safe mode now covers every
   lane, so this is two gates agreeing rather than one floor.
 - **No test case can clean up after itself.** `TestCase` and `TestStep` have no such field.

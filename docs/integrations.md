@@ -1889,12 +1889,33 @@ is not a promise: a cause that persists fails the retry identically and the case
 as not run, which is where a zero has to be read from.
 
 The skip is recorded as an observation now, so it survives in `GET /sessions/{id}` and the
-report rather than living in a stage `reason` that the next case overwrites. **It does not
-reach `coverage()`, and no shape of it would** — a per-url record is keyed
-`(url, parameter, identity)` and this url is the operator's declared callback *probe* rather
-than a discovered endpoint, while a case-wide record is filtered to pairs the case was
-eligible for and `WSTG-INPV-19` never appears in `eligible_test_cases` at all. Both were
-tried; both reported `not_attempted`. That gap is E-033.
+report. It did not reach `coverage()` either, for two reasons that both came down to the same
+thing: a per-url record is keyed `(url, parameter, identity)` and this url is the operator's
+declared callback *probe* rather than a discovered endpoint, while a case-wide record is
+filtered to pairs the case was eligible for and `WSTG-INPV-19` never appears in
+`eligible_test_cases` at all. Both shapes of observation were tried; both reported
+`not_attempted`.
+
+**The declared probe is now a surface `coverage()` enumerates.** Measured on three sessions
+differing only in what happened to the case — it ran, it was skipped for want of a collector,
+it was never selected — the reports were byte-identical before: one row, one `not_attempted`,
+the probe URL absent. They are three distinct reports now, one row per probe per arm, with
+`sources: ["callback"]` so a reader can tell a nominated probe from a crawled endpoint (a
+larger `max_urls` reaches more of the second and none of the first).
+
+**Not by giving the probe an endpoint row**, which is the fix that first suggests itself and
+is the worse defect: `eligible_test_cases` returns 12 cases for a URL carrying a parameter, so
+the probe would become a target for every catalogue check at a URL the operator nominated for
+one out-of-band payload, drawing from a budget shared with the real surface.
+`integration_endpoints` is untouched; on both recorded real stores, which declare no probes,
+zero rows move.
+
+The probe row carries `COLLECTOR_CASES` as its own eligibility, because `eligible_test_cases`
+lists what the curl dialect can execute and never names one — without that the row would drop
+the budget truncation of the case that owns the probe while still, correctly, ignoring another
+case's. And a probe with no record at all does not inherit the catalogue's generic "it may not
+have been selected" sentence: the operator nominated it, so the only question is whether the
+case that drives it was selected, and the two answers are different facts.
 
 ### The benchmark's own numbers came from bytes nothing checked
 
