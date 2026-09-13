@@ -110,10 +110,14 @@ async def save_run(result: RunResult, *, provider: str | None, model: str | None
         # every agent run started from a bare URL and rediscovered what a scan
         # had already established.
         try:
-            from orchestrator.handoff import bridge_run
+            from orchestrator.handoff import bridge_run, declared_markers
             _t = result.target if isinstance(result.target, dict) else {}
             _url = _endpoint(_t) or _t.get("host") or ""
-            n = await bridge_run(db, run_id, _url, result.findings)
+            # The declared markers travel no further than this lane's own findings. The
+            # evaluators quote them deliberately; `recon_context` is keyed on host:port, read
+            # by later sessions, and rendered into a model prompt.
+            n = await bridge_run(db, run_id, _url, result.findings,
+                                 declared=declared_markers(_t))
             if n:
                 print(f"[handoff {run_id[:8]}] {n} deterministic result(s) "
                       f"available to the agent", flush=True)

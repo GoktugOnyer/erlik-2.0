@@ -1017,12 +1017,43 @@ implementation of the triage-merge rule — so running a check twice updates one
 `false_positive` survives a re-run. Measured on the real run: 9 findings became **11**, and
 persisting the same result twice left 11.
 
-**The marker never travels.** It names the application's private data, and a finding goes into an
-export. The finding carries the 12-character digest the check already computed, and its `evidence`
-states what each arm *received* rather than quoting any of it — the obvious evidence string would
-quote the response around the marker, which *is* the private data. Verified against the real run:
-neither the marker nor the bare email nor a bearer token appears in any stored payload or in the
-export body.
+### Where the marker does and does not travel
+
+**The cross-arm check never carries it.** It names the application's private data and a
+finding goes into an export, so the finding carries the 12-character digest the check already
+computed, and its `evidence` states what each arm *received* rather than quoting any of it —
+the obvious evidence string would quote the response around the marker, which *is* the private
+data. Verified against the real run: neither the marker nor the bare email nor a bearer token
+appears in any stored payload or in the export body.
+
+**That is a property of this path, not of the product**, and it used to be written here as
+though it were. Two other producers quote the marker on purpose, and they are right to:
+
+| Path | Does the marker travel? | Why |
+|---|---|---|
+| `cross_arm_*` findings | no — a digest stands in for it | the claim is "an arm received marked data", which a digest establishes; the finding is exported |
+| `SecurityAssertion` | yes — `evidence` is 200 bytes centred on it | the claim is "this identity saw a string you declared forbidden", so the neighbourhood IS the proof, and the reader is the data's owner |
+| the catalogue's marker evaluators (`idor`, `ownership`) | yes — quoted in `evidence` | a differential is only checkable if a reader can see what crossed |
+| `recon_context`, via the deterministic handoff | **never** | keyed on host:port with no session and no expiry, read by later sessions, and rendered into a model prompt |
+
+The last row is a boundary rather than a preference, and it was not held. Measured on the
+committed code: the `idor` evaluator's evidence reached `recon_context.value` verbatim;
+`_get_warm_start_context` renders that column in full, so the marker reached an agent prompt;
+and `_get_handoff_context` cut the line at 110 characters, which withheld it by ONE character
+on a long URL and not at all on a short one. A boundary that depends on how long the URL in
+front of it happens to be is not a boundary.
+
+`handoff.bridge_run` now withholds every value named by `declared.EVALUATOR_ONLY` — the list
+that already means "fields an evaluator reads and no command interpolates", which is exactly
+the set whose values are data — and it does so *before* the length cut. The endpoint and the
+statement that a crossing was established there still reach the agent, which is what the
+handoff is for; the value never did.
+
+**This is not retroactive, and it cannot be.** A store already holding a marker in
+`recon_context` cannot be repaired by the writer: nothing records which substring of an
+existing row was the declared value. If a marker was declared before this change, the rows for
+that target have to be deleted by hand — `DELETE FROM recon_context WHERE target_key = ?` —
+and the handoff will rebuild them on the next deterministic run.
 
 A refused check records nothing. A refusal means the comparison did not run, and turning that into
 zero rows would be indistinguishable from a clean result.

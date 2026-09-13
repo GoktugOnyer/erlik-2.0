@@ -55,11 +55,72 @@ def _classify(vuln_type: str) -> str:
     return "finding"
 
 
-async def bridge_run(db, run_id: str, target_url: str, findings: list) -> int:
+WITHHELD = "[declared marker withheld]"
+
+
+def _without_declared(text: str, declared) -> str:
+    """`text` with every operator-declared data value removed.
+
+    THIS IS A LANE BOUNDARY, and the one value that must not cross it is the marker.
+    `private_object_marker` is, by its own definition, a fragment of the application's
+    private data — "this datum identifies the privileged object" — and the `idor` and
+    `ownership` evaluators quote it into a finding's evidence ON PURPOSE, because a
+    differential claim is only checkable if a reader can see what crossed. The reader of a
+    finding is the data's owner, so that quotation is right.
+
+    `recon_context` is not that reader. Measured before this:
+
+        the evaluator's evidence       "the private object is identified by: 'admin@…'"
+        recon_context.value            the same string, keyed on host:port
+        a LATER session, same host     _get_warm_start_context renders `value` in full,
+                                       so the marker reached an agent prompt verbatim
+        _get_handoff_context           cuts the line at 110 characters, which saved it by
+                                       ONE character on a long URL and not at all on a
+                                       short one — luck, not a boundary
+
+    Two properties make it worse than the quotation in the finding. The row is keyed on
+    host:port with no session and no expiry, so a datum declared in one engagement is handed
+    to agents in later ones; and what it is handed to is a model prompt, which is the edge of
+    everything erlik can reason about.
+
+    Scrubbed at the WRITE, because both readers go through this one column, and a reader-side
+    fix would have to be repeated in each and would leave the store itself holding the value.
+
+    NOT RETROACTIVE, and it cannot be: a store already holding a marker cannot be repaired
+    here, because nothing records which substring of an old row was the declared value. See
+    docs/integrations.md.
+    """
+    for value in declared:
+        value = str(value or "")
+        if value:
+            text = text.replace(value, WITHHELD)
+    return text
+
+
+def declared_markers(target) -> tuple[str, ...]:
+    """The operator-declared data values in a target, from the list that names them.
+
+    `declared.EVALUATOR_ONLY` already exists and already means what is needed: fields an
+    EVALUATOR reads and no command interpolates — which is exactly the set whose values are
+    data rather than instructions. Read from there rather than re-listed, so a second
+    evaluator-only field cannot be added without this following it.
+    """
+    from orchestrator.testcase.declared import EVALUATOR_ONLY
+
+    if not isinstance(target, dict):
+        return ()
+    return tuple(str(target[field]) for field in EVALUATOR_ONLY
+                 if str(target.get(field) or "").strip())
+
+
+async def bridge_run(db, run_id: str, target_url: str, findings: list,
+                     declared=()) -> int:
     """Write one deterministic run's findings into the shared context store.
 
     Returns the number of rows written. Idempotent per (session, key): a rerun
     of the same case does not multiply the context.
+
+    `declared` names operator-declared data values to withhold — see `_without_declared`.
     """
     tk = target_key(target_url)
     if not tk:
@@ -82,7 +143,10 @@ async def bridge_run(db, run_id: str, target_url: str, findings: list) -> int:
         await db.execute(
             "INSERT INTO recon_context (session_id, context_type, key, value, "
             "source_tool, target_key) VALUES (?, ?, ?, ?, ?, ?)",
-            (run_id, _classify(vt), key, f"{url} {ev}".strip()[:500],
+            (run_id, _classify(vt), key,
+             # Withheld BEFORE the 500-character cut, so whether the value survives does not
+             # depend on how long the URL in front of it happens to be.
+             _without_declared(f"{url} {ev}".strip(), declared)[:500],
              f"wstg:{tcid}", tk))
         written += 1
     return written

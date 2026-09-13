@@ -877,8 +877,33 @@ See E-032 for what follows from it.
 
 ### E-032: what the authorization work still does not do — PARTLY CLOSED
 
-Five are fixed: three grades that nothing had earned, and the two ways the client's tracker
-stopped receiving findings at all. A sixth item — "nothing reads `integration_stages.status`"
+Seven are fixed: three grades that nothing had earned, the two ways the client's tracker
+stopped receiving findings at all, and the marker's two travel items — the per-path claim and
+the one path it had to stay off.
+
+**The marker reached a model prompt, and that was a measured leak rather than the "reachable
+shape" recorded here.** The premise was that the legacy lane carries no marker; it does —
+`private_object_marker` has been declarable since E-027, and the `idor` and `ownership`
+evaluators both quote it into a finding's evidence on purpose. Measured: the evidence reached
+`recon_context.value` verbatim, keyed on host:port with no session and no expiry;
+`_get_warm_start_context` renders that column in full, so a later session's agent prompt
+carried the marker; and `_get_handoff_context`'s 110-character cut withheld it by ONE character
+on a long URL and not at all on a short one. A boundary that depends on how long the URL in
+front of it happens to be is not a boundary.
+
+`bridge_run` withholds every value named by `declared.EVALUATOR_ONLY` — already the list of
+fields an evaluator reads and no command interpolates, which is exactly the set whose values
+are data — before the length cut. Fixed at the WRITE, because `_get_handoff_context` and
+`_get_warm_start_context` both read that one column and the store itself would otherwise keep
+holding the value. It is NOT retroactive and cannot be: nothing records which substring of an
+existing row was the declared value, so a store that already holds one needs the rows for that
+target deleted by hand. Said so in `docs/integrations.md` rather than implied.
+
+**The per-path decision** is the table in `docs/integrations.md`: the cross-arm findings carry
+a digest because they are exported; `SecurityAssertion` and the catalogue's marker evaluators
+quote it because there the quotation is the proof and the reader is the data's owner; and
+`recon_context` never carries it, because that row outlives the engagement and ends up in a
+model prompt. A sixth item — "nothing reads `integration_stages.status`"
 — was still listed here as open after E-033 closed it (the half-run fix), and has been
 removed; the measurement it recorded is in E-033 and in `docs/integrations.md`. The rest are
 measured and listed so none is rediscovered as new.
@@ -960,17 +985,6 @@ source rather than measured; measuring them confirmed both and turned up a third
   paths out of 189 gated operations, the object id is not derivable from `subject_id`
   (jim's is 2 while his address ids are 4 and 5), and they can only learn which after
   reading the false finding. Keep the clause; stop calling it the answer.
-- **The marker is quoted by two other producers, by design, and nothing says so.**
-  `SecurityAssertion` evidence is 200 bytes centred on the `forbidden_marker`, and the
-  catalogue's marker-based evaluators match in the response the same way. For those the
-  quotation is the proof and the reader is the data's owner, so it is probably right — but
-  "the marker never travels" is written as a product-wide property and is not one. Decide it
-  per path and say which is which.
-- **The marker can reach `recon_context`, which outlives the session.** `handoff.bridge_run`
-  writes `f"{url} {evidence}"[:500]` keyed by host:port, read across sessions and formatted
-  into the agent's context. It is the LEGACY lane's findings that flow there today, so this
-  is a reachable shape rather than a measured leak — an adversarial pass put it 42 characters
-  from the agent's prompt. Check it before any producer's marker-bearing evidence is bridged.
 - **Length is a weak proxy for a degenerate marker, and breadth is a better one.** The floor
   of 8 kills `2` and `"id":2`, but markers well over 8 characters — `"role":"customer"` — still
   match most of a corpus. An adversarial pass measured breadth over the privileged arm's own
@@ -1737,12 +1751,18 @@ triage-merge rule has one implementation — so a re-run updates one row and an 
 `false_positive` survives. Measured on the real run: 9 findings became 11, and persisting twice
 left 11.
 
-The MARKER never travels: the finding carries the digest the check already computed, and its
-evidence states what each arm RECEIVED rather than quoting it, because the obvious evidence string
-would quote the response around the marker — which is the private data. Verified against the real
-run: neither the marker, the bare email, nor a bearer token appears in any stored payload or in the
-export body. A refused check records nothing, because zero rows from a refusal is
-indistinguishable from a clean result.
+The MARKER never travels ON THIS PATH: the finding carries the digest the check already
+computed, and its evidence states what each arm RECEIVED rather than quoting it, because the
+obvious evidence string would quote the response around the marker — which is the private data.
+Verified against the real run: neither the marker, the bare email, nor a bearer token appears in
+any stored payload or in the export body. A refused check records nothing, because zero rows
+from a refusal is indistinguishable from a clean result.
+
+> "The marker never travels" was written as a product-wide property, here and in
+> `docs/integrations.md`, and it is not one — E-032 records the per-path decision and
+> `docs/integrations.md` now carries the table. `SecurityAssertion` and the catalogue's marker
+> evaluators quote it deliberately, because there the quotation is the proof and the reader is
+> the data's owner. The one place it must never reach is `recon_context`, and it did.
 
 **Two gaps the work exposed, both pre-existing, both fixed.** `finding_payload` dropped `cwe`
 entirely — findings have carried one since the ZAP adapter began recording `alert["cweid"]` and it
