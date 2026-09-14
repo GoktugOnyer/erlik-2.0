@@ -56,6 +56,11 @@ class RunResult(BaseModel):
     chain_next: list[str] = Field(default_factory=list)
     stopped_early: bool = False
     duration_ms: int = 0
+    # WHAT THE RUN UNDID, and what it could not. One entry per declared `TestStep.cleanup`
+    # whose step actually executed. A FAILED cleanup is the important one: it is a file
+    # still sitting on a client's server, and a run that stayed silent about it is how
+    # BUSL-09 came to tell a human to go looking with `find`.
+    cleanups: list[StepResult] = Field(default_factory=list)
     # Target fields this run DISCOVERED, e.g. {"endpoint": ["/admin", "/api"]}.
     # A case that finds three parameters can retarget three children; without
     # this the chain walker hands every child the same target it started with.
@@ -967,6 +972,9 @@ async def run_test_case(
 
     result = RunResult(test_case_id=tc.id, target=target)
     last_step: StepResult | None = None
+    # (step, rendered context) for every step that EXECUTED and declared an undo. Populated
+    # in the loop and drained in the `finally` below — see TestStep.cleanup.
+    pending_cleanups: list[tuple] = []
     # Every secret any step resolved. Collected so the single redaction pass at
     # the end covers a value a later step never saw.
     resolved_secrets: list[str] = []
@@ -1102,6 +1110,10 @@ async def run_test_case(
                 # executor's default instead; the field parsed and went nowhere.
                 custom_timeout=step.timeout,
             )
+            if step.cleanup:
+                # Only after a step that RAN. A skipped or refused step created nothing, and
+                # undoing what was never done is a request to a client's server for no reason.
+                pending_cleanups.append((step, ctx))
             sr = StepResult(
                 step=step.name,
                 command=cmd,                       # handles, never the secret
@@ -1162,6 +1174,59 @@ async def run_test_case(
     finally:
         if saved_provider is not None:
             llm_client.PROVIDER = saved_provider
+        # IN `finally`, because the artifact exists whether or not the case finished. A
+        # cleanup that only ran on the happy path would be absent exactly when a run was
+        # cut short mid-probe, which is when something is most likely left behind.
+        #
+        # Reverse order: a later step can depend on what an earlier one created, so undoing
+        # forwards can remove the thing the next undo needs.
+        for step, step_ctx in reversed(pending_cleanups):
+            try:
+                command = _render(step.cleanup, step_ctx)
+            except Exception as exc:          # noqa: BLE001 — see the scope branch below
+                result.cleanups.append(StepResult(
+                    step=f"cleanup: {step.name}", command=step.cleanup, success=False,
+                    output="", duration_ms=0, skipped=True,
+                    error=f"could not be rendered: {type(exc).__name__}: {exc}"))
+                continue
+            outcome = StepResult(step=f"cleanup: {step.name}", command=command,
+                                 success=False, output="", duration_ms=0)
+            safe_reason = _safe_mode_violation(command)
+            if safe_reason:
+                # Cannot fire on a legitimate cleanup — the step it undoes only ran because
+                # safe mode permitted the mutation in the first place — and stops a case
+                # smuggling one past a gate its own step could not pass.
+                outcome.skipped, outcome.error = True, f"SAFE_MODE: {safe_reason}"
+                result.cleanups.append(outcome)
+                continue
+            if scope is not None:
+                try:
+                    (command_checker or check_command)(
+                        command, scope, primary_url=endpoint_of(target))
+                except ScopeViolation as exc:
+                    outcome.skipped, outcome.error = True, f"scope violation: {exc}"
+                    result.cleanups.append(outcome)
+                    continue
+                except Exception as exc:      # noqa: BLE001
+                    # ONE FAILED UNDO MUST NOT STRAND THE REST — the lesson `service.release`
+                    # already learned about collectors, and it applies harder here, because
+                    # what is stranded is a file on a client's server. `Exception`, not
+                    # `BaseException`: a cancellation or a KeyboardInterrupt is the operator
+                    # stopping the run and must still propagate.
+                    outcome.skipped = True
+                    outcome.error = f"could not be checked: {type(exc).__name__}: {exc}"
+                    result.cleanups.append(outcome)
+                    continue
+            try:
+                raw = await (executor or execute_tool)(
+                    command, enabled_tools=_TOOLS_ALL, target_url=endpoint_of(target),
+                    no_timeout=False, tool_hint=step.tool, custom_timeout=step.timeout)
+                outcome.success = bool(raw.get("success"))
+                outcome.output = str(raw.get("output") or "")
+                outcome.error = raw.get("error")
+            except Exception as exc:      # noqa: BLE001 — a failed undo must be REPORTED
+                outcome.error = f"{type(exc).__name__}: {exc}"
+            result.cleanups.append(outcome)
 
     _scrub_for_storage(result, tuple(dict.fromkeys(resolved_secrets)))
     result.duration_ms = int((time.time() - started) * 1000)

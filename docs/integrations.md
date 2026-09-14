@@ -1880,11 +1880,16 @@ through `_safe_mode_violation` itself:
 Nine catalogue files wrap curl in `bash -c '...'`, because a step needing a pipe or a shell
 variable must. Both sqlmap rules had the same hole.
 
-The reported half resolved into three facts. **No catalogue case has a cleanup step, or can
-have one** — `TestCase` and `TestStep` have no such field at either level, across all 32
-cases; the only `cleanup` in the system is `Workflow.cleanup`, the operator's declaration for
-the Schemathesis lane. BUSL-09's own header tells a human to run `find / -name
-'erlik-upload-*'` afterwards. **The PUT probe is gated twice over** and needs a deliberate
+The reported half resolved into three facts. **No catalogue case had a cleanup step, or
+could have one** — `TestCase` and `TestStep` had no such field at either level, across all 32
+cases; the only `cleanup` in the system was `Workflow.cleanup`, the operator's declaration for
+the Schemathesis lane. `TestStep.cleanup` exists now, runs only after a step that actually
+executed — so only where safe mode already permits the write — and is held to the same scope
+check and safe-mode floor as any other command, which is what stops a harmless step smuggling
+a mutation through its own undo. CONF-06's PUT probe declares one, because erlik chose that
+URL and can form the DELETE. BUSL-09 does not and keeps its header telling a human to run
+`find / -name 'erlik-upload-*'`: the server decides where an upload lands, so a declared undo
+there would DELETE a path erlik invented on a client's system. **The PUT probe is gated twice over** and needs a deliberate
 `ERLIK_SAFE_MODE=0`. **The unconditional leak was POST**, because POST is deliberately not a
 write verb — a login and a search are both POSTs — and an upload therefore walked through:
 BUSL-09 posts a file with `-F "param=@-;filename=erlik-upload-canary.php"` inside exactly the

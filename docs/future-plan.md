@@ -1020,7 +1020,7 @@ source rather than measured; measuring them confirmed both and turned up a third
 
 ### E-033: the callback lifecycle, and what the fixes did not reach — PARTLY CLOSED
 
-All but two of the eight items are fixed; see `docs/integrations.md` ("What the report could not
+All but one of the eight items are fixed; see `docs/integrations.md` ("What the report could not
 see") for the measurements. Closed: `recover()`'s rollup, including the `sessions` row it
 stopped short of; the three pieces of write-only state; the coverage report's blind spot for
 arm-wide truncations, plus the comma-joined truncation id found while fixing it; the arm that
@@ -1110,10 +1110,33 @@ One rule was found by the test rather than by reading the list: `sql-ddl-dml`. T
 enumerates `_SAFE_MODE_RULES` instead of restating it, so a rule added later is covered
 without editing it.
 
+**A case can undo what it left behind — CLOSED, and it permits nothing new.** `TestStep`
+gains `cleanup`. The shape is what keeps it safe: an undo runs only after a step that
+actually EXECUTED, and a mutating step executes only where safe mode already allows it —
+`ERLIK_SAFE_MODE=0`, a deliberately authorised destructive engagement. With safe mode on the
+step is refused and the undo never runs, because there is nothing to undo. The gate is
+untouched; what changes is what erlik leaves behind on the side of it where it was already
+writing, which until now was a file and a header telling a human to go find it.
+
+The undo is held to the same scope check and the same safe-mode floor as any other command.
+That costs nothing — a legitimate undo follows a step safe mode already permitted — and closes
+the obvious abuse: a plain GET step with `cleanup: curl -X DELETE …` would otherwise smuggle a
+mutation past a gate its own step could not pass. Undos run in `finally` and in reverse order,
+each independent of the others, and every outcome lands in `RunResult.cleanups`. A FAILED undo
+is the one that matters: it is a file still on a client's server.
+
+**Wired to the one case that can name what it wrote.** CONF-06's `put_probe` writes
+`erlik_put_test.txt` to a URL erlik CHOSE, so it can form the DELETE. BUSL-09 deliberately
+declares none and keeps its `find / -name 'erlik-upload-*'` header: the server decides where an
+upload lands, so a declared undo there would issue a DELETE against a path erlik invented on a
+client's system. Both are asserted, so neither can drift.
+
+E-012's fixture/cleanup wrapper — the thing `_v1_step_policy` says the XXE case waits for — now
+has the second half of its mechanism. Permitting a mutating step BECAUSE it declares an undo is
+a separate decision and is deliberately not taken here.
+
 Still open from the original eight:
 
-- **No test case can clean up after itself.** `TestCase` and `TestStep` have no such field.
-  Safe mode refusing uploads by default makes that acceptable rather than fixed.
 - **`POST /stop` has no debounce.** The damage two clicks did is fixed in the teardown, which
   is the right layer; nothing tells an operator the second click did anything.
 

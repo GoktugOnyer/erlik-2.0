@@ -30,6 +30,14 @@ steps:
     # A successful PUT of an arbitrary file is a serious upload/deploy flaw.
     command: >-
       curl -s -b "{{cookie}}" -H "{{auth_header}}" -i -X PUT --data "erlik-put-probe" "{{url}}/erlik_put_test.txt"
+    # E-033. This step writes a file to the client's server, and erlik CHOSE the URL — so
+    # unlike an upload, it can name what it created and therefore undo it. The step only
+    # runs where safe mode already permits a PUT (`ERLIK_SAFE_MODE=0`, an authorised
+    # destructive engagement), and the undo runs only after it actually ran; with safe mode
+    # on, neither happens. A failed undo is reported in `RunResult.cleanups` rather than
+    # left for someone to find later.
+    cleanup: >-
+      curl -s -b "{{cookie}}" -H "{{auth_header}}" -i -X DELETE "{{url}}/erlik_put_test.txt"
     evaluators:
       - type: regex
         pattern: 'HTTP/[0-9.]+ (200|201|204)'

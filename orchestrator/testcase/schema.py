@@ -237,6 +237,28 @@ class TestStep(BaseModel):
     # fired, still reports this.
     subsumed_by: list[str] = Field(default_factory=list)
 
+    # THE UNDO FOR WHAT THIS STEP LEAVES ON THE TARGET.
+    #
+    # E-033: no test case could clean up after itself. `TestCase` and `TestStep` had no
+    # such field at either level across all 32 cases, and the only `cleanup` in the system
+    # was `Workflow.cleanup` — the operator's declaration for the Schemathesis lane, not
+    # the case author's for their own probe. BUSL-09's header tells a HUMAN to run
+    # `find / -name 'erlik-upload-*'` afterwards, which is the honest admission that erlik
+    # writes to a client's server on an authorised engagement and then forgets.
+    #
+    # THIS PERMITS NOTHING NEW. A cleanup runs only after a step that actually EXECUTED,
+    # and a mutating step executes only where safe mode already allows it — that is,
+    # `ERLIK_SAFE_MODE=0`, a deliberately authorised destructive engagement. With safe mode
+    # on, the step is refused and its cleanup never runs, because there is nothing to undo.
+    # The gate is untouched; what changes is what erlik leaves behind on the side of it
+    # where it was already writing.
+    #
+    # It is held to the same scope check and the same safe-mode floor as any other command,
+    # which costs nothing and closes the obvious abuse: a case declaring a plain GET step
+    # with a `cleanup: curl -X DELETE …` would otherwise have smuggled a mutation past a
+    # gate its own step could not pass.
+    cleanup: Optional[str] = None
+
 
 class ChainRule(BaseModel):
     """Test cases to schedule after this one, conditional on outcome."""
