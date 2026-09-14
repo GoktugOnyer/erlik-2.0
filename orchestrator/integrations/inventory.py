@@ -1268,6 +1268,10 @@ async def cross_arm_privileged_function(session_id, privileged, unprivileged, ma
     read_urls = {key[0] for key in privileged_saw}
     not_shared = len(read_urls - gated)
     findings, checked, reflected, allowed, reported = [], 0, [], [], set()
+    indistinct_responses = []
+    # Computed from the PRIVILEGED arm's captures, which are the ones clause 1 reads.
+    indistinct = indistinct_urls([(key[0], capture)
+                                  for key, capture in privileged_saw.items()])
     caller_named, redirected, not_probed = [], [], []
     if not refused:
         for key, response in sorted(privileged_saw.items()):
@@ -1287,6 +1291,28 @@ async def cross_arm_privileged_function(session_id, privileged, unprivileged, ma
             # `Vulnerability: Reflected` that DVWA reflects three times into that page.
             if needle in url or needle in unquote_plus(url):
                 reflected.append(url)
+                continue
+            # 0b. AND THE RESPONSE MUST BE ABOUT THIS OPERATION, not a document the
+            #     application serves everywhere. E-011's acceptance names generic error
+            #     pages as a negative control, and the status clause only catches the ones
+            #     that come with an error STATUS. Measured: one error body carrying the
+            #     operator's marker, served 200 at five URLs and refused to the anonymous
+            #     arm, produced FIVE high findings — five copies of one document reported as
+            #     five privilege crossings.
+            #
+            #     `indistinct_urls` already answers this and the cross-arm checks were not
+            #     asking it: two URLs that answered with the same status, headers and bytes
+            #     produced one observation. The most canonical spelling SURVIVES and is still
+            #     reported, so a real leak at one URL is not lost — only its repeats are.
+            #     Skipped and listed rather than dropped, which is E-034's answer for an
+            #     operation that alone is uninterpretable.
+            #
+            #     The object-level check needs no such clause and does not get one: measured
+            #     on the same evidence it reported 1 of 6, because its own clauses require an
+            #     asserted owner read from the body and an error page has none. A clause that
+            #     cannot fire is a protection that is not there.
+            if url in indistinct:
+                indistinct_responses.append({"url": url, "same_response_as": indistinct[url]})
                 continue
             # 1. The privileged arm received the marked data, so there is a privileged
             #    function here to cross into. Without this the operator's declaration
@@ -1449,6 +1475,10 @@ async def cross_arm_privileged_function(session_id, privileged, unprivileged, ma
         # object-level check refuses outright without a subject_id; this one cannot, because
         # it does not otherwise need one and refusing would withdraw findings that are fine.
         "caller_own_records_not_excluded": not subject,
+        # Operations whose response the privileged arm had already seen at another URL, so
+        # the marker in them is one document rather than one record per operation. The
+        # surviving spelling is still checked; these are its repeats.
+        "skipped_indistinct_response": indistinct_responses,
         # Operations the operator declared this identity entitled to, via
         # `Identity.may_access`. Listed, because a suppression nobody can see is
         # indistinguishable from a check that never looked.

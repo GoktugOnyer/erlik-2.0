@@ -248,6 +248,34 @@ as negative controls. Store both baseline and violating request/response evidenc
 Map coverage to relevant WSTG and API Security categories; the OWASP API Security
 project supplies the reference taxonomy. [OWASP API Security](https://github.com/OWASP/API-Security)
 
+**The acceptance is demonstrated in one place**, `tests/test_the_authorization_acceptance.py`:
+three seeded violation classes recovered, three negative controls rejected. Writing it found
+two things.
+
+CROSS-TENANT had only a LABEL test. `compare_arms` reports `cross_tenant: True` when both arms
+declare a tenant and the two differ, and nothing seeded a cross-tenant violation to show the
+product recovers it. Measured: it does. The capability was there; the demonstration was not.
+
+A NEGATIVE CONTROL WAS NOT MET. One error document carrying the operator's marker, served 200
+at five URLs and refused to the anonymous arm, produced FIVE high findings — five copies of one
+document reported as five privilege crossings. The status clause catches an error page that
+comes with an error STATUS; an application answering 200 with an error body walked past it.
+`indistinct_urls` already answers this and the cross-arm checks were not asking it, so
+`cross_arm_privileged_function` asks it now: the most canonical spelling survives and is still
+reported, the repeats are listed under `skipped_indistinct_response` with the URL they answered
+like. Five findings became one. On both recorded real runs the clause prunes nothing — 34 and
+38 operations checked, 0 skipped — so it is free on real evidence.
+
+The object-level check does NOT get the clause and does not need one: measured on the same
+evidence it reported 1 of 6, because its clauses require an asserted owner read from the body
+and an error page has none. A clause that cannot fire is a protection that is not there.
+
+Two limits, both measured and recorded rather than smoothed over. Two genuinely distinct
+objects that answer with identical bytes collapse to one finding naming both — a merge, and the
+same answer this lane already gives for a URL group. And a generic document at ONE url is still
+reported: whether a string is privileged data is the operator's declaration and no recorded
+response can overturn it, so that finding stands and carries `declaration_that_would_suppress`.
+
 ### E-012: API workflow and schema improvements
 
 Validate and bundle schema references before scanning. Support schema version
