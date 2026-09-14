@@ -293,7 +293,7 @@ about it:
 | `role` | operator label | reporting — the lane does not interpret it |
 | `tenant` | operator label | reporting, and `cross_tenant` on an arm comparison |
 | `subject_id` | operator declaration | **who this identity IS in the application** |
-| `may_access` | operator declaration | which object paths this identity is expected to reach |
+| `may_access` | operator declaration | exact object paths this identity is entitled to reach, suppressing a finding about each — a triage instrument, not a defence; see "`may_access` is a triage instrument" |
 
 `subject_id` is the one the authorization checks rest on, and the asymmetry is the safety
 property: who the caller is comes from **you**, the asserted owner comes from the
@@ -447,6 +447,37 @@ and the administrator can read it too —
 `may_access: ["/rest/basket/2"]` on that identity is how the operator says so, and
 `suppressed_declared_access` in the payload lists what was removed, because a suppression
 nobody can see is indistinguishable from a check that never looked.
+
+#### `may_access` is a triage instrument, not a defence
+
+It cannot be written in advance. The object id is not derivable from `subject_id` — jim's is
+2 while his address ids are 4 and 5 — so an operator learns which paths to declare by reading
+the findings. That part is inherent. Everything around it is not:
+
+**Spell it exactly, and let the finding spell it for you.** Measured against four object URLs:
+
+| declaration | suppresses | |
+|---|---|---|
+| `/rest/basket/2` | 1 of 4 | exact, and what an operator means |
+| `/rest/basket/` | 3 of 4 | the whole collection — coarse, but `suppressed_declared_access` lists what it took |
+| `/rest/basket` | **0 of 4** | matches nothing below it |
+
+The third is the spelling a person reaches for, and it used to fail silently: the false
+finding stayed, the declaration looked applied, and nothing related the two. Every finding now
+carries `declaration_that_would_suppress` — the exact string, produced by the same rule that
+reads it back — and both checks return `declared_access_that_matched_nothing` for any declared
+path that covered nothing they looked at.
+
+**Declaring costs one request, not a re-run.** Both checks are POST routes over a *finished*
+assessment's stored evidence, and both read `may_access` live from the secret store. So the
+loop is: read the finding, `PUT /api/integrations/identities/{id}` with the path it named,
+POST the check again. Nothing is re-crawled and no traffic reaches the target.
+
+**Read the other way it would manufacture findings.** `may_access` is an OPEN-WORLD
+suppression: a declared path removes a finding and an empty declaration removes none. As a
+closed-world allowlist — "anything not declared is a violation" — it would be worst for the
+anonymous arm, whose allowlist is empty and for whom every public endpoint would then read as
+forbidden.
 
 **Two measured limits, both outside this check and both real.**
 

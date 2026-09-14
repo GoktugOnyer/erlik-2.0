@@ -771,6 +771,43 @@ def _entitled(url, declared_paths) -> bool:
     return False
 
 
+def _unmatched_declarations(declared_paths, considered) -> list:
+    """Declared paths that covered nothing this check looked at.
+
+    A DECLARATION THAT MATCHED NOTHING MUST NOT READ AS ONE THAT WAS HONOURED, which is
+    this repository's oldest rule applied to the operator's side of the contract. Measured
+    on `_entitled`'s three shapes against four object URLs:
+
+        /api/Users/2   suppresses 1 of 4   exact, and what an operator means
+        /api/Users/    suppresses 3 of 4   the whole collection, listed in
+                                           `suppressed_declared_access` so it is visible
+        /api/Users     suppresses 0 of 4   SILENTLY
+
+    The third is the one that costs an operator an afternoon: it is the spelling a person
+    reaches for — "this identity may read users" — and `_entitled` matches it against
+    `/api/Users` and `/api/Users/` only, never `/api/Users/2`. The false finding stays, the
+    declaration looks applied, and nothing anywhere says the two are related.
+
+    `considered` is every URL this check reached a verdict about, so a path that matched
+    none of them is reported whether the reason is a missing slash, a typo, or an operation
+    this assessment never saw. Naming which of those it is would be a guess; naming that it
+    matched nothing is a fact.
+    """
+    return [path for path in declared_paths
+            if not any(_entitled(url, (path,)) for url in considered)]
+
+
+def _suppressing_declaration(url) -> str:
+    """The exact `may_access` entry that would suppress a finding about this URL.
+
+    The operator can only learn which paths to declare by reading the findings — E-032
+    records that, and it is inherent: the object id is not derivable from `subject_id`
+    (jim's is 2 while his address ids are 4 and 5). What is NOT inherent is having to
+    then work out the spelling, and get it wrong in the direction that silently does
+    nothing. This is the path, exactly as `_entitled` matches it.
+    """
+    return urlsplit(url).path or "/"
+
 async def cross_arm_authorization(session_id, caller, owner, owner_field,
                                   anonymous=None) -> dict:
     """Object-level authorization, compared ACROSS stages. E-011's remaining half.
@@ -887,6 +924,9 @@ async def cross_arm_authorization(session_id, caller, owner, owner_field,
     read_urls = {key[0] for key in caller_saw}
     not_shared = len(read_urls - gated)
     findings, checked, allowed, reported = [], 0, [], set()
+    # Every URL this check reached a verdict about, so a declaration matching none of them
+    # can be named. `read_urls` is the same set before the gating clauses narrow it.
+    considered = read_urls
     not_probed = []
     if not refused:
         for key, body in sorted(caller_saw.items()):
@@ -939,6 +979,11 @@ async def cross_arm_authorization(session_id, caller, owner, owner_field,
             reported.add(url)
             findings.append({
                 "url": url, "owner_field": owner_field,
+                # THE EXACT DECLARATION THAT WOULD SUPPRESS THIS, so the operator does not
+                # have to work out the spelling and get it wrong silently. Re-running the
+                # check after `PUT /identities/{id}` costs one request: both checks read the
+                # declaration live, and neither needs a new assessment.
+                "declaration_that_would_suppress": _suppressing_declaration(url),
                 "arm_evidence": {name: art[key] for name, art in
                                  ((caller, caller_art), (owner, owner_art),
                                   (anonymous or "anonymous", anonymous_art))
@@ -956,6 +1001,10 @@ async def cross_arm_authorization(session_id, caller, owner, owner_field,
         "refused_because": refused,
         "checked": checked,
         "suppressed_declared_access": allowed,
+        # AND THE DECLARATIONS THAT SUPPRESSED NOTHING. See `_unmatched_declarations`:
+        # `/api/Users` is the spelling an operator reaches for and the one `_entitled`
+        # matches against nothing below it.
+        "declared_access_that_matched_nothing": _unmatched_declarations(entitled, considered),
         "not_comparable": not_comparable,
         "urls_not_shared_by_both_arms": not_shared,
         # Instances the lane derived, excluded because this check would read its own input
@@ -1336,6 +1385,8 @@ async def cross_arm_privileged_function(session_id, privileged, unprivileged, ma
             reported.add(url)
             findings.append({
                 "url": url,
+                # The exact `may_access` entry that would suppress this one — see the twin.
+                "declaration_that_would_suppress": _suppressing_declaration(url),
                 # THE THREE ARTIFACTS THIS RESTS ON, for the KEY that satisfied the clauses
                 # — not looked up by URL afterwards, because a URL does not have one
                 # artifact and a lookup would cite a capture no clause read. Keyed by arm
@@ -1402,6 +1453,10 @@ async def cross_arm_privileged_function(session_id, privileged, unprivileged, ma
         # `Identity.may_access`. Listed, because a suppression nobody can see is
         # indistinguishable from a check that never looked.
         "suppressed_declared_access": allowed,
+        # AND THE DECLARATIONS THAT SUPPRESSED NOTHING, for the same reason one step
+        # earlier: a declaration matching nothing is not a declaration that was honoured.
+        # `gated` is every operation this check reached a verdict about.
+        "declared_access_that_matched_nothing": _unmatched_declarations(entitled, gated),
         # Operations both arms reached at DIFFERENT URLs, or that only one arm saw. Counted,
         # because a comparison that quietly skipped them would read as having covered them.
         "not_comparable": not_comparable,

@@ -877,8 +877,9 @@ See E-032 for what follows from it.
 
 ### E-032: what the authorization work still does not do — PARTLY CLOSED
 
-Seven are fixed: three grades that nothing had earned, the two ways the client's tracker
-stopped receiving findings at all, and the marker's two travel items — the per-path claim and
+Eight are fixed: three grades that nothing had earned, the two ways the client's tracker
+stopped receiving findings at all, the marker's two travel items, and `may_access`'s silent
+spelling — the per-path claim and
 the one path it had to stay off.
 
 **The marker reached a model prompt, and that was a measured leak rather than the "reachable
@@ -898,6 +899,23 @@ are data — before the length cut. Fixed at the WRITE, because `_get_handoff_co
 holding the value. It is NOT retroactive and cannot be: nothing records which substring of an
 existing row was the declared value, so a store that already holds one needs the rows for that
 target deleted by hand. Said so in `docs/integrations.md` rather than implied.
+
+**A `may_access` declaration that matched nothing now says so.** Measured on `_entitled`'s
+three shapes against four object URLs: `/api/Users/2` suppresses 1 of 4, `/api/Users/`
+suppresses 3 of 4 — coarse, but visible, because `suppressed_declared_access` lists what it
+took — and `/api/Users` suppresses **0 of 4, silently**. The third is the spelling a person
+reaches for ("this identity may read users"), and `_entitled` matches it against `/api/Users`
+and `/api/Users/` only, never `/api/Users/2`: the false finding stays, the declaration looks
+applied, and nothing related the two. Both checks now return
+`declared_access_that_matched_nothing`, for the same reason every other clause in this lane
+reports what it did not do.
+
+**And every finding names the exact declaration that would suppress it.** Working out the
+spelling was never the inherent part, and getting it wrong failed in the silent direction.
+The loop is also cheaper than this entry implied: both checks are POST routes over a FINISHED
+assessment's stored evidence and both read `may_access` live from the secret store, so
+declaring and re-checking is one `PUT /identities/{id}` and one POST — no new assessment.
+Measured end to end.
 
 **The per-path decision** is the table in `docs/integrations.md`: the cross-arm findings carry
 a digest because they are exported; `SecurityAssertion` and the catalogue's marker evaluators
@@ -979,12 +997,11 @@ source rather than measured; measuring them confirmed both and turned up a third
   verified, so it sits in the client's tracker inactive. The remaining answer is the client's
   product configuration, not erlik's export — recorded so the `partial` status is not
   mistaken for a defect in the writer.
-- **`may_access` is unusable as the defence it is presented as.** It works — declaring
-  `/api/Users/2` suppresses exactly that — but the plausible coarser declaration
-  `/api/Users/` suppresses the two true findings as well, the operator must name 2 exact
-  paths out of 189 gated operations, the object id is not derivable from `subject_id`
-  (jim's is 2 while his address ids are 4 and 5), and they can only learn which after
-  reading the false finding. Keep the clause; stop calling it the answer.
+- **`may_access` still cannot be declared in advance**, and that part is inherent: the
+  object id is not derivable from `subject_id` — jim's is 2 while his address ids are 4 and
+  5 — so an operator learns which paths to declare by reading the findings. What is NOT
+  inherent was fixed; see below. It is a triage instrument, not a defence, and the docs no
+  longer present it as one.
 - **Length is a weak proxy for a degenerate marker, and breadth is a better one.** The floor
   of 8 kills `2` and `"id":2`, but markers well over 8 characters — `"role":"customer"` — still
   match most of a corpus. An adversarial pass measured breadth over the privileged arm's own
