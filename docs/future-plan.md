@@ -1020,7 +1020,7 @@ source rather than measured; measuring them confirmed both and turned up a third
 
 ### E-033: the callback lifecycle, and what the fixes did not reach — PARTLY CLOSED
 
-Seven of the eight items are fixed; see `docs/integrations.md` ("What the report could not
+All but two of the eight items are fixed; see `docs/integrations.md` ("What the report could not
 see") for the measurements. Closed: `recover()`'s rollup, including the `sessions` row it
 stopped short of; the three pieces of write-only state; the coverage report's blind spot for
 arm-wide truncations, plus the comma-joined truncation id found while fixing it; the arm that
@@ -1083,10 +1083,35 @@ One measurement here corrected a claim: the 21→14 `target_budget` figure an ea
 recorded is a consequence of the number of SELECTED cases (`max_urls // selected // steps`),
 not of endpoint rows, so it is true today and no fix moves it.
 
+**The mutation refusal is the runner's floor now — CLOSED, and the reason it was judged
+acceptable was wrong.** This entry read "safe mode now covers every lane, so this is two gates
+agreeing rather than one floor". It does not cover every lane. Safe mode lives in
+`execute_tool`, and a caller supplying its own `executor` never reaches it — the integration
+lane's `deterministic.execute` goes from `curl_request` straight to `sandbox.run`, touching
+`_safe_mode_violation` nowhere. So that lane's only mutation gate was `step_policy`, an
+optional keyword argument. Measured with a recording executor that sends nothing, on a caller
+that brought an executor and no policy:
+
+    curl -X PUT     ...   SENT, refused by nothing
+    curl -X DELETE  ...   SENT, refused by nothing
+    curl -F @upload ...   refused, but by `curl_request`'s syntax rule rather than by any
+                          decision about mutation
+
+The two that went through are exactly the two safe mode exists to stop. `run_test_case` now
+applies `_safe_mode_violation` before dispatch, whatever executor the caller brought, records
+the refusal as a skipped step rather than dropping it, and prefixes the reason `SAFE_MODE:` so
+a reader can tell it from the lane's own narrower refusal. It defers to the one rule set
+rather than re-listing verbs, and it reads the same environment `execute_tool` reads —
+`ERLIK_SAFE_MODE=0` still authorises destructive testing, which is tested, because a fix that
+made an authorised engagement impossible would be a worse defect than the one it closed. The
+test-case lane never had a per-session override to lose.
+
+One rule was found by the test rather than by reading the list: `sql-ddl-dml`. The test
+enumerates `_SAFE_MODE_RULES` instead of restating it, so a rule added later is covered
+without editing it.
+
 Still open from the original eight:
 
-- **The mutation refusal is a lane opt-in, not the runner's floor.** Safe mode now covers every
-  lane, so this is two gates agreeing rather than one floor.
 - **No test case can clean up after itself.** `TestCase` and `TestStep` have no such field.
   Safe mode refusing uploads by default makes that acceptable rather than fixed.
 - **`POST /stop` has no debounce.** The damage two clicks did is fixed in the teardown, which

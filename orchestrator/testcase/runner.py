@@ -12,7 +12,7 @@ from orchestrator import llm_client
 from orchestrator import credentials as _CRED
 from orchestrator.testcase.schema import TestCase, TestStep, Evaluator
 from orchestrator.testcase.scope import Scope, ScopeViolation, check_command, from_target
-from orchestrator.tool_executor import execute_tool
+from orchestrator.tool_executor import _safe_mode_violation, execute_tool
 from orchestrator.testcase.schema import endpoint_of
 from urllib.parse import unquote_plus, urlsplit
 
@@ -1001,6 +1001,34 @@ async def run_test_case(
                         step=step.name, command=cmd, success=False, output="",
                         duration_ms=0, error=reason, skipped=True))
                     continue
+
+            # SAFE MODE IS A FLOOR HERE, NOT ONLY INSIDE `execute_tool`.
+            #
+            # E-033 recorded the mutation refusal as "a lane opt-in, not the runner's floor",
+            # and judged it acceptable because "safe mode now covers every lane, so this is
+            # two gates agreeing". It does not. Safe mode lives in `execute_tool`, and a
+            # caller that supplies its own `executor` never reaches it: the integration
+            # lane's `execute` goes straight from `curl_request` to `sandbox.run`. So that
+            # lane's ONLY mutation gate is `step_policy` — an optional keyword argument.
+            #
+            # Measured, with a recording executor that sends nothing, on a caller supplying
+            # its own executor and no policy:
+            #
+            #     curl -X PUT     ...   SENT, refused by nothing
+            #     curl -X DELETE  ...   SENT, refused by nothing
+            #     curl -F @upload ...   refused, but by `curl_request`'s syntax rule
+            #
+            # The two that went through are exactly the two safe mode exists to stop. So the
+            # floor is applied where every caller passes, whatever executor they brought.
+            # It is deliberately redundant for the legacy lane, where `execute_tool` refuses
+            # the same commands again — a second gate that never fires is the point of a
+            # floor, and the reason text says which gate spoke.
+            safe_reason = _safe_mode_violation(cmd)
+            if safe_reason:
+                result.steps.append(StepResult(
+                    step=step.name, command=cmd, success=False, output="",
+                    duration_ms=0, error=f"SAFE_MODE: {safe_reason}", skipped=True))
+                continue
 
             # Safety floor: every command must pass scope check before exec.
             if scope is not None:

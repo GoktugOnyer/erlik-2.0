@@ -1891,6 +1891,27 @@ BUSL-09 posts a file with `-F "param=@-;filename=erlik-upload-canary.php"` insid
 wrapper that hid the client, and an adversarial pass ran that shape against a throwaway
 server with every default in place and watched the file persist.
 
+#### And where safe mode is applied, which was not everywhere
+
+`_safe_mode_violation` lives in `execute_tool`. A caller that supplies its own `executor`
+never reaches it, and the integration lane supplies one: `deterministic.execute` goes from
+`curl_request` straight to `sandbox.run`. So that lane's only mutation gate was its
+`step_policy` — an optional keyword argument — and a lane that brought an executor without
+one had no gate at all. Measured with a recording executor that sends nothing:
+
+    curl -X PUT     ...   SENT, refused by nothing
+    curl -X DELETE  ...   SENT, refused by nothing
+    curl -F @upload ...   refused, but by `curl_request`'s syntax rule rather than by any
+                          decision about mutation
+
+`run_test_case` applies the floor before dispatch now, whatever executor the caller brought.
+The refusal is recorded as a skipped step — a report that omits it reads as if the case ran
+clean — and its reason is prefixed `SAFE_MODE:` so a reader can tell it from the lane's own
+narrower "this step would mutate the target" refusal, which still runs first and still covers
+POST. It is redundant in the legacy lane, where `execute_tool` refuses the same commands
+again; a second gate that never fires is what a floor is for. `ERLIK_SAFE_MODE=0` authorises
+destructive testing exactly as before, from the same environment `execute_tool` reads.
+
 So the boundary is any shell punctuation that can precede a command, still a boundary so
 `mycurl` does not match, and there is a new `http-file-upload` rule for `-F` carrying an `@`
 and for `-T`. `-d` POSTs stay allowed. The cost is named rather than hidden: a *mention* of
