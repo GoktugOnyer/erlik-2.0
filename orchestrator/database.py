@@ -170,6 +170,35 @@ async def init_db():
                 created_at TEXT NOT NULL DEFAULT (datetime('now'))
             );
 
+            -- WHAT A RUN OWES THE TARGET, written BEFORE the write that creates it.
+            --
+            -- E-012: "if the orchestrator dies, preserve cleanup obligations for operator
+            -- review rather than automatically repeating state changes after restart."
+            -- `TestStep.cleanup` runs the undo in a `finally`, which covers an exception and
+            -- a cancellation and does NOT cover the process going away — a SIGKILL, a
+            -- container stop, a machine losing power. `save_run` is called AFTER the run
+            -- returns, so until this table there was no row of any kind: the file was on the
+            -- client's server and nothing anywhere knew it existed.
+            --
+            -- Recorded before rather than after, deliberately. A spurious obligation costs an
+            -- operator one look; a missing one costs a file nobody finds.
+            --
+            -- NEVER REPLAYED ON RESTART. Re-issuing a DELETE against a client's system from a
+            -- record erlik cannot re-verify is a state change nobody asked for a second time;
+            -- the entry says review, and review is what this offers.
+            CREATE TABLE IF NOT EXISTS v2_cleanup_obligations (
+                id TEXT PRIMARY KEY,
+                run_id TEXT,
+                test_case_id TEXT NOT NULL,
+                step TEXT NOT NULL,
+                command TEXT NOT NULL,
+                target TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                discharged_at TEXT,
+                outcome TEXT,
+                detail TEXT NOT NULL DEFAULT ''
+            );
+
             CREATE TABLE IF NOT EXISTS v2_findings (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 run_id TEXT NOT NULL REFERENCES v2_runs(id),

@@ -27,6 +27,24 @@ from orchestrator.testcase.runner import run_test_case
 from orchestrator.testcase.schema import TestCase as Case, TestStep as Step
 
 SCOPE = {"allow_hosts": ["app.test"], "allow_ports": [80]}
+
+
+@pytest.fixture(autouse=True)
+def store(tmp_path, monkeypatch):
+    """Every cleanup needs somewhere to record its obligation.
+
+    Not incidental: the runner refuses a writing step whose obligation it cannot record, so
+    a test without a database is testing the refusal rather than the undo. Production always
+    has one — see `test_a_cleanup_obligation_outlives_the_run` for the rule itself.
+    """
+    import asyncio
+
+    import orchestrator.database as db_mod
+
+    monkeypatch.setattr(db_mod, "DB_DIR", tmp_path)
+    monkeypatch.setattr(db_mod, "DB_PATH", tmp_path / "t.db")
+    asyncio.run(db_mod.init_db())
+    return tmp_path / "t.db"
 UPLOAD = 'curl -s -F "f=@-;filename=erlik-upload-canary.php" "http://app.test/u"'
 UNDO = 'curl -s -X DELETE "http://app.test/uploads/erlik-upload-canary.php"'
 

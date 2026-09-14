@@ -4,6 +4,7 @@ import json
 import re
 import sys
 import time
+import uuid
 from typing import Any
 from pydantic import BaseModel, Field
 
@@ -46,6 +47,8 @@ class StepResult(BaseModel):
     # A step the caller's policy declined to run. Distinct from a step that ran
     # and failed: the first is "we chose not to", the second is evidence.
     skipped: bool = False
+    # For a cleanup outcome: the durable obligation this discharges. Empty for a step.
+    obligation_id: str | None = None
 
 
 class RunResult(BaseModel):
@@ -930,6 +933,85 @@ def _scrub_for_storage(result: RunResult, secrets: tuple[str, ...]) -> None:
                                 + f"\n[truncated at {MAX_EVIDENCE} characters]")
 
 
+async def _obligation_store(db):
+    """The connection obligations are written through, opened here if none was given.
+
+    `run_test_case`'s `db` parameter existed and was read by NOTHING — the dead-parameter
+    shape this codebase names elsewhere. It is the handle for this, and a caller that does
+    not pass one still gets the protection, because a guard only some callers opt into is
+    the defect E-033 recorded about the mutation refusal.
+    """
+    if db is not None:
+        return db, False
+    from orchestrator.database import get_db
+
+    return await get_db(), True
+
+
+async def _record_obligation(db, tc, step, command, target) -> str:
+    """Write what this run is about to owe the target. Returns the obligation id.
+
+    Raises if it cannot be written, and the caller then refuses the step: an undo erlik
+    cannot promise to remember is an undo it cannot promise.
+    """
+    handle, mine = await _obligation_store(db)
+    key = str(uuid.uuid4())
+    try:
+        await handle.execute(
+            "INSERT INTO v2_cleanup_obligations(id,test_case_id,step,command,target) "
+            "VALUES (?, ?, ?, ?, ?)", (key, tc.id, step.name, command, target or ""))
+        await handle.commit()
+    finally:
+        if mine:
+            await handle.close()
+    return key
+
+
+async def _discharge_obligation(db, outcome) -> None:
+    """Close the row for a cleanup that has now been attempted.
+
+    Swallows its own failure: the undo has already run, and turning a bookkeeping problem
+    into a raised exception here would lose the run's findings over it. An obligation that
+    stays open when it should have closed reads as outstanding work, which is the safe
+    direction for this to fail in.
+    """
+    key = getattr(outcome, "obligation_id", None)
+    if not key:
+        return
+    handle, mine = await _obligation_store(db)
+    try:
+        await handle.execute(
+            "UPDATE v2_cleanup_obligations SET discharged_at=datetime('now'),outcome=?,"
+            "detail=? WHERE id=?",
+            ("succeeded" if outcome.success else "failed", (outcome.error or "")[:500], key))
+        await handle.commit()
+    except Exception:                         # noqa: BLE001 — see the docstring
+        pass
+    finally:
+        if mine:
+            await handle.close()
+
+
+async def outstanding_cleanups(db=None) -> list[dict]:
+    """Cleanup obligations no run ever discharged — for REVIEW, never for replay.
+
+    E-012: "if the orchestrator dies, preserve cleanup obligations for operator review
+    rather than automatically repeating state changes after restart." Re-issuing a DELETE
+    against a client's system from a record erlik cannot re-verify is a state change nobody
+    asked for a second time, and the target may have been restored, reused, or handed to
+    someone else since. So this reads; nothing in the codebase replays.
+    """
+    handle, mine = await _obligation_store(db)
+    try:
+        rows = await (await handle.execute(
+            "SELECT id,run_id,test_case_id,step,command,target,created_at,outcome,detail "
+            "FROM v2_cleanup_obligations WHERE discharged_at IS NULL "
+            "ORDER BY created_at")).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        if mine:
+            await handle.close()
+
 async def run_test_case(
     tc: TestCase,
     target: dict[str, Any],
@@ -975,6 +1057,8 @@ async def run_test_case(
     # (step, rendered context) for every step that EXECUTED and declared an undo. Populated
     # in the loop and drained in the `finally` below — see TestStep.cleanup.
     pending_cleanups: list[tuple] = []
+    # step name -> the obligation id recorded before that step wrote anything.
+    obligations: dict[str, str] = {}
     # Every secret any step resolved. Collected so the single redaction pass at
     # the end covers a value a later step never saw.
     resolved_secrets: list[str] = []
@@ -1100,6 +1184,37 @@ async def run_test_case(
                     break
 
             t0 = time.time()
+            # AND THE OBLIGATION IS RECORDED IMMEDIATELY BEFORE THE WRITE.
+            #
+            # E-012 asks that a cleanup obligation survive the orchestrator dying. The undo
+            # runs in a `finally`, which covers an exception and a cancellation and does NOT
+            # cover the process going away; `save_run` is called after the run returns, so
+            # until this there was no row of any kind and the file on the client's server was
+            # known to nobody.
+            #
+            # HERE, and not beside the step policy, because everything above can still refuse
+            # the step — a first version recorded it before the safe-mode floor and left an
+            # obligation for a write that never happened. At this line the step has passed
+            # the caller's policy, the floor and the scope check, so the next thing that
+            # happens is the request.
+            #
+            # IF IT CANNOT BE RECORDED, THE STEP DOES NOT RUN. That is `_v1_step_policy`'s own
+            # reasoning — erlik cannot declare the undo, so it does not make the request —
+            # applied to the durable half. It cannot affect the default path: safe mode
+            # refuses a mutating step anyway, so this is only reached on an authorised
+            # destructive engagement, which is exactly where an unrecorded write matters.
+            if step.cleanup:
+                try:
+                    obligations[step.name] = await _record_obligation(
+                        db, tc, step, _render(step.cleanup, ctx), endpoint_of(target))
+                except Exception as exc:      # noqa: BLE001
+                    result.steps.append(StepResult(
+                        step=step.name, command=cmd, success=False, output="",
+                        duration_ms=0, skipped=True,
+                        error=(f"this step writes and its cleanup obligation could not be "
+                               f"recorded, so the write was not made: "
+                               f"{type(exc).__name__}: {exc}")))
+                    continue
             raw = await (executor or execute_tool)(
                 live_cmd,
                 enabled_tools=_TOOLS_ALL,
@@ -1113,7 +1228,7 @@ async def run_test_case(
             if step.cleanup:
                 # Only after a step that RAN. A skipped or refused step created nothing, and
                 # undoing what was never done is a request to a client's server for no reason.
-                pending_cleanups.append((step, ctx))
+                pending_cleanups.append((step, ctx, obligations.get(step.name)))
             sr = StepResult(
                 step=step.name,
                 command=cmd,                       # handles, never the secret
@@ -1180,7 +1295,7 @@ async def run_test_case(
         #
         # Reverse order: a later step can depend on what an earlier one created, so undoing
         # forwards can remove the thing the next undo needs.
-        for step, step_ctx in reversed(pending_cleanups):
+        for step, step_ctx, obligation in reversed(pending_cleanups):
             try:
                 command = _render(step.cleanup, step_ctx)
             except Exception as exc:          # noqa: BLE001 — see the scope branch below
@@ -1190,7 +1305,8 @@ async def run_test_case(
                     error=f"could not be rendered: {type(exc).__name__}: {exc}"))
                 continue
             outcome = StepResult(step=f"cleanup: {step.name}", command=command,
-                                 success=False, output="", duration_ms=0)
+                                 success=False, output="", duration_ms=0,
+                                 obligation_id=obligation)
             safe_reason = _safe_mode_violation(command)
             if safe_reason:
                 # Cannot fire on a legitimate cleanup — the step it undoes only ran because
@@ -1227,6 +1343,12 @@ async def run_test_case(
             except Exception as exc:      # noqa: BLE001 — a failed undo must be REPORTED
                 outcome.error = f"{type(exc).__name__}: {exc}"
             result.cleanups.append(outcome)
+
+        # DISCHARGED, whatever the outcome. An obligation left open after its undo FAILED is
+        # the row an operator most needs; one left open after it succeeded is noise that
+        # trains them to ignore the list.
+        for outcome in result.cleanups:
+            await _discharge_obligation(db, outcome)
 
     _scrub_for_storage(result, tuple(dict.fromkeys(resolved_secrets)))
     result.duration_ms = int((time.time() - started) * 1000)

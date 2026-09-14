@@ -293,6 +293,31 @@ unselected mutations never execute; cleanup success/failure is independently
 reported. Schema contract failures remain observations unless security impact is
 demonstrated.
 
+**Cleanup obligations survive the orchestrator dying — done.** `TestStep.cleanup` runs the
+undo in a `finally`, which covers an exception and a cancellation and does NOT cover the
+process going away; `save_run` is called after the run returns, so measured before this, a run
+that wrote and then died left ZERO rows: the file was on the client's server and nothing
+anywhere knew it existed. `v2_cleanup_obligations` is written immediately before the write and
+discharged after the undo, whatever the undo's outcome, and `runner.outstanding_cleanups`
+lists what nothing ever closed.
+
+Three properties, each measured. The obligation is on disk BEFORE the request — asserted from
+inside the executor, which is the only moment that proves it. It is recorded there and not
+beside the step policy, because a first version filed an obligation for a write the safe-mode
+floor then refused. And if it cannot be recorded the step does not run, which is
+`_v1_step_policy`'s own reasoning — erlik cannot declare the undo, so it does not make the
+request — applied to the durable half; it cannot affect the default path, because safe mode
+refuses a mutating step anyway.
+
+NOTHING REPLAYS, which is what the entry actually asks for. Re-issuing a DELETE against a
+client's system from a record erlik cannot re-verify is a state change nobody asked for a
+second time, and the target may have been restored, reused or handed to someone else since.
+The review path is a read and there is a test that no other code path touches the table.
+
+`RunResult.cleanups` still does not reach `v2_runs` — the receipt is in the obligations table
+instead, which is the durable half and the one an operator acts on. The in-run list stays for
+the caller that holds the result.
+
 ### E-013: business-logic and concurrency testing
 
 Extend the existing race-condition case with application-specific invariants:
