@@ -6772,13 +6772,53 @@ async def start_session(session_id: str):
     return {"status": "running", "message": "Agent loop started."}
 
 
+def request_stop(session_id: str) -> str:
+    """Ask a running session to stop, ONCE. Returns what actually happened.
+
+    E-033: `POST /stop` was `if task and not task.done(): task.cancel()` with no debounce,
+    and the teardown it interrupts is not instant — a `docker rm -f` of one container
+    measures 207ms, and the integration lane's unwind releases one collector after another.
+    So a second click during that window found the task still not done, cancelled it again,
+    and got back the same "Stop signal sent." as the first. An operator could not tell
+    whether the second click had done anything, which is the reason they click a third time.
+
+    The damage that used to do is fixed in the teardown — `service.run`'s unwind is one
+    shielded task, so a cancellation delivered inside it stops us WAITING rather than
+    stopping the work. This is the other half: not delivering the redundant signal at all,
+    and saying which of the three things happened.
+
+    `Task.cancelling()` rather than a set of session ids we maintain: it is the task's own
+    count of pending cancellation requests, so it cannot drift out of step with reality, it
+    needs no cleanup when a run ends, and it cannot leak an entry for a session that never
+    finished.
+    """
+    task = running_tasks.get(session_id)
+    if not task or task.done():
+        return "not_running"
+    if task.cancelling():
+        return "already_stopping"
+    task.cancel()
+    return "stopping"
+
+
+_STOP_MESSAGE = {
+    "stopping": "Stop signal sent.",
+    "already_stopping": ("A stop was already requested and the run is still unwinding — "
+                         "releasing containers and writing its final status. Nothing was "
+                         "sent again; this can take a few seconds per container."),
+    "not_running": "No active agent loop for this session.",
+}
+
+
 @app.post("/api/sessions/{session_id}/stop")
 async def stop_session(session_id: str):
-    task = running_tasks.get(session_id)
-    if task and not task.done():
-        task.cancel()
-        return {"status": "stopping", "message": "Stop signal sent."}
-    return {"status": "not_running", "message": "No active agent loop for this session."}
+    outcome = request_stop(session_id)
+    return {"status": "stopping" if outcome == "already_stopping" else outcome,
+            # SEPARATE FROM `status`, which a dashboard switches on and which must keep
+            # meaning "this run is stopping" for both of the first two cases. The repeat is
+            # a fact about the REQUEST, not about the run.
+            "already_requested": outcome == "already_stopping",
+            "message": _STOP_MESSAGE[outcome]}
 
 
 @app.get("/api/sessions/{session_id}/steps")
@@ -7384,10 +7424,10 @@ async def stop_chain(chain_id: str):
             (chain_id,)
         )
         running_sessions = await cursor.fetchall()
-        for s in running_sessions:
-            task = running_tasks.get(s["id"])
-            if task and not task.done():
-                task.cancel()
+        # Through the same debounce: stopping a chain twice would otherwise deliver a second
+        # cancellation to every session in it, which is the same redundant signal one level
+        # up. `request_stop` is where that decision lives, so the two routes cannot drift.
+        stopped = [request_stop(s["id"]) for s in running_sessions]
 
         await db.execute(
             "UPDATE chains SET status = 'stopped', updated_at = datetime('now') WHERE id = ?",
@@ -7397,7 +7437,11 @@ async def stop_chain(chain_id: str):
     finally:
         await db.close()
 
-    return {"status": "stopped", "chain_id": chain_id, "message": "Chain stopped."}
+    return {"status": "stopped", "chain_id": chain_id, "message": "Chain stopped.",
+            # What the stop actually reached, so a second click on a chain says as much as a
+            # second click on a session.
+            "sessions_stopping": stopped.count("stopping"),
+            "sessions_already_stopping": stopped.count("already_stopping")}
 
 
 @app.get("/api/health")

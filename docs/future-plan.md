@@ -1018,9 +1018,9 @@ source rather than measured; measuring them confirmed both and turned up a third
   `forbidden_marker` fix above is the pattern to follow, not a reason to think the problem
   is gone.
 
-### E-033: the callback lifecycle, and what the fixes did not reach — PARTLY CLOSED
+### E-033: the callback lifecycle, and what the fixes did not reach — CLOSED
 
-All but one of the eight items are fixed; see `docs/integrations.md` ("What the report could not
+All eight items are fixed; see `docs/integrations.md` ("What the report could not
 see") for the measurements. Closed: `recover()`'s rollup, including the `sessions` row it
 stopped short of; the three pieces of write-only state; the coverage report's blind spot for
 arm-wide truncations, plus the comma-joined truncation id found while fixing it; the arm that
@@ -1135,10 +1135,24 @@ E-012's fixture/cleanup wrapper — the thing `_v1_step_policy` says the XXE cas
 has the second half of its mechanism. Permitting a mutating step BECAUSE it declares an undo is
 a separate decision and is deliberately not taken here.
 
-Still open from the original eight:
+**`POST /stop` has a debounce — CLOSED, and E-033 is closed with it.** The route was
+`if task and not task.done(): task.cancel()`. The teardown it interrupts is not instant — a
+`docker rm -f` of one container measures 207ms, and the integration lane's unwind releases one
+collector after another — so a second click during that window found the task still not done,
+cancelled it again, and returned the same "Stop signal sent." as the first. An operator could
+not tell whether the second click had done anything, which is the reason they click a third
+time.
 
-- **`POST /stop` has no debounce.** The damage two clicks did is fixed in the teardown, which
-  is the right layer; nothing tells an operator the second click did anything.
+`request_stop` answers `stopping`, `already_stopping` or `not_running`, and delivers a
+cancellation only for the first. It reads `Task.cancelling()` — the task's own count of
+pending cancellation requests — rather than a set of session ids the API maintains, so it
+cannot drift out of step with reality, needs no cleanup when a run ends, and cannot leak an
+entry for a session that never finished. `status` stays `stopping` for both of the first two,
+because a dashboard switches on it and the run IS stopping either way; the repeat is reported
+as `already_requested`, a fact about the request rather than the run, with a message saying
+why it is taking a moment. `POST /chains/{id}/stop` goes through the same decision, so
+stopping a chain twice no longer delivers a second cancellation to every session in it.
+
 
 ### E-034: the three answers a comparison can give, and where the line sits — OPEN
 
