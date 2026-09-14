@@ -1154,7 +1154,7 @@ why it is taking a moment. `POST /chains/{id}/stop` goes through the same decisi
 stopping a chain twice no longer delivers a second cancellation to every session in it.
 
 
-### E-034: the three answers a comparison can give, and where the line sits — OPEN
+### E-034: the three answers a comparison can give, and where the line sits — CLOSED
 
 This increment drew a distinction worth recording, because the next person to touch these
 checks will have to place a new case on one side of it.
@@ -1173,10 +1173,36 @@ A cross-arm comparison now answers in three ways, and the rule for choosing is t
   marker, a URL that names the caller, an anonymous arm that was redirected rather than
   refused.
 
-What is NOT resolved: whether `partial` should ever refuse. It is currently reported, on the
-strength of that measurement. If a real run is found where a `partial` arm produces a finding
-that inspection cannot stand behind, the line moves — and the measurement to redo is the
-truncation sweep, not the reasoning.
+**Resolved by sweep: `partial` should NOT refuse, and the line stays where it is.** The open
+question rested on one data point — a finding surviving a 60-of-117 truncation — and the entry
+asked for the sweep rather than more argument.
+
+The falsifiable form of "a missing capture cannot manufacture one" is that truncating any arm
+must never ADD a finding. It could, in principle, and the mechanism is specific: the ANONYMOUS
+arm's capture is what REFUSES a finding, since content an unauthenticated caller received is
+published rather than crossed. Delete that capture and the refusal has nothing to fire on.
+
+`tests/test_truncating_an_arm_never_adds_a_finding.py` sweeps it: 3 arms x 7 truncation levels
+over a 12-operation surface, both checks, with the anonymous arm's reads of the PUBLIC
+operations deleted outright as the sharpest single case. **No truncation at any level on any
+arm added a finding.** The reason is a named clause rather than luck, and it is asserted so it
+cannot quietly go:
+
+    # `get` with a default would read "the anonymous arm never probed this" as "the
+    # anonymous arm was refused", which is the unrun-clause defect this project keeps removing
+    if key not in anonymous_saw:
+        continue
+
+Corroborated on the recorded real runs. juice5 has all three katana stages `partial` from the
+URL budget, 9 findings, and 9 of 9 cited artifacts resolve with their digests checking; DVWA
+has no partial stage and 4 of 4 resolve. So a `partial` arm's findings are inspectable, which
+is the half the original data point established, and the sweep now covers the half it did not.
+
+The far end of the sweep confirms the OTHER line too: an arm with no evidence at all refuses
+rather than reporting a bare zero, which is where "refuse" belongs and where it already was.
+
+**Nothing in the product changed.** The answer was the status quo; what changed is that it now
+rests on a sweep instead of one measurement, and the sweep is a test rather than a paragraph.
 
 ## 10. Shared technical contracts
 
