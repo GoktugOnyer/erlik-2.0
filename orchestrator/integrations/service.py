@@ -7,12 +7,11 @@ import re
 import time
 import uuid
 from urllib.parse import urlsplit
-import yaml
 from .contracts import (FINISHED_STAGE_STATUSES, AssessmentConfig, Identity, StageResult,
                         canonical_origin)
 from .security import SecretStore, redact
 from .runtime import Sandbox, availability, recover_orphans, JobOutput
-from .adapters import ADAPTERS, Context, rpc, record
+from .adapters import ADAPTERS, Context, load_openapi_document, rpc, record
 from .interactsh import Collector
 from . import persistence as db
 from orchestrator.testcase.scope import check_url
@@ -377,7 +376,15 @@ async def operation_routes(config, sandbox, target):
         if response["status"] != 200 or response["blocked"]:
             raise ValueError("cannot retrieve workflow schema")
         content = response["body"]
-    doc = yaml.safe_load(content)
+    # THE SAME VALIDATOR THE SCHEMATHESIS LANE USES. This read the same bytes with no
+    # validation at all, so a document that is not a specification reached `doc.get("paths")`
+    # and surfaced as `AttributeError: 'str' object has no attribute 'get'` — and a JSON
+    # object that merely lacked the `openapi` key fell through to "selected operation IDs are
+    # missing from schema", which sends an operator to check the IDs they typed when the
+    # document is not a specification at all.
+    doc = load_openapi_document(
+        content, f"the workflow schema at {schema.url}" if schema.url
+        else "the supplied workflow schema")
     routes, found = [], set()
     for path, operations in doc.get("paths", {}).items():
         for method, definition in operations.items():

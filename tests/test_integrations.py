@@ -51,7 +51,11 @@ def test_mutation_routes_are_explicit():
 async def test_workflow_routes_bind_base_path_origin_and_single_segment():
     from orchestrator.integrations.service import operation_routes
     cfg = config(stages=["schemathesis"], active=True, state_changing=True,
-                 schema_input={"content": json.dumps({"paths": {"/items/{id}": {"post": {"operationId": "update"}}}})},
+                 # `openapi` is not decoration: a document without it is not a
+                 # specification, and `schema_file` has always refused one. This stub
+                 # relied on `operation_routes` not validating — see
+                 # tests/test_a_wrong_schema_says_what_is_wrong_with_it.py.
+                 schema_input={"content": json.dumps({"openapi": "3.0.0", "paths": {"/items/{id}": {"post": {"operationId": "update"}}}})},
                  workflow={"operations": ["update"],
                            "fixtures": [{"url": "https://app.test/setup", "method": "POST"}],
                            "cleanup": [{"url": "https://app.test/cleanup", "method": "POST"}]})

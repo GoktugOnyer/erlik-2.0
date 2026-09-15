@@ -278,6 +278,55 @@ def parse_zap(document, ctx):
     return result
 
 
+def load_openapi_document(content, source: str = "the supplied schema"):
+    """Parse and validate an OpenAPI document, saying what is wrong when it is not one.
+
+    E-012: "missing or incompatible schemas should not disappear into a generic scanner
+    failure." Measured on the committed code, for the five ways a schema can be wrong:
+
+        malformed YAML        a raw multi-line `yaml.ParserError` in both readers
+        a YAML scalar         `AttributeError: 'str' object has no attribute 'get'`
+        a YAML list           `AttributeError: 'list' object has no attribute 'get'`
+        an HTML error page    `AttributeError: 'str' object has no attribute 'get'`
+        JSON that is not a
+        specification         "selected operation IDs are missing from schema"
+
+    Those reasons reach the operator: the stage row carries `redact(str(exc))`. The last is
+    the worst of them — it is not generic, it is WRONG, and it sends someone to check the
+    operation IDs they typed when the document is not a specification at all.
+
+    ONE VALIDATOR, because there were two readers of the same bytes that disagreed.
+    `schema_file` validated the document and `operation_routes` did not, so the same schema
+    produced "invalid OpenAPI document" in one lane and an AttributeError in the other. Two
+    copies of one fact is the defect this codebase names about its own catalogue lists.
+
+    The HTML case is called out by name because it is the common one in practice: a schema
+    URL that answers 200 with a login page, an error page, or documentation ABOUT the API.
+    """
+    try:
+        document = yaml.safe_load(content)
+    except yaml.YAMLError as exc:
+        # One line. `yaml`'s own message is a multi-line mark dump that renders as noise in
+        # a stage `reason`, and the useful part is the first line and the position.
+        detail = " ".join(str(exc).split())[:180]
+        raise ValueError(f"{source} is not parseable as YAML or JSON: {detail}") from exc
+    if isinstance(document, str) and document.lstrip()[:1] == "<":
+        raise ValueError(
+            f"{source} returned markup rather than a specification — a schema URL that "
+            f"answers 200 with a login page, an error page, or documentation ABOUT the API "
+            f"is the usual cause")
+    if not isinstance(document, dict):
+        kind = type(document).__name__
+        raise ValueError(
+            f"{source} parsed as a {kind}, not an OpenAPI document; check that the URL or "
+            f"content is the specification itself")
+    if not ("openapi" in document or "swagger" in document):
+        raise ValueError(
+            f"{source} has no `openapi` or `swagger` key, so it is not an OpenAPI "
+            f"specification; its top-level keys are "
+            f"{sorted(str(k) for k in document)[:8]}")
+    return document
+
 async def schema_file(ctx, sandbox):
     source = ctx.config.schema_input
     if not source:
@@ -289,9 +338,8 @@ async def schema_file(ctx, sandbox):
             raise ValueError("schema retrieval failed or was blocked")
         content = response["body"]
     if source.kind == "openapi":
-        document = yaml.safe_load(content)
-        if not isinstance(document, dict) or not ("openapi" in document or "swagger" in document):
-            raise ValueError("invalid OpenAPI document")
+        document = load_openapi_document(
+            content, f"the schema at {source.url}" if source.url else "the supplied schema")
         async def bundle(node, base, ancestors=()):
             if isinstance(node, list):
                 return [await bundle(n, base, ancestors) for n in node]

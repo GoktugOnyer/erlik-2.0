@@ -318,6 +318,31 @@ The review path is a read and there is a test that no other code path touches th
 instead, which is the durable half and the one an operator acts on. The in-run list stays for
 the caller that holds the result.
 
+**A wrong schema says what is wrong with it — done.** Two readers parsed the same bytes and
+disagreed: `adapters.schema_file` validated the document, `service.operation_routes` went
+straight to `doc.get("paths", {})`. Measured across the five ways a schema can be wrong:
+
+                            operation_routes                       schema_file
+    malformed YAML          raw multi-line yaml.ParserError         the same dump
+    a YAML scalar           AttributeError: 'str' has no 'get'      invalid OpenAPI document
+    a YAML list             AttributeError: 'list' has no 'get'     invalid OpenAPI document
+    an HTML error page      AttributeError: 'str' has no 'get'      invalid OpenAPI document
+    JSON, not a spec        "selected operation IDs are missing"    invalid OpenAPI document
+
+Those reasons reach the operator — the stage row carries `redact(str(exc))`. The last is the
+worst and is not generic: it is WRONG, and it sends someone to check the operation IDs they
+typed when the document is not a specification at all.
+
+`load_openapi_document` is the one validator both now call. It names the source, collapses a
+parser dump to one bounded line while keeping the line and column that locate the typo, says
+what the document parsed AS when it is not a mapping, lists the top-level keys it does have
+when the `openapi` key is missing, and calls out markup separately because a schema URL
+answering 200 with a login page, an error page, or documentation ABOUT the API is the common
+case in practice.
+
+One existing fixture was relying on the gap — a stub with `paths` and no `openapi` key, which
+`schema_file` had always refused. It is a valid stub now, and says so.
+
 ### E-013: business-logic and concurrency testing
 
 Extend the existing race-condition case with application-specific invariants:
