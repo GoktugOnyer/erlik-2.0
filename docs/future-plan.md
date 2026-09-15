@@ -233,6 +233,33 @@ Acceptance: an operator can configure the authenticated lab without editing JSON
 the UI and API reject the same invalid settings and produce equivalent saved runs;
 the preview shows per-case target budgets before the run starts.
 
+**The preview now says which cross-arm checks the configuration cannot support — done.** The
+budget half of "state what the run will not do" was already there. This is the half that costs
+a whole assessment: the cross-arm checks are the highest-value capability in the product, and
+the commonest way to lose them is a declaration nobody filled in. Every one of
+`caller_has_no_subject_id`, `owner_has_no_subject_id`, `role_not_declared` and
+`arms_share_a_role` is an honest refusal that arrives AFTER the containers have run — measured
+over and over while building those checks, including twice in this session's own harnesses.
+
+`preview()` carries `authorization_readiness`: every ordered identity pair, per check, with
+what it will refuse and the remedy. Both directions, because which identity is the caller is
+the operator's choice at the route and a configuration can support one direction and not the
+other. Plus whether an anonymous arm will be registered at all, which both checks require.
+
+ONE PREDICATE, not a second opinion. `declaration_refusals` is called by the checks AND by the
+preview, and `test_the_preview_predicts_what_the_check_actually_does` walks a matrix of six
+declaration combinations, runs both real checks against a seeded session, and asserts the
+forecast equals what they actually refused with. Without that differential this would be a
+second implementation of a guess, tested against itself.
+
+IT DOES NOT PREDICT ARGUMENTS IT CANNOT SEE. The anonymous arm, the owner field and the marker
+reach the checks from the route rather than the configuration, so `marker_unusable`,
+`arms_share_one_identity` and the `*_did_not_run` family are deliberately absent — asserted, so
+a later edit cannot start guessing at the operator's next keystroke.
+
+STILL OPEN in this entry: the forms, the templates, and the resumption preview. This is the
+API half only.
+
 ## 6. R2: improve the quality and depth of testing
 
 ### E-011: authorization verification — highest-value new capability

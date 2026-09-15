@@ -519,6 +519,78 @@ async def preview(session_id, config, identity_id=None) -> dict:
                    f"max_urls or select fewer cases"
                    if not_reached else
                    f"every eligible case-target fits within max_urls={config.max_urls}"),
+        # WHICH CROSS-ARM CHECKS THIS CONFIGURATION CANNOT SUPPORT, before the
+        # containers run. E-010: the preview must "state what the run will not do".
+        # The budget half above was already here; this is the half that costs a whole
+        # assessment, because the cross-arm checks are the highest-value capability in
+        # the product and the commonest way to lose them is a declaration nobody
+        # filled in.
+        "authorization_readiness": authorization_readiness(config),
+    }
+
+def authorization_readiness(config) -> dict:
+    """Can the cross-arm checks run at all against these declarations?
+
+    Answered from `declaration_refusals` — the predicate the checks themselves use — so the
+    preview cannot promise a check the check will not perform.
+
+    THE PAIRS ARE ORDERED and both directions are reported, because which identity is the
+    caller and which is the owner is the operator's choice at the route, and a configuration
+    that supports one direction may not support the other.
+
+    IT DOES NOT PREDICT THE ARGUMENTS. The anonymous arm, the owner field and the marker
+    reach the checks from the route rather than the configuration, so this reports whether an
+    anonymous arm will be REGISTERED — both checks refuse without one — and says nothing
+    about a marker it cannot see. A preview that guessed at arguments would be predicting the
+    operator's next keystroke and would be wrong for free.
+    """
+    from .security import SecretStore
+
+    store = SecretStore()
+    declarations = {}
+    for identity_id in config.identity_ids:
+        try:
+            declarations[identity_id] = store.get(identity_id) or {}
+        except Exception:
+            declarations[identity_id] = {}
+
+    def name(identity_id):
+        return declarations[identity_id].get("name") or identity_id[:8]
+
+    pairs = []
+    for first in config.identity_ids:
+        for second in config.identity_ids:
+            if first == second:
+                continue
+            for check in ("object", "function"):
+                pairs.append({
+                    "check": check, "first": name(first), "second": name(second),
+                    "will_refuse": declaration_refusals(
+                        check, declarations[first], declarations[second])})
+    runnable = [pair for pair in pairs if not pair["will_refuse"]]
+    anonymous = bool(config.anonymous_arm) or "anonymous" in config.identity_ids
+    blocked_by = sorted({reason for pair in pairs for reason in pair["will_refuse"]})
+    remedies = {
+        "caller_has_no_subject_id": "declare `subject_id` on every identity — it is who the "
+                                    "operator says the caller IS, and no response supplies it",
+        "owner_has_no_subject_id": "declare `subject_id` on every identity — it is who the "
+                                   "operator says the caller IS, and no response supplies it",
+        "role_not_declared": "declare `role` on every identity; the lane will not guess which "
+                             "of two is the privileged one",
+        "arms_share_a_role": "give the two arms different `role` values, or the comparison "
+                             "has no privilege boundary to cross",
+    }
+    advice = [remedies[reason] for reason in blocked_by if reason in remedies]
+    if not anonymous:
+        advice.append("register an anonymous arm (`anonymous_arm: true`); both cross-arm "
+                      "checks refuse without one")
+    return {
+        "pairs": pairs,
+        "runnable_pairs": len(runnable),
+        "anonymous_arm_registered": anonymous,
+        "remedy": "; ".join(advice) or (
+            "every identity pair can be compared in both directions" if runnable else
+            "no cross-arm comparison is possible: fewer than two identities are declared"),
     }
 
 
@@ -808,6 +880,43 @@ def _suppressing_declaration(url) -> str:
     """
     return urlsplit(url).path or "/"
 
+def declaration_refusals(check: str, first: dict, second: dict) -> list[str]:
+    """Refusals decidable from the operator's DECLARATIONS alone, before anything runs.
+
+    E-010 asks that the launch preview "state what the run **will not** do, not only what it
+    will". The budget arithmetic was already there; this is the other half, and it is the one
+    that costs a whole assessment. The cross-arm checks are the product's highest-value
+    capability, and the commonest way to lose them is a declaration nobody filled in — an
+    identity with no `subject_id`, two arms the operator labelled with the same role. Measured
+    repeatedly while building them: the refusal is honest, and it arrives after the containers
+    have run.
+
+    ONE PREDICATE, called by the checks AND by the preview, because the alternative is a
+    preview that predicts one thing while the check does another — two copies of one fact,
+    which is the defect this codebase names about its own catalogue lists.
+    `test_the_preview_predicts_what_the_check_actually_does` walks a matrix of declarations
+    and asserts the two agree.
+
+    DECLARATIONS ONLY. `no_anonymous_arm` is not here: the checks learn the anonymous arm from
+    a route ARGUMENT, so a config that registers one does not guarantee one is passed. The
+    preview says what it can — whether an anonymous arm will be registered at all — rather
+    than predicting an argument it cannot see.
+    """
+    refused = []
+    if check == "object":
+        if not str((first or {}).get("subject_id") or "").strip():
+            refused.append("caller_has_no_subject_id")
+        if not str((second or {}).get("subject_id") or "").strip():
+            refused.append("owner_has_no_subject_id")
+        return refused
+    high = str((first or {}).get("role") or "").strip()
+    low = str((second or {}).get("role") or "").strip()
+    if not high or not low:
+        refused.append("role_not_declared")
+    elif high == low:
+        refused.append("arms_share_a_role")
+    return refused
+
 async def cross_arm_authorization(session_id, caller, owner, owner_field,
                                   anonymous=None) -> dict:
     """Object-level authorization, compared ACROSS stages. E-011's remaining half.
@@ -848,10 +957,9 @@ async def cross_arm_authorization(session_id, caller, owner, owner_field,
     entitled = _declared_access(declared(caller))
     caller_subject = str(declared(caller).get("subject_id") or "").strip()
     owner_subject = str(declared(owner).get("subject_id") or "").strip()
-    if not caller_subject:
-        refused.append("caller_has_no_subject_id")
-    if not owner_subject:
-        refused.append("owner_has_no_subject_id")
+    # The same predicate the launch preview reads, so a preview cannot promise a check the
+    # check will not perform — see `declaration_refusals`.
+    refused += declaration_refusals("object", declared(caller), declared(owner))
     anonymous = _arm_name(anonymous)
     if anonymous is None:
         # The clause cannot be evaluated without the arm, and a clause nobody ran is not
@@ -1185,16 +1293,14 @@ async def cross_arm_privileged_function(session_id, privileged, unprivileged, ma
     subject = str(declaration.get("subject_id") or "").strip()
     derived = await derived_urls(session_id)
     high, low = role_of(privileged), role_of(unprivileged)
-    if not high or not low:
-        # Guessing which of two identities is privileged — from a name, from which was
-        # passed first — would let the lane report a finding off its own assumption.
-        refused.append("role_not_declared")
-    elif high == low:
-        # A privilege crossing needs two privilege levels. Two identities the operator
-        # labelled the same way is a configuration mistake, and a finding drawn from it
-        # would be reporting that mistake as a vulnerability. This also subsumes the
-        # degenerate case of one identity passed twice.
-        refused.append("arms_share_a_role")
+    # Guessing which of two identities is privileged — from a name, from which was passed
+    # first — would let the lane report a finding off its own assumption. And a privilege
+    # crossing needs two privilege LEVELS: two identities the operator labelled the same way
+    # is a configuration mistake, and a finding drawn from it would report that mistake as a
+    # vulnerability (this also subsumes one identity passed twice). Both conditions live in
+    # `declaration_refusals`, which the launch preview reads too.
+    refused += declaration_refusals(
+        "function", {"role": high}, {"role": low})
     # AND THE SESSION MUST NOT ALREADY SAY THE OPPOSITE. Two identities cannot each be
     # the more privileged one, and a swapped declaration is otherwise indistinguishable
     # from a correct one — see `_already_compared_the_other_way`.
