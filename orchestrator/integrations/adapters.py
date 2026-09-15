@@ -368,7 +368,18 @@ async def schema_file(ctx, sandbox):
         # Supplied target is authoritative; schema servers never expand scan scope.
         if "openapi" in document:
             document["servers"] = [{"url": ctx.target}]
-        content = json.dumps(document)
+        # `sort_keys`, because the digest below is an IDENTITY and key order is not part of
+        # one. Its sibling `plan_sha256` was already canonical and this was not, with no
+        # stated reason for the difference — and this is the digest that REFUSES: two arms
+        # whose recorded `schema_sha256` differ are reported as having been given different
+        # schemas (`test_schema_fork`). Measured: two semantically identical documents
+        # differing only in key order hashed to d1ac2b39… and 90147ce6…, while the same pair
+        # under `sort_keys=True` hashed alike.
+        #
+        # It is reachable because each arm fetches `schema_input.url` on its own request, and
+        # the order of a remote server's JSON is its business, not ours. A refusal on a
+        # difference that is not a difference is the shape this project keeps removing.
+        content = json.dumps(document, sort_keys=True)
     return (sandbox.write("schema.graphql" if source.kind == "graphql" else "schema.json", content),
             hashlib.sha256(content.encode()).hexdigest(),
             document if source.kind == "openapi" else None)

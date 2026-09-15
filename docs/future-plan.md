@@ -343,6 +343,28 @@ case in practice.
 One existing fixture was relying on the gap — a stub with `paths` and no `openapi` key, which
 `schema_file` had always refused. It is a valid stub now, and says so.
 
+**The schema digest is an identity, not a serialisation — fixed.** `schema_sha256` is what
+`test_schema_fork` compares to decide two arms were given DIFFERENT schemas, which is a
+refusal. It was `json.dumps(document)` with no `sort_keys`, while its sibling `plan_sha256`
+was already canonical and nothing said why they differed. Measured: two semantically identical
+documents differing only in key order hashed to `d1ac2b39…` and `90147ce6…`; the same pair
+under `sort_keys=True` hashed alike. It is reachable because each arm fetches
+`schema_input.url` on its own request, and the order of a remote server's JSON is its business
+rather than ours — a refusal on a difference that is not a difference.
+
+**What is and is not established about reproducibility.** The acceptance is "a seeded failure
+reproduces with the same schema digest and seed". Both halves are recorded on the stage the
+fuzzer produced, and the recorded seed IS the one passed — the command line and the metadata
+read the same config field, so they cannot drift. The digest is now over the exact bytes handed
+to the scanner, after bundling and after the target is pinned into `servers`, so two runs
+against different hosts are correctly different scans.
+
+NOT established: that Schemathesis is itself deterministic under a fixed seed. That is a
+property of the tool, it needs a lab run with `ERLIK_DOCKER_TESTS=1` to check, and it is
+deliberately not asserted — claiming the acceptance on the strength of a recorded number would
+be the confident-output-from-an-unrun-path defect this list exists to remove. Left open with
+the measurement to do rather than marked done.
+
 ### E-013: business-logic and concurrency testing
 
 Extend the existing race-condition case with application-specific invariants:
