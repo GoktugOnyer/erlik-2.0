@@ -518,6 +518,34 @@ produce not-retested/unknown outcomes rather than automatic closure. **A probe t
 received no bytes is not-retested, never fixed** — the 2026-09-10 run shows how
 readily an empty response reads as a clean one.
 
+**Done, and built around that one rule.** `inventory.compare_assessments`, served by
+`GET /sessions/{id}/retest?baseline=…`, classifies every finding of an earlier assessment as
+new, unchanged, changed, regressed, fixed or not_retested. Absence is never evidence. Three
+things must hold before `fixed`:
+
+1. the stage that produced the finding FINISHED in the retest, for that arm;
+2. `coverage` says the retest reached the same (url, parameter, identity) pair — and where it
+   did not, its own reason is quoted verbatim rather than summarised;
+3. for a catalogue finding, the SAME case ran against that pair. `rule` is `<case>:<step>` and
+   `coverage` records the case, so an XSS probe answering on a URL cannot close the SQL
+   injection that was there.
+
+`COVERAGE_STATES` supplies the sharper version of the warning and it is honoured: even
+`answered` only means bytes came back, which is why condition 3 exists. The easiest way for a
+live vulnerability to read as fixed is the endpoint quietly dropping out of the retest's crawl
+— no coverage row at all — and that is `not_retested` with its own reason.
+
+`configuration_differences` sits beside the states rather than below them: a retest against a
+changed scope, schema, stage set or identity set can move a finding for a reason that is not a
+fix, and a reader of the state column alone would never know.
+
+**WHAT IT CANNOT DO, asserted rather than left to be found.** A cross-arm finding can never be
+reported `fixed`. Those come from an on-demand route over stored evidence and NOTHING records
+that the route ran, so a retest that never invoked it is indistinguishable from one that
+invoked it and found nothing. They come back `not_retested` with that reason. Fixing it means
+recording the invocation — a change to the two authorization routes, not to this comparison —
+and is the next thing to do here.
+
 ### E-018: remediation workflow and exports
 
 Finish the existing DefectDojo mapping/reconciliation UX and add remediation

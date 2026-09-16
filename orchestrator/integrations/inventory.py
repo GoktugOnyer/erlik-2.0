@@ -594,6 +594,172 @@ def authorization_readiness(config) -> dict:
     }
 
 
+# Which stage a finding's `source` came out of, so "did the check that found this run again"
+# has an answer. `cross-arm` is absent on purpose: those come from an on-demand route over
+# stored evidence and NOTHING records that the route ran, so absence in a retest cannot be
+# told from never having asked. See `compare_assessments`.
+PRODUCING_STAGE = {"zap": "zap", "schemathesis": "schemathesis", "katana": "katana",
+                   "interactsh": "interactsh", "testcase": "testcases"}
+
+# Coverage states that mean a probe reached this pair and got an answer. `not_run`,
+# `not_attempted`, `refused`, `unreachable`, `inferred` and `indistinct` all mean the opposite,
+# and each carries its own reason, which is what a `not_retested` row quotes.
+REACHED_STATES = ("answered", "verified")
+
+RETEST_STATES = ("new", "unchanged", "changed", "regressed", "fixed", "not_retested")
+
+
+async def compare_assessments(baseline_session, retest_session) -> dict:
+    """What a retest establishes about each finding of an earlier assessment. E-017.
+
+    THE ONE RULE THIS IS BUILT AROUND: a finding is `fixed` only on POSITIVE evidence that
+    the check which found it ran again and did not find it. Absence is not evidence. The
+    entry says it in the project's own idiom — "a probe that received no bytes is
+    not-retested, never fixed" — and `COVERAGE_STATES` says the sharper version beside it:
+    even `answered` only means bytes came back, not that a check exercised anything.
+
+    So three things must hold before `fixed`:
+
+      1. the stage that produced the finding FINISHED in the retest, for that arm;
+      2. the retest reached the same (url, parameter, identity) pair — `coverage` says so,
+         and where it does not, its reason is quoted verbatim rather than summarised;
+      3. for a catalogue finding, the same CASE ran against that pair, not merely some case.
+         `rule` is `<case>:<step>` and `coverage` records the case, so this is checkable.
+
+    Anything short of all three is `not_retested`, which is a different claim from `fixed`
+    and must not be collapsed into it — an automatic closure is how a live vulnerability
+    leaves a client's tracker.
+
+    WHAT THIS CANNOT DO, said rather than papered over: a cross-arm finding can never be
+    `fixed` here. Those come from an on-demand route over stored evidence, and nothing
+    records that the route RAN — so a retest that never invoked it is indistinguishable from
+    one that invoked it and found nothing. They are reported `not_retested` with that reason.
+    Fixing it means recording the invocation, which is a change to the routes rather than to
+    this comparison.
+    """
+    async def findings_of(session_id):
+        return {row["fingerprint"]: json.loads(row["payload"]) for row in await db.rows(
+            "SELECT fingerprint,payload FROM integration_findings WHERE session_id=?",
+            (session_id,))}
+
+    baseline, retest = await findings_of(baseline_session), await findings_of(retest_session)
+    finished = {(row["adapter"], row["identity_id"]) for row in await db.rows(
+        "SELECT adapter,identity_id,status FROM integration_stages WHERE session_id=?",
+        (retest_session,)) if row["status"] in FINISHED_STAGE_STATUSES}
+    covered = {}
+    for row in await coverage(retest_session):
+        covered[(base_url(row["url"]), row["parameter"] or "", row["identity"])] = row
+
+    def retested(finding):
+        """(did the check demonstrably run again, why not). The `why not` is the reason a
+        `not_retested` row carries, so it has to be specific enough to act on."""
+        source = finding.get("source", "")
+        stage = PRODUCING_STAGE.get(source)
+        if stage is None:
+            return False, (f"a {source!r} finding comes from an on-demand check over stored "
+                           f"evidence, and nothing records that the check ran in the retest — "
+                           f"so its absence cannot be told from its never having been asked")
+        arm = finding.get("identity", "anonymous")
+        if (stage, arm) not in finished:
+            return False, (f"the {stage} stage did not finish for the {arm!r} arm in the "
+                           f"retest, so nothing re-probed this")
+        key = (base_url(finding.get("url", "")), finding.get("parameter") or "", arm)
+        row = covered.get(key)
+        if row is None:
+            return False, ("the retest has no coverage record for this operation, so it was "
+                           "not part of the surface that was read")
+        if row["state"] not in REACHED_STATES:
+            return False, f"the retest reported this operation {row['state']}: {row['reason']}"
+        case = str(finding.get("rule", "")).split(":")[0]
+        if source == "testcase" and row["test_case_id"] and row["test_case_id"] != case:
+            return False, (f"the retest probed this operation with {row['test_case_id']} "
+                           f"rather than {case}, which is the check that found it")
+        return True, ""
+
+    out = []
+    for fingerprint, finding in sorted(baseline.items()):
+        present = retest.get(fingerprint)
+        if present:
+            was_fixed = finding.get("triage_state") == "fixed"
+            changed = (present.get("severity") != finding.get("severity")
+                       or present.get("confidence") != finding.get("confidence"))
+            state = "regressed" if was_fixed else ("changed" if changed else "unchanged")
+            reason = ""
+            if state == "regressed":
+                reason = ("this was triaged `fixed` and the retest found it again")
+            elif state == "changed":
+                reason = (f"severity {finding.get('severity')} -> {present.get('severity')}, "
+                          f"confidence {finding.get('confidence')} -> {present.get('confidence')}")
+        else:
+            ran, why = retested(finding)
+            state = "fixed" if ran else "not_retested"
+            reason = ("the check that found it ran against this operation again and did not "
+                      "report it" if ran else why)
+        out.append({"fingerprint": fingerprint, "url": finding.get("url", ""),
+                    "parameter": finding.get("parameter") or "",
+                    "identity": finding.get("identity", "anonymous"),
+                    "rule": finding.get("rule", ""), "severity": finding.get("severity", ""),
+                    "state": state, "reason": reason})
+    for fingerprint, finding in sorted(retest.items()):
+        if fingerprint not in baseline:
+            out.append({"fingerprint": fingerprint, "url": finding.get("url", ""),
+                        "parameter": finding.get("parameter") or "",
+                        "identity": finding.get("identity", "anonymous"),
+                        "rule": finding.get("rule", ""),
+                        "severity": finding.get("severity", ""),
+                        "state": "new", "reason": "not present in the baseline assessment"})
+
+    differences = await _configuration_differences(baseline_session, retest_session)
+    states = {state: sum(1 for row in out if row["state"] == state) for state in RETEST_STATES}
+    return {
+        "findings": out,
+        "states": states,
+        "configuration_differences": differences,
+        "establishes": (
+            f"{states['fixed']} finding(s) were re-probed by the check that found them and "
+            f"not reported again. {states['not_retested']} were NOT re-probed and are "
+            f"unknown rather than fixed — read their reasons before closing any of them"
+            + ("; and the two assessments differ in configuration, so this is not a "
+               "like-for-like retest" if differences else "")),
+    }
+
+
+async def _configuration_differences(baseline_session, retest_session) -> list[dict]:
+    """Ways the two assessments are not the same scan, so a comparison is not read as one.
+
+    E-017: compare "while considering schema, identity, rule, and scope changes". A retest
+    against a different schema, a different scope or a different set of arms can move a
+    finding for reasons that have nothing to do with a fix, and an operator reading only the
+    state column would never know.
+    """
+    async def shape(session_id):
+        rows = await db.rows(
+            "SELECT config FROM integration_assessments WHERE session_id=?", (session_id,))
+        config = json.loads(rows[0]["config"]) if rows and rows[0]["config"] else {}
+        digests = sorted({
+            json.loads(row["result"] or "{}").get("metadata", {}).get("schema_sha256")
+            for row in await db.rows(
+                "SELECT result FROM integration_stages WHERE session_id=?", (session_id,))
+        } - {None})
+        return {
+            "scope": config.get("scope"),
+            "test_cases": sorted(config.get("test_cases") or []),
+            "stages": sorted(config.get("stages") or []),
+            "arms": sorted({row["identity_id"] for row in await db.rows(
+                "SELECT DISTINCT identity_id FROM integration_stages WHERE session_id=?",
+                (session_id,))}),
+            "schema_sha256": digests,
+        }
+
+    first, second = await shape(baseline_session), await shape(retest_session)
+    labels = {"scope": "the authorised scope", "test_cases": "the selected catalogue checks",
+              "stages": "the selected stages", "arms": "the identities that ran",
+              "schema_sha256": "the API schema"}
+    return [{"field": field, "baseline": first[field], "retest": second[field],
+             "why_it_matters": f"{labels[field]} changed between the two assessments, so a "
+                               f"finding can move for a reason that is not a fix"}
+            for field in labels if first[field] != second[field]]
+
 def _incompleteness_caveat(unfinished: dict, not_probed: list) -> str:
     """What `establishes` must add when the comparison had blind spots.
 

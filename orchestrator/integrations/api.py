@@ -218,6 +218,33 @@ async def privileged_function_check(session_id: str, body: PrivilegedFunctionChe
     return {**result, "recorded": [f.fingerprint for f in recorded]}
 
 
+@router.get("/sessions/{session_id}/retest")
+async def retest_report(session_id: str, baseline: str):
+    """What this assessment establishes about an earlier one's findings. E-017.
+
+    `session_id` is the retest and `baseline` the assessment it is being compared against.
+
+    A finding is `fixed` ONLY where the check that found it demonstrably ran again and did
+    not report it — the stage finished for that arm, `coverage` says the operation was
+    reached, and for a catalogue finding the same case ran. Everything short of that is
+    `not_retested`, which is a different claim: absence is not evidence, and automatic
+    closure is how a live vulnerability leaves a client's tracker.
+
+    `configuration_differences` is beside the states rather than below them, because a
+    retest against a changed scope, schema or set of checks can move a finding for a reason
+    that has nothing to do with a fix.
+    """
+    from .inventory import compare_assessments
+
+    for candidate in (session_id, baseline):
+        if not await db.rows("SELECT session_id FROM integration_assessments WHERE session_id=?",
+                             (candidate,)):
+            raise HTTPException(404, f"integration assessment not found: {candidate}")
+    if session_id == baseline:
+        raise HTTPException(422, "a retest must be compared against a different assessment")
+    return await compare_assessments(baseline, session_id)
+
+
 @router.get("/sessions/{session_id}/coverage")
 async def coverage_report(session_id: str, identity_id: str | None = None):
     """What the run did, what it did not, and why — per operation and identity.
