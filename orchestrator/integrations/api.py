@@ -238,6 +238,37 @@ async def finding_bundle_report(session_id: str, fingerprint: str):
         raise HTTPException(404, str(exc)) from exc
 
 
+class RetestApplyInput(BaseModel):
+    baseline: str = Field(min_length=1)
+    # EXPLICIT. This changes what a later export tells a client's tracker, so the call is a
+    # preview until somebody says otherwise — E-018's "keep external sending explicit"
+    # applied one step earlier, to the thing that decides what gets sent.
+    confirm: bool = False
+
+
+@router.post("/sessions/{session_id}/retest/apply")
+async def retest_apply(session_id: str, body: RetestApplyInput):
+    """Move the baseline findings' local triage to match what this retest established.
+
+    `session_id` is the retest; `body.baseline` the assessment being updated. Without
+    `confirm` it reports what it WOULD change and writes nothing.
+
+    It acts only on `fixed` and `regressed`. `not_retested` means nobody looked, and closing
+    on it is the automatic closure E-017 exists to prevent; a finding an operator triaged
+    `false_positive` is left alone and listed, because a retest does not overrule a human
+    judging something not to be a bug.
+    """
+    from .inventory import apply_retest
+
+    for candidate in (session_id, body.baseline):
+        if not await db.rows("SELECT session_id FROM integration_assessments WHERE session_id=?",
+                             (candidate,)):
+            raise HTTPException(404, f"integration assessment not found: {candidate}")
+    if session_id == body.baseline:
+        raise HTTPException(422, "a retest must be compared against a different assessment")
+    return await apply_retest(body.baseline, session_id, confirm=body.confirm)
+
+
 @router.get("/sessions/{session_id}/retest")
 async def retest_report(session_id: str, baseline: str):
     """What this assessment establishes about an earlier one's findings. E-017.

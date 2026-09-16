@@ -794,6 +794,91 @@ async def compare_assessments(baseline_session, retest_session) -> dict:
     }
 
 
+# What a retest outcome is allowed to do to a finding's LOCAL triage, and nothing else does
+# anything. `not_retested` is absent by design and asserted absent: it is the state that means
+# nobody looked, and an automatic closure is how a live vulnerability leaves a client's
+# tracker. `unchanged`, `changed` and `new` are absent because they assert nothing about
+# whether the finding was dealt with.
+RETEST_TRIAGE = {
+    # The retest re-ran the check that found it and did not report it — see
+    # `compare_assessments` for the three conditions that has to satisfy.
+    "fixed": "fixed",
+    # It was triaged `fixed` and the retest found it again. The earlier claim was wrong, so
+    # the finding goes back to open rather than staying closed with a contradiction beside it.
+    "regressed": "open",
+}
+
+
+async def apply_retest(baseline_session, retest_session, *, confirm=False) -> dict:
+    """Move the BASELINE findings' local triage to match what a retest established.
+
+    E-018 asks for a remediation workflow and says "keep external sending explicit". This is
+    the step before the sending: it changes what a later export will tell a client's tracker,
+    so `confirm` defaults to False and the call is a preview until somebody says otherwise.
+
+    THREE THINGS IT WILL NOT DO, each for a reason that has cost somebody something:
+
+    - It never acts on `not_retested`. That state means nobody looked, and closing on it is
+      the automatic closure E-017 exists to prevent.
+    - It never overwrites `false_positive`. A human judged the finding not to be a bug; a
+      retest reporting `fixed` would replace that judgement with a weaker one, and reporting
+      `regressed` would resurface noise somebody already dismissed. The operator's call
+      stands until the operator changes it.
+    - It writes nothing without a trace. Every change records an evidence artifact naming the
+      retest session, the state it established and the reason — because a finding that closed
+      with no record of why is indistinguishable from one that was closed by hand, and only
+      one of those can be checked.
+    """
+    comparison = await compare_assessments(baseline_session, retest_session)
+    planned, refused = [], []
+    for row in comparison["findings"]:
+        target = RETEST_TRIAGE.get(row["state"])
+        if target is None:
+            continue
+        entries = await db.rows(
+            "SELECT payload FROM integration_findings WHERE session_id=? AND fingerprint=?",
+            (baseline_session, row["fingerprint"]))
+        if not entries:
+            continue
+        finding = json.loads(entries[0]["payload"])
+        current = finding.get("triage_state", "open")
+        if current == "false_positive":
+            refused.append({**row, "would_have_become": target,
+                            "left_alone_because": "an operator triaged this false_positive, "
+                                                  "and a retest does not overrule that"})
+            continue
+        if current == target:
+            continue
+        planned.append({"fingerprint": row["fingerprint"], "url": row["url"],
+                        "from": current, "to": target, "retest_state": row["state"],
+                        "reason": row["reason"]})
+        if not confirm:
+            continue
+        note = (f"set to {target} by the retest in session {retest_session}: "
+                f"{row['state']} — {row['reason']}")
+        finding.update(triage_state=target, triage_note=note)
+        await db.execute(
+            "UPDATE integration_findings SET payload=? WHERE session_id=? AND fingerprint=?",
+            (json.dumps(finding), baseline_session, row["fingerprint"]))
+        await db.evidence(baseline_session, "triage", "retest-applied", json.dumps({
+            "fingerprint": row["fingerprint"], "state": target, "from": current,
+            "retest_session": retest_session, "retest_state": row["state"],
+            "reason": row["reason"]}))
+    return {
+        "applied": bool(confirm),
+        "changes": planned,
+        "left_alone": refused,
+        "not_retested": comparison["states"]["not_retested"],
+        "configuration_differences": comparison["configuration_differences"],
+        "establishes": (
+            ("applied " if confirm else "would apply ")
+            + f"{len(planned)} triage change(s) from the retest. "
+              f"{comparison['states']['not_retested']} finding(s) are not_retested and were "
+              f"NOT touched — nobody looked at those, and closing them is the automatic "
+              f"closure this refuses to do"
+            + ("; run again with confirm to make these changes" if not confirm else "")),
+    }
+
 async def _configuration_differences(baseline_session, retest_session) -> list[dict]:
     """Ways the two assessments are not the same scan, so a comparison is not read as one.
 

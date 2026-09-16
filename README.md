@@ -191,8 +191,8 @@ Run it from the repository root: `conftest.py` anchors the working directory
 there, and `orchestrator.main` builds its Jinja2 template path relative to the
 CWD.
 
-A **fresh clone** reports **3187 passed, 69 skipped** on its first run, and
-3189 passed / 67 skipped on every run after — measured 2026-09-12 against this
+A **fresh clone** reports **3200 passed, 69 skipped** on its first run, and
+3202 passed / 67 skipped on every run after — measured 2026-09-12 against this
 commit by cloning and running it, not quoted from a developer's tree.
 
 > Re-measure this after any change under `tests/`. The first draft of this
@@ -208,7 +208,7 @@ Every skip is structural rather than broken, and the 69 account for themselves:
 | 3 | need a real external service (Interactsh, DefectDojo) |
 
 With Docker running and the lab images built, **every one of those container suites
-passes**: `ERLIK_DOCKER_TESTS=1 ERLIK_REAL_INTERACTSH_TESTS=1 pytest` reports **3255
+passes**: `ERLIK_DOCKER_TESTS=1 ERLIK_REAL_INTERACTSH_TESTS=1 pytest` reports **3268
 passed, 1 skipped** — the remaining skip is `test_defectdojo_live.py`, which needs a
 live DefectDojo instance. Measured 2026-09-16 against the local lab.
 
@@ -220,7 +220,7 @@ live DefectDojo instance. Measured 2026-09-16 against the local lab.
 > is a hypothesis, not a measurement, and it has not been chased down. If you hit it, run
 > that file alone before treating it as a regression.
 
-A developer's tree reports **3220 passed, 36 skipped** instead, and the 33-test
+A developer's tree reports **3233 passed, 36 skipped** instead, and the 33-test
 gap is entirely that corpus: 31 tests report `corpus present but empty`, and 2
 more inspect the live database directly — one for a plaintext credential on disk,
 the other for leftover fixture rows. Those two are hygiene checks on a real machine, so skipping

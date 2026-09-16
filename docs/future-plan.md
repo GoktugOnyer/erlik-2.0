@@ -606,6 +606,34 @@ Acceptance: repeated exports do not duplicate records, changed findings update t
 same record, and uncertainty after a network failure is reconciled without blind
 replay. Reports separate local triage from external synchronization status.
 
+**A retest outcome can now reach the tracker, and the interesting part is what it refuses.**
+E-017 produces the states and `defectdojo.finding_payload` maps `triage_state` to a remote
+record; nothing connected them, so a verified fix stayed `open` until somebody clicked it and a
+regression stayed `fixed`. `inventory.apply_retest`, served by
+`POST /sessions/{id}/retest/apply`, is the bridge.
+
+`RETEST_TRIAGE` holds exactly two entries — `fixed` closes, `regressed` reopens — and the
+safety argument is that a state absent from the map cannot move a triage whatever a later
+branch does. `not_retested` is absent and asserted absent: it means nobody looked, and closing
+on it is the automatic closure E-017 exists to prevent.
+
+It never overwrites `false_positive`. A human judged the finding not to be a bug; `fixed` would
+replace that with a weaker claim and `regressed` would resurface noise somebody already
+dismissed. Those findings are listed as left alone, with the reason, rather than silently
+skipped.
+
+It is a PREVIEW by default. This decides what a later export tells a client's tracker, so
+"keep external sending explicit" applies one step earlier — at the thing that decides what gets
+sent. `confirm` turns the report into a write, the two are asserted to agree, and applying
+twice changes nothing the second time.
+
+Every change records an artifact naming the retest, the state it established and the reason. A
+finding that closed with no record of why is indistinguishable from one closed by hand, and
+only one of those can be checked.
+
+STILL OPEN in this entry: remediation ownership and notes, explicit export previews, and
+"reports separate local triage from external synchronization status".
+
 ### E-019: retention, backup, and operational diagnostics
 
 Add configurable evidence retention, disk limits, secure deletion policy,
