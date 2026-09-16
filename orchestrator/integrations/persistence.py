@@ -43,12 +43,20 @@ async def migrate():
         CREATE TABLE IF NOT EXISTS integration_export_destinations (
           destination TEXT PRIMARY KEY, server TEXT NOT NULL, remote_test_id INTEGER NOT NULL,
           remote_engagement_id INTEGER, created_at TEXT DEFAULT CURRENT_TIMESTAMP);
+        CREATE TABLE IF NOT EXISTS integration_check_runs (
+          id TEXT PRIMARY KEY, session_id TEXT NOT NULL, check_name TEXT NOT NULL,
+          first_identity TEXT NOT NULL, second_identity TEXT NOT NULL,
+          arguments TEXT NOT NULL DEFAULT '{}',
+          refused_because TEXT NOT NULL DEFAULT '[]',
+          checked INTEGER NOT NULL DEFAULT 0, findings INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT DEFAULT CURRENT_TIMESTAMP);
         CREATE TABLE IF NOT EXISTS integration_remote_findings (
           server TEXT NOT NULL, remote_test_id INTEGER NOT NULL, fingerprint TEXT NOT NULL,
           remote_finding_id INTEGER NOT NULL, payload_hash TEXT NOT NULL,
           updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
           PRIMARY KEY(server,remote_test_id,fingerprint));
         CREATE INDEX IF NOT EXISTS integration_stage_session ON integration_stages(session_id);
+        CREATE INDEX IF NOT EXISTS integration_check_run_session ON integration_check_runs(session_id);
         """)
         columns = {r[1] for r in await (await db.execute("PRAGMA table_info(integration_assessments)")).fetchall()}
         if "elapsed_seconds" not in columns:

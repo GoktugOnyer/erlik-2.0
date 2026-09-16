@@ -539,12 +539,28 @@ live vulnerability to read as fixed is the endpoint quietly dropping out of the 
 changed scope, schema, stage set or identity set can move a finding for a reason that is not a
 fix, and a reader of the state column alone would never know.
 
-**WHAT IT CANNOT DO, asserted rather than left to be found.** A cross-arm finding can never be
-reported `fixed`. Those come from an on-demand route over stored evidence and NOTHING records
-that the route ran, so a retest that never invoked it is indistinguishable from one that
-invoked it and found nothing. They come back `not_retested` with that reason. Fixing it means
-recording the invocation — a change to the two authorization routes, not to this comparison —
-and is the next thing to do here.
+**And the on-demand checks now record their own invocations**, which is what E-017 needed and
+could not have. A cross-arm finding used to be unretestable in principle: nothing recorded that
+a check RAN, so a retest that never invoked it was indistinguishable from one that invoked it
+and found nothing. Inferring the invocation from findings — which
+`_already_compared_the_other_way` does for its own purpose — only works when there ARE
+findings, and the whole question is what an absence means.
+
+`integration_check_runs` is written INSIDE each check rather than at its route, because both
+are importable and are called directly by harnesses; a record only the routes wrote would be a
+guard some callers opt into, which is the defect E-033 filed about the mutation refusal. A
+refused run is recorded too, with its reasons, and excluded from the conclusive set — a
+comparison that refused did not look.
+
+Retesting a cross-arm finding then needs the same check, the same ordered pair, and a run that
+did not refuse. The DIRECTION matters: privilege is an order, and a retest that compared the
+arms the other way round asserts the opposite of the finding. `compared_with` supplies the
+other half of the pair, and a finding without one is `not_retested` rather than closed on a
+guess at which arm it meant.
+
+**The marker never reaches the row.** It is the operator's description of privileged data, so
+the function check stores the keyed `marker_digest` its findings already carry — see E-032's
+per-path table for where the marker does and does not travel.
 
 ### E-018: remediation workflow and exports
 

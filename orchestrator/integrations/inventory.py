@@ -2,6 +2,7 @@
 import hashlib
 import json
 import re
+import uuid
 from functools import lru_cache
 from urllib.parse import unquote_plus, urldefrag, urlsplit, urlunsplit
 from orchestrator import http_capture
@@ -609,6 +610,51 @@ REACHED_STATES = ("answered", "verified")
 RETEST_STATES = ("new", "unchanged", "changed", "regressed", "fixed", "not_retested")
 
 
+async def record_check_run(session_id, check, first, second, arguments, result) -> None:
+    """That an on-demand cross-arm check RAN, which nothing recorded.
+
+    E-017 needs it and could not have it: a cross-arm finding absent from a retest was
+    indistinguishable from a check the retest never invoked, so those findings could never be
+    reported `fixed`. Inferring the invocation from findings — which
+    `_already_compared_the_other_way` does for its own purpose — only works when there ARE
+    findings, and the whole question here is what an absence means.
+
+    RECORDED INSIDE THE CHECK, not at the route. Both checks are importable and are called
+    directly by harnesses and tests; a record only the routes wrote would be a guard some
+    callers opt into, which is the defect E-033 filed about the mutation refusal.
+
+    THE MARKER IS NOT AN ARGUMENT THAT TRAVELS. `arguments` carries what is safe to keep:
+    the object check's `owner_field` is a JSON path the operator chose and names no data,
+    while the function check's marker IS the data — so that one is stored as the keyed digest
+    the findings already carry, and the value never reaches the row. See E-032's per-path
+    table for where the marker does and does not travel.
+
+    A REFUSED RUN IS NOT A RUN, and it is recorded anyway with its reasons: `refused_because`
+    is what tells a later retest that this invocation established nothing, and dropping the
+    row would leave the same silence this exists to remove.
+    """
+    await db.execute(
+        "INSERT INTO integration_check_runs(id,session_id,check_name,first_identity,"
+        "second_identity,arguments,refused_because,checked,findings) "
+        "VALUES(?,?,?,?,?,?,?,?,?)",
+        (uuid.uuid4().hex, session_id, check, _arm_name(first) or "anonymous",
+         _arm_name(second) or "anonymous", json.dumps(arguments, sort_keys=True),
+         json.dumps(sorted(result.get("refused_because") or [])),
+         int(result.get("checked") or 0), len(result.get("findings") or [])))
+
+
+async def conclusive_check_runs(session_id) -> set:
+    """(check, first, second) triples this session actually compared.
+
+    Refused runs are excluded: a comparison that refused did not look, and treating it as
+    evidence is the unrun-clause defect one level up from the one it refuses over.
+    """
+    return {(row["check_name"], row["first_identity"], row["second_identity"])
+            for row in await db.rows(
+                "SELECT check_name,first_identity,second_identity,refused_because "
+                "FROM integration_check_runs WHERE session_id=?", (session_id,))
+            if json.loads(row["refused_because"] or "[]") == []}
+
 async def compare_assessments(baseline_session, retest_session) -> dict:
     """What a retest establishes about each finding of an earlier assessment. E-017.
 
@@ -646,6 +692,7 @@ async def compare_assessments(baseline_session, retest_session) -> dict:
     finished = {(row["adapter"], row["identity_id"]) for row in await db.rows(
         "SELECT adapter,identity_id,status FROM integration_stages WHERE session_id=?",
         (retest_session,)) if row["status"] in FINISHED_STAGE_STATUSES}
+    conclusive = await conclusive_check_runs(retest_session)
     covered = {}
     for row in await coverage(retest_session):
         covered[(base_url(row["url"]), row["parameter"] or "", row["identity"])] = row
@@ -655,6 +702,29 @@ async def compare_assessments(baseline_session, retest_session) -> dict:
         `not_retested` row carries, so it has to be specific enough to act on."""
         source = finding.get("source", "")
         stage = PRODUCING_STAGE.get(source)
+        if source == "cross-arm":
+            # NOW ANSWERABLE, because the checks record their own invocations. Before
+            # `record_check_run` existed this returned "nothing records that the check ran",
+            # and the product's highest-value findings could never be retested at all.
+            #
+            # The pair and the DIRECTION both matter: `identity` is the arm the finding is
+            # about and `compared_with` is the one it was compared against, and a comparison
+            # run the other way round asserts the opposite privilege order — see
+            # `_already_compared_the_other_way`.
+            check = CHECK_OF_RULE.get(str(finding.get("rule", "")))
+            pair = (check, finding.get("identity", "anonymous"),
+                    finding.get("compared_with", ""))
+            if check is None:
+                return False, (f"this finding's rule {finding.get('rule', '')!r} names no "
+                               f"known cross-arm check, so nothing can establish that it ran")
+            if not finding.get("compared_with"):
+                return False, ("this finding does not record which arm it was compared "
+                               "against, so a retest cannot re-run the same comparison")
+            if pair not in conclusive:
+                return False, (f"the retest ran no conclusive {check} comparison of "
+                               f"{pair[1]!r} against {pair[2]!r} — a comparison that was "
+                               f"never invoked, or that refused, establishes nothing")
+            return True, ""
         if stage is None:
             return False, (f"a {source!r} finding comes from an on-demand check over stored "
                            f"evidence, and nothing records that the check ran in the retest — "
@@ -1270,7 +1340,7 @@ async def cross_arm_authorization(session_id, caller, owner, owner_field,
                            f"it, so it is not published content"),
             })
 
-    return {
+    outcome = {
         "findings": findings,
         "refused_because": refused,
         "checked": checked,
@@ -1298,6 +1368,14 @@ async def cross_arm_authorization(session_id, caller, owner, owner_field,
         "establishes": ("nothing, when `refused_because` is non-empty — an empty findings "
                         "list is not a clean result unless the comparison actually ran" + _incompleteness_caveat(unfinished, not_probed)),
     }
+    # Recorded HERE rather than at the route, so a harness or a direct caller cannot skip
+    # it — see `record_check_run`. `owner_field` names a JSON path the operator chose and no
+    # data, so it is kept as written.
+    await record_check_run(session_id, "object", caller, owner,
+                           {"owner_field": owner_field}, outcome)
+    return outcome
+
+
 
 
 def _names_the_caller(url, subject_id) -> bool:
@@ -1713,7 +1791,7 @@ async def cross_arm_privileged_function(session_id, privileged, unprivileged, ma
                            f"receive it, so it is not published content"),
             })
 
-    return {
+    outcome = {
         "findings": findings,
         "refused_because": refused,
         "checked": checked,
@@ -1774,6 +1852,14 @@ async def cross_arm_privileged_function(session_id, privileged, unprivileged, ma
                         "anonymous arm did not is the application's answer"
                         + _incompleteness_caveat(unfinished, not_probed)),
     }
+    # The MARKER never reaches this row — it is the operator's description of privileged
+    # data, and `marker_digest` is the keyed stand-in the findings already carry. See E-032's
+    # per-path table for where the marker does and does not travel.
+    await record_check_run(session_id, "function", privileged, unprivileged,
+                           {"marker_digest": marker_digest(session_id, marker)}, outcome)
+    return outcome
+
+
 
 
 # The rules the two cross-arm checks report under. Stable strings, because `fingerprint` hashes
@@ -1782,6 +1868,10 @@ AUTHORIZATION_RULES = {
     "object": "erlik:authorization:object",
     "function": "erlik:authorization:privileged-function",
 }
+
+# The same map read backwards, so a recorded finding can say which check made it. Derived
+# rather than written out twice — the two copies would drift the moment a third check exists.
+CHECK_OF_RULE = {rule: check for check, rule in AUTHORIZATION_RULES.items()}
 
 
 # How many of a collapsed group's URLs a finding names before it stops listing and

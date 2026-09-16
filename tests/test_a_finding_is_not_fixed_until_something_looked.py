@@ -188,16 +188,99 @@ async def test_a_finding_only_the_retest_has_is_new(lane):
 # ------------------------------------------------ what it cannot establish, said out loud
 
 
-async def test_a_cross_arm_finding_is_never_reported_fixed(lane):
-    """Nothing records that an on-demand check RAN, so its absence cannot be told from its
-    never having been asked. Reported as that, rather than as a fix."""
-    crossing = sqli(fingerprint="fp-xarm", source="cross-arm",
-                    rule="erlik:authorization:abc123")
-    await assessment(lane, "before", findings=[crossing])
+# ------------------------------------------- the on-demand checks, now that they record
+
+
+from orchestrator.integrations.inventory import AUTHORIZATION_RULES
+
+
+def crossing(**overrides):
+    """A cross-arm finding: an ordered pair of arms, not one identity."""
+    data = sqli(fingerprint="fp-xarm", source="cross-arm",
+                rule=AUTHORIZATION_RULES["object"], identity="jim", compared_with="admin")
+    data.update(overrides)
+    return data
+
+
+async def ran(db, session, *, check="object", first="jim", second="admin", refused=()):
+    await db.execute(
+        "INSERT INTO integration_check_runs(id,session_id,check_name,first_identity,"
+        "second_identity,arguments,refused_because,checked,findings) VALUES(?,?,?,?,?,?,?,?,?)",
+        (uuid.uuid4().hex, session, check, first, second, "{}",
+         json.dumps(sorted(refused)), 12, 0))
+
+
+async def test_a_cross_arm_comparison_that_was_re_run_can_fix_its_finding(lane):
+    """The capability this record exists for. Before it, the product's highest-value
+    findings could never be retested at all — a cross-arm finding absent from a retest was
+    indistinguishable from a check the retest never invoked."""
+    await assessment(lane, "before", findings=[crossing()])
+    await assessment(lane, "after", findings=[])
+    await ran(lane, "after")
+    row = state_of(await compare_assessments("before", "after"), "fp-xarm")
+    assert row["state"] == "fixed", row
+
+
+async def test_a_comparison_the_retest_never_ran_fixes_nothing(lane):
+    await assessment(lane, "before", findings=[crossing()])
     await assessment(lane, "after", findings=[])
     row = state_of(await compare_assessments("before", "after"), "fp-xarm")
     assert row["state"] == "not_retested"
-    assert "nothing records that the check ran" in row["reason"], row["reason"]
+    assert "never invoked" in row["reason"], row["reason"]
+
+
+async def test_a_comparison_that_refused_is_not_a_comparison(lane):
+    """A refused check did not look. Treating its row as evidence would be the unrun-clause
+    defect one level up from the one it refuses over."""
+    await assessment(lane, "before", findings=[crossing()])
+    await assessment(lane, "after", findings=[])
+    await ran(lane, "after", refused=["no_anonymous_arm"])
+    row = state_of(await compare_assessments("before", "after"), "fp-xarm")
+    assert row["state"] == "not_retested", row
+
+
+async def test_the_direction_of_the_comparison_matters(lane):
+    """Privilege is an ORDER. A retest that compared admin-against-jim asserts the opposite
+    of the finding, and cannot close it."""
+    await assessment(lane, "before", findings=[crossing()])
+    await assessment(lane, "after", findings=[])
+    await ran(lane, "after", first="admin", second="jim")
+    assert state_of(await compare_assessments("before", "after"), "fp-xarm")["state"] == (
+        "not_retested")
+
+
+async def test_the_other_check_does_not_close_this_ones_finding(lane):
+    """Two different questions. The function-level comparison running says nothing about an
+    object-level finding."""
+    await assessment(lane, "before", findings=[crossing()])
+    await assessment(lane, "after", findings=[])
+    await ran(lane, "after", check="function")
+    assert state_of(await compare_assessments("before", "after"), "fp-xarm")["state"] == (
+        "not_retested")
+
+
+async def test_a_function_level_finding_is_closed_by_the_function_comparison(lane):
+    """The mirror of the test above, and the one that proves the check is read from the
+    finding's own rule rather than assumed. Without it, hard-coding either check passes:
+    the object case is closed by an object run, and a function finding left `not_retested`
+    looks like caution rather than a lookup that missed.
+    """
+    await assessment(lane, "before", findings=[crossing(
+        fingerprint="fp-fn", rule=AUTHORIZATION_RULES["function"])])
+    await assessment(lane, "after", findings=[])
+    await ran(lane, "after", check="function")
+    assert state_of(await compare_assessments("before", "after"), "fp-fn")["state"] == "fixed"
+
+
+async def test_a_finding_that_does_not_say_what_it_was_compared_against(lane):
+    """`compared_with` is half of an ordered claim. Without it there is no comparison to
+    re-run, and guessing the other arm would close a finding on an assumption."""
+    await assessment(lane, "before", findings=[crossing(compared_with="")])
+    await assessment(lane, "after", findings=[])
+    await ran(lane, "after")
+    row = state_of(await compare_assessments("before", "after"), "fp-xarm")
+    assert row["state"] == "not_retested"
+    assert "which arm it was compared against" in row["reason"], row["reason"]
 
 
 async def test_a_configuration_change_is_reported_beside_the_states(lane):
@@ -272,3 +355,56 @@ async def test_the_route_returns_the_comparison(lane):
     body = await retest_report("after", baseline="before")
     assert body["states"]["fixed"] == 1
     assert body["findings"][0]["fingerprint"] == "fp-sqli"
+
+
+# --------------------------------------------- and the record is written by the check
+
+
+async def test_the_check_records_its_own_run(lane):
+    """Recorded INSIDE the check, not at the route. Both are importable and are called
+    directly by harnesses; a record only the routes wrote would be a guard some callers opt
+    into — the defect E-033 filed about the mutation refusal."""
+    from orchestrator.integrations.inventory import (
+        conclusive_check_runs, cross_arm_authorization)
+    from orchestrator.integrations.contracts import Identity
+    from orchestrator.integrations.security import SecretStore
+
+    store = SecretStore()
+    ids = {}
+    for name, subject, role in (("jim", "2", "customer"), ("admin", "1", "admin")):
+        ids[name] = store.put(Identity.model_validate({
+            "name": name, "target_origin": "http://app.test", "subject_id": subject,
+            "role": role, "check": {"url": "http://app.test/me", "method": "GET"}
+        }).model_dump())
+    await assessment(lane, "s", findings=[])
+    await cross_arm_authorization("s", ids["jim"], ids["admin"], "data.UserId", "anonymous")
+    rows = await lane.rows("SELECT * FROM integration_check_runs WHERE session_id='s'")
+    assert len(rows) == 1, rows
+    assert rows[0]["check_name"] == "object"
+    assert rows[0]["first_identity"] == ids["jim"]
+    assert json.loads(rows[0]["arguments"]) == {"owner_field": "data.UserId"}
+    # It refused (no evidence seeded), so it must not count as a conclusive comparison.
+    assert json.loads(rows[0]["refused_because"]), rows[0]["refused_because"]
+    assert await conclusive_check_runs("s") == set()
+
+
+async def test_the_marker_never_reaches_the_record(lane):
+    """The function check's marker IS the operator's private data. The row keeps the keyed
+    digest the findings already carry — see E-032's per-path table."""
+    from orchestrator.integrations.inventory import cross_arm_privileged_function
+    from orchestrator.integrations.contracts import Identity
+    from orchestrator.integrations.security import SecretStore
+
+    marker = "admin@app.test-secret-canary"
+    store = SecretStore()
+    ids = [store.put(Identity.model_validate({
+        "name": name, "target_origin": "http://app.test", "subject_id": subject, "role": role,
+        "check": {"url": "http://app.test/me", "method": "GET"}}).model_dump())
+        for name, subject, role in (("admin", "1", "admin"), ("jim", "2", "customer"))]
+    await assessment(lane, "s", findings=[])
+    await cross_arm_privileged_function("s", ids[0], ids[1], marker, "anonymous")
+    rows = await lane.rows("SELECT * FROM integration_check_runs WHERE session_id='s'")
+    assert rows, "the function check recorded nothing"
+    assert marker not in json.dumps([dict(r) for r in rows]), (
+        "the operator's marker was persisted into the check-run record")
+    assert json.loads(rows[0]["arguments"])["marker_digest"], rows[0]["arguments"]
