@@ -84,6 +84,50 @@ def test_one_identity_free_answer_carrying_the_marker_is_enough_to_withhold_conf
     assert caveat["type"] == "security_assertion_marker_is_public"
 
 
+def test_a_refusal_that_echoes_the_marker_is_inconclusive_not_publication():
+    """A 401 whose BODY carries the marker is not the application publishing it.
+
+    Found by running the container suites: the benchmark lab answered `/api/private` with
+    `401` and the canary still in the body, so the identity-free control received the marker
+    inside a refusal. The grade was right to withhold `confirmed` — nothing distinguishes
+    gated content from a marker the application echoes into every answer — but the reason
+    said "the application publishes it", which the 401 says it does not.
+
+    The cross-arm `carries` helper has required a successful status since a 400 that echoed
+    the request was found satisfying a clause for free. Same distinction, same reason.
+    """
+    confidence, basis, caveat = assertion_grade(
+        declared(), [answer(MARKER, status=401)] * 2)
+    assert confidence == "likely", basis
+    assert caveat["type"] == "security_assertion_control_inconclusive"
+    assert "INCONCLUSIVE" in basis and "refusal itself contains" in basis, basis
+    assert "publishes it" not in basis, (
+        "a refusal is being reported as publication, which is the thing this separates")
+
+
+def test_the_remedy_for_an_inconclusive_control_is_actionable():
+    """Two different causes, two different things to do about them — otherwise the split is
+    cosmetic."""
+    _, echoed_basis, inconclusive = assertion_grade(
+        declared(), [answer(MARKER, status=401)] * 2)
+    _, public_basis, public = assertion_grade(declared(), [answer(MARKER)] * 2)
+    assert inconclusive["type"] != public["type"]
+    assert inconclusive["reason"] != public["reason"]
+    # The basis is what a reader acts on, and the two causes need different actions: one is
+    # "your marker is wrong", the other is "your content is public".
+    assert "Choose a marker the refusal does not contain" in echoed_basis, echoed_basis
+    assert "Choose a marker" not in public_basis, public_basis
+    assert "Decide whether the content should be public" in public_basis, public_basis
+
+
+def test_a_successful_answer_carrying_the_marker_is_still_publication():
+    """The clause that must NOT be weakened by the split: 2xx plus the marker is the case
+    the whole differential exists to catch."""
+    for status in (200, 201, 299):
+        _, _, caveat = assertion_grade(declared(), [answer(MARKER, status=status)] * 2)
+        assert caveat["type"] == "security_assertion_marker_is_public", status
+
+
 @pytest.mark.parametrize("control", [
     pytest.param(None, id="no control at all"),
     pytest.param([], id="an empty control"),

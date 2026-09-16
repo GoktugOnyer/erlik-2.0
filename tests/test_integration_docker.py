@@ -224,7 +224,54 @@ async def test_full_assessment_lifecycle_and_auth_resume(lab):
 
 
 @pytest.mark.asyncio
-async def test_security_assertion_produces_confirmed_evidence(lab):
+async def test_security_assertion_earns_confirmed_against_a_real_control(lab):
+    """`confirmed` has to be EARNED, and this is where that is proved against a real target.
+
+    E-032: the assertion path graded every finding `confirmed` — which `defectdojo.py` maps
+    to `"verified": True` on a client's tracker — from one arm, one response, and no control
+    beyond a synthetic 404. The grade now follows a differential: the same request with the
+    identity DROPPED. The lab fixture answers `/private` with the canary and 200 to
+    `Bearer lab-token`, and 401 `unauthorized` to nobody, so the control refutes and the
+    grade is earned.
+
+    The control is fetched by `service.assertion_controls`, the same function the lane calls
+    once per assessment — not stubbed here, because a test that supplies its own control
+    would be checking the grading and not the sweep that feeds it.
+    """
+    from orchestrator.integrations.service import assertion_controls
+
+    cfg = config(stages=["schemathesis"], active=True, identity_ids=["reader"],
+                 schema_input={"url": "http://target:8080/openapi.json"},
+                 security_assertions=[{"identity_id": "reader", "description": "Peer can read private object",
+                     "request": {"url": "http://target:8080/private", "expected_status": 200}, "forbidden_marker": "private-object-canary"}])
+    identity = {"target_origin": "http://target:8080", "headers": {"Authorization": "Bearer lab-token"}}
+    controls = await assertion_controls("assertion", cfg)
+    assert controls.get("http://target:8080/private"), (
+        "the identity-free control was not obtained, so this test would be asserting the "
+        "degraded grade rather than the earned one")
+    assert all("private-object-canary" not in (sample.get("body") or "")
+               for sample in controls["http://target:8080/private"]), (
+        "the lab served the canary to a caller with no credential; the content is not gated "
+        "and `confirmed` must not be earned")
+
+    ctx = Context("assertion", "assertion", "http://target:8080", cfg, "reader", identity,
+                  assertion_controls=controls)
+    async with Sandbox(cfg, identity) as sandbox:
+        result = await ADAPTERS["schemathesis"].run(ctx, sandbox)
+    assert len(result.findings) == 1
+    assert result.findings[0].confidence == "confirmed"
+    assert result.findings[0].evidence_ids
+    assert "REFUTED with the identity dropped" in result.findings[0].basis
+
+
+@pytest.mark.asyncio
+async def test_security_assertion_without_a_control_is_not_confirmed(lab):
+    """The other half, and the one the old test was accidentally exercising: with no control
+    the same assertion still fires and is graded `likely`, with a caveat saying why.
+
+    A MISSING CONTROL IS NOT A PASS — the answer `authenticate` already gives as
+    `control_unavailable`.
+    """
     cfg = config(stages=["schemathesis"], active=True, identity_ids=["reader"],
                  schema_input={"url": "http://target:8080/openapi.json"},
                  security_assertions=[{"identity_id": "reader", "description": "Peer can read private object",
@@ -234,8 +281,9 @@ async def test_security_assertion_produces_confirmed_evidence(lab):
     async with Sandbox(cfg, identity) as sandbox:
         result = await ADAPTERS["schemathesis"].run(ctx, sandbox)
     assert len(result.findings) == 1
-    assert result.findings[0].confidence == "confirmed"
-    assert result.findings[0].evidence_ids
+    assert result.findings[0].confidence == "likely"
+    assert any(o["type"] == "security_assertion_control_unavailable"
+               for o in result.observations)
 
 
 @pytest.mark.asyncio

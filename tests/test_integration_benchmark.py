@@ -15,7 +15,7 @@ from orchestrator.integrations.contracts import AssessmentConfig, Endpoint, Stag
 from orchestrator.integrations.deterministic import CatalogueAdapter
 from orchestrator.integrations.runtime import Sandbox, IMAGES, docker, JobOutput
 from orchestrator.integrations.security import SecretStore, runtime_root
-from orchestrator.integrations.service import register
+from orchestrator.integrations.service import assertion_controls, register
 
 pytestmark = [pytest.mark.docker, pytest.mark.skipif(os.environ.get("ERLIK_DOCKER_TESTS") != "1", reason="local Docker benchmark opt-in")]
 ROOT = Path(__file__).resolve().parents[1]
@@ -179,7 +179,14 @@ async def test_integrated_coverage_and_finding_benchmark(benchmark_lab):
             for name in [*names, "testcases"]:
                 # Only Schemathesis and explicitly selected catalogue probes are active.
                 effective = cfg.model_copy(update={"active": name in ("schemathesis", "testcases")})
-                ctx = Context(session_id, name, "http://target:8080", effective, identity_id, identity.model_dump())
+                # The control sweep the real lane runs once per assessment. Without it the
+                # assertion path grades `likely` for want of a differential, and the
+                # benchmark measures a product that does not exist — measured: recall in
+                # scored rules 0.667 instead of 1, because the authorization rule was scored
+                # only on `confirmed`.
+                ctx = Context(session_id, name, "http://target:8080", effective, identity_id,
+                              identity.model_dump(),
+                              assertion_controls=await assertion_controls(session_id, effective))
                 async with Sandbox(effective, identity.model_dump()) as sandbox:
                     if name == "baseline":
                         script = sandbox.write("baseline.js", (ROOT / "scripts/pw-crawl.js").read_text())

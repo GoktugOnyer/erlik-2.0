@@ -260,6 +260,39 @@ a later edit cannot start guessing at the operator's next keystroke.
 STILL OPEN in this entry: the forms, the templates, and the resumption preview. This is the
 API half only.
 
+### E-035: what running the container suites found — CLOSED
+
+Every increment before this one was verified network-free, and the 68 Docker-gated tests had
+not run in the session at all. Running them found two real failures, both mine, both invisible
+to the suite that had been green all along.
+
+**A `SecurityAssertion` was graded `likely` where `confirmed` is earned.** E-032 made the grade
+follow a differential — the same request with the identity dropped — and
+`test_integration_docker.py` called the adapter DIRECTLY, so no control was supplied and the
+grade degraded. The test asserted the old constant. The fix is not to relax the assertion: the
+test now runs `service.assertion_controls` against the lab, whose `/private` answers 401 to a
+caller with no token, so the control refutes and `confirmed` is earned for the right reason —
+the first end-to-end proof of that differential against a real target. Its sibling asserts the
+other half, that a missing control grades `likely` with a caveat.
+
+**A refusal that echoes the marker is not publication.** The benchmark lab answered
+`/api/private` with `401` and the canary still in the body, so the identity-free control
+received the marker inside a refusal. Withholding `confirmed` was right — nothing there
+distinguishes gated content from a marker the application echoes into every answer — but the
+reason said "the application publishes it", which the 401 says it does not. `assertion_grade`
+now separates the two, with different remedies: "your content is public" and "choose a marker
+the refusal does not contain". The cross-arm `carries` helper has required a successful status
+since a 400 that echoed the request was found satisfying a clause for free; this is the same
+distinction arriving on the other path.
+
+The fixture was also wrong and is fixed: it shipped the private object to every caller and only
+the status line said otherwise. Its sibling `integration_target.py` already modelled a refusal
+correctly.
+
+**Measured with the lab up:** `ERLIK_DOCKER_TESTS=1 ERLIK_REAL_INTERACTSH_TESTS=1 pytest`
+reports **3191 passed, 1 skipped** — the remaining skip needs a live DefectDojo. The benchmark's
+`recall_in_scored_rules` is back to 1, and earned against a real control rather than a constant.
+
 ## 6. R2: improve the quality and depth of testing
 
 ### E-011: authorization verification — highest-value new capability

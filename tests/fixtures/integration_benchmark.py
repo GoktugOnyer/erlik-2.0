@@ -27,8 +27,15 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/openapi.json":
             self.respond(200, json.dumps(SCHEMA), "application/json")
         elif path == "/api/private":
-            self.respond(200 if self.headers.get("Authorization") == "Bearer reader-token" else 401,
-                         "admin-object-canary", "text/plain")
+            # The BODY is gated, not only the status. This returned the canary with the 401
+            # too, so the private object was shipped to every caller and only the status
+            # line said otherwise — which made the identity-free control inconclusive and
+            # cost the benchmark its authorization rule. Its sibling fixture
+            # (integration_target.py) already modelled a refusal this way.
+            authorised = self.headers.get("Authorization") == "Bearer reader-token"
+            self.respond(200 if authorised else 401,
+                         "admin-object-canary" if authorised else "unauthorized",
+                         "text/plain")
         elif path == "/api/error":
             self.respond(500, "seeded API contract failure", "text/plain")
         elif path == "/hidden":

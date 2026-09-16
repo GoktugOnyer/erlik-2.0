@@ -945,24 +945,46 @@ def assertion_grade(assertion, identity_free) -> tuple[str, str, dict | None]:
                  "url": assertion.request.url,
                  "reason": "the identity-free control for this URL was not obtained, so the "
                            "finding is graded on one arm and one response"})
-    # ANY sample, and the status is deliberately not required to match. This decides whether
-    # a grade that sets `verified` on a client's tracker is awarded, so the marker appearing
-    # in an identity-free answer at all is enough to withhold it.
+    # ANY sample, and a REFUSAL that echoes the marker is not publication. The cross-arm
+    # `carries` helper has required a successful status since a 400 that echoes the request
+    # was found satisfying a clause for free; the same distinction belongs here, and without
+    # it the two outcomes below were reported with one sentence that is wrong for one of
+    # them. Measured on the benchmark lab, whose `/api/private` answers 401 with the canary
+    # still in the body: the finding was graded `likely` and told the operator "the
+    # application publishes it", which the 401 says it does not.
     public = [sample for sample in usable
-              if assertion.forbidden_marker in (sample.get("body") or "")]
+              if assertion.forbidden_marker in (sample.get("body") or "")
+              and 200 <= int(sample.get("status") or 0) < 400]
+    echoed = [sample for sample in usable
+              if assertion.forbidden_marker in (sample.get("body") or "")
+              and sample not in public]
     if public:
         return ("likely",
                 "Explicit forbidden-content assertion reproduced with the configured "
                 "identity — AND with no identity at all. The same request with the identity "
-                "dropped returned the same forbidden content, so the application publishes "
-                "it: this is a disclosure, not a failure of authorization for this "
-                "identity, and the rule and methodology on this finding describe the wrong "
-                "thing. Decide whether the content should be public before triaging it as "
-                "an access-control defect",
+                "dropped returned the same forbidden content in a SUCCESSFUL response, so "
+                "the application publishes it: this is a disclosure, not a failure of "
+                "authorization for this identity, and the rule and methodology on this "
+                "finding describe the wrong thing. Decide whether the content should be "
+                "public before triaging it as an access-control defect",
                 {"type": "security_assertion_marker_is_public",
                  "url": assertion.request.url,
                  "reason": "the forbidden marker was returned to a caller carrying no "
                            "credential, so nothing was gated"})
+    if echoed:
+        return ("likely",
+                "Explicit forbidden-content assertion reproduced with the configured "
+                "identity. The control is INCONCLUSIVE rather than contradicting: the same "
+                "request with the identity dropped was REFUSED, but the refusal itself "
+                "contains the forbidden marker, so nothing here distinguishes content gated "
+                "on this credential from a marker the application echoes into every answer. "
+                "Choose a marker the refusal does not contain, or fix an application that "
+                "ships the value it is declining to serve",
+                {"type": "security_assertion_control_inconclusive",
+                 "url": assertion.request.url,
+                 "reason": "the identity-free control was refused and its refusal body "
+                           "contains the forbidden marker, so the differential establishes "
+                           "nothing either way"})
     return ("confirmed",
             "Explicit forbidden-content assertion reproduced with the configured identity, "
             "and REFUTED with the identity dropped: the same request carrying no credential "
