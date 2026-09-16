@@ -872,10 +872,33 @@ async def report(session_id):
     assessment = await db.rows("SELECT * FROM integration_assessments WHERE session_id=?", (session_id,))
     if not assessment:
         return None
-    findings = [json.loads(row["payload"]) for row in await db.rows("SELECT payload FROM integration_findings WHERE session_id=?", (session_id,))]
-    findings = [f for f in findings if f.get("triage_state", "open") == "open"]
+    stored = [json.loads(row["payload"]) for row in await db.rows("SELECT payload FROM integration_findings WHERE session_id=?", (session_id,))]
+    findings = [f for f in stored if f.get("triage_state", "open") == "open"]
+    # WHAT THIS REPORT LEAVES OUT, which it used to leave out silently. The list is the
+    # OUTSTANDING findings — triaged ones are deliberately absent — and a reader seeing a
+    # count of N had no way to know that M more had been triaged away. That is the same
+    # shape `coverage` exists to remove one layer down: a report listing only what remains
+    # reads as a clean bill of health for everything it omits.
+    triage = {}
+    for finding in stored:
+        state = finding.get("triage_state", "open")
+        triage[state] = triage.get(state, 0) + 1
+    from .defectdojo import synchronization
+
     return {"engagement": {"session_id": session_id, "target": assessment[0]["target"], "status": assessment[0]["status"]},
             "statistics": {"findings": len(findings)},
+            # LOCAL triage, kept apart from the remote state below. E-018 asks a report to
+            # separate them because they answer different questions: what erlik was told,
+            # and what the client's tracker was told.
+            "triage": {**triage,
+                       "excluded_from_this_report": len(stored) - len(findings),
+                       "establishes": ("this report lists OUTSTANDING findings; anything "
+                                       "triaged false_positive or fixed is counted here and "
+                                       "not listed above")},
+            # EXTERNAL synchronization, which local triage says nothing about: a finding
+            # triaged `fixed` has not necessarily reached anybody, and an unresolved export
+            # makes every state here provisional.
+            "synchronization": await synchronization(session_id),
             "findings": [{"id": f["fingerprint"], "fingerprint": f["fingerprint"], "title": f["title"], "severity": f["severity"],
                 "affected_url": f["url"], "description": f["basis"], "confidence": f["confidence"], "cwe": f["cwe"],
                 # Separate from `description` on purpose: this is the

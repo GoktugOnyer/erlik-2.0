@@ -197,6 +197,79 @@ def finding_payload(finding):
     return payload
 
 
+# What a report can say about one finding's life on a client's tracker. Local triage and
+# remote state are DIFFERENT FACTS and E-018 asks that a report keep them apart: a finding an
+# operator triaged `fixed` has not necessarily reached anybody, and one the tracker holds may
+# be an older version of what erlik now says.
+SYNCHRONIZATION_STATES = ("never_exported", "synchronized", "changed_since_export")
+
+
+async def synchronization(session_id) -> dict:
+    """Per-fingerprint remote state, and whether it can be trusted.
+
+    `integration_remote_findings` records the payload digest at the moment of a successful
+    write, so recomputing it now says whether the tracker holds what erlik currently says —
+    `changed_since_export` is a finding whose severity, triage or evidence moved after it was
+    sent, and which the client is therefore reading an older version of.
+
+    UNRESOLVED EXPORTS MAKE ALL OF IT PROVISIONAL, which is why `unresolved_exports` travels
+    beside the per-finding states rather than under them. A `partial` export — the steady-state
+    DefectDojo deduplication case, see E-032 — means some findings are in the tracker in a
+    state erlik could not set, and an `uncertain` one means a write may or may not have
+    landed. A report that showed `synchronized` next to an uncertain export would be asserting
+    the one thing nobody knows.
+    """
+    findings = {row["fingerprint"]: json.loads(row["payload"]) for row in await db.rows(
+        "SELECT fingerprint,payload FROM integration_findings WHERE session_id=?",
+        (session_id,))}
+    exports = [dict(row) for row in await db.rows(
+        "SELECT id,destination,status,detail FROM integration_exports WHERE session_id=?",
+        (session_id,))]
+    servers = {export["destination"].split("/")[0] + "//" + export["destination"].split("/")[2]
+               for export in exports if export["destination"].count("/") >= 2}
+    remote = {}
+    for row in await db.rows(
+            "SELECT server,remote_test_id,fingerprint,payload_hash FROM "
+            "integration_remote_findings"):
+        if not servers or row["server"] in servers:
+            remote.setdefault(row["fingerprint"], []).append(dict(row))
+
+    states = {}
+    for fingerprint, finding in findings.items():
+        rows = remote.get(fingerprint) or []
+        if not rows:
+            states[fingerprint] = {"state": "never_exported",
+                                   "detail": "no remote record names this fingerprint"}
+            continue
+        current = digest(finding_payload(finding))
+        stale = [row for row in rows if row["payload_hash"] != current]
+        states[fingerprint] = ({
+            "state": "changed_since_export",
+            "detail": (f"the tracker holds an earlier version on "
+                       f"{len(stale)} of {len(rows)} destination(s); export again to update "
+                       f"it"),
+            "remote_test_ids": sorted({row["remote_test_id"] for row in stale})}
+            if stale else {
+            "state": "synchronized",
+            "detail": "the tracker holds what erlik currently says",
+            "remote_test_ids": sorted({row["remote_test_id"] for row in rows})})
+    unresolved = [export for export in exports
+                  if export["status"] in ("running", "uncertain", "partial")]
+    return {
+        "findings": states,
+        "summary": {state: sum(1 for value in states.values() if value["state"] == state)
+                    for state in SYNCHRONIZATION_STATES},
+        "unresolved_exports": [
+            {"id": export["id"], "destination": export["destination"],
+             "status": export["status"], "detail": export["detail"]} for export in unresolved],
+        "establishes": (
+            "local triage is what erlik was told; this is what the tracker was told, and the "
+            "two are separate facts"
+            + (f". {len(unresolved)} export(s) are unresolved, so every state above is "
+               f"provisional — read their detail before relying on any of it"
+               if unresolved else "")),
+    }
+
 class RemoteError(RuntimeError):
     def __init__(self, status, message):
         self.status = status

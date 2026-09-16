@@ -631,8 +631,28 @@ Every change records an artifact naming the retest, the state it established and
 finding that closed with no record of why is indistinguishable from one closed by hand, and
 only one of those can be checked.
 
-STILL OPEN in this entry: remediation ownership and notes, explicit export previews, and
-"reports separate local triage from external synchronization status".
+**Reports separate local triage from external synchronization status — done.** They are
+different facts and the report conflated them by omission: it listed the findings whose
+`triage_state` is `open` and said nothing else. So a reader saw a count of N with no way to
+know that M more had been triaged away — the shape `coverage` exists to remove one layer down,
+where a report listing only what remains reads as a clean bill of health for everything it
+omits — and a finding triaged `fixed` looked dealt with while nothing said whether the client's
+tracker had ever heard of it.
+
+`report()` carries `triage` (counts by state, and how many are excluded from the list) and
+`synchronization`, computed by `defectdojo.synchronization` from
+`integration_remote_findings` — which records the payload digest at the moment of a successful
+write, so recomputing it now says whether the tracker holds what erlik currently says. A local
+triage change alone is enough to make a finding `changed_since_export`, which is exactly the
+gap: triaging tells nobody.
+
+UNRESOLVED EXPORTS MAKE ALL OF IT PROVISIONAL, and travel beside the per-finding states rather
+than under them. `partial` is the steady-state DefectDojo deduplication case (E-032) and
+`uncertain` means a write may or may not have landed; showing `synchronized` next to either
+without saying so would assert the one thing nobody knows. A resolved export adds no caveat,
+because a caveat on every report is a caveat nobody reads.
+
+STILL OPEN in this entry: remediation ownership and notes, and explicit export previews.
 
 ### E-019: retention, backup, and operational diagnostics
 
