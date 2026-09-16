@@ -14,7 +14,7 @@ import yaml
 
 from .contracts import (canonical_origin, AssessmentConfig, Endpoint, IntegrationFinding, StageResult,
                         fingerprint, form_endpoint, parameter_names)
-from .runtime import Sandbox, IMAGES, JobOutput
+from .runtime import Sandbox, IMAGES, JobOutput, TOOL_VERSIONS
 from .security import SecretStore, secret_values, redact, safe_evidence
 from . import persistence as db
 
@@ -724,7 +724,7 @@ class KatanaAdapter(BaseAdapter):
         # is seeded with everything it found; katana's own browser would be a
         # second renderer doing the same work.
         output = await sandbox.run(argv)
-        result = StageResult(endpoints=browser_endpoints, metadata={"version": "1.2.2", "depth": ctx.config.crawl_depth})
+        result = StageResult(endpoints=browser_endpoints, metadata={"version": TOOL_VERSIONS["katana"], "depth": ctx.config.crawl_depth})
         seen = {(e.url, e.method) for e in browser_endpoints}
         for row in json_lines(output.stdout):
             request = row.get("request", {})
@@ -787,7 +787,8 @@ class SchemathesisAdapter(BaseAdapter):
             if ctx.config.schema_input.kind == "openapi":
                 argv += ["--include-method", "GET", "--include-method", "HEAD", "--include-method", "OPTIONS"]
             output = await sandbox.run(argv)
-        result = StageResult(metadata={"version": "4.0.14", "seed": ctx.config.seed, "schema_sha256": digest})
+        result = StageResult(metadata={"version": TOOL_VERSIONS["schemathesis"], "seed": ctx.config.seed,
+                               "schema_sha256": digest})
         report = sandbox.output / "results.xml"
         if report.exists():
             for case in ET.fromstring(report.read_text()).iter("testcase"):

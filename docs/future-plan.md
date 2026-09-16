@@ -480,9 +480,27 @@ than the head of the response, and reaches report.json, the HTML report, SARIF, 
 Jira CSV and the DefectDojo description. A time-based blind SQL injection exports
 as its four requests with their payloads and measured durations.
 
-Remaining for E-016: rule and image versions on the finding, a digest check at read
-time rather than only at write time, and the archive-level "no credential values"
-assertion.
+**The image and tool version are on the finding now.** A reviewer handed one finding can say
+what produced it without being handed the lane as well. The facts existed and were scattered
+across three modules — ZAP's image in `runtime.IMAGES`, katana's `"version": "1.2.2"` and
+Schemathesis's `"version": "4.0.14"` inlined in their own adapters' stage metadata — and none
+reached the finding, the one thing that leaves the building.
+
+`produced_by` is STAMPED FROM `source` by the model rather than passed at each construction
+site. There are five sites and the failure mode is a sixth that forgets; filling in the first
+five does not prevent that. Every site already declares `source`, so a new producer cannot be
+silent, and `runtime.TOOL_VERSIONS` is the one place a version lives — the adapters read their
+stage metadata from it, so provenance and metadata cannot drift apart. Lane-authored findings
+(`cross-arm`, `testcase`) name no image on purpose: no container ran, so naming one would be
+inventing it, and the provenance says what DOES reproduce them instead.
+
+**The read-time digest check was already done** and this list was stale: `persistence.
+evidence_bytes` has verified the recorded sha256 on every read since the increment that found
+the digest was write-only state. Removed rather than left to be rediscovered.
+
+Remaining for E-016: the archive-level "no credential values" assertion — and there is no
+archive yet, so that item is really "decide what an exported bundle is" rather than a check to
+add to something that exists.
 
 Acceptance: a reviewer can trace a finding to its supporting evidence and reproduce
 a lab finding with replacement credentials. A changed or missing artifact is

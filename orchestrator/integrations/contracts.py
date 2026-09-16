@@ -716,6 +716,28 @@ class IntegrationFinding(StrictModel):
     method: str = "GET"
     parameter: str = ""
     identity: str = "anonymous"
+    # WHAT MADE THIS FINDING — the image and tool version, so a bundle is self-contained.
+    #
+    # E-016 asks for a finding packaged with its "tool/image version". The facts were
+    # scattered across three modules — ZAP's image in `runtime.IMAGES`, katana's and
+    # Schemathesis's inlined in their adapters' stage metadata — and none of them reached the
+    # finding, which is the one thing that leaves the building.
+    #
+    # STAMPED FROM `source` RATHER THAN PASSED BY EACH PRODUCER. There are five construction
+    # sites and the failure mode is a sixth that forgets, which no amount of filling in the
+    # first five prevents. Every one of them already declares `source`, so the model derives
+    # it and a new producer cannot be silent about the question a reviewer starts from. An
+    # explicit value still wins, for a caller that knows better than the map.
+    produced_by: str = ""
+
+    @model_validator(mode="after")
+    def _stamp_provenance(self):
+        # Deferred: `runtime` imports this module, so a module-level import is a cycle.
+        if not self.produced_by:
+            from .runtime import produced_by
+
+            self.produced_by = produced_by(self.source)
+        return self
     # THE OTHER ARM, when the claim is a comparison between two of them.
     #
     # `identity` alone cannot carry a differential claim: a privileged-function

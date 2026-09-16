@@ -20,6 +20,42 @@ IMAGES = {
     "worker": "erlik-integrations:1",
     "zap": "ghcr.io/zaproxy/zaproxy:2.16.1",
 }
+# WHAT PRODUCED A FINDING, in one place rather than three.
+#
+# E-016 asks that a finding be packaged with its "tool/image version", so a reviewer handed
+# one finding can reproduce it without being handed the lane as well. The facts existed and
+# were scattered: ZAP's image here, katana's `"version": "1.2.2"` and Schemathesis's
+# `"version": "4.0.14"` inlined in their adapters' stage metadata, and nothing at all on the
+# finding. Three copies of one fact is the defect this codebase names about its own catalogue
+# lists, and the finding — the thing that leaves the building — had none of them.
+#
+# The adapters read their version from here now, so a finding's provenance and its stage's
+# metadata cannot disagree.
+TOOL_VERSIONS = {"katana": "1.2.2", "schemathesis": "4.0.14"}
+
+# Findings erlik's own code makes by comparing stored evidence. No container ran, so naming
+# an image would be inventing one — and what a reviewer needs to reproduce these is the
+# recorded evidence and the rule, both of which the finding already carries.
+LANE_AUTHORED = ("cross-arm", "testcase")
+
+
+def produced_by(source: str) -> str:
+    """The image and tool version behind a finding from `source`.
+
+    Every producer fills it; `test_every_producer_says_what_made_the_finding` asserts that,
+    because a finding that cannot say what made it is exactly the one a reviewer cannot
+    reproduce, and a new producer defaulting to empty would be silent about it.
+    """
+    if source in LANE_AUTHORED:
+        return (f"erlik {source} evaluation over stored evidence; no scanner image ran — "
+                f"reproduce from the cited evidence artifacts and the rule")
+    if source == "zap":
+        return IMAGES["zap"]
+    if source in TOOL_VERSIONS:
+        return f"{source} {TOOL_VERSIONS[source]} in {IMAGES['worker']}"
+    return IMAGES["worker"]
+
+
 OWNER = "erlik.owner=" + hashlib.sha256(str(Path(__file__).resolve().parents[2]).encode()).hexdigest()[:12]
 
 
