@@ -498,9 +498,43 @@ inventing it, and the provenance says what DOES reproduce them instead.
 evidence_bytes` has verified the recorded sha256 on every read since the increment that found
 the digest was write-only state. Removed rather than left to be rediscovered.
 
-Remaining for E-016: the archive-level "no credential values" assertion — and there is no
-archive yet, so that item is really "decide what an exported bundle is" rather than a check to
-add to something that exists.
+**The bundle exists — CLOSED.** `integrations/bundle.py` assembles one finding into something
+another person can check: the finding, the published assessment configuration, the
+authorization context in the operator's own labels, the provenance (`produced_by`, the rule,
+the methodology, and each stage's `schema_sha256`/`seed`), every cited artifact with its
+content and digest, and the diagnostics kept SEPARATE from them.
+`GET /sessions/{id}/findings/{fingerprint}/bundle` serves one; `write_bundle_archive` writes a
+zip with a manifest digesting every member.
+
+"An exported archive contains no credential values" is asserted over the SERIALISED bundle and
+over the archive bytes, against a session whose identity carries a real-shaped bearer token and
+cookie. It holds by construction rather than by filtering: `DECLARED_IDENTITY_FIELDS` names
+what may travel — `name`, `role`, `tenant`, `subject_id`, `may_access` — and `headers`,
+`cookies`, `storage_state` and `check` are simply not in it. The configuration is the PUBLISHED
+row, never the secret store's private copy.
+
+"A changed or missing artifact is detectable" holds because every artifact is read through
+`evidence_bytes`, which re-checks the digest recorded at write time; a failure is reported in
+`evidence_not_readable` and the summary says the claim rests on less than it says, rather than
+the bundle quietly arriving smaller.
+
+**Building it found a redaction defect that had been eating evidence.** `redact`'s
+sensitive-header rule matched `[^\r\n]+` — everything to end of line — which is right in a
+response capture and wrong in a shell command. Measured:
+
+    curl -s -i -H "Authorization: $LOW_PRIV_TOKEN" http://app.test/api/Users/1
+
+was stored as `curl -s -i -H "Authorization: [REDACTED]` — no closing quote, no URL, and the
+placeholder NAME gone too, so a reviewer could not tell which credential to supply. The cookie
+rule immediately above it had already learned this lesson for the same reason ("the rest of the
+line is frequently the finding") and this rule never got the same treatment. It is one pass now
+with a conditional group: quoted headers terminate on the quote they opened with, unquoted ones
+still run to end of line, which is the shape a header disclosed in a response BODY has and the
+reason the rule is not anchored.
+
+A first attempt at that fix silently did nothing — a new quoted rule followed by the old
+end-of-line rule, and the second re-matched the first's output. There is a test that the
+sensitive-header value is matched by exactly one rule.
 
 Acceptance: a reviewer can trace a finding to its supporting evidence and reproduce
 a lab finding with replacement credentials. A changed or missing artifact is

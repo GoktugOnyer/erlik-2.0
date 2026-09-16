@@ -218,6 +218,26 @@ async def privileged_function_check(session_id: str, body: PrivilegedFunctionChe
     return {**result, "recorded": [f.fingerprint for f in recorded]}
 
 
+@router.get("/sessions/{session_id}/findings/{fingerprint}/bundle")
+async def finding_bundle_report(session_id: str, fingerprint: str):
+    """One finding packaged so someone else can check it. E-016.
+
+    Carries the operator's DECLARATIONS and the EVIDENCE, never credentials: the identity's
+    headers, cookies, storage state and authentication check are absent by construction, and
+    the configuration is the published row rather than the secret store's private copy.
+
+    Every cited artifact is read through `evidence_bytes`, which re-checks the digest recorded
+    when it was written — so a changed or missing one appears in `evidence_not_readable`
+    rather than leaving the bundle quietly smaller.
+    """
+    from .bundle import finding_bundle
+
+    try:
+        return await finding_bundle(session_id, fingerprint)
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
 @router.get("/sessions/{session_id}/retest")
 async def retest_report(session_id: str, baseline: str):
     """What this assessment establishes about an earlier one's findings. E-017.

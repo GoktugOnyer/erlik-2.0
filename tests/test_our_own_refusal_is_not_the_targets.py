@@ -392,3 +392,71 @@ async def test_a_refused_assertion_is_reported_rather_than_passed_over(monkeypat
     assert findings == [], "a refused request must not produce a finding"
     refusals = [o for o in observations if o["type"] == "security_assertion_refused"]
     assert refusals and "never contacted" in refusals[0]["reason"], observations
+
+
+# ------------------------------------- a redaction that ate the evidence it was protecting
+
+
+@pytest.mark.parametrize("command,kept", [
+    pytest.param('curl -s -i -H "Authorization: $LOW_PRIV_TOKEN" http://app.test/api/Users/1',
+                 "http://app.test/api/Users/1", id="double-quoted shell argument"),
+    pytest.param("curl -H 'Authorization: Bearer abc123def456' http://app.test/x",
+                 "http://app.test/x", id="single-quoted shell argument"),
+    pytest.param('curl -H "X-Api-Key: k-9f3c2a1b" -X GET "http://app.test/orders"',
+                 "http://app.test/orders", id="a different sensitive header"),
+])
+def test_a_quoted_header_loses_its_value_and_keeps_the_command(command, kept):
+    """E-016 asks a finding to carry "sanitized reproduction instructions".
+
+    The sensitive-header rule ate to end of line, which is right in a response capture and
+    wrong in a shell command: `curl -s -i -H "Authorization: $TOKEN" http://app.test/x` was
+    stored as `curl -s -i -H "Authorization: [REDACTED]` — no closing quote, no URL. The
+    cookie rule directly above it had already learned this lesson, for the same reason: the
+    rest of the line is frequently the finding.
+    """
+    from orchestrator.integrations.security import redact
+
+    result = redact(command)
+    assert kept in result, result
+    assert "[REDACTED]" in result, result
+    for secret in ("$LOW_PRIV_TOKEN", "abc123def456", "k-9f3c2a1b"):
+        assert secret not in result, f"{secret} survived: {result}"
+
+
+@pytest.mark.parametrize("text", [
+    pytest.param("HTTP/1.1 200 OK\r\nAuthorization: leaked-session-value\r\n\r\nbody",
+                 id="a header in a response capture"),
+    pytest.param("normalised to one line Authorization: leaked-session-value and more",
+                 id="mid-line, which is why the rule is not anchored"),
+])
+def test_an_unquoted_header_still_loses_everything_after_it(text):
+    """The branch that must NOT change. A disclosed header inside a response BODY runs to the
+    newline, and an earlier anchored version of this rule leaked a third party's session
+    cookie into a DefectDojo description — the measurement recorded beside the rule."""
+    from orchestrator.integrations.security import redact
+
+    assert "leaked-session-value" not in redact(text), redact(text)
+
+
+def test_a_value_containing_the_other_quote_is_still_redacted_whole():
+    """The quoted branch terminates on the SAME quote it opened with, so a value carrying the
+    other one cannot escape half of itself."""
+    from orchestrator.integrations.security import redact
+
+    result = redact("""curl -H 'Authorization: a"b"c-secret' http://app.test/x""")
+    assert "a\"b\"c-secret" not in result and "c-secret" not in result, result
+    assert "http://app.test/x" in result, result
+
+
+def test_the_header_rule_runs_once_over_each_header():
+    """The first attempt at this was a quoted rule followed by the end-of-line rule, and the
+    second re-matched the first's output (`[REDACTED]" http://…`) and truncated it again — so
+    the change silently did nothing. One pass, with a conditional group."""
+    import inspect
+
+    from orchestrator.integrations import security
+
+    source = inspect.getsource(security.redact)
+    assert source.count("authorization|authentication|proxy-authorization") == 1, (
+        "the sensitive-header value is matched by more than one rule, so one can undo the "
+        "other's output")

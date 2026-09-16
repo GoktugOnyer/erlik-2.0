@@ -145,6 +145,16 @@ def marker_digest(session_id: str, marker: str) -> str:
 _SENSITIVE = re.compile(r"authorization|cookie|password|secret|token|api.?key|session", re.I)
 
 
+def _redact_header(match) -> str:
+    """Replace a sensitive header's VALUE, keeping the quotes that bound it.
+
+    Paired with the conditional group in `redact`: group 1 is the opening quote when the
+    header sits inside one — a shell command — and absent when it does not.
+    """
+    quote = match.group(1) or ""
+    return f"{quote}{match.group(2)}[REDACTED]{quote}"
+
+
 def redact(value, known: tuple[str, ...] = ()):
     if isinstance(value, dict):
         return {k: "[REDACTED]" if _SENSITIVE.search(k) and k not in ("identity_ids", "identity_id", "secret_id") else redact(v, known) for k, v in value.items()}
@@ -198,9 +208,33 @@ def redact(value, known: tuple[str, ...] = ()):
     # semicolon, a second cookie on the same line, and a secret in a
     # non-standard attribute.
     value = re.sub(_COOKIE_HEADER, _redact_cookie, value)
-    value = re.sub(r"(?i)((?:authorization|authentication|proxy-authorization|"
-                   r"x-api-key|api-key|x-auth-key|x-auth-token|x-csrf-token)\s*:[ \t]*)[^\r\n]+",
-                   r"\1[REDACTED]", value)
+    # A QUOTED header loses its VALUE and keeps the rest of the command — the same lesson the
+    # cookie rule above already learned, applied to the header it was never applied to.
+    #
+    # Eating to end-of-line is right in a response capture, where a header value runs to the
+    # newline. In a SHELL COMMAND it is not. Measured:
+    #
+    #   curl -s -i -H "Authorization: $LOW_PRIV_TOKEN" http://app.test/api/Users/1
+    #
+    # was stored as `curl -s -i -H "Authorization: [REDACTED]` — no closing quote, no URL.
+    # E-016 asks a finding to carry "sanitized reproduction instructions", and a command that
+    # does not say what it requested is not one. It also erased the PLACEHOLDER name, so a
+    # reviewer could not tell which credential to supply.
+    #
+    # ONE PASS, with a conditional group, rather than a quoted rule followed by the
+    # end-of-line one. Two rules meant the second re-matched the first's output — `[REDACTED]"
+    # http://…` — and truncated it again, which is how the first attempt at this silently did
+    # nothing.
+    #
+    # The quoted branch terminates on the SAME quote it opened with, so a value containing the
+    # other quote is still redacted whole: `'Authorization: a"b"c'` loses all of `a"b"c`.
+    # Anything not inside quotes still falls to the end-of-line branch, which is the shape a
+    # disclosed header in a response body has — and that shape is why this rule is not
+    # anchored, per the note above.
+    value = re.sub(r"""(?i)(["'])?((?:authorization|authentication|proxy-authorization|"""
+                   r"""x-api-key|api-key|x-auth-key|x-auth-token|x-csrf-token)\s*:[ \t]*)"""
+                   r"""(?(1)(?:(?!\1)[^\r\n])+\1|[^\r\n]+)""",
+                   _redact_header, value)
     value = re.sub(r"(?i)(Bearer\s+)[\w.~+/=-]+", r"\1[REDACTED]", value)
     value = re.sub(r"\beyJ[\w-]+\.[\w-]+\.[\w-]+", "[REDACTED]", value)
     value = re.sub(r'(?i)(["\']?(?:password|access_token|token|api_key|secret)["\']?\s*[:=]\s*["\']?)[^\s&"\'<>]+', r"\1[REDACTED]", value)
