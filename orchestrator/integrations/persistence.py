@@ -1,6 +1,7 @@
 """Additive integration storage. Artifacts are addressed by opaque IDs."""
 from __future__ import annotations
 import hashlib
+from datetime import datetime, timedelta, timezone
 import json
 import re
 import uuid
@@ -75,6 +76,16 @@ async def migrate():
                                   ("remote_engagement_id", "INTEGER"), ("evidence_id", "TEXT")):
             if name not in export_columns:
                 await db.execute(f"ALTER TABLE integration_exports ADD COLUMN {name} {declaration}")
+        evidence_columns = {r[1] for r in await (await db.execute(
+            "PRAGMA table_info(integration_evidence)")).fetchall()}
+        if "expired_at" not in evidence_columns:
+            # THE ROW SURVIVES THE BYTES. E-019 asks which metadata survives evidence
+            # expiry, and the answer has to be "enough to tell a deliberate expiry from a
+            # loss": the digest, the size, the kind and when it went. Without this column a
+            # retention policy and a corrupted store are the same event to every reader —
+            # `evidence_bytes` raises the same integrity error for both — and one of those
+            # is a decision somebody made while the other is a failure.
+            await db.execute("ALTER TABLE integration_evidence ADD COLUMN expired_at TEXT")
         await _withdraw_invertible_marker_digests(db)
         await db.commit()
     finally:
@@ -121,6 +132,17 @@ class EvidenceIntegrityError(Exception):
     """A stored artifact is missing, or no longer the bytes that were stored."""
 
 
+class EvidenceExpired(EvidenceIntegrityError):
+    """The artifact was deliberately removed under a retention policy.
+
+    A SUBCLASS, so every existing `except EvidenceIntegrityError` keeps working and nothing
+    starts treating an expiry as readable. It is a distinct type because the two events need
+    opposite responses: a store that lost an artifact is a failure to investigate, and a
+    retention expiry is a decision somebody made — and a report that renders them identically
+    sends an operator looking for a fault that is not there.
+    """
+
+
 async def evidence_bytes(evidence_id: str) -> bytes:
     """An artifact, checked against the digest recorded when it was written.
 
@@ -141,6 +163,10 @@ async def evidence_bytes(evidence_id: str) -> bytes:
         raise KeyError(evidence_id)
     path = runtime_root() / "evidence" / evidence_id
     if not path.is_file():
+        if entries[0]["expired_at"]:
+            raise EvidenceExpired(
+                f"evidence artifact was expired under the retention policy on "
+                f"{entries[0]['expired_at']}; its digest, size and kind are retained")
         raise EvidenceIntegrityError("evidence artifact is missing")
     content = path.read_bytes()
     if hashlib.sha256(content).hexdigest() != entries[0]["sha256"]:
@@ -156,6 +182,76 @@ async def evidence(session_id: str, stage_id: str, kind: str, content: str, know
                   (key, session_id, stage_id, kind, hashlib.sha256(cleaned).hexdigest(), len(cleaned)))
     return key
 
+
+# An assessment in one of these is still being worked on, and its evidence is what the work
+# rests on. E-019: "retention never silently deletes evidence needed by an active assessment."
+# Read as the complement of `FINISHED_STAGE_STATUSES` would be wrong — `partial` and `failed`
+# assessments are finished, however unhappily, and their evidence is as expirable as any.
+ACTIVE_ASSESSMENT_STATUSES = ("queued", "running", "needs_auth")
+
+
+async def expire_evidence(older_than_days: int, *, confirm: bool = False) -> dict:
+    """Remove evidence BYTES past their retention age, keeping the row that describes them.
+
+    E-019 asks for configurable retention and for "which metadata survives evidence expiry"
+    to be defined. It is: the id, the session, the stage, the kind, the sha256, the size and
+    the date it went. Enough to tell a reader what was there, that its digest was recorded,
+    and that it left on purpose.
+
+    THREE RULES, and the first two are the acceptance:
+
+    - Evidence belonging to an ACTIVE assessment is never touched, whatever its age. A run
+      that is queued, running or paused for authentication is still being worked on, and
+      deleting what it rests on mid-flight is the silent deletion the entry names.
+    - Nothing is removed without `confirm`. This destroys bytes that a finding may cite and a
+      client may be owed; the default is to report what WOULD go.
+    - The row survives the file. `EvidenceExpired` is what a later read gets — a distinct type
+      from the integrity error, because a retention decision and a corrupted store need
+      opposite responses from whoever reads them.
+
+    WHAT THIS DOES NOT CLAIM: it is not secure deletion. The bytes are unlinked, which returns
+    them to the filesystem and not to nobody; on a journalled or copy-on-write volume, or with
+    a snapshot behind it, they may persist. E-019 asks for a secure deletion POLICY and this
+    is a retention mechanism — saying otherwise would be the kind of confident wrong claim
+    this project keeps removing.
+    """
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=max(0, older_than_days))).isoformat()
+    active = {row["session_id"] for row in await rows(
+        "SELECT session_id FROM integration_assessments WHERE status IN "
+        f"({','.join('?' * len(ACTIVE_ASSESSMENT_STATUSES))})", ACTIVE_ASSESSMENT_STATUSES)}
+    candidates = [dict(row) for row in await rows(
+        "SELECT id,session_id,stage_id,kind,sha256,size,created_at FROM integration_evidence "
+        "WHERE expired_at IS NULL AND created_at < ?", (cutoff,))]
+
+    expiring = [row for row in candidates if row["session_id"] not in active]
+    held = [{**row, "held_because": "its assessment is still active"}
+            for row in candidates if row["session_id"] in active]
+    if confirm:
+        stamp = datetime.now(timezone.utc).isoformat()
+        for row in expiring:
+            path = runtime_root() / "evidence" / row["id"]
+            # `missing_ok`: an artifact already gone is still expired from here on, and
+            # raising would leave the rest of the sweep undone over a file nobody has.
+            path.unlink(missing_ok=True)
+            await execute("UPDATE integration_evidence SET expired_at=? WHERE id=?",
+                          (stamp, row["id"]))
+    return {
+        "applied": bool(confirm),
+        "cutoff": cutoff,
+        "expired": [{k: row[k] for k in ("id", "session_id", "kind", "sha256", "size",
+                                         "created_at")} for row in expiring],
+        "held_for_active_assessments": held,
+        "bytes_released": sum(row["size"] for row in expiring),
+        "establishes": (
+            ("expired " if confirm else "would expire ")
+            + f"{len(expiring)} artifact(s) older than {older_than_days} day(s), releasing "
+              f"{sum(row['size'] for row in expiring)} byte(s). {len(held)} were HELD because "
+              f"their assessment is still active. Each expired row keeps its digest, size and "
+              f"kind, so a later read reports an expiry rather than an integrity failure"
+            + ("; run again with confirm to remove them" if not confirm else "")
+            + ". This is retention, not secure deletion: the bytes are unlinked, which is not "
+              "the same as unrecoverable."),
+    }
 
 async def persist_result(session_id, stage_id, result):
     await execute("UPDATE integration_stages SET status=?, reason=?, result=?, finished_at=CURRENT_TIMESTAMP WHERE id=?",

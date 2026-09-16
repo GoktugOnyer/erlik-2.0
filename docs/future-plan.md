@@ -666,6 +666,35 @@ causes an explicit incomplete outcome; telemetry cannot contain credentials or
 captured response bodies by default. Retention never silently deletes evidence
 needed by an active assessment.
 
+**Retention exists, and the metadata question is answered.** `persistence.expire_evidence`
+removes evidence BYTES past a retention age and keeps the row that describes them: id,
+session, stage, kind, sha256, size and the date it went. That is what "define which metadata
+survives evidence expiry" resolves to — enough for a later reader to know what was there and
+that its digest was recorded.
+
+**The defect it closes is that an expiry and a fault read identically.** `evidence_bytes`
+raised one `EvidenceIntegrityError` for a missing artifact, so a store that LOST something and
+a store that expired something on purpose were the same event to every reader — and they need
+opposite responses: one is a fault to investigate, the other a decision somebody made.
+`EvidenceExpired` is a SUBCLASS, so every existing handler keeps working and nothing starts
+treating an expiry as readable, and `finding_bundle` files the two apart with the digest
+retained for the expired one.
+
+"Retention never silently deletes evidence needed by an active assessment" is the first rule
+and is tested for each of `queued`, `running` and `needs_auth`. The active set is NOT the
+complement of `FINISHED_STAGE_STATUSES`: `partial` and `failed` assessments are finished,
+however unhappily, and holding their evidence for ever would be a different defect. Nothing is
+removed without `confirm`, and one already-missing file does not leave the rest of the sweep
+undone — the lesson `service.release` learned about collectors, applied to a filesystem.
+
+WHAT IT DOES NOT CLAIM: it is not secure deletion. The bytes are unlinked, which returns them
+to the filesystem and not to nobody; on a journalled or copy-on-write volume, or with a
+snapshot behind it, they may persist. The entry asks for a secure deletion POLICY and this is a
+retention mechanism — the summary says so rather than letting a reader assume otherwise.
+
+STILL OPEN in this entry: disk limits and the explicit incomplete outcome on a disk-full
+event, encrypted backups and a tested restore procedure, and the operational telemetry.
+
 ## 8. R4: bounded AI investigation
 
 ### E-020: consolidate execution and audit policy

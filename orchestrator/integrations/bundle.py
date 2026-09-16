@@ -32,7 +32,7 @@ import zipfile
 from pathlib import Path
 
 from . import persistence as db
-from .persistence import EvidenceIntegrityError
+from .persistence import EvidenceExpired, EvidenceIntegrityError
 from .security import SecretStore
 
 # Identity fields a bundle may carry. Everything absent from this set — `headers`, `cookies`,
@@ -82,11 +82,22 @@ async def _artifacts(session_id, wanted) -> tuple[list, list]:
         row = dict(rows[0])
         try:
             content = (await db.evidence_bytes(evidence_id)).decode("utf-8", "replace")
+        except EvidenceExpired as exc:
+            # A DECISION, NOT A FAULT. E-019 keeps the row when retention removes the bytes,
+            # and a bundle that filed this next to a corrupted artifact would send a reader
+            # looking for a failure that did not happen. The digest is still here, so what
+            # the finding rested on remains identifiable even though it can no longer be
+            # read.
+            unreadable.append({"evidence_id": evidence_id, "kind": row["kind"],
+                               "expired": True, "sha256": row["sha256"], "size": row["size"],
+                               "reason": str(exc)})
+            continue
         except (EvidenceIntegrityError, KeyError) as exc:
             # DETECTABLE, which the acceptance asks for by name. A bundle that silently
             # omitted a failed artifact would read as a finding with less evidence rather
             # than as evidence that changed underneath it.
             unreadable.append({"evidence_id": evidence_id, "kind": row["kind"],
+                               "expired": False,
                                "reason": f"{type(exc).__name__}: {exc}"})
             continue
         cited.append({**row, "content": content})
@@ -166,6 +177,10 @@ async def finding_bundle(session_id, fingerprint) -> dict:
             f"the digest recorded when it was written"
             + (f"; {len(unreadable)} cited artifact(s) could NOT be read and the claim rests "
                f"on less than it says" if unreadable else "")
+            + (f" — {sum(1 for e in unreadable if e.get('expired'))} of them because "
+               f"retention removed the bytes, which is a decision rather than a fault, and "
+               f"their digests are retained"
+               if any(e.get("expired") for e in unreadable) else "")
             + ". Credentials are absent by construction: this carries the operator's "
               "declarations, not the material an arm authenticates with."),
     }
