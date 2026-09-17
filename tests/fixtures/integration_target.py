@@ -29,7 +29,14 @@ class Handler(BaseHTTPRequestHandler):
                                "paths": {"/bug": {"get": {"operationId": "bug", "parameters": [{"in": "query", "name": "q", "schema": {"type": "string"}}],
                                     "responses": {"200": {"description": "OK"}}}},
                                          "/private": {"get": {"operationId": "private", "responses": {"200": {"description": "OK"}}}},
-                                         "/items": {"post": {"operationId": "createItem", "responses": {"201": {"description": "Created"}}}}}})
+                                         "/items": {"post": {"operationId": "createItem", "responses": {"201": {"description": "Created"}}}},
+                                         # NEVER selected by any workflow, and that is its whole job.
+                                         # Before it existed the schema declared exactly ONE mutation,
+                                         # `createItem`, which every workflow test also selected — so
+                                         # "unselected mutations never execute" was asserted against a
+                                         # schema with no unselected mutation in it. The assertion could
+                                         # not fail, which is not the same as passing.
+                                         "/admin/promote": {"post": {"operationId": "promoteUser", "responses": {"200": {"description": "OK"}}}}}})
         elif path == "/bug":
             status, body = 500, "seeded server failure"
         elif path == "/app.js":

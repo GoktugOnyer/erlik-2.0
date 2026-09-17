@@ -338,6 +338,21 @@ async def test_workflow_selection_and_cleanup_failure(lab):
     assert "/setup" in mutations and "/cleanup-fail" in mutations and "/items" in mutations
     assert set(mutations) <= {"/setup", "/items", "/cleanup-fail"}
 
+    # THE NEGATIVE CONTROL, and the reason the fixture declares a second mutation. Until it
+    # did, the schema's only mutation was `createItem` — which this workflow SELECTS — so the
+    # subset assertion above had no unselected mutation to exclude and could not have failed.
+    # It was reporting exclusion without ever exercising it.
+    schema = json.loads((await docker("exec", lab["names"][0], "python", "-c",
+        "import urllib.request;print(urllib.request.urlopen('http://127.0.0.1:8080/openapi.json').read().decode())"))[1])
+    declared = {definition["operationId"]
+                for operations in schema["paths"].values()
+                for method, definition in operations.items() if method != "get"}
+    assert declared >= {"createItem", "promoteUser"}, (
+        f"the fixture declares {declared}; with only the selected mutation in the schema this "
+        f"test cannot show that an UNSELECTED one is refused")
+    assert "/admin/promote" not in mutations, (
+        "an unselected mutation reached the target")
+
 
 @pytest.mark.asyncio
 async def test_graphql_query_allowed_mutation_refused(lab):

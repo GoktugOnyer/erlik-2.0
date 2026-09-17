@@ -534,6 +534,36 @@ to three values showed the OLD form would have PASSED while the with-schema path
 the guard checked only one path, so it would have missed the exact defect it was written for.
 It now compares the two paths to each other.
 
+**"Unselected mutations never execute" was asserted against a schema that could not violate it
+— NOW DEMONSTRATED.** The enforcement was real and in two places: `AssessmentConfig` refuses
+`state_changing` without operations, fixtures and cleanup, so "mutations on, nothing selected"
+is not a configuration that can be built; and `EgressPolicy` refuses any non-GET/HEAD/OPTIONS
+request that matches no permitted route, with the reason "operation not selected".
+
+WHAT WAS MISSING WAS THE DEMONSTRATION. The container fixture's OpenAPI document declared
+exactly ONE mutation, `createItem`, and `test_workflow_selection_and_cleanup_failure` — the
+test that looks like the acceptance — SELECTS it and then asserts the target saw no mutation
+outside the selected set. With no unselected mutation in the schema there was nothing to
+exclude and the assertion could not have failed. It reported exclusion without exercising it,
+which is the clause-that-cannot-fire shape rather than a missing feature.
+
+The fixture now declares `promoteUser` (POST /admin/promote) which no workflow selects, and the
+container test asserts it never reached the target. Measured: it does not.
+
+THE REFUSAL HAD A NAME AND NOTHING USED IT. No test in the suite mentioned "operation not
+selected", so a refusal arriving for a different reason — scope, port, an excluded path,
+state-changing disabled — was indistinguishable from this one, and a selection rule that
+stopped working while another rule happened to catch the same request would have looked
+identical. Nine policy-level cases now assert the reason, including that state-changing-disabled
+answers with ITS reason rather than this one, and that swapping which operation is selected
+swaps which URL is refused — the decision follows the workflow, not the path.
+
+A GUARD ON THE GUARD. `test_the_container_fixture_declares_a_mutation_no_workflow_selects`
+fails if `promoteUser` is removed, because without it the container test silently returns to
+the vacuous state this increment found it in and nothing else would say so. Ablated: it does.
+
+STILL OPEN in this entry: schema version diffs, and required fixture data.
+
 ### E-013: business-logic and concurrency testing
 
 Extend the existing race-condition case with application-specific invariants:
