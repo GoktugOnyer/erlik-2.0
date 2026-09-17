@@ -13,7 +13,8 @@ from orchestrator import llm_client
 from orchestrator import credentials as _CRED
 from orchestrator.testcase.schema import TestCase, TestStep, Evaluator
 from orchestrator.testcase.scope import Scope, ScopeViolation, check_command, from_target
-from orchestrator.tool_executor import _safe_mode_violation, execute_tool
+from orchestrator.tool_executor import (_safe_mode_violation, execute_tool,
+                                        write_confinement_violation)
 from orchestrator.testcase.schema import endpoint_of
 from urllib.parse import unquote_plus, urlsplit
 
@@ -1115,6 +1116,17 @@ async def run_test_case(
             # It is deliberately redundant for the legacy lane, where `execute_tool` refuses
             # the same commands again — a second gate that never fires is the point of a
             # floor, and the reason text says which gate spoke.
+            # AND WHERE IT MAY WRITE, on the same floor and for the same reason: a caller
+            # that brought its own executor reaches neither gate inside `execute_tool`.
+            # Unlike safe mode this is NOT overridable by authorising destructive testing —
+            # that authorises acting on the target, not on the operator's filesystem.
+            write_reason = write_confinement_violation(cmd)
+            if write_reason:
+                result.steps.append(StepResult(
+                    step=step.name, command=cmd, success=False, output="",
+                    duration_ms=0, skipped=True,
+                    error=f"WRITE_CONFINEMENT: {write_reason}"))
+                continue
             safe_reason = _safe_mode_violation(cmd)
             if safe_reason:
                 result.steps.append(StepResult(

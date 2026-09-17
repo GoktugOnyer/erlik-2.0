@@ -766,6 +766,37 @@ command line can, and this one does not pretend to — there is a test asserting
 stops the direct shape, which is the one an instruction injected through a target's response
 would produce.
 
+**A tool may now write only where erlik is allowed to write** — the complement of the read
+side. A command can put bytes on the ORCHESTRATOR as easily as take them off it: `curl -o
+~/.ssh/authorized_keys`, `nmap -oN /etc/cron.d/x`, `... > ~/.erlik/secrets/a.json`. That host
+holds the secret store, other engagements' evidence and the operator's own files.
+
+NOT A SAFE-MODE RULE, and that is the load-bearing decision. Safe mode answers "does this
+engagement authorise destructive testing OF THE TARGET", and `ERLIK_SAFE_MODE=0` says yes.
+Writing to the operator's disk is a different authorisation, so collapsing them would mean an
+authorised destructive engagement silently unlocked the filesystem. The floor holds either
+way, and there is a test that says so.
+
+THE ROOTS COME FROM WHAT REAL RUNS DO. Measured over 1630 recorded commands: 14 (0.9%) write
+anything, and every target is under /tmp or a bare relative name landing in the working
+directory. Those two plus the data directory are the roots; `ERLIK_WRITE_ROOTS` extends them.
+`curl -O` is refused outright because the TARGET names the file, and no recorded command uses
+it.
+
+**The rule was wrong three times and each corpus caught a different one.** A case-insensitive
+flag match read every `-d` (curl's data) as `-D` (its dump-header) and called 17.9% of commands
+writers. `-w` was included as "write-out" when it is a WORDLIST for ffuf, gobuster and hydra
+and a stdout FORMAT STRING for curl. And `-o /dev/null` — the standard way to discard a body
+while keeping headers, used by five steps of the shipped `WSTG-CLNT-04` — was refused until the
+catalogue sweep found it. The recorded corpus covers the agent lane and the catalogue sweep
+covers the deterministic one; both are now tests.
+
+The idea came from reading xalgorix's `Path_Policy`, which confines writes to its data
+directory, `~/.xalgorix/` and `/tmp` and counts the rejections. This is a reimplementation from
+that documented behaviour rather than a port — they are Go and Apache-2.0, erlik is Python and
+MIT, so nothing was copied and no attribution obligation attaches. Their rejection COUNTER is a
+separate idea and is not done here; it belongs with E-019's telemetry.
+
 STILL OPEN in this entry: the refactor itself, the cancellation/credential/audit halves of the
 acceptance, and "policy decisions are visible in the action log".
 

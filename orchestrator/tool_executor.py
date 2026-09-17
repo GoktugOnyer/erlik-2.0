@@ -4,6 +4,7 @@ import asyncio
 import fnmatch
 import ipaddress
 import os
+from pathlib import Path
 import re
 import shlex
 import shutil
@@ -540,6 +541,105 @@ _SAFE_MODE_RULES: list[tuple[str, "callable", str]] = [
 ]
 
 
+# WHERE A TOOL MAY WRITE ON THIS MACHINE.
+#
+# The complement of `_http_local_file_read`, which closed the read side: a command can also
+# put bytes somewhere on the ORCHESTRATOR — the host that holds the secret store, other
+# engagements' evidence and the operator's own dotfiles. `curl -o ~/.ssh/authorized_keys`,
+# `nmap -oN /etc/cron.d/x`, `... > ~/.erlik/secrets/a.json`.
+#
+# NOT A SAFE-MODE RULE, deliberately. Safe mode asks whether this engagement authorises
+# DESTRUCTIVE TESTING OF THE TARGET, and `ERLIK_SAFE_MODE=0` says it does. That is a different
+# authorisation from "erlik may write anywhere on the operator's disk", and collapsing the two
+# would mean an authorised destructive engagement silently unlocked the operator's filesystem.
+# This floor holds either way.
+#
+# THE ROOTS COME FROM WHAT REAL RUNS DO. Measured over 1630 recorded commands: 14 (0.9%) write
+# anything, and every target is either under /tmp or a bare relative name that lands in the
+# working directory — `nmap_results.txt`, `ffuf_results.json`, `output.txt`. Nothing writes to
+# an absolute path outside /tmp. So those two, plus the configured data directory, are the
+# roots; `ERLIK_WRITE_ROOTS` extends them for an operator whose tooling needs elsewhere.
+DEFAULT_WRITE_ROOTS = ("/tmp",)
+
+# Writes that go NOWHERE. `-o /dev/null` is the standard way to discard a response body while
+# keeping the headers, and five steps of the shipped `WSTG-CLNT-04` use exactly that shape —
+# which is how the first version of this rule broke a working case. The null and standard
+# streams are named explicitly rather than allowing `/dev/`, because `/dev/sda` is also under
+# `/dev/`.
+NULL_DEVICES = ("/dev/null", "/dev/stdout", "/dev/stderr")
+
+# `>`/`>>` at a command boundary followed by a path. NOT `</script>` in an XSS payload, which
+# is preceded by `/`, and not `jwt_tool <token>`, which is the other bracket. Measured: 74 of
+# 1630 recorded commands contain a `>` and only 14 are redirects.
+_REDIRECT = re.compile(r"(?:^|[\s;&|)])>>?\s*['\"]?([^\s;&|<>'\"]+)")
+# CASE-SENSITIVE, because `-D` is curl's dump-header and `-d` is its data. A case-insensitive
+# version of this matched every `-d` in the corpus and called 17.9% of commands writers.
+#
+# `-w` is deliberately absent: it is a WORDLIST for ffuf, gobuster and hydra, and a stdout
+# FORMAT STRING for curl. Neither names a file erlik writes.
+_WRITE_FLAG = re.compile(
+    r"(?:^|\s)(?:-o|--output|--output-dir|-D|--dump-header|--trace|--trace-ascii"
+    r"|-oN|-oX|-oG|-oA|-oS)[=\s]+['\"]?([^\s;&|'\"]+)")
+_TEE = re.compile(r"\btee\b(?:\s+-a)?\s+['\"]?([^\s;&|'\"]+)")
+# `curl -O` names the file from the REMOTE url's last segment, so the target chooses what
+# appears in the working directory — `nmap_results.txt`, say, over the top of a real one. No
+# recorded command uses it, so refusing costs nothing measurable.
+_REMOTE_NAMED = re.compile(r"(?:^|\s)(?:-O|--remote-name)(?:\s|$)")
+
+
+def write_roots() -> tuple[str, ...]:
+    """Directories a tool may write into, resolved."""
+    configured = [part for part in
+                  (os.environ.get("ERLIK_WRITE_ROOTS") or "").split(os.pathsep) if part.strip()]
+    roots = [*DEFAULT_WRITE_ROOTS, *configured, os.getcwd()]
+    data = os.environ.get("ERLIK_INTEGRATION_DATA")
+    if data:
+        roots.append(data)
+    resolved = []
+    for root in roots:
+        try:
+            resolved.append(str(Path(root).resolve()))
+        except OSError:
+            continue
+    return tuple(dict.fromkeys(resolved))
+
+
+def write_targets(command: str) -> list[str]:
+    """Paths this command would write to, as written."""
+    found = []
+    for pattern in (_REDIRECT, _WRITE_FLAG, _TEE):
+        found += [t for t in pattern.findall(command) if not t.startswith("-")]
+    return found
+
+
+def write_confinement_violation(command: str) -> str | None:
+    """A reason if this command writes outside the permitted roots. None otherwise.
+
+    Relative paths are resolved against the working directory and must stay under it, so
+    `> ../../.bashrc` is refused while `-oN nmap_results.txt` is not.
+    """
+    if _REMOTE_NAMED.search(command):
+        return ("`-O`/`--remote-name` lets the TARGET choose the filename written into the "
+                "working directory. Name the file yourself with `-o`.")
+    roots = write_roots()
+    for target in write_targets(command):
+        if target in NULL_DEVICES:
+            continue
+        try:
+            resolved = Path(target).expanduser()
+            resolved = (resolved if resolved.is_absolute()
+                        else Path(os.getcwd()) / resolved).resolve()
+        except (OSError, RuntimeError):
+            return f"the write target {target!r} could not be resolved to a path"
+        if not any(resolved == Path(root) or Path(root) in resolved.parents
+                   for root in roots):
+            return (f"this command writes to {resolved}, which is outside the directories "
+                    f"erlik may write to ({', '.join(roots)}). The orchestrator holds the "
+                    f"secret store, other engagements' evidence and the operator's own "
+                    f"files; a scan writes to its working directory or /tmp. Extend "
+                    f"ERLIK_WRITE_ROOTS if this is deliberate.")
+    return None
+
 def _safe_mode_enabled() -> bool:
     return os.environ.get("ERLIK_SAFE_MODE", "1").strip().lower() not in ("0", "false", "no", "off")
 
@@ -979,6 +1079,14 @@ async def execute_tool(command: str, enabled_tools: list[str], no_timeout: bool 
     if safe_err:
         return {"success": False, "output": "", "tool": tool_name, "duration_ms": 0,
                 "error": f"SAFE_MODE: {safe_err}", "executed": False, "denied": True}
+
+    # WHERE IT MAY WRITE, which safe mode does not decide. `ERLIK_SAFE_MODE=0` says this
+    # engagement authorises destructive testing OF THE TARGET; it says nothing about erlik
+    # writing to the operator's own disk, so this is checked whether or not safe mode is on.
+    write_err = write_confinement_violation(sanitized)
+    if write_err:
+        return {"success": False, "output": "", "tool": tool_name, "duration_ms": 0,
+                "error": f"WRITE_CONFINEMENT: {write_err}", "executed": False, "denied": True}
 
     # Check container is running
     if not await check_container_running():
