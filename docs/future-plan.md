@@ -876,6 +876,25 @@ same function reads a few lines below. A test has asserted cross-arm closure sin
 landed; only the paragraph was left behind, telling a reader the product cannot do something it
 does.
 
+**The report says what the run did not reach — done.** `service.report` already argues the
+principle in its own comment, about triage: a reader seeing a count of N had no way to know M
+more had been triaged away, and "a report listing only what remains reads as a clean bill of
+health for everything it omits". It then applied it to triage only. `coverage` answers the same
+question one layer down and the report never asked.
+
+The measured cost is the run this lane is calibrated against. On 2026-09-10, 156 of 208
+injection-case steps received ZERO bytes and the stage reported `completed` with no findings. A
+report of that run and a report of a thorough one were the same document: findings, triage,
+synchronization, and nothing about what was never touched. `/sessions/{id}/coverage` has
+carried the answer all along, and a client reading the report is not calling the API.
+
+`known_pairs`, `reached`, `not_reached` and the per-state counts now sit beside the findings,
+with the caveat COPIED VERBATIM from the coverage route rather than reworded — two wordings of
+one caveat is how one of them gets weaker. A run that reached NOTHING says so in words rather
+than leaving it to be derived from `reached == 0`, because the reader most likely to miss it is
+the one skimming a findings count. "Nothing known" is kept distinct from "nothing reached": a
+run that discovered no surface has a different problem and this clause says nothing about it.
+
 ### E-018: remediation workflow and exports
 
 Finish the existing DefectDojo mapping/reconciliation UX and add remediation

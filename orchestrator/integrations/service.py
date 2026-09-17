@@ -938,9 +938,46 @@ async def report(session_id):
         state = finding.get("triage_state", "open")
         triage[state] = triage.get(state, 0) + 1
     from .defectdojo import synchronization
+    from .inventory import COVERAGE_STATES, REACHED_STATES, coverage
+
+    # AND WHAT THE RUN DID NOT REACH, which this report also used to leave out silently.
+    # The comment above says the shape exactly — "a report listing only what remains reads
+    # as a clean bill of health for everything it omits" — and then said it about triage
+    # only. `coverage` answers the same question one layer down and the report never asked.
+    #
+    # The measured cost is the run this whole lane is calibrated against: on 2026-09-10,
+    # 156 of 208 injection-case steps received ZERO bytes and the stage reported `completed`
+    # with no findings. A report of that run and a report of a thorough one were the same
+    # document. `/sessions/{id}/coverage` has carried the answer all along; a client reading
+    # the report is not calling the API.
+    pairs = await coverage(session_id)
+    states = {state: 0 for state in COVERAGE_STATES}
+    for row in pairs:
+        states[row["state"]] = states.get(row["state"], 0) + 1
+    reached = sum(states.get(state, 0) for state in REACHED_STATES)
 
     return {"engagement": {"session_id": session_id, "target": assessment[0]["target"], "status": assessment[0]["status"]},
             "statistics": {"findings": len(findings)},
+            "coverage": {
+                "known_pairs": len(pairs),
+                "reached": reached,
+                "not_reached": len(pairs) - reached,
+                "states": states,
+                # VERBATIM from the coverage route, because two wordings of one caveat is
+                # how one of them gets weaker. A caller adding `answered` to `verified` and
+                # calling the total "tested" has made the claim this refuses to make.
+                "establishes": ("`verified` means a finding came out of the probe. "
+                                "`answered` means bytes came back and nothing matched, "
+                                "which is not proof the check exercised the application "
+                                "— a probe refused for want of a token still answers. No "
+                                "state means `tested`."),
+                # Said outright rather than left to be computed from two numbers: a run
+                # that reached nothing produced its findings from nothing, and the reader
+                # most likely to miss that is the one skimming a findings count.
+                "warning": (None if reached or not pairs else
+                            "this assessment reached NONE of the operations it knows "
+                            "about, so an empty or short findings list below is untested "
+                            "coverage rather than a clean result")},
             # LOCAL triage, kept apart from the remote state below. E-018 asks a report to
             # separate them because they answer different questions: what erlik was told,
             # and what the client's tracker was told.
