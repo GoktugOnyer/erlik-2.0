@@ -253,7 +253,56 @@ async def expire_evidence(older_than_days: int, *, confirm: bool = False) -> dic
               "the same as unrecoverable."),
     }
 
+async def _unstored_citations(session_id, findings) -> list[dict]:
+    """Findings citing evidence ids no row describes.
+
+    E-019 asks that "a disk-full event causes an explicit incomplete outcome". `evidence`
+    writes the FILE before the ROW, so a write that fails leaves neither — which is the safe
+    order and means a caller never gets an id for bytes that are not there. What was missing
+    is the check one level up: nothing verified that a finding's `evidence_ids` name anything,
+    so a finding whose proof was never stored persisted exactly like one whose proof was.
+
+    THE FINDING IS STILL KEPT. It may be perfectly real — the evidence write is the thing that
+    failed, not the detection — and dropping it would turn a storage fault into a lost
+    vulnerability, which is the worse of the two errors by a long way. What changes is that
+    the loss is recorded where a reader meets it.
+
+    AN EXPIRED ARTIFACT IS NOT THIS. Retention keeps the row and removes only the bytes, so a
+    cited id still resolves here and `evidence_bytes` reports the expiry itself — see
+    `EvidenceExpired`. This is for a citation that names nothing at all.
+    """
+    cited = {evidence_id for finding in findings
+             for evidence_id in (finding.evidence_ids or [])}
+    if not cited:
+        return []
+    placeholders = ",".join("?" * len(cited))
+    known = {row["id"] for row in await rows(
+        f"SELECT id FROM integration_evidence WHERE id IN ({placeholders})", tuple(cited))}
+    missing = cited - known
+    return [{"type": "finding_evidence_not_stored", "fingerprint": finding.fingerprint,
+             "url": finding.url,
+             "evidence_ids": sorted(set(finding.evidence_ids or []) & missing),
+             "reason": ("this finding cites evidence that was never stored — the most likely "
+                        "cause is a failed write, a full disk among them. The finding is "
+                        "kept because the detection is not what failed, but its proof cannot "
+                        "be produced and it must not be read as evidenced")}
+            for finding in findings
+            if set(finding.evidence_ids or []) & missing]
+
 async def persist_result(session_id, stage_id, result):
+    # BEFORE the row is written, so the observation travels with the result rather than being
+    # a correction to it. A finding citing evidence nothing stored is an incomplete outcome,
+    # and E-019 asks for those to be explicit — see `_unstored_citations`.
+    unstored = await _unstored_citations(session_id, result.findings)
+    if unstored:
+        result.observations.extend(unstored)
+        if result.status == "completed":
+            # `partial`, because the stage did its work and could not store all of what it
+            # rests on. Left alone when the stage already says something more specific.
+            result.status = "partial"
+            result.reason = (result.reason or
+                             f"{len(unstored)} finding(s) cite evidence that was never "
+                             f"stored; check free disk space and see the observations")
     await execute("UPDATE integration_stages SET status=?, reason=?, result=?, finished_at=CURRENT_TIMESTAMP WHERE id=?",
                   (result.status, result.reason, result.model_dump_json(), stage_id))
     for endpoint in result.endpoints:

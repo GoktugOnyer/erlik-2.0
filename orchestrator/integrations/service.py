@@ -3,13 +3,15 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 import re
 import time
+import shutil
 import uuid
 from urllib.parse import urlsplit
 from .contracts import (FINISHED_STAGE_STATUSES, AssessmentConfig, Identity, StageResult,
                         canonical_origin)
-from .security import SecretStore, redact
+from .security import SecretStore, redact, runtime_root
 from .runtime import Sandbox, availability, recover_orphans, JobOutput
 from .adapters import ADAPTERS, Context, load_openapi_document, rpc, record
 from .interactsh import Collector
@@ -17,7 +19,59 @@ from . import persistence as db
 from orchestrator.testcase.scope import check_url
 
 
+# A floor below which an assessment is refused rather than started. E-019 asks that a
+# disk-full event cause an explicit incomplete outcome; refusing up front is the most explicit
+# outcome there is, and the alternative — finding out mid-run — costs the containers, the
+# operator's time and, in the worst case, a finding whose evidence could not be written.
+#
+# 512 MiB because an assessment stores every arm's captures and a real three-arm Juice Shop
+# run wrote tens of megabytes; this is a floor that a machine about to fail will already be
+# under, not an estimate of what a run needs. Override with ERLIK_MIN_FREE_BYTES — a number
+# an operator can lower for a small engagement, and one this refuses to read as zero by
+# accident, because a floor of nothing is no floor.
+DEFAULT_MIN_FREE_BYTES = 512 * 1024 * 1024
+
+
+def free_space_floor() -> int:
+    raw = (os.environ.get("ERLIK_MIN_FREE_BYTES") or "").strip()
+    if not raw:
+        return DEFAULT_MIN_FREE_BYTES
+    try:
+        value = int(raw)
+    except ValueError:
+        return DEFAULT_MIN_FREE_BYTES
+    return max(0, value)
+
+
+def check_free_space() -> None:
+    """Refuse to start an assessment that the disk cannot hold the evidence for.
+
+    Raises `ValueError` with the numbers, because "not enough disk" without them is a message
+    an operator cannot act on: they need to know how much is free and how much was wanted.
+
+    IT DOES NOT PROMISE THE RUN FITS. Nothing can — the size of an assessment's evidence
+    depends on the target. This refuses the case that is knowably doomed and says nothing
+    about the rest; `persist_result` reports a citation whose evidence was never stored, which
+    is what catches the run that fills the disk while it is going.
+    """
+    floor = free_space_floor()
+    if floor <= 0:
+        return
+    root = runtime_root()
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    free = shutil.disk_usage(root).free
+    if free < floor:
+        raise ValueError(
+            f"refusing to start: {free} byte(s) free on the evidence volume at {root}, "
+            f"below the {floor}-byte floor. An assessment stores every arm's captures, and "
+            f"a run that fills the disk loses the evidence its findings rest on. Free space "
+            f"or lower ERLIK_MIN_FREE_BYTES")
+
 async def preflight(target, config: AssessmentConfig, *, check_images=True):
+    # FIRST, before anything is validated or started. A machine that cannot hold the evidence
+    # cannot run the assessment, and finding that out mid-run costs the containers and the
+    # captures already taken.
+    check_free_space()
     check_url(target, config.scope)
     if urlsplit(target).scheme not in ("http", "https") or urlsplit(target).username:
         raise ValueError("assessment target must be an HTTP(S) URL without credentials")

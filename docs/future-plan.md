@@ -692,8 +692,34 @@ to the filesystem and not to nobody; on a journalled or copy-on-write volume, or
 snapshot behind it, they may persist. The entry asks for a secure deletion POLICY and this is a
 retention mechanism — the summary says so rather than letting a reader assume otherwise.
 
-STILL OPEN in this entry: disk limits and the explicit incomplete outcome on a disk-full
-event, encrypted backups and a tested restore procedure, and the operational telemetry.
+**A disk-full event is an explicit incomplete outcome now, at both ends.**
+
+At the front: `service.check_free_space`, called FIRST in `preflight`, refuses to start an
+assessment on a volume below a floor (512 MiB, `ERLIK_MIN_FREE_BYTES`) and says how much is
+free and what to change. Refusing up front is the most explicit outcome there is, and finding
+out mid-run costs the containers, the operator's time and at worst a finding whose evidence
+could not be written. It does not promise the run fits — nothing can, since evidence size
+depends on the target — and says so.
+
+At the back: `persist_result` verifies that a finding's `evidence_ids` name rows that exist.
+`evidence` writes the FILE before the ROW, so a failed write leaves neither and a caller never
+gets an id for bytes that are not there — the safe order. What was missing was the check one
+level up: nothing verified the citations, so a finding whose proof was never stored persisted
+exactly like one whose proof was. A `completed` stage carrying such a finding becomes `partial`
+with a named reason and a `finding_evidence_not_stored` observation; a stage that already says
+something more specific keeps its own word.
+
+THE FINDING IS KEPT. The detection is not what failed, and dropping it would turn a storage
+fault into a lost vulnerability — much the worse of the two errors. And an EXPIRED citation is
+not this: retention keeps the row and removes only the bytes, so it still resolves here and
+`evidence_bytes` reports the expiry. Asserted, so the two do not collapse into each other from
+either side.
+
+An unusable `ERLIK_MIN_FREE_BYTES` does not silently become no floor; a negative one is read
+as the operator explicitly disabling it.
+
+STILL OPEN in this entry: encrypted backups and a tested restore procedure, and the
+operational telemetry (scanner health, job ownership, stage latency, budget consumption).
 
 ## 8. R4: bounded AI investigation
 

@@ -228,3 +228,179 @@ async def test_a_bundle_still_calls_a_corrupted_artifact_a_fault(lane):
     bundle = await finding_bundle("old", "fp-2")
     assert bundle["evidence_not_readable"][0]["expired"] is False
     assert "retention removed" not in bundle["establishes"]
+
+
+# ------------------------------------ a disk-full event is an explicit incomplete outcome
+
+
+async def test_a_finding_whose_evidence_was_never_stored_makes_the_stage_partial(lane):
+    """E-019: "a disk-full event causes an explicit incomplete outcome."
+
+    `evidence` writes the FILE before the ROW, so a failed write leaves neither and a caller
+    never gets an id for bytes that are not there — the safe order. What was missing is the
+    check one level up: nothing verified that a finding's `evidence_ids` name anything, so a
+    finding whose proof was never stored persisted exactly like one whose proof was.
+    """
+    from orchestrator.integrations.contracts import IntegrationFinding, StageResult
+
+    await session(lane, "s", status="running")
+    stage = uuid.uuid4().hex
+    await lane.execute(
+        "INSERT INTO integration_stages(id,session_id,adapter,identity_id,status) "
+        "VALUES(?,?,?,?,?)", (stage, "s", "testcases", "anonymous", "running"))
+    await lane.persist_result("s", stage, StageResult(status="completed", findings=[
+        IntegrationFinding(fingerprint="fp-1", title="SQLi", url="http://app.test/x",
+                           rule="r", source="testcase", basis="b",
+                           evidence_ids=["never-written"])]))
+    row = dict((await lane.rows(
+        "SELECT status,reason,result FROM integration_stages WHERE id=?", (stage,)))[0])
+    assert row["status"] == "partial", row
+    assert "never stored" in row["reason"], row["reason"]
+    observed = json.loads(row["result"])["observations"]
+    assert observed[0]["type"] == "finding_evidence_not_stored"
+    assert observed[0]["evidence_ids"] == ["never-written"]
+
+
+async def test_the_finding_itself_is_kept(lane):
+    """The detection is not what failed. Dropping the finding would turn a storage fault into
+    a lost vulnerability, which is the worse of the two errors by a long way."""
+    from orchestrator.integrations.contracts import IntegrationFinding, StageResult
+
+    await session(lane, "s", status="running")
+    stage = uuid.uuid4().hex
+    await lane.execute(
+        "INSERT INTO integration_stages(id,session_id,adapter,identity_id,status) "
+        "VALUES(?,?,?,?,?)", (stage, "s", "testcases", "anonymous", "running"))
+    await lane.persist_result("s", stage, StageResult(status="completed", findings=[
+        IntegrationFinding(fingerprint="fp-1", title="SQLi", url="http://app.test/x",
+                           rule="r", source="testcase", basis="b",
+                           evidence_ids=["never-written"])]))
+    assert await lane.rows("SELECT fingerprint FROM integration_findings WHERE session_id='s'")
+
+
+async def test_an_expired_citation_is_not_reported_as_unstored(lane):
+    """Retention keeps the ROW and removes only the bytes, so a cited id still resolves and
+    `evidence_bytes` reports the expiry itself. Conflating the two would undo last
+    increment's distinction from the other side."""
+    from orchestrator.integrations.contracts import IntegrationFinding, StageResult
+
+    await session(lane, "s")
+    evidence_id = await aged(lane, "s", days=400)
+    await expire_evidence(30, confirm=True)
+    stage = uuid.uuid4().hex
+    await lane.execute(
+        "INSERT INTO integration_stages(id,session_id,adapter,identity_id,status) "
+        "VALUES(?,?,?,?,?)", (stage, "s", "testcases", "anonymous", "running"))
+    await lane.persist_result("s", stage, StageResult(status="completed", findings=[
+        IntegrationFinding(fingerprint="fp-1", title="t", url="http://app.test/x", rule="r",
+                           source="testcase", basis="b", evidence_ids=[evidence_id])]))
+    row = dict((await lane.rows(
+        "SELECT status,result FROM integration_stages WHERE id=?", (stage,)))[0])
+    assert row["status"] == "completed", row
+    assert json.loads(row["result"])["observations"] == []
+
+
+async def test_a_stage_with_a_more_specific_status_keeps_it(lane):
+    """Only `completed` is downgraded. A stage that already failed has a better reason than
+    this one, and overwriting it would lose it."""
+    from orchestrator.integrations.contracts import IntegrationFinding, StageResult
+
+    await session(lane, "s", status="running")
+    stage = uuid.uuid4().hex
+    await lane.execute(
+        "INSERT INTO integration_stages(id,session_id,adapter,identity_id,status) "
+        "VALUES(?,?,?,?,?)", (stage, "s", "testcases", "anonymous", "running"))
+    await lane.persist_result("s", stage, StageResult(
+        status="failed", reason="authentication expired during stage",
+        findings=[IntegrationFinding(fingerprint="fp-1", title="t", url="http://app.test/x",
+                                     rule="r", source="testcase", basis="b",
+                                     evidence_ids=["never-written"])]))
+    row = dict((await lane.rows(
+        "SELECT status,reason,result FROM integration_stages WHERE id=?", (stage,)))[0])
+    assert row["status"] == "failed"
+    assert row["reason"] == "authentication expired during stage"
+    assert json.loads(row["result"])["observations"], "the loss was not recorded at all"
+
+
+async def test_a_finding_citing_nothing_is_not_flagged(lane):
+    """Most findings cite nothing. Flagging them would make the signal worthless."""
+    from orchestrator.integrations.contracts import IntegrationFinding, StageResult
+
+    await session(lane, "s", status="running")
+    stage = uuid.uuid4().hex
+    await lane.execute(
+        "INSERT INTO integration_stages(id,session_id,adapter,identity_id,status) "
+        "VALUES(?,?,?,?,?)", (stage, "s", "testcases", "anonymous", "running"))
+    await lane.persist_result("s", stage, StageResult(status="completed", findings=[
+        IntegrationFinding(fingerprint="fp-1", title="t", url="http://app.test/x", rule="r",
+                           source="testcase", basis="b")]))
+    row = dict((await lane.rows(
+        "SELECT status FROM integration_stages WHERE id=?", (stage,)))[0])
+    assert row["status"] == "completed"
+
+
+# ------------------------------------------------------ and the run refuses to start
+
+
+def test_the_preflight_refuses_a_volume_that_cannot_hold_the_evidence(tmp_path, monkeypatch):
+    """The most explicit outcome there is. Finding out mid-run costs the containers, the
+    operator's time and, at worst, a finding whose evidence could not be written."""
+    import shutil as shutil_module
+
+    from orchestrator.integrations import service
+
+    monkeypatch.setenv("ERLIK_INTEGRATION_DATA", str(tmp_path / "runtime"))
+    monkeypatch.setattr(service.shutil, "disk_usage",
+                        lambda path: shutil_module._ntuple_diskusage(100, 99, 1))
+    with pytest.raises(ValueError) as raised:
+        service.check_free_space()
+    message = str(raised.value)
+    assert "refusing to start" in message
+    assert "1 byte(s) free" in message, "the operator is not told how much there is"
+    assert "ERLIK_MIN_FREE_BYTES" in message, "the operator is not told what to change"
+
+
+def test_the_floor_is_configurable(tmp_path, monkeypatch):
+    from orchestrator.integrations import service
+
+    monkeypatch.setenv("ERLIK_INTEGRATION_DATA", str(tmp_path / "runtime"))
+    monkeypatch.setenv("ERLIK_MIN_FREE_BYTES", "1024")
+    assert service.free_space_floor() == 1024
+    service.check_free_space()          # this machine has more than a kilobyte
+
+
+@pytest.mark.parametrize("value", ["", "not-a-number", "-5"])
+def test_an_unusable_floor_setting_does_not_silently_become_no_floor(value, monkeypatch):
+    """A floor of nothing is no floor, and an operator who typos the variable should not
+    quietly lose the guard."""
+    from orchestrator.integrations import service
+
+    monkeypatch.setenv("ERLIK_MIN_FREE_BYTES", value)
+    floor = service.free_space_floor()
+    assert floor == service.DEFAULT_MIN_FREE_BYTES or floor == 0
+    if value == "-5":
+        assert floor == 0, "a negative floor is the operator explicitly disabling it"
+    else:
+        assert floor == service.DEFAULT_MIN_FREE_BYTES, value
+
+
+async def test_the_preflight_is_where_the_check_runs(tmp_path, monkeypatch):
+    """The wiring, not the function. `check_free_space` passing its own tests says nothing
+    about whether anything calls it — and a guard nothing calls is the shape this project
+    keeps removing.
+    """
+    import shutil as shutil_module
+
+    from orchestrator.integrations import service
+    from orchestrator.integrations.contracts import AssessmentConfig
+
+    monkeypatch.setenv("ERLIK_INTEGRATION_DATA", str(tmp_path / "runtime"))
+    config = AssessmentConfig(scope={"allow_hosts": ["app.test"], "allow_ports": [80]})
+    # It passes with space, so the refusal below is about the disk and not the config.
+    await service.preflight("http://app.test/", config, check_images=False)
+
+    monkeypatch.setattr(service.shutil, "disk_usage",
+                        lambda path: shutil_module._ntuple_diskusage(100, 99, 1))
+    with pytest.raises(ValueError) as raised:
+        await service.preflight("http://app.test/", config, check_images=False)
+    assert "refusing to start" in str(raised.value)
