@@ -565,6 +565,72 @@ def schema_diff(baseline, current):
     }
 
 
+def workflow_setup_ok(detail, specs):
+    """Did every required fixture actually establish its data?
+
+    COMPUTED FROM THE RECORDED RESPONSES rather than read from a flag, because the worker
+    runs from the copy baked into the container image and the orchestrator cannot assume the
+    image was rebuilt. Measured: the worker's own `setup_ok` arrived as None against a
+    current lab, so anything depending on it would have been deciding on a default.
+
+    It is not the same question as `error`, which the worker also sets when the SCAN times
+    out. Treating those alike reports a scan that ran and was cut short as one that never
+    started — the opposite instruction to the operator.
+
+    The worker stops at the first fixture that fails its assertion, so a short list is itself
+    a failure: fewer recorded responses than declared specs means one never returned.
+    """
+    recorded = detail.get("fixtures") or []
+    if len(recorded) != len(specs):
+        return False
+    for response, spec in zip(recorded, specs):
+        if response.get("status") != spec.expected_status:
+            return False
+        if spec.body_contains and spec.body_contains not in (response.get("body") or ""):
+            return False
+    return True
+
+
+def workflow_outcome(detail, specs):
+    """The stage status and reason a finished workflow deserves, or None to leave them.
+
+    EXTRACTED from the adapter for the reason `assertion_findings` says in its own docstring:
+    while this lived inside a method that needs schemathesis output and a container, the only
+    thing a test could reach was the container. The decision is a pure function of the
+    worker's report and the declared fixtures, so it is one here.
+
+    THREE OUTCOMES THAT WERE ONE. Measured against the lab, a fixture whose assertion fails
+    stops the worker BEFORE the scan: `exit_code` is None and not one operation is exercised.
+    That reported "partial" — overwriting the "failed" the missing report had already earned,
+    and "partial" is what a run gets when it scanned properly and cleanup left residue. So no
+    coverage at all was reported more reassuringly than a run that worked, under a reason
+    that named both causes and committed to neither.
+
+    They ask the operator for opposite things. No coverage means run it again. Residue means
+    go and look at what was left on the client's system.
+    """
+    setup_ok = workflow_setup_ok(detail, specs)
+    residue = [item for item in detail.get("cleanup") or [] if not item.get("ok")]
+    if not setup_ok:
+        reason = ("the required fixture data could not be established, so the scan never ran "
+                  "and this arm has NO coverage: "
+                  f"{detail.get('error') or 'setup did not complete'}")
+        if residue:
+            reason += (f"; {len(residue)} cleanup request(s) also failed, so check for state "
+                       f"left behind")
+        return "failed", reason
+    if detail.get("error"):
+        # Setup was fine and the SCAN stopped — a timeout, most often. Partial coverage is
+        # not no coverage, and this is the case the first version got wrong by reading the
+        # worker's `error` as though it could only mean the fixtures.
+        return "partial", (f"setup succeeded but the scan did not finish: {detail['error']}; "
+                           f"coverage is incomplete")
+    if residue:
+        return "partial", (f"the scan ran; {len(residue)} cleanup request(s) failed, so state "
+                           f"may be left on the target — inspect before retry")
+    return None
+
+
 class ZapAdapter(BaseAdapter):
     name = "zap"
     required_images = ("proxy", "worker", "zap")
@@ -978,8 +1044,20 @@ class SchemathesisAdapter(BaseAdapter):
         if workflow:
             detail = json.loads(output.stdout)
             result.observations.append({"type": "workflow", **detail})
-            if detail.get("error") or any(not c.get("ok") for c in detail.get("cleanup", [])):
-                result.status, result.reason = "partial", "workflow or cleanup failed; inspect evidence before retry"
+            # THE REQUIRED FIXTURE DATA AND THE CLEANUP ARE DIFFERENT OUTCOMES and were one
+            # status. Measured against the lab: a fixture whose assertion fails stops the
+            # worker BEFORE the scan, so `exit_code` is None and not one operation is
+            # exercised — and this branch then reported "partial", overwriting the "failed"
+            # the missing report had already earned. "Partial" is what a run gets when it
+            # scanned properly and cleanup left residue behind, so no-coverage-at-all was
+            # being reported more reassuringly than it deserved, under a reason naming both
+            # causes and committing to neither.
+            #
+            # They ask the operator for opposite things: no coverage means run it again,
+            # residue means go and look at what was left on the client's system.
+            outcome = workflow_outcome(detail, workflow.fixtures)
+            if outcome:
+                result.status, result.reason = outcome
         arm_findings, arm_observations = await assertion_findings(ctx, sandbox)
         result.findings.extend(arm_findings)
         result.observations.extend(arm_observations)

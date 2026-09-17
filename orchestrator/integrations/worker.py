@@ -22,13 +22,18 @@ def main():
         print(json.dumps(request(config["request"])))
     elif action == "workflow":
         import subprocess
-        result = {"fixtures": [], "cleanup": [], "exit_code": None}
+        # `setup_ok` is a SEPARATE question from `error`, which is also set when the scan
+        # itself times out or the subprocess dies. Only this says whether the required
+        # fixture data was actually in place, and the two have opposite meanings for a
+        # reader: a scan that never started has no coverage, a scan that timed out has some.
+        result = {"fixtures": [], "cleanup": [], "exit_code": None, "setup_ok": False}
         try:
             for spec in config["fixtures"]:
                 response = request(spec)
                 result["fixtures"].append(response)
                 if response["status"] != spec["expected_status"] or (spec.get("body_contains") and spec["body_contains"] not in response["body"]):
                     raise RuntimeError("fixture assertion failed")
+            result["setup_ok"] = True
             process = subprocess.run(config["argv"], capture_output=True, text=True, timeout=config["scan_seconds"])
             result.update(exit_code=process.returncode, stdout=process.stdout, stderr=process.stderr)
         except Exception as exc:

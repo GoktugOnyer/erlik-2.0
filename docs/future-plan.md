@@ -588,7 +588,37 @@ inventory, where an empty added/removed pair means "not recorded" rather than "n
 changed". Reporting the second would be this entry's own defect in new clothes, so the
 comparison says what it cannot show. Ablated: the clause fires.
 
-STILL OPEN in this entry: required fixture data.
+**Required fixture data — done, and the defect was in what a missing setup REPORTED.** The
+worker already refused to scan without it: a fixture whose assertion fails raises before
+`subprocess.run`, so the scan never starts. Measured against the lab, four combinations:
+
+    setup ok,   cleanup ok      completed   1 operation exercised
+    setup FAIL, cleanup ok      partial     0 exercised   <-- no coverage, reported as partial
+    setup ok,   cleanup FAIL    partial     1 exercised
+    setup FAIL, cleanup FAIL    partial     0 exercised
+
+The failing-setup rows had `exit_code: None` and not one operation exercised — and the missing
+report had ALREADY set the stage to "failed". The workflow branch ran afterwards and overwrote
+it with "partial", which is what a run earns when it scanned properly and cleanup left residue.
+No coverage at all was reported more reassuringly than a run that worked, under one reason
+naming both causes and committing to neither. They are opposite instructions: no coverage means
+run it again, residue means go and look at what was left on the client's system.
+
+THE FIRST FIX WORKED BY ACCIDENT and is worth recording. It read a `setup_ok` flag added to
+`worker.py` — which arrived as None, because the worker runs from the copy baked into the
+container image and nothing rebuilt it. The fallback was right for the three cases measured and
+would have been WRONG for the fourth: a scan that TIMES OUT sets the same `error` with setup
+perfectly fine, and would have been reported as never having started. `workflow_setup_ok`
+computes the verdict from the fixture responses the existing worker already sends, so it needs
+no image rebuild and a stale flag claiming success cannot override it.
+
+`workflow_outcome` is extracted rather than inline for the reason `assertion_findings` gives in
+its own docstring: while the decision lived inside a method needing schemathesis output and a
+container, the only thing a test could reach was the container. Twelve of the thirteen cases
+now run without Docker; the thirteenth is the end-to-end, because the unit cases take the
+worker's report on trust and the lab is where that report is produced.
+
+E-012 IS CLOSED.
 
 ### E-013: business-logic and concurrency testing
 
