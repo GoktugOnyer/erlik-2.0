@@ -631,6 +631,36 @@ Acceptance: detect one seeded invariant violation and reject a correctly enforce
 control under the same bounded schedule. Confidence records timing variability
 and does not infer impact from response counts alone.
 
+**Both controls exist now, and WSTG-BUSL-04 had never been run against anything.** The case
+ships, `capabilities.CLASSES` claims it for the `logic` attack class, and the only test that
+mentioned it asserted the id exists. Nothing executed it, so neither half of the acceptance had
+been shown.
+
+THE LAB CARRIES A MATCHED PAIR. `/redeem` is check-then-act with a real sleep in the gap;
+`/redeem-safe` does identical work holding a mutex. Measured against the fixture directly
+BEFORE erlik was pointed at it, because a test of a detector against an unverified target
+measures nothing:
+
+    /redeem        8 concurrent -> 8 redeemed, 0 refused
+    /redeem-safe   8 concurrent -> 1 redeemed, 7 refused
+
+The window is a real sleep rather than a hopeful one: a race won one run in five is a flaky
+test, and a flaky NEGATIVE control cannot be told from a working one.
+
+THE NEGATIVE CONTROL PASSED VACUOUSLY FIRST. The initial run never executed the burst —
+`execute_tool` runs commands in the kali-tools container and it was not up — and "no findings"
+is exactly what a working control looks like. Only the POSITIVE control failing exposed it.
+`test_the_control_actually_took_the_same_burst` now asserts the enforced endpoint really
+received the burst and really refused all but one, so the pair cannot both go quiet together.
+
+NOT DOCKER-GATED, and the floors still apply. `run_test_case` checks safe mode and write
+confinement BEFORE it calls an executor — that is what makes them a floor rather than something
+`execute_tool` happens to do — so supplying a local one swaps the transport and not the policy.
+Both controls therefore run everywhere the suite runs, including the network-free CI job.
+
+STILL OPEN in this entry: the other invariants — duplicate submissions, workflow ordering,
+ownership transfer — and "confidence records timing variability", which this does not do.
+
 ### E-014: browser-backed confirmation
 
 Add evidence-based confirmation recipes for existing XSS, CORS, cookie/session,

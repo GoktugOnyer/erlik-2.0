@@ -1,10 +1,31 @@
 """Deliberately flawed local-only HTTP fixture. Never deployed with the product."""
 import json
 import os
+import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit, parse_qs
 
 REQUESTS = []
+
+# TWO SINGLE-USE COUPONS, one of which is wrong on purpose — the seeded invariant violation
+# and the correctly enforced control E-013 asks for, in one fixture so the same bounded
+# schedule hits both. Before these existed the shipped WSTG-BUSL-04 case had never been run
+# against anything: it appears in the capability index and in no test that executes it, so
+# neither "detect one seeded violation" nor "reject a correctly enforced control" had ever
+# been shown.
+#
+# /redeem is CHECK-THEN-ACT with a real gap. The sleep is what makes the race deterministic
+# rather than occasional: a test that wins the race one run in five is a flaky test, and a
+# flaky negative is indistinguishable from a working control.
+#
+# /redeem-safe does the same work holding a lock, so exactly one caller wins however many
+# arrive together. It is the negative control, and without it the case could report a race
+# on every endpoint and still pass.
+COUPON = {"redeem": 1, "safe": 1}
+COUPON_LOCK = threading.Lock()
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *a): pass
     def do_GET(self):
@@ -70,9 +91,39 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         self.rfile.read(int(self.headers.get("Content-Length", 0)))
         REQUESTS.append({"path": self.path, "method": "POST"})
+        if self.path in ("/redeem", "/redeem-safe"):
+            return self._coupon("redeem" if self.path == "/redeem" else "safe",
+                                locked=self.path == "/redeem-safe")
         self.send_response(201 if self.path == "/items" else 500 if self.path == "/cleanup-fail" else 200)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
         self.wfile.write(b'{"data":{"hello":"world"}}')
+
+    def _coupon(self, key, *, locked):
+        """Redeem a single-use coupon, correctly or otherwise.
+
+        The unlocked path reads the remaining count, yields the GIL for long enough that
+        every concurrent caller has read it too, and only then writes. That is the classic
+        check-then-act gap and it is what a race-condition case is supposed to find. The
+        locked path does the identical work inside a mutex and is supposed to defeat it.
+        """
+        if locked:
+            with COUPON_LOCK:
+                won = COUPON[key] > 0
+                if won:
+                    COUPON[key] -= 1
+        else:
+            remaining = COUPON[key]
+            time.sleep(0.15)          # the window, wide enough to be deterministic
+            won = remaining > 0
+            if won:
+                COUPON[key] = remaining - 1
+        body = b'{"status":"REDEEMED"}' if won else b'{"status":"already used"}'
+        self.send_response(200 if won else 409)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
 
 ThreadingHTTPServer(("0.0.0.0", 8080), Handler).serve_forever()
