@@ -896,6 +896,19 @@ async def _configuration_differences(baseline_session, retest_session) -> list[d
             for row in await db.rows(
                 "SELECT result FROM integration_stages WHERE session_id=?", (session_id,))
         } - {None})
+        # The DECLARED inventory alongside the digest, so the comparison can say what
+        # changed rather than only that something did. Merged across stages and de-duplicated
+        # by id: ZAP and Schemathesis both record it from the same document, so the same
+        # operation arrives twice and is one operation.
+        operations = {}
+        for row in await db.rows(
+                "SELECT result FROM integration_stages WHERE session_id=?", (session_id,)):
+            try:
+                metadata = json.loads(row["result"] or "{}").get("metadata") or {}
+            except (ValueError, TypeError):
+                continue
+            for item in metadata.get("declared_operations") or []:
+                operations.setdefault(item["id"], item)
         return {
             "scope": config.get("scope"),
             "test_cases": sorted(config.get("test_cases") or []),
@@ -904,16 +917,45 @@ async def _configuration_differences(baseline_session, retest_session) -> list[d
                 "SELECT DISTINCT identity_id FROM integration_stages WHERE session_id=?",
                 (session_id,))}),
             "schema_sha256": digests,
+            "_operations": [operations[k] for k in sorted(operations)],
         }
 
     first, second = await shape(baseline_session), await shape(retest_session)
     labels = {"scope": "the authorised scope", "test_cases": "the selected catalogue checks",
               "stages": "the selected stages", "arms": "the identities that ran",
               "schema_sha256": "the API schema"}
-    return [{"field": field, "baseline": first[field], "retest": second[field],
-             "why_it_matters": f"{labels[field]} changed between the two assessments, so a "
-                               f"finding can move for a reason that is not a fix"}
-            for field in labels if first[field] != second[field]]
+    changes = [{"field": field, "baseline": first[field], "retest": second[field],
+                "why_it_matters": f"{labels[field]} changed between the two assessments, so a "
+                                  f"finding can move for a reason that is not a fix"}
+               for field in labels if first[field] != second[field]]
+    # WHAT changed, not only that it did. A digest answers "same schema?" and leaves the
+    # operator to diff two documents by hand — which they cannot do at all when the schema
+    # was supplied by URL, because the fetched bytes were never stored.
+    #
+    # The two halves are not the same finding. Operations ADDED are surface the baseline
+    # never assessed. An operation REMOVED is the more interesting one: withdrawn from the
+    # schema, it should now be gone, and if it still answers it is a live endpoint the
+    # documentation no longer admits to.
+    for entry in changes:
+        if entry["field"] != "schema_sha256":
+            continue
+        from orchestrator.integrations.adapters import schema_diff
+
+        difference = schema_diff(first["_operations"], second["_operations"])
+        entry["operations"] = difference
+        if difference["removed"]:
+            entry["why_it_matters"] += (
+                f"; {len(difference['removed'])} operation(s) present at baseline are no "
+                f"longer declared — if any still answers, it is live and undocumented")
+        if difference["added"]:
+            entry["why_it_matters"] += (
+                f"; {len(difference['added'])} operation(s) are new since baseline and were "
+                f"never assessed by it")
+        if not first["_operations"] and not second["_operations"]:
+            entry["why_it_matters"] += (
+                "; no declared inventory was recorded on either side, so what changed "
+                "cannot be shown — only that the digest differs")
+    return changes
 
 def _incompleteness_caveat(unfinished: dict, not_probed: list) -> str:
     """What `establishes` must add when the comparison had blind spots.

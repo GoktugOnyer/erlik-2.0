@@ -562,7 +562,33 @@ A GUARD ON THE GUARD. `test_the_container_fixture_declares_a_mutation_no_workflo
 fails if `promoteUser` is removed, because without it the container test silently returns to
 the vacuous state this increment found it in and nothing else would say so. Ablated: it does.
 
-STILL OPEN in this entry: schema version diffs, and required fixture data.
+**Schema version diffs — done.** `schema_sha256` answers "is this the same schema", and TWO
+places already compared it: the retest comparison and the cross-arm schema fork. Both could
+say only THAT it changed, which leaves the operator to diff two documents by hand — and when
+the schema came from a URL they cannot, because `schema_file` fetches it at run time and
+nothing keeps the bytes. Measured: `integration_assessments.config` stores inline
+`schema_input.content`, so an inline schema survives and a URL-supplied one leaves only a
+digest. The inventory is therefore RECORDED per stage rather than reconstructed later.
+
+NOT `schema_endpoints`, which is GET-only, exists to find query parameters, and skips
+templated paths because a template is not a URL. All three are right for parameter discovery
+and wrong here: `DELETE /items/{id}` is an operation, and an inventory that never held it
+cannot notice it being removed. `declared_operations` uses ONE shape for OpenAPI and GraphQL,
+so the diff does not need to know which kind it is reading.
+
+ADDED AND REMOVED ARE NOT THE SAME FINDING and are not reported as one. Added operations are
+surface the baseline never assessed. A REMOVED operation is the half worth acting on: withdrawn
+from the schema it should be gone, and one that still answers is a live endpoint the
+documentation no longer admits to — a lead rather than a diff line. A parameter added to an
+operation that already existed is a third case, invisible to a set comparison, and it is
+excluded from the `unchanged` count because an operation whose inputs moved is not unchanged.
+
+AND AN ABSENT INVENTORY SAYS SO. Assessments recorded before this existed carry a digest and no
+inventory, where an empty added/removed pair means "not recorded" rather than "nothing
+changed". Reporting the second would be this entry's own defect in new clothes, so the
+comparison says what it cannot show. Ablated: the clause fires.
+
+STILL OPEN in this entry: required fixture data.
 
 ### E-013: business-logic and concurrency testing
 

@@ -498,6 +498,73 @@ def graphql_inventory(operations, state_changing):
     }
 
 
+# The methods an OpenAPI path item may declare. `parameters` and `summary` sit beside them and
+# are not operations.
+OPENAPI_METHODS = ("get", "put", "post", "delete", "options", "head", "patch", "trace")
+
+
+def declared_operations(document=None, graphql=()):
+    """Every operation a schema declares, in ONE shape for both kinds.
+
+    Deliberately not `schema_endpoints`, which is GET-only, exists to find query parameters,
+    and SKIPS templated paths because a template is not a URL. All three are right for
+    parameter discovery and wrong here: `DELETE /items/{id}` is an operation, and an
+    inventory that drops it cannot notice it being removed.
+
+    One shape for OpenAPI and GraphQL so a diff does not need to know which it is reading:
+    an `id` a human can read, and the argument names, which is where a new input shows up on
+    an operation that already existed.
+    """
+    found = []
+    for path, operations in (document or {}).get("paths", {}).items():
+        if not isinstance(operations, dict):
+            continue
+        shared = [item.get("name", "") for item in operations.get("parameters", [])
+                  if isinstance(item, dict)]
+        for method, definition in operations.items():
+            if method.lower() not in OPENAPI_METHODS or not isinstance(definition, dict):
+                continue
+            names = shared + [item.get("name", "") for item in definition.get("parameters", [])
+                              if isinstance(item, dict)]
+            found.append({"id": f"{method.upper()} {path}",
+                          "operation_id": definition.get("operationId"),
+                          "parameters": sorted(n for n in names if n)})
+    for operation in graphql or ():
+        found.append({"id": f"{operation['operation']} {operation['name']}",
+                      "operation_id": operation["name"],
+                      "parameters": list(operation["arguments"])})
+    return sorted(found, key=lambda item: item["id"])
+
+
+def schema_diff(baseline, current):
+    """What changed between two declared inventories — not merely THAT they differ.
+
+    `schema_sha256` already answers "is this the same schema", and two places compare it: the
+    retest comparison and the cross-arm schema fork. Both could say only that it changed,
+    which leaves the operator to diff two documents by hand — and for a schema supplied by
+    URL the document was never kept, so they could not.
+
+    ADDED and REMOVED are not the same finding and are not reported as one. Added operations
+    are surface the baseline never assessed. A REMOVED operation is the more interesting
+    half: if it was withdrawn from the schema but still answers, it is a live endpoint the
+    documentation no longer admits to, which is worth a look rather than a diff line.
+    """
+    before = {item["id"]: item for item in baseline or []}
+    after = {item["id"]: item for item in current or []}
+    gained = []
+    for key in sorted(set(before) & set(after)):
+        new_parameters = sorted(set(after[key]["parameters"]) - set(before[key]["parameters"]))
+        if new_parameters:
+            gained.append({"id": key, "parameters": new_parameters})
+    return {
+        "added": [after[k] for k in sorted(set(after) - set(before))],
+        "removed": [before[k] for k in sorted(set(before) - set(after))],
+        "parameters_added": gained,
+        "unchanged": len(set(before) & set(after)) - len(gained),
+        "changed": bool(set(before) ^ set(after)) or bool(gained),
+    }
+
+
 class ZapAdapter(BaseAdapter):
     name = "zap"
     required_images = ("proxy", "worker", "zap")
@@ -563,6 +630,7 @@ class ZapAdapter(BaseAdapter):
                                plan_sha256=hashlib.sha256(json.dumps(plan, sort_keys=True).encode()).hexdigest())
         if operations:
             result.metadata["graphql"] = graphql_inventory(operations, ctx.config.state_changing)
+        result.metadata["declared_operations"] = declared_operations(document, operations)
         return await record(ctx, sandbox, output, result, accepted_codes=(0, 2))
 
 
@@ -884,6 +952,11 @@ class SchemathesisAdapter(BaseAdapter):
                                "schema_sha256": digest})
         if operations:
             result.metadata["graphql"] = graphql_inventory(operations, ctx.config.state_changing)
+        # RECORDED, not derived later. `schema_sha256` says a schema changed; only the
+        # inventory says WHAT it declared, and for a schema supplied by URL the document is
+        # fetched at run time and never stored — so without this the bytes are gone and no
+        # later diff is possible at all.
+        result.metadata["declared_operations"] = declared_operations(document, operations)
         report = sandbox.output / "results.xml"
         if report.exists():
             for case in ET.fromstring(report.read_text()).iter("testcase"):
