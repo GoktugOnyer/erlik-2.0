@@ -210,16 +210,14 @@ counted from the run's own skip reasons, not apportioned by hand:
 | 1 | needs a live DefectDojo (`ERLIK_DEFECTDOJO_LIVE_TESTS=1`) |
 
 With Docker running and the lab images built, **every one of those container suites
-passes**: `ERLIK_DOCKER_TESTS=1 ERLIK_REAL_INTERACTSH_TESTS=1 pytest` reports **3410
+passes**: `ERLIK_DOCKER_TESTS=1 ERLIK_REAL_INTERACTSH_TESTS=1 pytest` reports **3427
 passed, 1 skipped** — the remaining skip is `test_defectdojo_live.py`, which needs a
-live DefectDojo instance. Measured 2026-09-17 against the local lab, in 9m03s, when the
-suite collected 3411 — that total plus its one skip was the whole of it. The schema-diff work
-has since added 17 tests, none of them gated, and this figure is being re-measured; the
-fresh-clone and developer-tree figures above are the current ones.
+live DefectDojo instance. Measured 2026-09-17 against the local lab, in 9m01s. That
+total plus its one skip is the 3428 the suite collects, so nothing gated is left out.
 
 > **One flake seen, recorded rather than rounded off.**
 > `test_interactsh_completion.py::test_real_interactsh_dns_https_and_testcase_correlation`
-> failed once in seven full gated runs and passed four times out of four on its own and
+> failed once in eight full gated runs and passed four times out of four on its own and
 > within its own file. It drives a real Interactsh container and correlates a live DNS
 > callback, so contention with the other container suites is the likely cause — but that
 > is a hypothesis, not a measurement, and it has not been chased down. If you hit it, run
