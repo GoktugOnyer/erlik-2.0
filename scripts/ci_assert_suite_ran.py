@@ -28,8 +28,8 @@ DEFAULT_FLOOR = 2000
 # runner that has neither. This is the fraction of COLLECTED tests that must
 # actually run, and it is what catches a change that silently skips the suite.
 #
-# Measured on a FRESH CLONE, which is what CI actually checks out: 71 of 3365
-# skip on the first run, which is 2.1%. A developer's tree skips 36 (1.1%), and
+# Measured on a FRESH CLONE, which is what CI actually checks out: 71 of 3384
+# skip on the first run, which is 1.9%. A developer's tree skips 36 (1.1%), and
 # calibrating against that figure would have set this threshold too tight.
 #
 # The 35-test gap is one thing: `data/pentest.db`. `.gitignore` excludes `data/`

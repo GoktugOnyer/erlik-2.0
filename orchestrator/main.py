@@ -6264,6 +6264,22 @@ async def library_class_detail(key: str):
     return d
 
 
+@app.get("/api/library/api-coverage")
+async def library_api_coverage():
+    """Coverage against the OWASP API Security Top 10 2023.
+
+    Separate from the `owasp` field on each class, which is the WEB Top 10 — a different
+    taxonomy, not a renaming. The split that matters: the web list has one Broken Access
+    Control, the API list separates object level (API1) from function level (API5), and
+    erlik runs those as two different checks.
+
+    Reports uncovered categories WITH their reason rather than omitting them, so 8 of 10
+    reads as eight of ten instead of as a complete list of eight.
+    """
+    from orchestrator import capabilities as C
+    return C.api_coverage()
+
+
 @app.get("/api/library/detectors")
 async def library_detectors():
     """Detection rules, and which are exercised by the false-positive cleanroom.

@@ -37,41 +37,71 @@ WSTG_DIR = ROOT / "tests_catalog" / "wstg"
 CLASSES: list[dict] = [
     {"key": "sqli", "label": "SQL Injection", "owasp": "A03:2021 Injection",
      "wstg": ["WSTG-INPV-05", "WSTG-INPV-05.2", "WSTG-INPV-05.3", "WSTG-INPV-05.4"],
+
+     # injection: see API_UNMAPPED_REASON
+     "api": [],
      "detectors": ["sqlmap:_detect_sqlmap", "curl:_curl_sqli_login"]},
     {"key": "xss", "label": "Cross-Site Scripting", "owasp": "A03:2021 Injection",
      "wstg": ["WSTG-INPV-01", "WSTG-CLNT-04"],
+
+     # injection: see API_UNMAPPED_REASON
+     "api": [],
      "detectors": ["xsstrike:_detect_xss_tools", "dalfox:_detect_xss_tools"]},
     {"key": "cmdi", "label": "Command Injection", "owasp": "A03:2021 Injection",
-     "wstg": [], "detectors": ["commix:_detect_commix"]},
+     "wstg": [],
+     # injection: see API_UNMAPPED_REASON
+     "api": [],
+     "detectors": ["commix:_detect_commix"]},
     {"key": "ssti", "label": "Server-Side Template Injection",
-     "owasp": "A03:2021 Injection", "wstg": ["WSTG-INPV-18"], "detectors": []},
+     "owasp": "A03:2021 Injection", "wstg": ["WSTG-INPV-18"],
+     # injection: see API_UNMAPPED_REASON
+     "api": [],
+     "detectors": []},
     {"key": "xxe", "label": "XML External Entity", "owasp": "A05:2021 Misconfiguration",
-     "wstg": ["WSTG-INPV-07"], "detectors": []},
+     "wstg": ["WSTG-INPV-07"],
+     # an XML parser resolving external entities is a parser misconfiguration
+     "api": ["API8:2023"],
+     "detectors": []},
     {"key": "ldap", "label": "LDAP Injection", "owasp": "A03:2021 Injection",
-     "wstg": ["WSTG-INPV-06"], "detectors": []},
+     "wstg": ["WSTG-INPV-06"],
+     # injection: see API_UNMAPPED_REASON
+     "api": [],
+     "detectors": []},
     {"key": "nosql", "label": "NoSQL Injection", "owasp": "A03:2021 Injection",
-     "wstg": ["WSTG-INPV-05.6"], "detectors": []},
+     "wstg": ["WSTG-INPV-05.6"],
+     # injection: see API_UNMAPPED_REASON
+     "api": [],
+     "detectors": []},
     {"key": "authz", "label": "Broken Access Control / IDOR",
      "owasp": "A01:2021 Broken Access Control",
      "wstg": ["WSTG-AUTHZ-04"],
+
+     # THE split: cross_arm_authorization is object level, cross_arm_privileged_function is function level
+     "api": ["API1:2023", "API5:2023"],
      "detectors": ["curl:_curl_api_users_bac", "curl:_curl_idor_basket",
                    "curl:_curl_idor_order"]},
     {"key": "authn", "label": "Authentication Weakness",
      "owasp": "A07:2021 Identification & Authentication Failures",
-     "wstg": ["WSTG-ATHN-01"], "detectors": ["hydra:_detect_hydra"]},
+     "wstg": ["WSTG-ATHN-01"], "api": ["API2:2023"], "detectors": ["hydra:_detect_hydra"]},
     {"key": "jwt", "label": "JWT Weakness",
      "owasp": "A02:2021 Cryptographic Failures",
-     "wstg": ["WSTG-SESS-10"], "detectors": ["jwt_tool:_detect_jwt_tool"]},
+     "wstg": ["WSTG-SESS-10"],
+     # a forgeable or unverified token is broken authentication, whatever the web list files the crypto under
+     "api": ["API2:2023"],
+     "detectors": ["jwt_tool:_detect_jwt_tool"]},
     {"key": "oauth", "label": "OAuth / SSO Flow", "owasp": "A07:2021 Auth Failures",
-     "wstg": ["WSTG-AUTHZ-05"], "detectors": []},
+     "wstg": ["WSTG-AUTHZ-05"], "api": ["API2:2023"], "detectors": []},
     {"key": "csrf", "label": "Cross-Site Request Forgery",
      "owasp": "A01:2021 Broken Access Control",
-     "wstg": ["WSTG-SESS-02"], "detectors": []},
+     "wstg": ["WSTG-SESS-02"],
+     # no API 2023 category. a token-authenticated API is not CSRF-shaped, and claiming API8 for it would overstate
+     "api": [],
+     "detectors": []},
     {"key": "cors", "label": "CORS Misconfiguration",
      "owasp": "A05:2021 Security Misconfiguration",
-     "wstg": ["WSTG-CLNT-07", "WSTG-CLNT-07b"], "detectors": ["curl:_curl_cors"]},
+     "wstg": ["WSTG-CLNT-07", "WSTG-CLNT-07b"], "api": ["API8:2023"], "detectors": ["curl:_curl_cors"]},
     {"key": "ssrf", "label": "Server-Side Request Forgery", "owasp": "A10:2021 SSRF",
-     "wstg": ["WSTG-INPV-19"], "detectors": []},
+     "wstg": ["WSTG-INPV-19"], "api": ["API7:2023"], "detectors": []},
     # WSTG-AUTHZ-01, not WSTG-INPV-15. This class is labelled "Path Traversal
     # / File Inclusion" and its only case was Hop-by-Hop Header Handling — so
     # erlik advertised a path-traversal capability it did not have, and the
@@ -81,28 +111,43 @@ CLASSES: list[dict] = [
     {"key": "path", "label": "Path Traversal / File Inclusion",
      "owasp": "A01:2021 Broken Access Control",
      "wstg": ["WSTG-AUTHZ-01"],
+
+     # traversal reaches FILES, not API objects. claiming API1 would overstate a file read as an object-authorization crossing
+     "api": [],
      "detectors": ["curl:_curl_null_byte"]},
     {"key": "smuggling", "label": "HTTP Splitting / Smuggling",
      "owasp": "A05:2021 Security Misconfiguration",
      "wstg": ["WSTG-INPV-15"],
-     "detectors": []},
+     "api": ["API8:2023"], "detectors": []},
 
     {"key": "upload", "label": "Unrestricted File Upload",
-     "owasp": "A04:2021 Insecure Design", "wstg": ["WSTG-BUSL-09"], "detectors": []},
+     "owasp": "A04:2021 Insecure Design", "wstg": ["WSTG-BUSL-09"],
+     # unrestricted upload is not a misconfiguration and has no 2023 category
+     "api": [],
+     "detectors": []},
     {"key": "deserialize", "label": "Insecure Deserialization",
      "owasp": "A08:2021 Software & Data Integrity", "wstg": ["WSTG-INPV-11"],
+
+     # API10 is about what the target consumes from its upstreams, not about deserializing attacker input
+     "api": [],
      "detectors": []},
     {"key": "logic", "label": "Business Logic Flaw",
      "owasp": "A04:2021 Insecure Design",
-     "wstg": ["WSTG-BUSL-04"], "detectors": ["curl:_curl_forged_feedback"]},
+     "wstg": ["WSTG-BUSL-04"], "api": ["API6:2023"], "detectors": ["curl:_curl_forged_feedback"]},
     {"key": "disclosure", "label": "Information Disclosure",
      "owasp": "A05:2021 Security Misconfiguration",
      "wstg": ["WSTG-ERRH-01", "WSTG-INFO-02", "WSTG-INFO-03", "WSTG-CONF-02"],
+
+     # excessive data exposure is object PROPERTY level
+     "api": ["API3:2023"],
      "detectors": ["curl:_curl_stack_trace", "curl:_curl_server_header",
                    "curl:_curl_exposed_user_data", "nikto:_detect_nikto"]},
     {"key": "recon", "label": "Recon & Content Discovery",
      "owasp": "—",
      "wstg": ["WSTG-CONF-04", "WSTG-CONF-06", "WSTG-CONF-07", "WSTG-CLNT-09"],
+
+     # endpoint and shadow-API discovery is inventory management
+     "api": ["API9:2023"],
      "detectors": ["gobuster:_detect_content_discovery",
                    "ffuf:_detect_content_discovery",
                    "dirb:_detect_content_discovery",
@@ -111,8 +156,59 @@ CLASSES: list[dict] = [
                    "curl:_curl_missing_headers", "curl:_curl_open_redirect",
                    "nuclei:_detect_nuclei", "zap-cli:_detect_zap_cli"]},
     {"key": "injection_generic", "label": "Injection (unclassified)",
-     "owasp": "A03:2021 Injection", "wstg": ["WSTG-INPV-11.2"], "detectors": []},
+     "owasp": "A03:2021 Injection", "wstg": ["WSTG-INPV-11.2"],
+     # injection: see API_UNMAPPED_REASON
+     "api": [],
+     "detectors": []},
 ]
+
+
+# ---------------------------------------------------------------- OWASP API Security
+# E-011's acceptance asks for coverage mapped to "relevant WSTG and API Security
+# categories", and the WSTG half was the only half that existed. `owasp` above is the
+# WEB Top 10 (A01:2021); this is the API Top 10 2023, which is a DIFFERENT taxonomy with
+# a different shape, not a renaming of the same one.
+#
+# The difference that matters here: the web list has ONE "A01 Broken Access Control",
+# while the API list splits access control into OBJECT level (API1) and FUNCTION level
+# (API5) — and erlik already makes exactly that split in code, as
+# `cross_arm_authorization` and `cross_arm_privileged_function`. So this mapping is not
+# relabelling; it is the first place the product's own split is reported as coverage.
+API_CATEGORIES: dict[str, str] = {
+    "API1:2023": "Broken Object Level Authorization",
+    "API2:2023": "Broken Authentication",
+    "API3:2023": "Broken Object Property Level Authorization",
+    "API4:2023": "Unrestricted Resource Consumption",
+    "API5:2023": "Broken Function Level Authorization",
+    "API6:2023": "Unrestricted Access to Sensitive Business Flows",
+    "API7:2023": "Server Side Request Forgery",
+    "API8:2023": "Security Misconfiguration",
+    "API9:2023": "Improper Inventory Management",
+    "API10:2023": "Unsafe Consumption of APIs",
+}
+
+# Categories NO erlik class claims, declared with a reason rather than left to be
+# inferred from an absence. Without this the audit cannot tell "erlik has no capability
+# here" from "someone forgot to map it", and an unclaimed category would either read as
+# a defect forever or be silently dropped — the same two bad options the WSTG audit
+# already refuses.
+API_NOT_COVERED: dict[str, str] = {
+    "API4:2023": "rate limiting and resource exhaustion are load-shaped tests. erlik is "
+                 "explicitly read-only against a target by default and has no throttling "
+                 "or flood capability, so nothing here could be confirmed.",
+    "API10:2023": "this is about what the target consumes from ITS upstreams, which is "
+                  "not observable from the outside. erlik tests the API in front of it.",
+}
+
+# INJECTION IS DELIBERATELY UNMAPPED, and this is the non-obvious fact in the table.
+# Injection was API8:2019 and was REMOVED as a standalone category in the 2023 list. Six
+# erlik classes (sqli, xss, cmdi, ssti, ldap, nosql, injection_generic) therefore declare
+# no API category — not because they are uncovered, but because the taxonomy stopped
+# having a box for them. Mapping them to "API8 Security Misconfiguration" because the
+# number is familiar would be precisely the confidently-wrong relationship this module's
+# header refuses to auto-generate.
+API_UNMAPPED_REASON = ("injection has no standalone category in the API Top 10 2023; it "
+                       "was API8:2019 and was removed in the 2023 revision")
 
 
 @functools.lru_cache(maxsize=1)
@@ -209,6 +305,11 @@ def audit() -> dict:
     declared_w = {w for c in CLASSES for w in c["wstg"]}
     declared_d = {d for c in CLASSES for d in c["detectors"]}
     declared_k = {c["key"] for c in CLASSES}
+    # `.get`, not `["api"]`: a class dict missing the key crashed audit() with a KeyError
+    # instead of reporting it, which the existing join-integrity test caught by injecting
+    # exactly such a class. A malformed entry must make the audit FAIL, not raise — the
+    # endpoint turns this dict into an `ok` verdict and an exception is not a verdict.
+    declared_a = {a for c in CLASSES for a in c.get("api", ())}
     return {
         "wstg_declared_missing": sorted(declared_w - ids),
         "wstg_unclaimed": sorted(ids - declared_w),
@@ -225,6 +326,58 @@ def audit() -> dict:
         "detectors_unclaimed": sorted(dets - declared_d),
         "class_keys_unknown": sorted(declared_k - keys),
         "class_keys_unclaimed": sorted(keys - declared_k),
+        # The API taxonomy, on the same terms. `api_unaccounted` is the direction that
+        # matters: a category that no class claims AND no reason declares uncovered is a
+        # hole in the guide, while one with a declared reason is an honest "erlik does not
+        # do this". Without the second list the first can only be empty by pretending.
+        "api_declared_missing": sorted(declared_a - set(API_CATEGORIES)),
+        "api_unaccounted": sorted(set(API_CATEGORIES) - declared_a - set(API_NOT_COVERED)),
+        # A category cannot be both claimed by a class and declared uncovered. The two
+        # directions above cannot see that case: a contradicting category is present in
+        # `declared_a`, so it is neither missing nor unaccounted, and the join reads clean
+        # while the table contradicts itself. It has never fired — it is here because the
+        # two lists are edited independently and nothing else compares them.
+        "api_claimed_yet_declared_uncovered": sorted(declared_a & set(API_NOT_COVERED)),
+        # Tolerating the absence quietly would let a class drop its mapping unnoticed
+        # whenever another class happens to claim the same category — `jwt` losing API2
+        # while `authn` still claims it leaves every other check clean.
+        "classes_missing_api": sorted(c["key"] for c in CLASSES if "api" not in c),
+    }
+
+
+def api_coverage() -> dict:
+    """Coverage against the OWASP API Security Top 10 2023, per category.
+
+    Answers the question E-011's acceptance actually asks — "which API Security
+    categories can erlik demonstrate, and by which execution path" — rather than printing
+    a count. Every category appears, including the ones nothing covers: a coverage report
+    that lists only what it found is the shape that reads as complete when it is not.
+
+    `verdicts` is reused rather than recomputed, so a category's verdict cannot drift from
+    the class's. It keeps the two-path rule the module header states: `agent_session` and
+    `wstg_engine` are separate and never merge into one badge.
+    """
+    out = []
+    for cid, title in API_CATEGORIES.items():
+        classes = [c for c in CLASSES if cid in c["api"]]
+        out.append({
+            "id": cid,
+            "title": title,
+            "classes": [{"key": c["key"], "label": c["label"],
+                         "verdicts": verdicts(c)} for c in classes],
+            "covered": bool(classes),
+            # Present ONLY when nothing covers it, and then never empty: an uncovered
+            # category without a reason is a gap in the guide, and `audit()` fails on it.
+            "not_covered_reason": None if classes else API_NOT_COVERED.get(cid),
+        })
+    return {
+        "taxonomy": "OWASP API Security Top 10 2023",
+        "reference": "https://github.com/OWASP/API-Security",
+        "categories": out,
+        "covered": sum(1 for c in out if c["covered"]),
+        "total": len(API_CATEGORIES),
+        # The fact an operator would otherwise have to infer from six empty lists.
+        "injection_note": API_UNMAPPED_REASON,
     }
 
 

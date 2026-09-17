@@ -336,6 +336,48 @@ same answer this lane already gives for a URL group. And a generic document at O
 reported: whether a string is privileged data is the operator's declaration and no recorded
 response can overturn it, so that finding stands and carries `declaration_that_would_suppress`.
 
+**The API Security half of the mapping clause — CLOSED.** The acceptance asks for coverage
+mapped to "relevant WSTG and API Security categories". Measured before building: WSTG ids run
+through `orchestrator/`, `tests_catalog/` and the docs, and the OWASP API Security taxonomy
+appeared in NONE of them. Half the clause had been read as the whole of it.
+
+THE TWO TAXONOMIES ARE NOT THE SAME LIST, which is what makes this more than relabelling.
+`CLASSES[*]["owasp"]` is the WEB Top 10 and has ONE "A01 Broken Access Control". The API Top 10
+2023 splits access control into OBJECT level (API1) and FUNCTION level (API5) — and erlik
+already runs those as two different checks, `cross_arm_authorization` and
+`cross_arm_privileged_function`, both exercised by the acceptance above. The mapping reports a
+split the product had been making and not naming. `api_coverage()` answers per category, and
+`/api/library/api-coverage` serves it.
+
+EVERY CATEGORY IS LISTED, COVERED OR NOT — 8 of 10 — because a coverage report that lists only
+what it found reads as complete when it is not. The two erlik does not cover carry a declared
+REASON (API4 needs load-shaped tests erlik has no capability for, API10 is about what the target
+consumes from its own upstreams and is not observable from outside), and `audit()` fails on a
+category that is neither claimed nor explained. Without that second list the first can only be
+empty by pretending.
+
+INJECTION IS DELIBERATELY UNMAPPED and this is the non-obvious fact. Injection was API8:2019 and
+was REMOVED as a standalone category in 2023, so seven classes declare no API category. Filing
+them under "API8 Security Misconfiguration" because the number looks familiar is exactly the
+confidently-wrong relationship `capabilities.py` refuses to auto-generate. The report carries
+the reason so an operator does not read six empty lists as missing coverage.
+
+The guard that had never fired got a positive control rather than a comment: a category cannot
+be both claimed and declared uncovered, the two existing directions structurally cannot see
+that case, and `test_the_contradiction_check_can_actually_fire` gives it something to find.
+
+**The existing join-integrity test found the defect in the new code, which is the argument for
+running the whole suite rather than the file being edited.** `audit()` read `c["api"]` directly,
+so a class dict without the key raised a KeyError from INSIDE the audit — and
+`/api/library/classes/audit` turns that dict into an `ok` verdict, where an exception is a 500
+rather than a verdict. Tolerating the absence quietly is the other wrong answer: `jwt` dropping
+API2 while `authn` still claims it leaves every other direction clean, so a missing mapping is
+now its own finding, `classes_missing_api`.
+
+STILL OPEN in this entry: nothing in the acceptance as written. What the mapping does NOT do is
+claim coverage per category is EQUAL — API8 is claimed by three classes with very different
+depth, and the report says which classes rather than scoring them.
+
 ### E-012: API workflow and schema improvements
 
 Validate and bundle schema references before scanning. Support schema version
