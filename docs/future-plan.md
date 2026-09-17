@@ -791,6 +791,34 @@ guess at which arm it meant.
 the function check stores the keyed `marker_digest` its findings already carry — see E-032's
 per-path table for where the marker does and does not travel.
 
+**The headline rule was implemented and unguarded — now guarded.** "A probe that received no
+bytes is not-retested, never fixed" is the sentence this entry is built around, and the one the
+2026-09-10 run is cited for: 156 of 208 injection-case steps received ZERO bytes, every probe
+of sqli, sqli_blind, xss_r and csrf, and the stage reported `completed` with no findings.
+
+The mechanism is correct and was correct before this increment. `deterministic.py` emits
+`test_case_unreachable` when every executed step came back empty, `coverage` maps it to the
+`unreachable` state, and `REACHED_STATES` is `("answered", "verified")`, so `retested()` will
+not close on it.
+
+NOTHING TESTED IT. Measured: `unreachable` appeared zero times in the retest suite and
+`REACHED_STATES` was referenced by no test anywhere. The existing cases cover a finding with NO
+coverage row, a stage that did not finish, and a different case probing the same pair — all
+real, none of them this one, where the probe RAN, produced a row, and the row says nothing came
+back.
+
+THE ABLATION IS THE ARGUMENT. Adding `"unreachable"` to `REACHED_STATES` is a one-word edit
+that closes live findings on empty responses, and the pre-existing retest suite passes it
+26 of 26. The new file fails four. The states are asserted BEHAVIOURALLY, through the
+comparison, because a test that reads the tuple agrees with every edit to it.
+
+**And the docstring described a limitation the product no longer has.** It said a cross-arm
+finding "can never be `fixed` here" because nothing recorded that an on-demand check ran — true
+when written, and then removed by `record_check_run` and `conclusive_check_runs`, which the
+same function reads a few lines below. A test has asserted cross-arm closure since that work
+landed; only the paragraph was left behind, telling a reader the product cannot do something it
+does.
+
 ### E-018: remediation workflow and exports
 
 Finish the existing DefectDojo mapping/reconciliation UX and add remediation

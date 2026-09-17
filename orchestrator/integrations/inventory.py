@@ -676,12 +676,18 @@ async def compare_assessments(baseline_session, retest_session) -> dict:
     and must not be collapsed into it — an automatic closure is how a live vulnerability
     leaves a client's tracker.
 
-    WHAT THIS CANNOT DO, said rather than papered over: a cross-arm finding can never be
-    `fixed` here. Those come from an on-demand route over stored evidence, and nothing
-    records that the route RAN — so a retest that never invoked it is indistinguishable from
-    one that invoked it and found nothing. They are reported `not_retested` with that reason.
-    Fixing it means recording the invocation, which is a change to the routes rather than to
-    this comparison.
+    A CROSS-ARM FINDING CAN NOW BE `fixed`, AND THIS PARAGRAPH USED TO SAY IT COULD NOT.
+    It described a real limitation — nothing recorded that an on-demand check RAN, so a
+    retest that never invoked it was indistinguishable from one that invoked it and found
+    nothing — and that limitation was then removed by `record_check_run` and
+    `conclusive_check_runs`, which this function reads a few lines below. The paragraph was
+    left behind, telling a reader the product cannot do something it does.
+
+    What it costs to close one is higher than for a catalogue finding, not lower: the same
+    check, the same ORDERED pair, and a run that did not refuse. Privilege is an order, so a
+    comparison made the other way round asserts the opposite of the finding, and a finding
+    with no `compared_with` is `not_retested` rather than closed on a guess at which arm it
+    meant.
     """
     async def findings_of(session_id):
         return {row["fingerprint"]: json.loads(row["payload"]) for row in await db.rows(
