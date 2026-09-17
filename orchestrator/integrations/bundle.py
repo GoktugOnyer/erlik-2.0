@@ -43,7 +43,12 @@ DECLARED_IDENTITY_FIELDS = ("name", "role", "tenant", "subject_id", "may_access"
 # What a reader needs before they can repeat the run: which schema was scanned and with which
 # seed. Recorded per stage; `schema_sha256` is canonical (sorted keys), so it is an identity
 # rather than a serialisation — see E-012.
-REPRODUCTION_KEYS = ("schema_sha256", "seed", "version", "image")
+#
+# `workers` joined this list because the set was measured INCOMPLETE rather than because it
+# looked tidy: at the default --workers 2, two runs at a FIXED seed and an identical schema
+# digest record their requests in a DIFFERENT ORDER, and at --workers 1 they do not. A reader
+# given everything else and a different worker count does not reproduce the recorded sequence.
+REPRODUCTION_KEYS = ("schema_sha256", "seed", "workers", "version", "image")
 
 
 async def _assessment(session_id) -> dict:

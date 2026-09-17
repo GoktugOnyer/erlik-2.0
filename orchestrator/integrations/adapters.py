@@ -787,7 +787,14 @@ class SchemathesisAdapter(BaseAdapter):
             if ctx.config.schema_input.kind == "openapi":
                 argv += ["--include-method", "GET", "--include-method", "HEAD", "--include-method", "OPTIONS"]
             output = await sandbox.run(argv)
+        # `workers` is a REPRODUCTION key, not a performance note. Measured against the lab:
+        # at the default --workers 2 the ORDER of recorded requests differs run to run at a
+        # FIXED seed, while the set and the observations stay identical; at --workers 1 the
+        # order is stable across runs. So a reader handed the schema digest and the seed but
+        # running a different worker count does not get the same recorded sequence back, and
+        # the bundle would have implied they would.
         result = StageResult(metadata={"version": TOOL_VERSIONS["schemathesis"], "seed": ctx.config.seed,
+                               "workers": ctx.config.budget.concurrency,
                                "schema_sha256": digest})
         report = sandbox.output / "results.xml"
         if report.exists():

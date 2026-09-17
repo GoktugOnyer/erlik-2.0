@@ -467,6 +467,37 @@ deliberately not asserted — claiming the acceptance on the strength of a recor
 be the confident-output-from-an-unrun-path defect this list exists to remove. Left open with
 the measurement to do rather than marked done.
 
+**The measurement was done, and it is three facts rather than one — PARTLY CLOSED.** Run
+against the lab fixture:
+
+    --workers 2 (default), seed 1, x4    ordered requests DIFFER run to run
+                                         the request SET is identical
+                                         the observations are identical
+    --workers 1, seed 1, x3              ordered requests identical
+    --workers 1, seeds 1 / 987654 / 42   ordered requests IDENTICAL ACROSS SEEDS
+
+WHAT IS NOW ESTABLISHED: at a fixed seed AND worker count the scan repeats — same requests,
+same observations, same digest. That half of the acceptance is asserted, and compared as a SET
+rather than a sequence, because asserting order at the default concurrency would produce a
+flaky test for a reason that is not a regression.
+
+WHAT THE MEASUREMENT CHANGED IN THE PRODUCT: `workers` is now a reproduction key and is
+recorded on the stage. `REPRODUCTION_KEYS` says it is "what a reader needs before they can
+repeat the run" and it was INCOMPLETE — two runs at the same digest and seed but different
+worker counts do not record the same sequence, so a reader handed everything else could not
+repeat what they were shown. The set was measured incomplete rather than reasoned incomplete.
+
+WHAT REMAINS UNKNOWN, and is recorded as unknown: what the SEED controls. On this fixture the
+run is identical across three different seeds, so "a seeded failure reproduces with the same
+seed" is true and VACUOUS here — it reproduces with any seed. The obvious test, same seed in
+and same result out, would pass without the seed doing anything. It is therefore NOT asserted.
+Establishing seed sensitivity needs a schema large enough that generation is actually sampling,
+which the five-operation lab fixture is not.
+
+The first pass at this measurement DID assert seed sensitivity, on two runs that happened to
+differ; a third run contradicted it. The varying thing was worker ordering, not the seed — and
+a test written from the first pass would have been both flaky and wrong about why.
+
 ### E-013: business-logic and concurrency testing
 
 Extend the existing race-condition case with application-specific invariants:
