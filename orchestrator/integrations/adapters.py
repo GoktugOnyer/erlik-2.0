@@ -116,14 +116,46 @@ async def record(context, sandbox, output, result, accepted_codes=(0,)):
     if audit.exists():
         await keep("requests", audit.read_text(errors="replace"))
         events, unreadable = audit_events(audit)
+        # `request_count` is every DECISION the proxy made, allowed or refused, which is the
+        # number the budget is accounted against — see `budget_refusal`, which counts a
+        # refused request too. It is NOT the number that reached the target, and it reads
+        # like one: a stage where every request was refused reports the same request_count as
+        # a stage where every request succeeded.
         result.metadata["request_count"] = sum("allowed" in e for e in events)
         result.metadata["blocked_requests"] = sum(e.get("allowed") is False for e in events)
+        # So the number that means COVERAGE is recorded as its own field rather than left to
+        # be derived by subtraction.
+        result.metadata["requests_allowed"] = (result.metadata["request_count"]
+                                               - result.metadata["blocked_requests"])
+        # AND WHY THEY WERE REFUSED. A bare count invites the wrong conclusion in both
+        # directions: 47 refusals is unremarkable when they are out-of-scope links a crawler
+        # followed, and is a misconfiguration when they are "operation not selected". The
+        # proxy already records a reason on every decision and nothing read it.
+        reasons = {}
+        for event in events:
+            if event.get("allowed") is False:
+                reason = event.get("reason") or "unstated"
+                reasons[reason] = reasons.get(reason, 0) + 1
+        if reasons:
+            result.metadata["blocked_by_reason"] = dict(sorted(reasons.items()))
         # SAID, not dropped. With holes in the log these counts are floors, and a reader
         # comparing `request_count` against a budget needs to know which it is.
         if unreadable:
             result.metadata["unreadable_audit_lines"] = unreadable
         if any(e.get("reason") in ("request budget exhausted", "URL budget exhausted") for e in events):
             result.status, result.reason = "partial", "request or URL budget exhausted"
+        # A STAGE THAT REACHED NOTHING IS NOT A CLEAN STAGE. Every request refused means no
+        # coverage at all, and the scanner can still exit 0 and report `completed` with no
+        # findings — which is indistinguishable from a target that had nothing wrong with it.
+        # The reasons are named because they decide what the operator does next: a scope that
+        # does not contain the target is a different repair from a workflow selecting no
+        # operation the scanner tried.
+        if result.metadata["request_count"] and not result.metadata["requests_allowed"]:
+            result.status = "failed"
+            result.reason = (
+                f"every request was refused, so this stage has NO coverage: "
+                + ", ".join(f"{count}x {reason}" for reason, count in
+                            sorted(reasons.items(), key=lambda kv: (-kv[1], kv[0]))))
     for finding in result.findings:
         # A finding that already cites its OWN evidence keeps ONLY that. The
         # union is for scanner findings, which arrive citing nothing and have

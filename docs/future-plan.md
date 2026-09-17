@@ -992,8 +992,36 @@ that documented behaviour rather than a port — they are Go and Apache-2.0, erl
 MIT, so nothing was copied and no attribution obligation attaches. Their rejection COUNTER is a
 separate idea and is not done here; it belongs with E-019's telemetry.
 
-STILL OPEN in this entry: the refactor itself, the cancellation/credential/audit halves of the
-acceptance, and "policy decisions are visible in the action log".
+**"Policy decisions are visible in the action log" — done for the integration lane.** The proxy
+already records a decision for EVERY request with the reason it used, refusals included.
+`record()` read two things out of that file and neither was the one an operator needs:
+
+    request_count     every DECISION, allowed or refused
+    blocked_requests  a bare count, no reasons
+
+`request_count` is the number the BUDGET is accounted against — `budget_refusal` counts a
+refused request too — so it is right for that and reads like activity for everything else. A
+stage where all 47 requests were refused reported the same `request_count` as a stage where all
+47 succeeded, and the number that means COVERAGE had to be derived by subtraction. It is
+`requests_allowed` now.
+
+A BARE COUNT INVITES THE WRONG CONCLUSION IN BOTH DIRECTIONS. Forty-seven refusals is
+unremarkable when they are out-of-scope links a crawler followed and is a misconfiguration when
+they are "operation not selected" — different repairs, and the count alone cannot tell them
+apart. `blocked_by_reason` is the breakdown the proxy had already written and nothing read.
+
+AND A STAGE THAT REACHED NOTHING IS NOT A CLEAN STAGE. A scanner whose every request was
+refused can still exit 0 and be recorded `completed` with no findings, which is exactly what a
+target with nothing wrong with it looks like. That is now `failed`, with the dominant reason
+first, because what the operator repairs depends on which refusal it was. One request getting
+through is NOT nothing and is left alone, and a stage that issued no requests at all is a
+different situation this clause says nothing about — both asserted.
+
+STILL OPEN in this entry: the refactor itself, and the cancellation/credential/audit halves of
+the acceptance. The legacy lane's own refusals — safe mode, write confinement,
+`http-local-file-read` — are recorded per step rather than in a request log, because they stop
+the command before any request exists; whether that is the same visibility is not yet
+measured.
 
 ### E-021: structured hypotheses and evidence review
 
