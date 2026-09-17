@@ -133,7 +133,10 @@ CLASSES: list[dict] = [
      "detectors": []},
     {"key": "logic", "label": "Business Logic Flaw",
      "owasp": "A04:2021 Insecure Design",
-     "wstg": ["WSTG-BUSL-04"], "api": ["API6:2023"], "detectors": ["curl:_curl_forged_feedback"]},
+     # BUSL-06 is ordering, BUSL-04 is timing. Both are business logic and neither
+     # substitutes for the other: a burst finds the race and misses the skipped step.
+     "wstg": ["WSTG-BUSL-04", "WSTG-BUSL-06"], "api": ["API6:2023"],
+     "detectors": ["curl:_curl_forged_feedback"]},
     {"key": "disclosure", "label": "Information Disclosure",
      "owasp": "A05:2021 Security Misconfiguration",
      "wstg": ["WSTG-ERRH-01", "WSTG-INFO-02", "WSTG-INFO-03", "WSTG-CONF-02"],

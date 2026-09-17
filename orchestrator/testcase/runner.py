@@ -538,11 +538,21 @@ async def _run_evaluator(
             # and a reader cannot tell from the count alone. Same idiom as the blind
             # evaluators above, which put their measured numbers in `basis` rather than
             # leaving a reader to trust the verdict.
+            # WORDING FOLLOWS THE SHAPE OF THE CHECK, because a second case now uses this
+            # evaluator and the first one's vocabulary did not fit it. WSTG-BUSL-04 fires a
+            # parallel burst; WSTG-BUSL-06 sends ONE request that should have been refused
+            # outright. Calling the second a "burst" would describe a concurrency problem to
+            # a reader looking at an ordering one.
             attempts = target.get("parallel_n")
-            basis = (f"the success marker appeared {seen} times"
+            seen_text = "once" if seen == 1 else f"{seen} times"
+            allowed = ev.min_count - 1
+            basis = (f"the success marker appeared {seen_text}"
                      + (f" across {attempts} parallel attempts" if attempts else "")
-                     + f", where at most {ev.min_count - 1} should have succeeded"
-                     + (f"; the burst completed in {step_result.duration_ms}ms"
+                     + (f", where at most {allowed} should have succeeded" if allowed
+                        else ", where the request should not have succeeded at all")
+                     + (f"; the burst completed in {step_result.duration_ms}ms" if attempts
+                        and step_result.duration_ms
+                        else f"; the request completed in {step_result.duration_ms}ms"
                         if step_result.duration_ms else ""))
 
     elif ev.type == "cors":

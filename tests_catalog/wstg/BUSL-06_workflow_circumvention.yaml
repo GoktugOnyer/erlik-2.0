@@ -1,0 +1,50 @@
+id: WSTG-BUSL-06
+name: Circumvention of Work Flows
+category: Business Logic
+attack_class: logic
+severity: high
+references:
+  - https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/10-Business_Logic_Testing/06-Testing_for_the_Circumvention_of_Work_Flows
+
+# A multi-step process — add to cart, pay, confirm — is only as ordered as the
+# server makes it. The client-side sequence is a suggestion; the question is
+# whether the FINAL step succeeds when its prerequisite never happened.
+#
+# NOT A RACE, and checked differently on purpose. BUSL-04 fires a burst and asks
+# whether one request succeeded more often than it should. This sends ONE request
+# from a subject that never completed the earlier steps and asks whether it
+# should have been refused. A burst would find concurrency bugs here and miss
+# ordering entirely.
+target_schema:
+  # `final_request` is the LAST step, sent alone. The operator supplies it whole
+  # — including any session — for the same reason BUSL-04 does: a case that
+  # promised to attach auth on the operator's behalf would be making a promise
+  # about a workflow it cannot see.
+  #
+  # IT MUST NAME A SUBJECT THAT NEVER COMPLETED THE PREREQUISITE. A cart that was
+  # legitimately paid for will confirm, correctly, and that is not a finding —
+  # which is why this is documented here rather than left for a reader to infer
+  # from an unexpected result.
+  required: [final_request, success_marker]
+
+steps:
+  - name: skip_to_final_step
+    tool: curl
+    command: "{{final_request}}"
+    evaluators:
+      # `count` with min_count 1 rather than a regex on {{success_marker}}.
+      #
+      # NOT because patterns go unsubstituted: `_render_pattern` substitutes them,
+      # as a literal, and BUSL-04's comment about that is HISTORY rather than a
+      # live constraint — checked, because writing a fixed defect into a new case
+      # as a present reason is its own kind of wrong. A regex would work here.
+      #
+      # `count` is chosen because it reads the marker from the target in Python
+      # and records what it saw in the finding's `basis`: "appeared once, where
+      # the request should not have succeeded at all". A regex match would emit
+      # the same finding and say only that something matched.
+      - type: count
+        min_count: 1
+        emit_finding:
+          vuln_type: Workflow Circumvention (final step accepted without its prerequisite)
+          severity: high

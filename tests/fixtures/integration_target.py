@@ -25,6 +25,15 @@ REQUESTS = []
 COUPON = {"redeem": 1, "safe": 1}
 COUPON_LOCK = threading.Lock()
 
+# A THREE-STEP CHECKOUT, enforced in one place and not the other — the pair WSTG-BUSL-06
+# needs. `/shop/confirm` finalises an order whether or not it was ever paid for, which is
+# the circumvented workflow; `/shop-strict/confirm` refuses until the cart is paid.
+#
+# Ordering is a DIFFERENT invariant from the race above and is checked differently: no
+# concurrency, one request, from a cart that has never seen the prerequisite. A case that
+# needed a burst to find this would be testing the wrong thing.
+CARTS = {}
+
 
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *a): pass
@@ -94,10 +103,37 @@ class Handler(BaseHTTPRequestHandler):
         if self.path in ("/redeem", "/redeem-safe"):
             return self._coupon("redeem" if self.path == "/redeem" else "safe",
                                 locked=self.path == "/redeem-safe")
+        parts = urlsplit(self.path)
+        if parts.path in ("/shop/pay", "/shop/confirm",
+                          "/shop-strict/pay", "/shop-strict/confirm"):
+            cart = (parse_qs(parts.query).get("cart") or [""])[0]
+            return self._checkout(parts.path, cart)
         self.send_response(201 if self.path == "/items" else 500 if self.path == "/cleanup-fail" else 200)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
         self.wfile.write(b'{"data":{"hello":"world"}}')
+
+    def _checkout(self, path, cart):
+        """Pay for a cart, or confirm one — strictly or otherwise.
+
+        The lax confirm finalises whatever it is given. The strict confirm looks for the
+        prerequisite first, which is the entire difference between the two and the reason
+        they make a control pair.
+        """
+        if path.endswith("/pay"):
+            CARTS.setdefault(cart, set()).add("paid")
+            body, status = b'{"status":"PAID"}', 200
+        elif path == "/shop/confirm":
+            body, status = b'{"status":"CONFIRMED"}', 200
+        else:
+            paid = "paid" in CARTS.get(cart, set())
+            body = b'{"status":"CONFIRMED"}' if paid else b'{"error":"payment required"}'
+            status = 200 if paid else 409
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
     def _coupon(self, key, *, locked):
         """Redeem a single-use coupon, correctly or otherwise.

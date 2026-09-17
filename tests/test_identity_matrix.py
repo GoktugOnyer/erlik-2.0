@@ -239,11 +239,14 @@ def test_the_declarations_do_not_widen_what_the_lane_supplies():
 
     It is deliberately NOT in `LANE_TARGET_FIELDS`: that set answers "what can DISCOVERY
     produce", and adding a field no lane-runnable case requires would change the measured
-    12-of-32 figure for nothing. The bridge is how it travels; the set is unchanged.
+    12-of-33 figure for nothing. The bridge is how it travels; the set is unchanged.
     """
     from orchestrator.integrations.inventory import LANE_TARGET_FIELDS, executable_test_cases
     from orchestrator.testcase.loader import load_catalog
 
     assert LANE_TARGET_FIELDS == frozenset({"url", "parameter"})
     assert len(executable_test_cases()) == 12
-    assert len(load_catalog()) == 32
+    # 33 since WSTG-BUSL-06 (workflow circumvention) joined the catalogue. It is NOT
+    # lane-runnable and must not become so: it needs `final_request`, which only an
+    # operator can supply, so the 12 above is the figure that matters here.
+    assert len(load_catalog()) == 33

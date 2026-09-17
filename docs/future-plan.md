@@ -674,8 +674,35 @@ RECORDING THE EVIDENCE IS NOT UPGRADING THE CLAIM, and a test pins that. A burst
 application allowed the thing twice; it does not show what that is worth, and `confirmed` in
 this lane is reserved for a differential — E-014's rule holds here too.
 
-STILL OPEN in this entry: the other invariants — duplicate submissions, workflow ordering,
-ownership transfer.
+**Workflow ordering — done, as WSTG-BUSL-06.** A multi-step process is only as ordered as the
+server makes it, and the client-side sequence is a suggestion. The case sends the FINAL step
+alone, from a subject that never completed the prerequisite, and asks whether it should have
+been refused at all.
+
+CHECKED DIFFERENTLY FROM THE RACE, deliberately. BUSL-04 fires a burst and asks whether one
+request succeeded more often than allowed; this sends ONE request and asks whether it should
+have succeeded once. A burst would find concurrency bugs here and miss ordering entirely.
+
+THREE CONTROLS, NOT TWO. `/shop/confirm` finalises an unpaid order and `/shop-strict/confirm`
+refuses it — but an endpoint that refuses EVERYTHING also passes that negative test while
+enforcing nothing. So the strict endpoint is driven down its happy path as well: pay, then
+confirm, and the confirmation must succeed. Ablated by breaking the strict endpoint to refuse
+unconditionally, which the third control catches and the first two do not.
+
+TWO THINGS THE WORK FOUND ABOUT ITSELF. The second consumer of the `count` evaluator showed
+its `basis` wording was race-specific — calling a single skipped step a "burst" describes a
+concurrency problem to a reader looking at an ordering one — so the wording now follows the
+shape of the check. And an ablation caught a FALSE RATIONALE in the new case: it claimed
+evaluator patterns go unsubstituted, quoting BUSL-04's comment, when `_render_pattern`
+substitutes them and that warning is history. Writing a fixed defect into a new case as a
+present-tense reason is the E-017 docstring defect in a different file.
+
+The capability audit fired as designed on a catalogue case no class claimed, and two count
+guards — the README's "12 of the 32" and the identity matrix's own assertion — caught the
+catalogue growing. BUSL-06 is deliberately NOT lane-runnable: it needs `final_request`, which
+only an operator can supply.
+
+STILL OPEN in this entry: duplicate submissions, and ownership transfer.
 
 ### E-014: browser-backed confirmation
 
