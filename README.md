@@ -191,29 +191,31 @@ Run it from the repository root: `conftest.py` anchors the working directory
 there, and `orchestrator.main` builds its Jinja2 template path relative to the
 CWD.
 
-A **fresh clone** reports **3355 passed, 73 skipped** on its first run, and
-3357 passed / 71 skipped on every run after — measured 2026-09-17 against this
+A **fresh clone** reports **3367 passed, 74 skipped** on its first run, and
+3369 passed / 72 skipped on every run after — measured 2026-09-17 against this
 commit by cloning and running it, not quoted from a developer's tree.
 
 > Re-measure this after any change under `tests/`. The first draft of this
 > paragraph was taken before the same commit finished adding tests, which is
 > exactly the staleness it was written to correct.
 
-Every skip is structural rather than broken, and the 73 account for themselves —
+Every skip is structural rather than broken, and the 74 account for themselves —
 counted from the run's own skip reasons, not apportioned by hand:
 
 | Count | Reason |
 |-------|--------|
 | 35 | need the recorded corpus or a live database — `data/pentest.db`, or the command corpus under `data/reports/` — `.gitignore` excludes `data/` because it holds real client findings (see `docs/REPRODUCIBILITY.md` and `tests/corpus.py`) |
-| 35 | container suites, behind `ERLIK_DOCKER_TESTS=1` |
+| 36 | container suites, behind `ERLIK_DOCKER_TESTS=1` |
 | 2 | need a container lab **and** a real Interactsh (`ERLIK_REAL_INTERACTSH_TESTS=1`) |
 | 1 | needs a live DefectDojo (`ERLIK_DEFECTDOJO_LIVE_TESTS=1`) |
 
 With Docker running and the lab images built, **every one of those container suites
 passes**: `ERLIK_DOCKER_TESTS=1 ERLIK_REAL_INTERACTSH_TESTS=1 pytest` reports **3427
 passed, 1 skipped** — the remaining skip is `test_defectdojo_live.py`, which needs a
-live DefectDojo instance. Measured 2026-09-17 against the local lab, in 9m01s. That
-total plus its one skip is the 3428 the suite collects, so nothing gated is left out.
+live DefectDojo instance. Measured 2026-09-17 against the local lab, in 9m01s, when the
+suite collected 3428 — that total plus its one skip was the whole of it. The fixture-data work
+has since added 13 tests, one of them gated, and this figure is being re-measured; the
+fresh-clone and developer-tree figures above are the current ones.
 
 > **One flake seen, recorded rather than rounded off.**
 > `test_interactsh_completion.py::test_real_interactsh_dns_https_and_testcase_correlation`
@@ -228,7 +230,7 @@ total plus its one skip is the 3428 the suite collects, so nothing gated is left
 > once a container fixture, once a timing-based delay detector — plus a container left in
 > `Created`. Neither was a regression and neither was a measurement.
 
-A developer's tree reports **3390 passed, 38 skipped** instead, and the 35-test
+A developer's tree reports **3402 passed, 39 skipped** instead, and the 35-test
 gap is entirely that corpus: 33 tests report `corpus present but empty` or that no
 recorded corpus is in the tree, and 2 more inspect the live database directly — one
 for a plaintext credential on disk, the other for leftover fixture rows. Those two are
@@ -236,7 +238,7 @@ hygiene checks on a real machine, so skipping
 where there is no live database is the right answer; it is also why they stop
 skipping from the second run onward, once the suite has created one.
 
-Every one of the 38 skips left on a developer's tree is a gated suite: 35 container,
+Every one of the 39 skips left on a developer's tree is a gated suite: 36 container,
 2 Interactsh, 1 DefectDojo. They gate on
 `ERLIK_DOCKER_TESTS=1` being set, **not** on whether Docker is available — having
 the daemon running does not opt you in.
