@@ -658,8 +658,24 @@ confinement BEFORE it calls an executor — that is what makes them a floor rath
 `execute_tool` happens to do — so supplying a local one swaps the transport and not the policy.
 Both controls therefore run everywhere the suite runs, including the network-free CI job.
 
+**The finding says how badly the race was lost — done.** The count decided the finding and
+then vanished: `basis` fell back to "count evaluator matched captured tool output", so a coupon
+redeemed twice out of eight and one redeemed eight times out of eight produced
+INDISTINGUISHABLE findings. `basis` is what the integration report renders as the description,
+so that generic sentence is what a client read.
+
+It now names the observed count, the number of parallel attempts, and the threshold the
+application should have enforced. THE DURATION GOES WITH IT because it is what says the
+requests overlapped: a burst that took as long as eight sequential requests raced nothing, and
+no count can show that. Same idiom as the blind evaluators, which already put their measured
+numbers in `basis` rather than leaving a reader to trust the verdict.
+
+RECORDING THE EVIDENCE IS NOT UPGRADING THE CLAIM, and a test pins that. A burst shows the
+application allowed the thing twice; it does not show what that is worth, and `confirmed` in
+this lane is reserved for a differential — E-014's rule holds here too.
+
 STILL OPEN in this entry: the other invariants — duplicate submissions, workflow ordering,
-ownership transfer — and "confidence records timing variability", which this does not do.
+ownership transfer.
 
 ### E-014: browser-backed confirmation
 

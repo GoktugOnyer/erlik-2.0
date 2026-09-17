@@ -163,3 +163,47 @@ async def test_the_two_endpoints_differ_only_in_the_lock(lab_host):
     safe = await run_against("/redeem-safe", lab_host)
     assert bool(racy.findings) and not safe.findings
     assert racy.steps[0].command == safe.steps[0].command.replace("/redeem-safe", "/redeem")
+
+
+# ------------------------------------------------- the finding says how badly it was lost
+
+
+@pytest.mark.asyncio
+async def test_the_finding_records_how_many_succeeded(lab_host):
+    """E-013: "confidence records timing variability and does not infer impact from response
+    counts alone". The count decides the finding, and it used to vanish — `basis` fell back
+    to "count evaluator matched captured tool output", so two-of-eight and eight-of-eight
+    were the same finding. `basis` is what the integration report renders as the
+    description, so this is the sentence a client reads."""
+    result = await run_against("/redeem", lab_host)
+    finding = next(f for f in result.findings if "Race Condition" in (f.vuln_type or ""))
+    assert "8 times" in finding.basis, finding.basis
+    assert "across 8 parallel attempts" in finding.basis
+    assert "at most 1 should have succeeded" in finding.basis
+
+
+@pytest.mark.asyncio
+async def test_the_finding_records_the_burst_duration(lab_host):
+    """What says the requests actually overlapped. A burst taking as long as eight
+    sequential requests raced nothing, and no count can show that."""
+    result = await run_against("/redeem", lab_host)
+    finding = next(f for f in result.findings if "Race Condition" in (f.vuln_type or ""))
+    assert re.search(r"burst completed in \d+ms", finding.basis), finding.basis
+
+
+@pytest.mark.asyncio
+async def test_the_generic_fallback_is_not_what_a_race_reports(lab_host):
+    """The specific thing that was there before, asserted absent."""
+    result = await run_against("/redeem", lab_host)
+    finding = next(f for f in result.findings if "Race Condition" in (f.vuln_type or ""))
+    assert "count evaluator matched captured tool output" not in finding.basis
+
+
+@pytest.mark.asyncio
+async def test_a_race_finding_is_still_only_suspected(lab_host):
+    """Recording the evidence is not the same as upgrading the claim. A burst shows the
+    application allowed it twice; it does not show what that is worth, and `confirmed` in
+    this lane is reserved for a differential. E-014's rule applies here too."""
+    result = await run_against("/redeem", lab_host)
+    finding = next(f for f in result.findings if "Race Condition" in (f.vuln_type or ""))
+    assert finding.confidence == "suspected", finding.confidence

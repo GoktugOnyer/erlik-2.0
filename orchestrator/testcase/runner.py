@@ -522,7 +522,28 @@ async def _run_evaluator(
         # A race is won when the SAME success marker comes back more times than
         # the application should ever have allowed.
         marker = str(target.get("success_marker", "") or "")
-        matched = bool(marker) and step_result.output.count(marker) >= ev.min_count
+        seen = step_result.output.count(marker) if marker else 0
+        matched = bool(marker) and seen >= ev.min_count
+        if matched:
+            # THE COUNT IS THE WHOLE EVIDENCE AND IT USED TO VANISH. `basis` fell back to
+            # "count evaluator matched captured tool output", so a coupon redeemed twice out
+            # of eight and one redeemed eight times out of eight produced indistinguishable
+            # findings — and `basis` is what the integration report renders as the
+            # description. E-013 asks that confidence record timing variability and not
+            # infer impact from response counts alone; the count deciding the finding and
+            # then disappearing is that clause failing in the plainest way.
+            #
+            # The DURATION goes with it because it is what says the requests overlapped. A
+            # burst that took as long as eight sequential requests did not race anything,
+            # and a reader cannot tell from the count alone. Same idiom as the blind
+            # evaluators above, which put their measured numbers in `basis` rather than
+            # leaving a reader to trust the verdict.
+            attempts = target.get("parallel_n")
+            basis = (f"the success marker appeared {seen} times"
+                     + (f" across {attempts} parallel attempts" if attempts else "")
+                     + f", where at most {ev.min_count - 1} should have succeeded"
+                     + (f"; the burst completed in {step_result.duration_ms}ms"
+                        if step_result.duration_ms else ""))
 
     elif ev.type == "cors":
         # `Access-Control-Allow-Origin: *` with credentials is NOT a credentialed
