@@ -16,6 +16,7 @@ from unittest.mock import AsyncMock
 from orchestrator.integrations.contracts import (
     AssessmentConfig, Endpoint, StageResult, parameter_names,
 )
+import json
 from orchestrator.integrations.adapters import Context
 from orchestrator.integrations.deterministic import CatalogueAdapter, curl_request
 from orchestrator.integrations.inventory import (
@@ -422,13 +423,33 @@ class TestTheSchemaIsTheOneSourceTheTargetDoesNotControl:
         assert source.index("schema_declared = schema_endpoints") < source.index("requests.har")
 
 
+class _WriteOnly:
+    """The only thing `schema_file` needs from a sandbox when the schema is inline."""
+    def write(self, name, content):
+        return "/input/" + name
+
+
 async def test_schema_file_returns_the_same_shape_with_and_without_a_schema():
     """It grew a third return value (the parsed document) and the no-schema
     early return kept two, so every ZAP run — which calls this whether or not a
     schema was configured — died unpacking it. Four Docker acceptance tests
-    caught it; nothing in the unit suite would have."""
+    caught it; nothing in the unit suite would have.
+
+    Compares the TWO PATHS rather than a hard-coded arity. The number was 3 and is now 4
+    (the GraphQL operation inventory), and a guard written as `== 3` fails on every
+    deliberate growth while still not checking the thing that actually broke — that the
+    no-schema path returns what the with-schema path returns.
+    """
     from orchestrator.integrations.adapters import schema_file
-    assert len(await schema_file(Context("s", "stage", "https://app.test", config()), None)) == 3
+    without = await schema_file(Context("s", "stage", "https://app.test", config()), None)
+    with_schema = await schema_file(
+        Context("s", "stage", "https://app.test",
+                config(schema_input={"kind": "openapi", "content": json.dumps(
+                    {"openapi": "3.0.0", "info": {"title": "t", "version": "1"}, "paths": {}})})),
+        _WriteOnly())
+    assert len(without) == len(with_schema), (
+        f"no-schema returns {len(without)} values, with-schema returns {len(with_schema)}; "
+        f"every caller unpacks both")
 
 
 async def test_a_stage_that_runs_out_of_time_keeps_what_it_found(database, tmp_path,

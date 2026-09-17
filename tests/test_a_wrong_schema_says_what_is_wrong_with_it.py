@@ -202,8 +202,8 @@ async def test_the_same_schema_spelled_in_a_different_order_has_the_same_digest(
     """
     from orchestrator.integrations.adapters import schema_file
 
-    _, first, document = await schema_file(context(GOOD), _Sandbox())
-    _, second, reordered = await schema_file(context(REORDERED), _Sandbox())
+    _, first, document, _ = await schema_file(context(GOOD), _Sandbox())
+    _, second, reordered, _ = await schema_file(context(REORDERED), _Sandbox())
     assert document == reordered, "the fixtures are not the same document"
     assert first == second, (
         f"the same schema in a different key order hashed differently ({first[:12]} vs "
@@ -216,8 +216,8 @@ async def test_a_genuinely_different_schema_still_differs():
     from orchestrator.integrations.adapters import schema_file
 
     other = GOOD.replace("createOrder", "cancelOrder")
-    _, first, _ = await schema_file(context(GOOD), _Sandbox())
-    _, second, _ = await schema_file(context(other), _Sandbox())
+    _, first, _, _ = await schema_file(context(GOOD), _Sandbox())
+    _, second, _, _ = await schema_file(context(other), _Sandbox())
     assert first != second
 
 
@@ -229,7 +229,7 @@ async def test_the_digest_covers_the_bytes_the_scanner_was_given():
     from orchestrator.integrations.adapters import schema_file
 
     sandbox = _Sandbox()
-    _, digest, _ = await schema_file(context(GOOD), sandbox)
+    _, digest, _, _ = await schema_file(context(GOOD), sandbox)
     written = sandbox.written["schema.json"]
     assert hashlib.sha256(written.encode()).hexdigest() == digest, (
         "the digest is not of the file handed to the scanner")
@@ -241,8 +241,8 @@ async def test_the_target_is_part_of_the_schema_identity():
     scan, and the digest says so because the target is pinned into `servers` before hashing."""
     from orchestrator.integrations.adapters import schema_file
 
-    _, here, _ = await schema_file(context(GOOD, "http://app.test/"), _Sandbox())
-    _, there, _ = await schema_file(context(GOOD, "http://app.test/api/v2"), _Sandbox())
+    _, here, _, _ = await schema_file(context(GOOD, "http://app.test/"), _Sandbox())
+    _, there, _, _ = await schema_file(context(GOOD, "http://app.test/api/v2"), _Sandbox())
     assert here != there
 
 

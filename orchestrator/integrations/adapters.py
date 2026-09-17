@@ -330,7 +330,12 @@ def load_openapi_document(content, source: str = "the supplied schema"):
 async def schema_file(ctx, sandbox):
     source = ctx.config.schema_input
     if not source:
-        return None, None, None
+        # FOUR values, and the early return is why this is spelled out rather than left to
+        # fall through: when this grew its third value the no-schema path kept two and every
+        # ZAP run died unpacking it, caught only by Docker acceptance tests. The unit guard
+        # `test_schema_file_returns_the_same_shape_with_and_without_a_schema` compares the two
+        # paths rather than a magic number, so it survives the next value too.
+        return None, None, None, []
     content = source.content
     if source.url:
         response = await rpc(sandbox, {"action": "request", "request": {"url": source.url}})
@@ -380,9 +385,14 @@ async def schema_file(ctx, sandbox):
         # the order of a remote server's JSON is its business, not ours. A refusal on a
         # difference that is not a difference is the shape this project keeps removing.
         content = json.dumps(document, sort_keys=True)
+    # The GraphQL inventory is parsed HERE because this is where the content is — it may have
+    # arrived by URL, in which case no caller has the text. A schema that does not parse
+    # raises, so the failure reaches the stage row as a reason rather than as an empty list.
+    operations = graphql_operations(content) if source.kind == "graphql" else []
     return (sandbox.write("schema.graphql" if source.kind == "graphql" else "schema.json", content),
             hashlib.sha256(content.encode()).hexdigest(),
-            document if source.kind == "openapi" else None)
+            document if source.kind == "openapi" else None,
+            operations)
 
 
 def schema_endpoints(document, target, identity):
@@ -412,6 +422,80 @@ def schema_endpoints(document, target, identity):
                 found.append(Endpoint(url=url, method=method.upper(), source="openapi",
                                       identity=identity, parameters=parameter_names(url, *names)))
     return found
+
+
+# GraphQL has ONE url and no methods, so `schema_endpoints` — which is paths and query
+# parameters — has nothing to say about it and returned an empty list. Measured: a GraphQL
+# assessment declared ZERO operations from its schema, so a six-operation schema and an empty
+# one were indistinguishable in the inventory. The blind spot is the point: an empty inventory
+# reads as "the schema declares nothing" rather than "nothing looked".
+STATE_CHANGING_OPERATIONS = ("mutation", "subscription")
+
+
+def graphql_operations(text):
+    """Every operation a GraphQL schema declares, as {name, operation, arguments}.
+
+    Parsed with graphql-core rather than matched with a regular expression. SDL carries block
+    strings, descriptions, comments, directives, interfaces and `extend type`, and a pattern
+    that looked right on a tidy schema would quietly miss or invent operations on a real one —
+    the confidently-wrong relationship this codebase refuses elsewhere.
+
+    Accepts SDL or an introspection response, because both are what an operator has to hand.
+    Returns [] when the text parses but declares no root operations; raises ValueError when it
+    does not parse, so a broken schema says so instead of reporting an empty inventory.
+    """
+    from graphql import build_client_schema, build_schema
+    from graphql.error import GraphQLError
+
+    stripped = (text or "").strip()
+    if not stripped:
+        return []
+    schema = None
+    if stripped.startswith("{"):
+        try:
+            payload = json.loads(stripped)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"GraphQL schema is neither SDL nor introspection JSON: {exc}")
+        # An introspection response is usually wrapped in `data`, and sometimes is not.
+        try:
+            schema = build_client_schema(payload.get("data", payload))
+        except Exception as exc:
+            raise ValueError(f"GraphQL introspection document could not be read: {exc}")
+    else:
+        try:
+            schema = build_schema(stripped)
+        except GraphQLError as exc:
+            raise ValueError(f"GraphQL schema could not be parsed: {exc}")
+
+    found = []
+    for kind, root in (("query", schema.query_type), ("mutation", schema.mutation_type),
+                       ("subscription", schema.subscription_type)):
+        for name, field in (root.fields.items() if root else {}.items()):
+            found.append({"name": name, "operation": kind,
+                          "arguments": sorted(field.args), "type": str(field.type)})
+    return sorted(found, key=lambda item: (item["operation"], item["name"]))
+
+
+def graphql_inventory(operations, state_changing):
+    """The inventory an operator reads, including what will NOT be exercised.
+
+    A count of what exists is half the answer. With `state_changing` off the proxy refuses
+    mutations — it parses the AST for exactly this and allows query-only documents through —
+    so the operations that will not be reached are named here rather than left to be inferred
+    from their absence in the results.
+    """
+    skipped = [] if state_changing else [
+        item["name"] for item in operations if item["operation"] in STATE_CHANGING_OPERATIONS]
+    counts = {}
+    for item in operations:
+        counts[item["operation"]] = counts.get(item["operation"], 0) + 1
+    return {
+        "total": len(operations),
+        "by_operation": counts,
+        "state_changing_withheld": sorted(skipped),
+        "note": ("state_changing is off, so the proxy refuses these and they are not exercised"
+                 if skipped else None),
+    }
 
 
 class ZapAdapter(BaseAdapter):
@@ -457,7 +541,7 @@ class ZapAdapter(BaseAdapter):
         return {"env": {"contexts": [context], "parameters": {"failOnError": True, "failOnWarning": False}}, "jobs": jobs}
 
     async def run(self, ctx, sandbox):
-        schema, digest, document = await schema_file(ctx, sandbox)
+        schema, digest, document, operations = await schema_file(ctx, sandbox)
         from .inventory import seeds
         inventory = await seeds(ctx, sandbox.policy)
         plan = self.plan(ctx, schema, inventory)
@@ -477,6 +561,8 @@ class ZapAdapter(BaseAdapter):
             result = StageResult(status="failed", reason="ZAP did not produce its JSON report")
         result.metadata.update(image=IMAGES["zap"], schema_sha256=digest, inventory_seed_count=len(inventory),
                                plan_sha256=hashlib.sha256(json.dumps(plan, sort_keys=True).encode()).hexdigest())
+        if operations:
+            result.metadata["graphql"] = graphql_inventory(operations, ctx.config.state_changing)
         return await record(ctx, sandbox, output, result, accepted_codes=(0, 2))
 
 
@@ -765,7 +851,7 @@ class SchemathesisAdapter(BaseAdapter):
     name = "schemathesis"
 
     async def run(self, ctx, sandbox):
-        schema, digest, document = await schema_file(ctx, sandbox)
+        schema, digest, document, operations = await schema_file(ctx, sandbox)
         # Recorded before the run, not after: these come from the operator's own
         # schema, so they are known whether or not Schemathesis reaches anything.
         schema_declared = schema_endpoints(document, ctx.target, ctx.identity_id)
@@ -796,6 +882,8 @@ class SchemathesisAdapter(BaseAdapter):
         result = StageResult(metadata={"version": TOOL_VERSIONS["schemathesis"], "seed": ctx.config.seed,
                                "workers": ctx.config.budget.concurrency,
                                "schema_sha256": digest})
+        if operations:
+            result.metadata["graphql"] = graphql_inventory(operations, ctx.config.state_changing)
         report = sandbox.output / "results.xml"
         if report.exists():
             for case in ET.fromstring(report.read_text()).iter("testcase"):

@@ -498,6 +498,42 @@ The first pass at this measurement DID assert seed sensitivity, on two runs that
 differ; a third run contradicted it. The varying thing was worker ordering, not the seed — and
 a test written from the first pass would have been both flaky and wrong about why.
 
+**GraphQL query-operation inventory — done.** Measured first: `schema_file` returned the parsed
+document only for OpenAPI (`document if source.kind == "openapi" else None`), and
+`schema_endpoints` is paths and query parameters, which a transport with ONE url and no methods
+has none of. So `schema_endpoints(None, …)` returned `[]`, a GraphQL assessment declared ZERO
+operations, and a six-operation schema was indistinguishable from an empty one. A grep for any
+function that enumerated GraphQL operations came back empty — the capability was absent, not
+broken.
+
+The recurring shape rather than a missing feature: an empty inventory reads as "the schema
+declares nothing" when it meant "nothing looked".
+
+PARSED, NOT MATCHED. SDL carries block strings, descriptions, comments, directives, interfaces
+and `extend type`, so `graphql_operations` uses graphql-core — the library the proxy ALREADY
+uses to tell a read-only query from a mutation, now a declared orchestrator dependency as well
+as a container one. A regular expression that looked right on a tidy schema would miss or
+invent operations on a real one, and there are tests for both: a description that mentions
+`type Query { fake: String }` as prose contributes nothing, and `extend type Query` contributes
+its fields. SDL and introspection JSON are both accepted, because both are what an operator has
+to hand.
+
+THE INVENTORY NAMES WHAT WILL NOT RUN. With `state_changing` off the proxy refuses mutations,
+so `graphql_inventory` lists the withheld operations by name instead of leaving the operator to
+infer the gap from an absence in the results — and a test ties that set to what `proxy_addon`
+actually blocks, which is a document whose operations are ALL queries.
+
+A BROKEN SCHEMA RAISES RATHER THAN REPORTING AN EMPTY INVENTORY, which is the same defect
+this entry closed for OpenAPI: the failure reaches the stage row as a reason.
+
+**The arity guard was strengthened by the change it caught.**
+`test_schema_file_returns_the_same_shape_with_and_without_a_schema` existed because the third
+return value grew and the no-schema early return kept two, killing every ZAP run. It asserted
+`== 3`. Growing the tuple to four made it fail — correctly — but ablating the early return back
+to three values showed the OLD form would have PASSED while the with-schema path returned four:
+the guard checked only one path, so it would have missed the exact defect it was written for.
+It now compares the two paths to each other.
+
 ### E-013: business-logic and concurrency testing
 
 Extend the existing race-condition case with application-specific invariants:
