@@ -25,6 +25,45 @@ _SEV_COLOR = {
 }
 
 
+# WHAT A MODEL MAY SAY ABOUT CONFIDENCE, and the one thing it may not.
+#
+# `confidence == "confirmed"` is what makes a finding `verified` here and what
+# `defectdojo.remote` sends to a client's tracker as verified=true. The legacy lane
+# parses the model's own analysis text with `_parse_finding_blocks` and wrote whatever
+# it found straight into `findings.confidence` — so a model emitting
+# `CONFIDENCE: confirmed` verified its own finding. Measured before this: the parser
+# accepts any value that is not a placeholder echo, "confirmed" among them, and the
+# report then says verified.
+#
+# E-014: "Scanner and model agreement alone never upgrades confidence to confirmed."
+# E-020 is why it survived: "do not assume the new integration proxy already governs
+# every historical execution path" — the integration lane grades honestly (ZAP alerts
+# are `suspected`, the cross-arm object check earns `confirmed` from a differential,
+# `assertion_grade` needs a control) and none of that governs this path.
+#
+# CLAMPED RATHER THAN DROPPED. The model's calibration is worth keeping — it reads the
+# evidence and "this is weak" is useful — so it may still lower, and may still say
+# `likely`, its strongest permitted claim. What it may not do is grant the one value
+# that leaves the building as verification.
+MODEL_MAX_CONFIDENCE = "likely"
+CONFIDENCE_VALUES = ("suspected", "likely", "confirmed")
+
+
+def model_confidence(value):
+    """The confidence a MODEL is allowed to assert, or None if it said nothing usable.
+
+    `confirmed` is earned by a differential, a control, or a second observation — none
+    of which a model reading text has done. It becomes `likely` instead, which is the
+    difference between "the model is fairly sure" and "erlik verified this".
+    """
+    text = (value or "").strip().lower()
+    if not text:
+        return None
+    if text not in CONFIDENCE_VALUES:
+        return None
+    return MODEL_MAX_CONFIDENCE if text == "confirmed" else text
+
+
 def _e(v) -> str:
     return html.escape("" if v is None else str(v))
 

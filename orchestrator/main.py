@@ -2676,6 +2676,8 @@ async def _generate_report(session_id: str, model: str, target_url: str,
     if structured:
         db2 = await get_db()
         try:
+            from orchestrator.reporting import model_confidence
+
             for i, f in enumerate(findings, 1):
                 fb = structured.get(i)
                 if not fb or not f.get("id"):
@@ -2689,8 +2691,19 @@ async def _generate_report(session_id: str, model: str, target_url: str,
                     "UPDATE findings SET calibrated_severity = ?, owasp_category = ?, "
                     "impact = ?, remediation = ?, confidence = ?, "
                     "cwe = COALESCE(cwe, ?) WHERE id = ?",
+                    # `model_confidence`, not fb["CONFIDENCE"] raw. `confidence ==
+                    # "confirmed"` is what makes a finding `verified` in the report and
+                    # what reaches a client's tracker as verified=true, and this text was
+                    # written by the MODEL — so `CONFIDENCE: confirmed` in its analysis
+                    # verified its own finding. It may still lower, and `likely` is its
+                    # strongest permitted claim. See reporting.MODEL_MAX_CONFIDENCE.
+                    #
+                    # Imported at the call site, as the other reporting helpers in this
+                    # module are: `reporting` pulls in the HTML/SARIF writers and this
+                    # module is imported by tooling that has no use for them.
                     (fb.get("CALIBRATED_SEVERITY"), fb.get("OWASP"),
-                     fb.get("IMPACT"), fb.get("REMEDIATION"), fb.get("CONFIDENCE"),
+                     fb.get("IMPACT"), fb.get("REMEDIATION"),
+                     model_confidence(fb.get("CONFIDENCE")),
                      fb.get("CWE"), f["id"]),
                 )
                 # Reflect into the in-memory dict so the table below renders fresh data.

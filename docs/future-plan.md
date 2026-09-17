@@ -645,6 +645,35 @@ Scanner and model agreement alone never upgrades confidence to confirmed.
 Acceptance: known false-positive fixtures stay unconfirmed; confirmed findings
 include the exact assertion, identity, relevant response, and reproduction inputs.
 
+**"Scanner and model agreement alone never upgrades confidence to confirmed" — the model half
+was violated, and is now clamped.** `confidence == "confirmed"` is not a label: `reporting`
+turns it into `verified`, and `defectdojo.remote` sends verified=true to a client's tracker,
+where it means a human can stop checking.
+
+Everywhere it is EARNED, it is earned properly. A ZAP alert is `suspected` however sure ZAP
+itself sounds, the cross-arm object check takes `confirmed` from a differential, and
+`assertion_grade` needs a control. The legacy lane was the exception: it parses the model's own
+analysis with `_parse_finding_blocks`, which accepts any value that is not a placeholder echo,
+and wrote it straight into `findings.confidence`. Measured:
+
+    model text           CONFIDENCE: confirmed
+    findings.confidence  'confirmed'
+    report               verified: True
+    tracker              verified=true
+
+So a model verified its own finding by writing a word. E-020 is why it survived — "do not
+assume the new integration proxy already governs every historical execution path" — and this is
+what that warning looks like when it comes true.
+
+CLAMPED RATHER THAN DROPPED. The model reads the evidence and "this is weak" is the judgement
+it is actually good at, so it may still lower and may still say `likely`, its strongest
+permitted claim. A value outside the vocabulary writes nothing, so a model inventing a word
+cannot overwrite a confidence the evidence earned, and a finding that earned `confirmed`
+elsewhere keeps it — this is a ceiling on ONE writer, not a ban on the value.
+
+STILL OPEN in this entry: the browser-backed confirmation recipes themselves — CORS read
+demonstration, client-side traces, and the per-check repeatability rule.
+
 ### E-015: versioned methodology coverage
 
 Build a coverage matrix linking implemented checks to versioned WSTG, API Security,
