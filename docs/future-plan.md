@@ -674,6 +674,34 @@ elsewhere keeps it — this is a ceiling on ONE writer, not a ban on the value.
 STILL OPEN in this entry: the browser-backed confirmation recipes themselves — CORS read
 demonstration, client-side traces, and the per-check repeatability rule.
 
+**And the same column was losing 278 confirmations at the other end.** Fixing the write
+exposed the read. `verified` was `confidence == "confirmed"`, an exact case-sensitive match
+against a column an LLM pass writes. Measured on the recorded corpus of 462 findings:
+
+    'Confirmed'     251        'CONFIRMED'      15
+    '** Confirmed'   12        'confirmed'      10
+    'Demonstrated'   19        'Potential'      15        None  140
+
+288 are graded confirmed by any reading. TEN matched. The other 278 — twelve of them carrying
+markdown bold that leaked out of a model response — were told to a client as unverified, by
+the report and by the DefectDojo export alike.
+
+THE CODEBASE ALREADY LEARNED THIS ONE COLUMN OVER. `normalise_severity` says it outright:
+`calibrated_severity` is written by an LLM pass, the corpus holds `'** CRITICAL'`, and raw
+comparison makes those distinct buckets so a filter for critical silently misses the starred
+rows. `confidence` is written by the same pass and never got the treatment.
+
+The direction of the error was the safe one — erlik understated what it had established — and
+it was still wrong: a report contradicting the product's own data is not one anyone can act on.
+
+READING AND WRITING ARE DIFFERENT QUESTIONS, which looks like an inconsistency until it is
+needed. An unrecognised word READS at the floor, because `'Demonstrated'` reads stronger than
+`suspected` and mapping it upward is how a model's vocabulary becomes erlik's. The same word
+WRITES nothing, because `suspected` would overwrite a `confirmed` that a differential earned.
+
+NOT MIGRATED, following `normalise_severity`: the column records what a pass actually
+produced, and rewriting it would erase the evidence that it produced `'** Confirmed'` at all.
+
 ### E-015: versioned methodology coverage
 
 Build a coverage matrix linking implemented checks to versioned WSTG, API Security,

@@ -49,6 +49,44 @@ MODEL_MAX_CONFIDENCE = "likely"
 CONFIDENCE_VALUES = ("suspected", "likely", "confirmed")
 
 
+def _clean_confidence(value):
+    """Shared by both readers of this column, so they cannot disagree about what a value
+    IS while disagreeing about what to do with it. `strip("*")` is the markdown bold that
+    leaked out of a model response — the same contamination `normalise_severity` names."""
+    return (value or "").strip().strip("*").strip().lower()
+
+
+def normalise_confidence(value):
+    """One of CONFIDENCE_VALUES, or None when nothing was recorded.
+
+    THE SAME LESSON `normalise_severity` ALREADY LEARNED, in the column beside it. That one
+    says it plainly: `calibrated_severity` is written by an LLM pass and the corpus holds
+    `'** CRITICAL'`, markdown bold that leaked out of a model response. `confidence` is
+    written by the same pass and never got the same treatment. Measured on the recorded
+    corpus of 462 findings:
+
+        'Confirmed'     251      'CONFIRMED'      15
+        '** Confirmed'   12      'confirmed'      10
+        'Demonstrated'   19      'Potential'      15      None  140
+
+    `verified` was `confidence == "confirmed"`, an exact case-sensitive match, so 288
+    findings graded confirmed reported as 10. TWO HUNDRED AND SEVENTY-EIGHT confirmed
+    findings were told to a client as unverified.
+
+    The direction of that error is the safe one — erlik understated what it had established
+    rather than overstating it — and it is still wrong: a report that contradicts the
+    product's own data is not a report anyone can act on.
+
+    ANYTHING UNRECOGNISED BECOMES THE FLOOR, never the ceiling. `'Demonstrated'` reads
+    stronger than `suspected` and inventing that mapping is how a model's vocabulary
+    becomes erlik's; the severity rule is "never invented" and this is its equivalent.
+    """
+    text = _clean_confidence(value)
+    if not text:
+        return None
+    return text if text in CONFIDENCE_VALUES else "suspected"
+
+
 def model_confidence(value):
     """The confidence a MODEL is allowed to assert, or None if it said nothing usable.
 
@@ -56,9 +94,11 @@ def model_confidence(value):
     of which a model reading text has done. It becomes `likely` instead, which is the
     difference between "the model is fairly sure" and "erlik verified this".
     """
-    text = (value or "").strip().lower()
-    if not text:
-        return None
+    text = _clean_confidence(value)
+    # NOT `normalise_confidence`, and the difference is the point. Reading an unrecognised
+    # word means "grade it at the floor"; WRITING one must mean "write nothing", because
+    # `suspected` would overwrite a `confirmed` some differential earned with a lower grade
+    # on the strength of a word the model made up. Absence leaves the column alone.
     if text not in CONFIDENCE_VALUES:
         return None
     return MODEL_MAX_CONFIDENCE if text == "confirmed" else text
@@ -307,7 +347,9 @@ def report_to_defectdojo(report: dict) -> dict:
             # where the line below silently shadowed it — the change looked
             # applied and did nothing.
             "active": bool(f.get("submittable", True)),
-            "verified": (f.get("confidence") == "confirmed"),
+            # NORMALISED, not compared raw: the column holds five spellings of confirmed
+            # and an exact match found one of them. See `normalise_confidence`.
+            "verified": normalise_confidence(f.get("confidence")) == "confirmed",
         })
     return {"findings": out}
 

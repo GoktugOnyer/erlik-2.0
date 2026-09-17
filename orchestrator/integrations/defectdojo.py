@@ -13,6 +13,7 @@ from typing import Literal
 from urllib.parse import urlsplit
 from pydantic import Field, model_validator
 from .contracts import StrictModel, AssessmentConfig, canonical_origin
+from ..reporting import normalise_confidence
 from .security import SecretStore, runtime_root
 from .runtime import Sandbox
 from .adapters import rpc
@@ -166,7 +167,13 @@ def finding_payload(finding):
                "severity": finding["severity"].capitalize() if finding["severity"] != "informational" else "Info",
                "unique_id_from_tool": finding["fingerprint"], "vuln_id_from_tool": finding["fingerprint"],
                "endpoints": [finding["url"]], "active": triage == "open", "false_p": triage == "false_positive",
-               "verified": finding["confidence"] == "confirmed" and triage != "false_positive",
+               # Normalised for the same reason `reporting` is: this value reaches a
+               # client's tracker as verified=true, and an exact match against a column
+               # holding 'Confirmed' and '** Confirmed' answers false for a finding erlik
+               # confirmed. The integration lane writes clean values; the legacy corpus
+               # this can export does not.
+               "verified": (normalise_confidence(finding["confidence"]) == "confirmed"
+                            and triage != "false_positive"),
                "static_finding": False, "dynamic_finding": True}
     # THE METHODOLOGY MAPPING, which never left the process. Every finding has carried one
     # for as long as the catalogue has — `methodology=[case_id]` on a catalogue finding,
