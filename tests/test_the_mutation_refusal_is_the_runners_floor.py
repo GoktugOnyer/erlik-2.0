@@ -140,8 +140,9 @@ async def test_every_safe_mode_rule_reaches_the_floor():
         "sqlmap-os-takeover": 'sqlmap -u "http://app.test/x?id=1" --os-shell',
         "sqlmap-max-risk": 'sqlmap -u "http://app.test/x?id=1" --risk 3',
         # Found by this test rather than by reading the list — which is the reason it reads
-        # the list.
+        # the list. It caught `http-local-file-read` the same way three increments later.
         "sql-ddl-dml": 'curl -s "http://app.test/x?q=1;DROP TABLE users--"',
+        "http-local-file-read": 'curl -d @/etc/passwd "http://app.test/x"',
     }
     assert {rule for rule, _, _ in _SAFE_MODE_RULES} <= set(samples), (
         f"a safe-mode rule has no sample here: "

@@ -191,24 +191,24 @@ Run it from the repository root: `conftest.py` anchors the working directory
 there, and `orchestrator.main` builds its Jinja2 template path relative to the
 CWD.
 
-A **fresh clone** reports **3241 passed, 69 skipped** on its first run, and
-3243 passed / 67 skipped on every run after — measured 2026-09-12 against this
+A **fresh clone** reports **3268 passed, 70 skipped** on its first run, and
+3270 passed / 68 skipped on every run after — measured 2026-09-12 against this
 commit by cloning and running it, not quoted from a developer's tree.
 
 > Re-measure this after any change under `tests/`. The first draft of this
 > paragraph was taken before the same commit finished adding tests, which is
 > exactly the staleness it was written to correct.
 
-Every skip is structural rather than broken, and the 69 account for themselves:
+Every skip is structural rather than broken, and the 70 account for themselves:
 
 | Count | Reason |
 |-------|--------|
-| 33 | need `data/pentest.db`, the recorded corpus — `.gitignore` excludes `data/` because it holds real client findings (see `docs/REPRODUCIBILITY.md` and `tests/corpus.py`) |
+| 34 | need the recorded corpus — `data/pentest.db`, or the command corpus under `data/reports/` — `.gitignore` excludes `data/` because it holds real client findings (see `docs/REPRODUCIBILITY.md` and `tests/corpus.py`) |
 | 33 | container suites, behind `ERLIK_DOCKER_TESTS=1` |
 | 3 | need a real external service (Interactsh, DefectDojo) |
 
 With Docker running and the lab images built, **every one of those container suites
-passes**: `ERLIK_DOCKER_TESTS=1 ERLIK_REAL_INTERACTSH_TESTS=1 pytest` reports **3309
+passes**: `ERLIK_DOCKER_TESTS=1 ERLIK_REAL_INTERACTSH_TESTS=1 pytest` reports **3337
 passed, 1 skipped** — the remaining skip is `test_defectdojo_live.py`, which needs a
 live DefectDojo instance. Measured 2026-09-16 against the local lab.
 
@@ -225,7 +225,7 @@ live DefectDojo instance. Measured 2026-09-16 against the local lab.
 > once a container fixture, once a timing-based delay detector — plus a container left in
 > `Created`. Neither was a regression and neither was a measurement.
 
-A developer's tree reports **3274 passed, 36 skipped** instead, and the 33-test
+A developer's tree reports **3302 passed, 36 skipped** instead, and the 33-test
 gap is entirely that corpus: 31 tests report `corpus present but empty`, and 2
 more inspect the live database directly — one for a plaintext credential on disk,
 the other for leftover fixture rows. Those two are hygiene checks on a real machine, so skipping

