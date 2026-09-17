@@ -191,8 +191,8 @@ Run it from the repository root: `conftest.py` anchors the working directory
 there, and `orchestrator.main` builds its Jinja2 template path relative to the
 CWD.
 
-A **fresh clone** reports **3386 passed, 74 skipped** on its first run, and
-3388 passed / 72 skipped on every run after — measured 2026-09-17 against this
+A **fresh clone** reports **3404 passed, 74 skipped** on its first run, and
+3406 passed / 72 skipped on every run after — measured 2026-09-17 against this
 commit by cloning and running it, not quoted from a developer's tree.
 
 > Re-measure this after any change under `tests/`. The first draft of this
@@ -210,14 +210,14 @@ counted from the run's own skip reasons, not apportioned by hand:
 | 1 | needs a live DefectDojo (`ERLIK_DEFECTDOJO_LIVE_TESTS=1`) |
 
 With Docker running and the lab images built, **every one of those container suites
-passes**: `ERLIK_DOCKER_TESTS=1 ERLIK_REAL_INTERACTSH_TESTS=1 pytest` reports **3459
+passes**: `ERLIK_DOCKER_TESTS=1 ERLIK_REAL_INTERACTSH_TESTS=1 pytest` reports **3477
 passed, 1 skipped** — the remaining skip is `test_defectdojo_live.py`, which needs a
-live DefectDojo instance. Measured 2026-09-17 against the local lab, in 8m42s. That
-total plus its one skip is the 3460 the suite collects, so nothing gated is left out.
+live DefectDojo instance. Measured 2026-09-17 against the local lab, in 8m55s. That
+total plus its one skip is the 3478 the suite collects, so nothing gated is left out.
 
 > **One flake seen, recorded rather than rounded off.**
 > `test_interactsh_completion.py::test_real_interactsh_dns_https_and_testcase_correlation`
-> failed once in ten full gated runs and passed four times out of four on its own and
+> failed once in eleven full gated runs and passed four times out of four on its own and
 > within its own file. It drives a real Interactsh container and correlates a live DNS
 > callback, so contention with the other container suites is the likely cause — but that
 > is a hypothesis, not a measurement, and it has not been chased down. If you hit it, run
@@ -228,7 +228,7 @@ total plus its one skip is the 3460 the suite collects, so nothing gated is left
 > once a container fixture, once a timing-based delay detector — plus a container left in
 > `Created`. Neither was a regression and neither was a measurement.
 
-A developer's tree reports **3421 passed, 39 skipped** instead, and the 35-test
+A developer's tree reports **3439 passed, 39 skipped** instead, and the 35-test
 gap is entirely that corpus: 33 tests report `corpus present but empty` or that no
 recorded corpus is in the tree, and 2 more inspect the live database directly — one
 for a plaintext credential on disk, the other for leftover fixture rows. Those two are
