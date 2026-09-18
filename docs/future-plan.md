@@ -2154,6 +2154,36 @@ in 12 runs.
 The retry does not swallow regressions, which is the property that matters: with the evaluator
 disabled, or the anonymous clause dropped, the tests still FAIL rather than skip.
 
+**INPV-05 is the second one closed, and it needed no fix either.** Its header records a defect
+worth a test rather than a paragraph: a 302 to `/login.php` matched the reachability gate, "so
+every later step probed an empty redirect body, found nothing, and the case reported CLEAN on a
+page it never reached". The gate was added by hand and nothing held it. Measured:
+
+    no session                     302 -> ../../login.php, empty body   stops at baseline
+    session + security=low         200, 583 bytes, SQL error present    error-based FINDING
+    session + security=impossible  200, 389 bytes, PHP warning          NOT a control
+
+THE THIRD ROW IS DELIBERATELY UNUSED and that is the judgement in this increment. At
+`impossible` DVWA demands a CSRF token the case does not send, so the probe receives a PHP
+warning rather than a hardened query — it tested nothing, and `no finding` there would be a
+vacuous pass. `COVERAGE_STATES` already names the trap: "a probe missing its CSRF token answers
+HTTP 200 with 389 bytes of PHP warnings, so the emptiness-only detector does not fire and
+nothing was tested all the same." A real negative control needs a non-injectable endpoint,
+which routes into `sqlmap_scan` and costs minutes per run; it is recorded as missing rather
+than faked.
+
+Three ablations, each restoring a documented behaviour: removing the login gate makes the
+unauthenticated run report clean again, breaking the signature silences the positive control,
+and dropping `Submit` stops DVWA running the query at all — which is the header's own stated
+reason for carrying it.
+
+TWO MEASUREMENT ERRORS OF MY OWN, both recorded where the next person will hit them. httpx
+per-request cookies leaked an unauthenticated request's jar into an authenticated one, and the
+SQL signature read as absent at `security=low` — the documentation was right and the
+measurement was not. And the gated run that bracketed this work took 11m36s rather than its
+usual nine because I drove the same lab containers while it was running: interference I caused,
+not a regression.
+
 
 | Metric | Definition | Proposed release rule |
 |---|---|---|
