@@ -34,7 +34,7 @@ async def lab(tmp_path, monkeypatch):
         await asyncio.sleep(0.3)
         yield {"names": names, "network": network, "db": db}
     finally:
-        await docker("rm", "-f", *names, check=False)
+        await docker("rm", "-f", "-v", *names, check=False)
         await docker("network", "rm", network, check=False)
 
 
@@ -139,7 +139,7 @@ async def services(lab, tmp_path, monkeypatch):
         monkeypatch.setenv("ERLIK_INTEGRATION_CA_FILE", str(certificate))
         yield name
     finally:
-        await docker("rm", "-f", name, check=False)
+        await docker("rm", "-f", "-v", name, check=False)
 
 
 @pytest.mark.asyncio

@@ -2109,6 +2109,35 @@ traversal, executable content, and unexpected remote references.
 
 ## 11. Evaluation and release gates
 
+**EVERY ASSESSMENT LEAKED A DOCKER VOLUME, and the symptom was a timing drift nobody would
+have read as a defect.** `erlik-egress:1` inherits `VOLUME /home/mitmproxy/.mitmproxy` from
+its base image, so every proxy container creates an anonymous volume — and every sandbox runs
+a proxy. `Sandbox.close` removed the container with `docker rm -f`, which leaves the volume.
+
+    3443 anonymous volumes   against 12 named ones
+    122 created in one day   of assessment runs
+    15.4 GB, 84% reclaimable
+
+NOTHING FAILS WHEN THIS HAPPENS. No test goes red; docker just gets slower. The gated suite
+drifted from 8m42s to 13m51s across this session's runs, and the first two explanations were
+both wrong — contention from my own concurrent lab probing, then a degraded lab, which
+measured healthy at 2-9ms. The third look found the volumes.
+
+PROBED PER IMAGE, because "the containers leak" was a guess until it was not:
+
+    erlik-egress:1          creates 1 anonymous volume, survives `rm -f`, gone with `rm -f -v`
+    erlik-integrations:1    creates none
+    ghcr.io/zaproxy/zaproxy creates none
+
+Three removal sites in the product, not two — `close()` is the one that matters because it
+removes `self.proxy`, and it was found by grepping after the first two were fixed rather than
+by reading. Five test fixtures leaked the same way. `-v` removes ONLY anonymous volumes, so a
+named volume an operator mounted is untouched.
+
+THE EXISTING 3443 ARE NOT CLEANED BY THIS. The fix stops the growth; reclaiming what is
+already there is `docker volume prune`, which is destructive and is the operator's call.
+
+
 **MEASURED 2026-09-18: 16 of the 35 shipped catalogue cases are ever executed by the suite.
 Nineteen have never been run against anything.** Traced by wrapping `run_test_case` during a
 full run and recording which cases reached it — and comparing each against the catalogue's own

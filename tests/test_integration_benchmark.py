@@ -42,7 +42,7 @@ async def benchmark_lab(tmp_path, monkeypatch):
         await asyncio.sleep(0.3)
         yield fixture
     finally:
-        await docker("rm", "-f", name, check=False)
+        await docker("rm", "-f", "-v", name, check=False)
         await docker("network", "rm", network, check=False)
 
 

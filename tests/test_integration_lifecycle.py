@@ -48,7 +48,7 @@ async def lifecycle_lab(tmp_path, monkeypatch):
         yield {"name": name, "owner": owner, "network": network}
     finally:
         await runtime.recover_orphans()
-        await docker("rm", "-f", name, check=False)
+        await docker("rm", "-f", "-v", name, check=False)
         await docker("network", "rm", network, check=False)
 
 

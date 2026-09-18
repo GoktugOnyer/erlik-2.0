@@ -114,7 +114,17 @@ async def recover_orphans():
                     if code == 0:
                         private_write(directory / "output" / f"{name}.stdout", out)
                         private_write(directory / "output" / f"{name}.stderr", err)
-            code, _, _ = await docker("rm", "-f", *names.split(), check=False)
+            # `-v`, NOT just `-f`. `erlik-egress:1` inherits `VOLUME
+            # /home/mitmproxy/.mitmproxy` from its base image, so every proxy container
+            # creates an anonymous volume — and every sandbox runs a proxy. Removing the
+            # container without it leaves the volume forever.
+            #
+            # Measured on this machine: 3443 anonymous volumes against 12 named ones, 122
+            # created on a single day of assessment runs, 15.4 GB. It is unbounded growth on
+            # any long-running installation, and it is invisible: nothing fails, docker just
+            # gets slower. `-v` removes ONLY anonymous volumes, so a named volume an
+            # operator mounted is untouched.
+            code, _, _ = await docker("rm", "-f", "-v", *names.split(), check=False)
             if code:
                 return False
         _, networks, _ = await docker("network", "ls", "-q", "--filter", f"label={OWNER}")
@@ -304,7 +314,9 @@ class Sandbox:
                 private_write(self.output / f"{name}.stderr", err)
                 raise
         finally:
-            await asyncio.shield(docker("rm", "-f", name, check=False))
+            # `-v` for the reason given at the reaper above: the proxy image declares a
+            # VOLUME and this is the other place containers are removed.
+            await asyncio.shield(docker("rm", "-f", "-v", name, check=False))
             self.jobs.discard(name)
             if self.directory.exists():
                 self._write_manifest()
@@ -312,7 +324,10 @@ class Sandbox:
     async def close(self):
         for name in [*self.jobs, self.proxy]:
             try:
-                await docker("rm", "-f", name, check=False)
+                # THE MAIN LEAK PATH, and the one worth naming: `self.proxy` is the
+                # container whose image declares the volume, and this is where every
+                # sandbox removes it. Without `-v` each assessment left one behind.
+                await docker("rm", "-f", "-v", name, check=False)
             except (OSError, RuntimeError, asyncio.TimeoutError):
                 pass
         try:

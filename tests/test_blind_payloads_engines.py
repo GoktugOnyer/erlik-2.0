@@ -54,7 +54,7 @@ def _run(engine, query):
 
 def _up(engine):
     spec = ENGINES[engine]
-    subprocess.run(["docker", "rm", "-f", spec["container"]], capture_output=True)
+    subprocess.run(["docker", "rm", "-f", "-v", spec["container"]], capture_output=True)
     subprocess.run(["docker", "run", "-d", "--name", spec["container"], *spec["env"],
                     spec["image"]], check=True, capture_output=True)
     # Readiness is the REAL query succeeding, not a ping. MySQL's entrypoint
@@ -91,7 +91,7 @@ def engines():
         _up(engine)
     yield
     for spec in ENGINES.values():
-        subprocess.run(["docker", "rm", "-f", spec["container"]], capture_output=True)
+        subprocess.run(["docker", "rm", "-f", "-v", spec["container"]], capture_output=True)
 
 
 def payload(step_name):

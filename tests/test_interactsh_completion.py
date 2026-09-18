@@ -161,7 +161,7 @@ async def real_oast(tmp_path, monkeypatch):
                      "--entrypoint", "python", IMAGES["worker"], "/lab/target.py")
         yield {"network": network, "server": server, "target": target, "db": db}
     finally:
-        await docker("rm", "-f", target, server, check=False)
+        await docker("rm", "-f", "-v", target, server, check=False)
         await docker("network", "rm", network, check=False)
 
 
