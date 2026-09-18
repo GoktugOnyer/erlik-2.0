@@ -2109,6 +2109,34 @@ traversal, executable content, and unexpected remote references.
 
 ## 11. Evaluation and release gates
 
+**MEASURED 2026-09-18: 16 of the 35 shipped catalogue cases are ever executed by the suite.
+Nineteen have never been run against anything.** Traced by wrapping `run_test_case` during a
+full run and recording which cases reached it — and comparing each against the catalogue's own
+first step command, because several tests build synthetic cases wearing real WSTG ids and an
+id alone would have counted a stub as coverage of the case it impersonates.
+
+The gated and non-gated runs give the SAME answer: the lane's container tests exercise
+adapters, not `run_test_case`.
+
+    never executed:  ATHN-01 AUTHZ-01 AUTHZ-04 AUTHZ-05 BUSL-09 CLNT-07b CLNT-09
+                     CONF-02 CONF-07 ERRH-01 INPV-01 INPV-05 INPV-05.6 INPV-06
+                     INPV-07 INPV-11 INPV-15 INPV-19 SESS-10
+
+WHY IT MATTERS is not hypothetical. BUSL-04 and BUSL-05 were in exactly this state, and the
+first time anything ran them with a realistic input they turned out to report CLEAN on every
+authenticated target — a defect that made them useless precisely where they would be used.
+
+AUTHZ-04 IS THE FIRST ONE CLOSED, and it needed no fix: its header carries two measured verdict
+tables and both are still true, confirmed against the running lab. What it lacked was a test
+holding them, which the header itself identifies as the hazard — one of its rows "was true when
+written, and was not re-measured after the behaviour it describes was changed one commit
+later", and was corrected by hand. Nothing would have caught it twice.
+
+The positive control is what makes the four negative rows mean anything: four "no finding"
+results are also what a case that has stopped working produces, and this case spent a long
+time unable to conclude anything for three separate reasons its own header lists.
+
+
 | Metric | Definition | Proposed release rule |
 |---|---|---|
 | Scope integrity | Requests observed by recording out-of-scope services, **and target state compared before and after a run** | Zero unauthorized requests across supported execution paths, **and zero state changes while `state_changing` is false** |
