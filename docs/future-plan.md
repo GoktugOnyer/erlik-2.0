@@ -2136,6 +2136,24 @@ The positive control is what makes the four negative rows mean anything: four "n
 results are also what a case that has stopped working produces, and this case spent a long
 time unable to conclude anything for three separate reasons its own header lists.
 
+**And the new test flaked, which the full gated suite caught and a single-file run did not.**
+It failed once inside the gated run and passed alone, in combination with the other Juice Shop
+suites, and under 25 rapid logins. The assertion said nothing useful — it reached `findings[0]`
+on an empty list, so the report was an IndexError rather than which arm misbehaved.
+
+Made diagnostic first, then measured: 4 failures in 12 consecutive runs, each one an ARM
+RECEIVING ZERO BYTES in about a millisecond — `fetch_as_high_priv` three times,
+`fetch_as_low_priv` once. Juice Shop intermittently refuses the connection when driven hard.
+
+AN ARM THAT RECEIVED NOTHING ESTABLISHES NOTHING, in either direction, which is the rule this
+catalogue already states in INPV-05's own gate — "a case that cannot reach its target must say
+so, not return a verdict" — applied to the test rather than the case. So it retries, and skips
+with the arm named if the lab still will not answer. Re-measured: 0 failures and 1 honest skip
+in 12 runs.
+
+The retry does not swallow regressions, which is the property that matters: with the evaluator
+disabled, or the anonymous clause dropped, the tests still FAIL rather than skip.
+
 
 | Metric | Definition | Proposed release rule |
 |---|---|---|

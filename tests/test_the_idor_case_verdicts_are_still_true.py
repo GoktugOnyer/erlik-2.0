@@ -102,6 +102,70 @@ def body_sizes(result):
     return [len((step.output or "").split("\r\n\r\n", 1)[-1]) for step in result.steps]
 
 
+def arms(result):
+    """What each arm actually got, for a failure message that explains itself.
+
+    ADDED AFTER A FAILURE THAT COULD NOT EXPLAIN ITSELF. This file failed once inside a full
+    gated run — `test_the_finding_names_both_arms_and_the_anonymous_exclusion` — and passed
+    in isolation, in combination with the other Juice Shop suites, and under 25 rapid
+    logins. The cause is not established. What IS established is that the test said nothing
+    useful when it went: the assertion reached `findings[0]` on an empty list, so the report
+    was an IndexError rather than which arm misbehaved.
+
+    A finding that does not appear has three ordinary explanations here — an arm that never
+    answered, an arm that answered without the marker, an anonymous arm that was served the
+    object — and they are distinguishable from the captures. So the next occurrence says
+    which.
+    """
+    detail = []
+    for step in result.steps:
+        capture = step.output or ""
+        status = capture.split("\r\n", 1)[0][:40] if capture else "(no output)"
+        body = capture.split("\r\n\r\n", 1)[-1]
+        detail.append(f"{step.step}: {status!r} {len(body)}b")
+    return " | ".join(detail)
+
+
+def unanswered(result):
+    """Arms that received ZERO bytes, which is the lab not answering rather than a verdict."""
+    return [step.step for step in result.steps if not (step.output or "").strip()]
+
+
+def the_finding(result, marker):
+    """The single finding, or a failure that says why there is not one."""
+    assert result.findings, (
+        f"no finding. arms -> {arms(result)}. marker {marker!r} present per arm: "
+        + ", ".join(f"{s.step}={marker in (s.output or '')}" for s in result.steps))
+    assert len(result.findings) == 1, [f.model_dump() for f in result.findings]
+    return result.findings[0]
+
+
+async def run_until_the_lab_answers(target, attempts=3):
+    """Run the case, retrying while an ARM RECEIVES NOTHING.
+
+    MEASURED: 4 failures in 12 consecutive runs, each one an arm returning zero bytes in
+    about a millisecond — `fetch_as_high_priv` three times, `fetch_as_low_priv` once. Juice
+    Shop intermittently refuses the connection when driven hard, and the full gated suite
+    drives it hard.
+
+    An arm that received nothing establishes NOTHING, in either direction. Failing on it
+    reports a product defect that is not there; passing on it would be worse. This is the
+    rule the catalogue already states in INPV-05's own gate — "a case that cannot reach its
+    target must say so, not return a verdict" — applied to the test rather than the case.
+
+    So: retry, and if the lab still will not answer, SKIP with the arm named. A real
+    regression, where every arm answers and the verdict is wrong, is untouched by this.
+    """
+    for attempt in range(attempts):
+        result = await run_case(target)
+        if not unanswered(result):
+            return result
+        if attempt + 1 < attempts:
+            await asyncio.sleep(0.5)
+    pytest.skip(f"the lab did not answer after {attempts} attempts: "
+                f"{unanswered(result)} received zero bytes — arms: {arms(result)}")
+
+
 # ------------------------------------------------ the positive control, first and loudest
 
 
@@ -112,13 +176,12 @@ async def test_the_case_still_finds_the_violation_it_was_built_for():
     means nothing."""
     admin = await juice_token("admin@juice-sh.op", "admin123")
     jim = await juice_token("jim@juice-sh.op", "ncc-1701")
-    result = await run_case({
+    result = await run_until_the_lab_answers({
         "url_template": f"{JUICE}/api/Users",
         "private_object_marker": "admin@juice-sh.op",
         "high_priv_token": admin, "low_priv_token": jim,
         "scope": {"allow_hosts": ["localhost"], "allow_ports": [3000]}})
-    assert len(result.findings) == 1, [f.model_dump() for f in result.findings]
-    finding = result.findings[0]
+    finding = the_finding(result, "admin@juice-sh.op")
     assert "Broken Access Control" in finding.vuln_type
     assert finding.confidence == "confirmed", (
         "this is the one evaluator graded `confirmed`; the grade is the claim")
@@ -131,12 +194,12 @@ async def test_the_finding_names_both_arms_and_the_anonymous_exclusion():
     finding is reading it."""
     admin = await juice_token("admin@juice-sh.op", "admin123")
     jim = await juice_token("jim@juice-sh.op", "ncc-1701")
-    result = await run_case({
+    result = await run_until_the_lab_answers({
         "url_template": f"{JUICE}/api/Users",
         "private_object_marker": "admin@juice-sh.op",
         "high_priv_token": admin, "low_priv_token": jim,
         "scope": {"allow_hosts": ["localhost"], "allow_ports": [3000]}})
-    evidence = result.findings[0].evidence
+    evidence = the_finding(result, "admin@juice-sh.op").evidence
     assert "the private object is identified by" in evidence
     assert "as the privileged identity" in evidence
     assert "as the low-privilege identity" in evidence
@@ -160,7 +223,7 @@ async def test_dvwa_reports_nothing_and_for_the_documented_reason(level, expecte
     Asserting only "no finding" would pass against a case that fetched nothing."""
     admin = await dvwa_session("admin", "password")
     gordon = await dvwa_session("gordonb", "abc123")
-    result = await run_case({
+    result = await run_until_the_lab_answers({
         "url_template": USER_DATA, "private_object_marker": "Gordon",
         "high_priv_cookie": f"PHPSESSID={admin}",
         "low_priv_cookie": f"PHPSESSID={gordon}",
@@ -182,7 +245,7 @@ async def test_the_privileged_arm_always_got_the_object():
     admin = await dvwa_session("admin", "password")
     gordon = await dvwa_session("gordonb", "abc123")
     for level in ("low", "medium", "high", "impossible"):
-        result = await run_case({
+        result = await run_until_the_lab_answers({
             "url_template": USER_DATA, "private_object_marker": "Gordon",
             "high_priv_cookie": f"PHPSESSID={admin}",
             "low_priv_cookie": f"PHPSESSID={gordon}",
