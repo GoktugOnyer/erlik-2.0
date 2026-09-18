@@ -74,7 +74,9 @@ CLASSES: list[dict] = [
      "detectors": []},
     {"key": "authz", "label": "Broken Access Control / IDOR",
      "owasp": "A01:2021 Broken Access Control",
-     "wstg": ["WSTG-AUTHZ-04"],
+     # AUTHZ-02 is the temporal one: access surviving a transfer, which AUTHZ-04
+     # and the `ownership` evaluator do not ask about.
+     "wstg": ["WSTG-AUTHZ-02", "WSTG-AUTHZ-04"],
 
      # THE split: cross_arm_authorization is object level, cross_arm_privileged_function is function level
      "api": ["API1:2023", "API5:2023"],

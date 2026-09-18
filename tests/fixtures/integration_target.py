@@ -34,6 +34,22 @@ COUPON_LOCK = threading.Lock()
 # needed a burst to find this would be testing the wrong thing.
 CARTS = {}
 
+# AN OBJECT THAT CHANGES HANDS. The invariant is not "can I transfer what I do not own" —
+# that is object-level authorization and the `ownership` evaluator already asks it. It is
+# whether the FORMER owner's access survives a transfer that should have revoked it.
+#
+# The realistic shape of that bug is two sources of truth: an owner field and a grant list.
+# `/transfer` updates the owner and ADDS the recipient to the grants, leaving the previous
+# owner in place — so alice keeps reading a document that is now bob's. `/transfer-strict`
+# replaces the grants, which is the same operation done correctly.
+OBJECT_OWNER = {}
+OBJECT_GRANTS = {}
+
+
+def _reset_object(name):
+    OBJECT_OWNER[name] = "alice"
+    OBJECT_GRANTS[name] = {"alice"}
+
 
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *a): pass
@@ -53,6 +69,16 @@ class Handler(BaseHTTPRequestHandler):
         elif path in ("/me", "/private"):
             status = 200 if self.headers.get("Authorization") == "Bearer lab-token" else 401
             body = "reader private-object-canary" if status == 200 else "unauthorized"
+        elif path == "/object":
+            name = (parse_qs(urlsplit(self.path).query).get("id") or ["doc-1"])[0]
+            caller = (self.headers.get("Authorization") or "").removeprefix("Bearer ").strip()
+            if name not in OBJECT_GRANTS:
+                _reset_object(name)
+            if caller in OBJECT_GRANTS[name]:
+                status, body = 200, "OBJECT-BODY quarterly-figures"
+            else:
+                status, body = 403, "forbidden"
+            content_type = "text/plain"
         elif path == "/openapi.json":
             content_type = "application/json"
             body = json.dumps({"openapi": "3.0.3", "info": {"title": "Integration fixture", "version": "1"},
@@ -100,6 +126,25 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         self.rfile.read(int(self.headers.get("Content-Length", 0)))
         REQUESTS.append({"path": self.path, "method": "POST"})
+        parts_t = urlsplit(self.path)
+        if parts_t.path in ("/transfer", "/transfer-strict"):
+            query = parse_qs(parts_t.query)
+            name = (query.get("id") or ["doc-1"])[0]
+            recipient = (query.get("to") or ["bob"])[0]
+            if name not in OBJECT_GRANTS:
+                _reset_object(name)
+            OBJECT_OWNER[name] = recipient
+            if parts_t.path == "/transfer-strict":
+                OBJECT_GRANTS[name] = {recipient}      # the old owner loses access
+            else:
+                OBJECT_GRANTS[name].add(recipient)     # and here they do not
+            body = b'{"status":"TRANSFERRED"}'
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if self.path == "/apply":
             # A DISCOUNT WITH NO USAGE LIMIT — the WSTG-BUSL-05 positive. It is not racy in
             # the check-then-act sense, because there is no check: it simply has no notion of

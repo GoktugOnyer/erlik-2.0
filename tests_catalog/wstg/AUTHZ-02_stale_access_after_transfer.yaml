@@ -1,0 +1,58 @@
+id: WSTG-AUTHZ-02
+name: Bypassing Authorization Schema (access surviving an ownership transfer)
+category: Authorization
+attack_class: authz
+severity: high
+references:
+  - https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/05-Authorization_Testing/02-Testing_for_Bypassing_Authorization_Schema
+
+# WHY THIS ID. The finding is an authorization one — a caller reading an object
+# they are no longer entitled to — so it belongs under Authorization Testing
+# rather than with the Business Logic cases that share its mechanism. WSTG spells
+# the family ATHZ and this catalogue has spelled it AUTHZ since AUTHZ-01, so the
+# id follows the catalogue rather than introducing a second convention; the
+# reference link is the real WSTG page either way.
+#
+# WHAT IT ASKS THAT THE OTHER AUTHORIZATION CASES DO NOT. AUTHZ-04 and the
+# `ownership` evaluator both ask whether a caller can reach an object that was
+# never theirs. This asks whether access SURVIVES a legitimate transfer: alice
+# owns the document, hands it to bob, and can still read it. Nothing in the
+# lane asks a before-and-after question about one identity — the cross-arm
+# checks compare two identities at one moment, and `compare_assessments`
+# compares two whole runs.
+target_schema:
+  # Three operator-supplied requests, because only an operator knows which
+  # object is disposable and who may legitimately receive it. `read_request` is
+  # sent TWICE, unchanged, on either side of the transfer.
+  required: [read_request, transfer_request, success_marker]
+
+steps:
+  - name: read_transfer_read
+    tool: curl
+    # NO `bash -c '...'` WRAPPER, and the comment sits ABOVE `command:` because a
+    # folded scalar swallows anything indented under it — the first attempt at this
+    # note became part of the shell string.
+    #
+    # The executor already runs this through `bash -c` (tool_executor._sync_docker_exec),
+    # so a wrapper here was a SECOND shell and its single quotes collided with the
+    # operator's own. Measured against a lab endpoint with NO usage limit at all: a
+    # template carrying `-H 'Authorization: Bearer ...'` — how any authenticated
+    # function is called — rendered as broken shell and the case reported CLEAN, while
+    # the same template without quotes worked. The cases found business-logic flaws
+    # only on targets that need no authentication.
+    command: >-
+      {{read_request}}; {{transfer_request}}; {{read_request}}
+    evaluators:
+      # TWO SUCCESSFUL READS IS THE FINDING. The first is expected and proves the
+      # subject really had access, which is what makes the second meaningful: a
+      # case that only sent the second read could not tell "access was revoked"
+      # from "this identity never had any".
+      #
+      # So min_count 2 here is not the same claim as in BUSL-05, where two
+      # successes are two uses of one allowance. Here the first success is the
+      # control and the second is the defect.
+      - type: count
+        min_count: 2
+        emit_finding:
+          vuln_type: Stale Access After Ownership Transfer
+          severity: high

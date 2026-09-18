@@ -32,8 +32,19 @@ target_schema:
 steps:
   - name: use_it_twice
     tool: curl
+    # NO `bash -c '...'` WRAPPER, and the comment sits ABOVE `command:` because a
+    # folded scalar swallows anything indented under it — the first attempt at this
+    # note became part of the shell string.
+    #
+    # The executor already runs this through `bash -c` (tool_executor._sync_docker_exec),
+    # so a wrapper here was a SECOND shell and its single quotes collided with the
+    # operator's own. Measured against a lab endpoint with NO usage limit at all: a
+    # template carrying `-H 'Authorization: Bearer ...'` — how any authenticated
+    # function is called — rendered as broken shell and the case reported CLEAN, while
+    # the same template without quotes worked. The cases found business-logic flaws
+    # only on targets that need no authentication.
     command: >-
-      bash -c '{{request_template}}; {{request_template}}'
+      {{request_template}}; {{request_template}}
     evaluators:
       # `count` for the same reason BUSL-06 uses it: it reads the marker from the
       # target in Python and records what it saw in the finding's `basis`, so a

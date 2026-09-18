@@ -723,7 +723,39 @@ Neither BUSL-05 nor BUSL-06 is lane-runnable and neither may become so — both 
 operator-supplied fields the lane has no way to invent — so `executable_test_cases()` is still
 12 of 34.
 
-STILL OPEN in this entry: ownership transfer.
+**Ownership transfer — done as WSTG-AUTHZ-02, and it found a defect in the two cases already
+shipped.** The invariant is not "can I transfer what I do not own" — that is object-level
+authorization and the `ownership` evaluator already asks it. It is whether access SURVIVES a
+legitimate transfer: alice owns the document, hands it to bob, and can still read it. Nothing
+in the lane asked a before-and-after question about ONE identity; the cross-arm checks compare
+two identities at one moment and `compare_assessments` compares two whole runs.
+
+Four controls: stale access detected, a revoking transfer quiet, the first read asserted to
+have succeeded so the second one means something, and — the control's own control — the new
+owner still able to read what he now owns, because an endpoint that revoked EVERYBODY would
+pass the negative test and not be a working transfer.
+
+**THE REAL FIND: BOTH SHIPPED BUSINESS-LOGIC CASES REPORTED CLEAN ON ANY AUTHENTICATED
+TARGET.** BUSL-04 and BUSL-05 wrapped the operator's request in `bash -c '...'`, and
+`tool_executor._sync_docker_exec` ALREADY runs the command through `bash -c`. The wrapper was a
+second shell and the operator's own quotes closed it early:
+
+    bash -c 'curl -s -H 'Authorization: Bearer alice' 'http://...''
+
+which the shell reads as three words, none of them a URL. Measured against `/apply`, an
+endpoint with NO usage limit at all:
+
+    template with -H 'Authorization: ...'    BUSL-04  0 findings, 0 markers   BUSL-05  0, 0
+    the same request without quotes          BUSL-04  1 finding,  4 markers   BUSL-05  1, 2
+
+Every realistic business-logic target is behind a session and a session is passed as a quoted
+header, so the cases worked on exactly the targets where the flaws do not matter. The wrapper
+is REMOVED rather than escaped: escaping needs the renderer to know which shell it is quoting
+for, and not nesting a second shell needs nothing. A structural test now forbids `bash -c` in
+any templated case, and a paired test asserts the executor is what supplies the shell — if that
+ever stops being true, the unwrapped cases need one again and the two facts belong together.
+
+E-013 IS CLOSED.
 
 ### E-014: browser-backed confirmation
 

@@ -334,7 +334,7 @@ DefectDojo export, each running as a Docker job behind a scope-checking egress
 proxy. It does not change the existing toolset presets; the dashboard is at
 `/integrations`.
 
-The sandboxed executor runs **12 of the 34** catalogue cases, and a thirteenth
+The sandboxed executor runs **12 of the 35** catalogue cases, and a thirteenth
 (`WSTG-INPV-19`) through the Interactsh collector instead. Which twelve is
 derived from the parser itself (`inventory.executable_test_cases`), not written
 down: a case qualifies only when every one of its steps parses as a single
