@@ -702,7 +702,28 @@ guards — the README's "12 of the 32" and the identity matrix's own assertion �
 catalogue growing. BUSL-06 is deliberately NOT lane-runnable: it needs `final_request`, which
 only an operator can supply.
 
-STILL OPEN in this entry: duplicate submissions, and ownership transfer.
+**Duplicate submissions — done, as WSTG-BUSL-05, with a proof it is not the race case.** A
+single-use function used twice, SEQUENTIALLY. Measured on the fixture before either case was
+pointed at it:
+
+    /redeem       8 concurrent -> 8 succeed     sequential -> 1 of 2   race-unsafe, replay-SAFE
+    /apply        8 concurrent -> 8 succeed     sequential -> 2 of 2   no limit at all
+    /redeem-safe  8 concurrent -> 1 succeeds    sequential -> 1 of 2   both enforced
+
+THE DISCRIMINATION IS THE POINT. BUSL-05 must stay QUIET on `/redeem` — the endpoint BUSL-04
+reports — because `/redeem` does enforce its limit, just not atomically. Two tests assert that
+disagreement from both sides: the same endpoint, the same lab, opposite verdicts, because the
+cases ask different questions. Two cases that always agree are one case and a maintenance cost,
+and the ablation that rewrites BUSL-05 to fire a burst is caught by exactly that test.
+
+A third test stops the disagreement being over-read: `/apply` fails BOTH cases, because "they
+disagree" is a property of `/redeem` specifically rather than a rule about the pair.
+
+Neither BUSL-05 nor BUSL-06 is lane-runnable and neither may become so — both need
+operator-supplied fields the lane has no way to invent — so `executable_test_cases()` is still
+12 of 34.
+
+STILL OPEN in this entry: ownership transfer.
 
 ### E-014: browser-backed confirmation
 

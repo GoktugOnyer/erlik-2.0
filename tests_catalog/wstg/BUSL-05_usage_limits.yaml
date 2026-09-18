@@ -1,0 +1,46 @@
+id: WSTG-BUSL-05
+name: Number of Times a Function Can Be Used Limits
+category: Business Logic
+attack_class: logic
+severity: high
+references:
+  - https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/10-Business_Logic_Testing/05-Test_Number_of_Times_a_Function_Can_Be_Used_Limits
+
+# A single-use function used twice. SEQUENTIALLY — and that is the whole
+# distinction from BUSL-04, which fires the same request concurrently.
+#
+# THEY MEASURE DIFFERENT PROPERTIES AND AN APPLICATION CAN FAIL EITHER ONE ALONE.
+# Measured on the lab fixture:
+#
+#   /redeem       8 concurrent -> 8 succeed     sequential -> 1 of 2   race-unsafe, replay-SAFE
+#   /apply        8 concurrent -> 8 succeed     sequential -> 2 of 2   no limit at all
+#   /redeem-safe  8 concurrent -> 1 succeeds    sequential -> 1 of 2   both enforced
+#
+# So this case must stay QUIET on /redeem, which BUSL-04 reports. A case that
+# flagged it too would be BUSL-04 with extra steps, and the suite asserts the
+# difference rather than assuming it.
+target_schema:
+  # The operator's own request, sent twice. Same reasoning as BUSL-04 and BUSL-06:
+  # a session belongs inside the template, because a case that promised to attach
+  # one would be promising something about a workflow it cannot see.
+  #
+  # IT MUST BE A FUNCTION THAT IS SUPPOSED TO BE LIMITED. Replaying an endpoint
+  # that is meant to be idempotent proves nothing, and no evaluator can tell the
+  # difference — only the operator knows which this is.
+  required: [request_template, success_marker]
+
+steps:
+  - name: use_it_twice
+    tool: curl
+    command: >-
+      bash -c '{{request_template}}; {{request_template}}'
+    evaluators:
+      # `count` for the same reason BUSL-06 uses it: it reads the marker from the
+      # target in Python and records what it saw in the finding's `basis`, so a
+      # reader is told "appeared 2 times, where at most 1 should have succeeded"
+      # rather than that something matched.
+      - type: count
+        min_count: 2
+        emit_finding:
+          vuln_type: Usage Limit Not Enforced (single-use function succeeded twice)
+          severity: high

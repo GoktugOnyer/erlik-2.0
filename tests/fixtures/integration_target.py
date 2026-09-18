@@ -100,6 +100,18 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         self.rfile.read(int(self.headers.get("Content-Length", 0)))
         REQUESTS.append({"path": self.path, "method": "POST"})
+        if self.path == "/apply":
+            # A DISCOUNT WITH NO USAGE LIMIT — the WSTG-BUSL-05 positive. It is not racy in
+            # the check-then-act sense, because there is no check: it simply has no notion of
+            # having been used, so replaying it works forever. That is a different defect
+            # from /redeem's, and the reason BUSL-05 is not BUSL-04 with fewer threads.
+            body = b'{"status":"APPLIED"}'
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if self.path in ("/redeem", "/redeem-safe"):
             return self._coupon("redeem" if self.path == "/redeem" else "safe",
                                 locked=self.path == "/redeem-safe")
