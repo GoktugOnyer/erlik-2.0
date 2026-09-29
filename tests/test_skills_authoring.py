@@ -16,6 +16,7 @@ choke point, and the proof that the second corpus root changes nothing while it
 is empty.
 """
 
+import asyncio
 import os
 import warnings
 from pathlib import Path
@@ -41,7 +42,7 @@ def sandbox(tmp_path, monkeypatch):
 
 
 @pytest.fixture
-def client():
+def client(tmp_path, monkeypatch):
     """Carries the token the `sandbox` fixture configures.
 
     _api_token_guard used to cover writes only, so these reads went through
@@ -49,7 +50,15 @@ def client():
     too, a client that sends nothing gets 401 and the assertions below read a
     401 body instead of the payload. Sending the token is the correct fix: the
     subject of these tests is reachability reporting, not the guard.
+
+    The authoring-status route reads `sessions.skills_trace` through get_db(),
+    so point the DB at a tmp schema. Pointed at the real DB_PATH it mints a
+    stray, tableless data/pentest.db in the operator's tree on every run.
     """
+    import orchestrator.database as db_mod
+    monkeypatch.setattr(db_mod, "DB_DIR", tmp_path)
+    monkeypatch.setattr(db_mod, "DB_PATH", str(tmp_path / "skills.db"))
+    asyncio.run(db_mod.init_db())
     return TestClient(M.app, headers={"X-API-Token": "t0ken"})
 
 

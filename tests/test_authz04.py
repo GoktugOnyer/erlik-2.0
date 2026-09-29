@@ -33,6 +33,15 @@ CASE = pathlib.Path("tests_catalog/wstg/AUTHZ-04_idor.yaml")
 T = "http://t.example"
 
 
+@pytest.fixture(autouse=True)
+def _secret_key_stays_in_tmp(monkeypatch):
+    """Storing the per-role credentials this case needs encrypts them, and
+    secrets._load_key() mints a real data/.secret_key on first use when no key
+    env is set. A per-test env key keeps it off the operator's tree."""
+    from cryptography.fernet import Fernet
+    monkeypatch.setenv("ERLIK_SECRET_KEY", Fernet.generate_key().decode())
+
+
 @pytest.fixture(scope="module")
 def case():
     return yaml.safe_load(CASE.read_text())

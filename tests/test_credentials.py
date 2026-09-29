@@ -39,6 +39,21 @@ def _db(tmp_path, monkeypatch):
     return db_mod
 
 
+@pytest.fixture(autouse=True)
+def _secret_key_stays_in_tmp(monkeypatch):
+    """Keep encryption off the operator's real data/ tree.
+
+    secrets._load_key() mints data/.secret_key on first use when neither
+    ERLIK_SECRET_KEY nor ERLIK_SECRET_KEY_FILE is set. Every test here that
+    encrypts or stores a credential would otherwise write a real key file into
+    the checkout on each run. A per-test env key writes nothing to disk; the
+    one test that asserts the missing-key refusal overrides it afterwards, so
+    its own setenv still wins.
+    """
+    from cryptography.fernet import Fernet
+    monkeypatch.setenv(S.KEY_ENV, Fernet.generate_key().decode())
+
+
 class TestEncryptionAtRest:
     def test_round_trip(self):
         assert S.decrypt(S.encrypt("hunter2")) == "hunter2"

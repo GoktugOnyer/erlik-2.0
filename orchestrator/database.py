@@ -7,7 +7,14 @@ DB_PATH = DB_DIR / "pentest.db"
 
 
 async def init_db():
-    DB_DIR.mkdir(parents=True, exist_ok=True)
+    # Create the directory that will actually hold the database, derived from
+    # DB_PATH rather than the DB_DIR global. In production the two agree
+    # (DB_PATH lives under DB_DIR); the difference matters for tests, which
+    # repoint DB_PATH at a tmp file but leave DB_DIR alone. Mkdir'ing DB_DIR
+    # here would create the operator's real data/ dir on every such run — an
+    # empty dir that then lets a later get_db() route mint a stray pentest.db
+    # in the tree. Anchoring on DB_PATH keeps a redirected test fully in tmp.
+    Path(DB_PATH).parent.mkdir(parents=True, exist_ok=True)
     async with aiosqlite.connect(DB_PATH) as db:
         await db.executescript("""
             CREATE TABLE IF NOT EXISTS sessions (

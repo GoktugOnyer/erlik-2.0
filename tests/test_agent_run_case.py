@@ -262,11 +262,15 @@ class TestEndToEndThroughTheRealLoop:
         import orchestrator.llm_client as LC
 
         old = db_mod.DB_DIR, db_mod.DB_PATH
+        old_reports = M.REPORTS_DIR
         old_chat = LC.chat
         old_health = LC.health_check
         old_ok = LC.provider_is_healthy
         old_ensure = LC.ensure_model_available
         db_mod.DB_DIR, db_mod.DB_PATH = tmp_path, tmp_path / "p.db"
+        # agent_loop ends by generating a report; without this it writes into
+        # the operator's real data/reports/ tree on every run.
+        M.REPORTS_DIR = tmp_path / "reports"
         calls = {"n": 0}
 
         async def fake_chat(messages, **kw):
@@ -315,6 +319,7 @@ class TestEndToEndThroughTheRealLoop:
             }
         finally:
             db_mod.DB_DIR, db_mod.DB_PATH = old
+            M.REPORTS_DIR = old_reports
             LC.chat, LC.health_check, LC.provider_is_healthy = \
                 old_chat, old_health, old_ok
             LC.ensure_model_available = old_ensure
