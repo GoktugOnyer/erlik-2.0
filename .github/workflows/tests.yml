@@ -143,15 +143,33 @@ jobs:
       # README.md says it protects against a run that "silently skipped itself"
       # one sentence after describing this job — so three of the four reports CI
       # writes were unguarded, and a docker job that built the images and then
-      # skipped every test was green and proved nothing. Floor from the measured
-      # composition: `-m docker` selects 35 and exactly 3 always skip here
-      # (the live-DefectDojo case and the two real-Interactsh cases need opt-ins
-      # that only the actual-services job supplies), so 32 run; 30 leaves room
-      # for one more always-skipping case without crying wolf, because a guard
-      # that fires on a healthy run gets removed.
+      # skipped every test was green and proved nothing.
+      #
+      # RE-MEASURED 2026-09-30, and the guard earned its keep by firing: 71.2% ran,
+      # below the 85% it wanted, because the composition changed underneath it.
+      # `-m docker` now selects 52, and FIFTEEN skip here rather than three:
+      #
+      #    3  opt-in services — the live-DefectDojo case and the two real-Interactsh
+      #       cases, which only the actual-services job supplies variables for
+      #   12  NO DVWA ON THE RUNNER — tests/test_the_idor_case_verdicts_are_still_true
+      #       and tests/test_the_sqli_case_reaches_its_target measure real cases
+      #       against the local DVWA lab on :8081 and do not start it
+      #
+      # Those twelve did not skip before; they FAILED, with connection errors, which
+      # is why this job never once passed. Skipping is the honest result, and it is
+      # NOT a loss of coverage against this job's history — CI has never run them.
+      # It is a gap worth closing, and closing it means giving this job DVWA as a
+      # service the way cases-vs-juiceshop has Juice Shop; until then the gap is
+      # stated here rather than hidden in a threshold.
+      #
+      # So 37 run. The floor is the real guard at 35 — room for two more
+      # always-skipping cases without crying wolf, since a guard that fires on a
+      # healthy run gets removed. The ratio drops to 0.65 because 12 structural
+      # skips put a healthy run at 71%, and a ratio that cannot be met is worth
+      # nothing; the floor is what catches collection collapsing.
       - name: Assert the Docker suites actually ran
         if: always()
-        run: python scripts/ci_assert_suite_ran.py junit-docker.xml --floor 30 --ratio 0.85
+        run: python scripts/ci_assert_suite_ran.py junit-docker.xml --floor 35 --ratio 0.65
 
       # "produce release evidence" — these reports are what a release is judged
       # on, and they are worthless if nobody can find the run that produced
