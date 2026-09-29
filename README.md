@@ -95,7 +95,9 @@ without one still runs through the agent lane and the CLI.
 ## Prerequisites
 
 - **Docker** — runs the lab (target application, OWASP ZAP, and the Kali tools container)
-- **Python 3.10+** — runs the orchestrator
+- **Python 3.11+** — runs the orchestrator. Not 3.10: the assessment lane uses
+  `asyncio.timeout` and `Task.cancelling()`, both added in 3.11, and on 3.10 it
+  raises `AttributeError` rather than degrading
 - **Ollama** *(optional)* — local LLM for the model-judge steps. The deterministic
   checks work without it. Install from [ollama.com](https://ollama.com), then pull a
   model: `ollama pull qwen2.5-coder:7b`
@@ -193,8 +195,8 @@ Run it from the repository root: `conftest.py` anchors the working directory
 there, and `orchestrator.main` builds its Jinja2 template path relative to the
 CWD.
 
-A **fresh clone** reports **4751 passed, 89 skipped** on its first run, and
-4753 passed / 87 skipped on every run after — measured 2026-09-29 against this
+A **fresh clone** reports **4754 passed, 89 skipped** on its first run, and
+4756 passed / 87 skipped on every run after — measured 2026-09-29 against this
 commit by cloning and running it, not quoted from a developer's tree.
 
 > Re-measure this after any change under `tests/`. The first draft of this
@@ -258,7 +260,7 @@ ERLIK_DOCKER_TESTS=1 pytest -m docker          # the assessment lane's container
 pytest -m 'not docker'                         # everything else
 ```
 
-CI runs the network-free suite on 3.10, 3.12 and 3.14, and the `-m docker` suites
+CI runs the network-free suite on 3.11, 3.12 and 3.14, and the `-m docker` suites
 on everything except a plain push — pull requests, manual dispatches and releases. `scripts/ci_assert_suite_ran.py` fails a run in
 which the suite collapsed to a handful of tests or silently skipped itself — a
 green run where nothing executed is the one failure mode a test suite cannot

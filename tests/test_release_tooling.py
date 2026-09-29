@@ -557,3 +557,78 @@ def test_every_export_status_the_code_can_write_is_in_the_documented_table():
         f"export() writes {sorted(written)} and the table explains {sorted(documented)}; "
         f"undocumented: {sorted(written - documented)}; "
         f"documented but never written: {sorted(documented - written)}")
+
+
+# --- the Python floor is a fact about the code, not a preference --------------
+
+def _ci_matrix_versions() -> list[str]:
+    import yaml
+    body = yaml.safe_load((ROOT / ".github" / "workflows" / "tests.yml").read_text())
+    return [str(v) for v in body["jobs"]["pytest"]["strategy"]["matrix"]["python-version"]]
+
+
+def test_the_readme_python_floor_matches_what_ci_tests():
+    """Three statements about one fact: the README's minimum, the CI matrix, and the
+    interpreter the code actually needs.
+
+    They disagreed. README said "Python 3.10+" while the assessment lane used
+    `asyncio.timeout` and `Task.cancelling()`, both 3.11, so the 3.10 job had been
+    red with 28 AttributeErrors since the lane arrived and the README went on
+    telling readers to use a version that cannot run it.
+    """
+    import re
+    stated = re.search(r"\*\*Python (\d+)\.(\d+)\+\*\*", _readme())
+    assert stated, "the README no longer states a Python floor in the expected form"
+    floor = (int(stated.group(1)), int(stated.group(2)))
+    tested = sorted(tuple(int(p) for p in v.split(".")) for v in _ci_matrix_versions())
+    assert tested[0] == floor, (
+        f"README says Python {floor[0]}.{floor[1]}+ and the lowest version CI runs is "
+        f"{tested[0][0]}.{tested[0][1]} — one of them is not measured")
+
+
+def test_nothing_older_than_the_floor_is_claimed_elsewhere():
+    """The second sentence about CI in the same file, which drifted independently."""
+    import re
+    body = _readme()
+    stated = re.search(r"\*\*Python (\d+)\.(\d+)\+\*\*", body)
+    floor = f"{stated.group(1)}.{stated.group(2)}"
+    listed = re.search(r"CI runs the network-free suite on ([\d., and]+?), and", body)
+    assert listed, "the README no longer names the CI versions in the expected form"
+    named = re.findall(r"\d+\.\d+", listed.group(1))
+    assert named == _ci_matrix_versions(), (
+        f"the README says CI runs {named} and the workflow runs {_ci_matrix_versions()}")
+    assert named[0] == floor, (
+        f"the README's floor is {floor} but it says CI starts at {named[0]}")
+
+
+def test_the_floor_is_what_the_code_needs():
+    """Guard on the reason, not just the number. If the 3.11-only calls go away, the
+    floor can drop — and this is what says so rather than leaving it at 3.11 forever
+    because nobody rechecked.
+
+    PARSED, NOT GREPPED. The first version searched the source text and stayed green
+    with both calls removed, because `main._stop_running_session`'s docstring EXPLAINS
+    why it uses `Task.cancelling()` — so the guard was reading the note about the code
+    rather than the code. Same trap as TestTheComparisonIsConstantTime below, which
+    strips its docstring for the same reason.
+    """
+    import ast
+
+    def calls(path) -> set[str]:
+        found = set()
+        for node in ast.walk(ast.parse(path.read_text())):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+                found.add(node.func.attr)
+            # `async with asyncio.timeout(...)` is a Call too, but an attribute
+            # reference without one -- a bare `asyncio.timeout` passed around --
+            # would not be, so both shapes count.
+            if isinstance(node, ast.Attribute):
+                found.add(node.attr)
+        return found
+
+    lane = calls(ROOT / "orchestrator" / "integrations" / "service.py")
+    main = calls(ROOT / "orchestrator" / "main.py")
+    assert "timeout" in lane or "cancelling" in main, (
+        "neither `asyncio.timeout` nor `Task.cancelling()` is CALLED any more, so the "
+        "3.11 floor no longer has the reason the README gives for it — re-measure "
+        "against 3.10 and lower it, or write down the new reason")

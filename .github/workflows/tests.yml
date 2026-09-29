@@ -36,7 +36,13 @@ jobs:
         # the whole application failed to start on a supported interpreter —
         # and a 3.12/3.14 matrix could never see it. Verified on 3.10.20 before
         # adding: 1690 passed, 31 skipped.
-        python-version: ["3.10", "3.12", "3.14"]
+        # 3.11 IS THE FLOOR, and it is a fact about the code rather than a
+        # preference: the assessment lane is built on `asyncio.timeout` and
+        # `Task.cancelling()`, both of which landed in 3.11. On 3.10 that is 28
+        # failures in seven files -- AttributeError, not a subtle behaviour
+        # difference -- and it has been red here since the lane arrived while
+        # README claimed 3.10+.
+        python-version: ["3.11", "3.12", "3.14"]
 
     steps:
       - uses: actions/checkout@v4
