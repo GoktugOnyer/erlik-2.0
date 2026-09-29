@@ -646,9 +646,17 @@ class TestTheExecutiveSummaryPromptAgreesWithItself:
         import asyncio
         import orchestrator.database as db_mod
         import orchestrator.main as M
-        old = db_mod.DB_PATH, db_mod.DB_DIR
+        # REPORTS_DIR TOO, like the two helpers above. Without it
+        # `_generate_report` wrote `data/reports/s1.md` into the REPOSITORY, which
+        # is how a clean clone stopped being clean after one `pytest`: the same run
+        # also left `data/pentest.db` behind, so
+        # test_reproducibility_doc.test_the_corpus_really_is_empty then failed on
+        # every developer machine, reporting a restored campaign corpus that was
+        # really this test's own leftovers.
+        old = db_mod.DB_PATH, db_mod.DB_DIR, M.REPORTS_DIR
         db_mod.DB_DIR = tmp_path
         db_mod.DB_PATH = tmp_path / "p.db"
+        M.REPORTS_DIR = tmp_path / "reports"
         seen = {}
         try:
             async def go():
@@ -675,7 +683,7 @@ class TestTheExecutiveSummaryPromptAgreesWithItself:
                 return seen["p"]
             return asyncio.run(go())
         finally:
-            db_mod.DB_PATH, db_mod.DB_DIR = old
+            db_mod.DB_PATH, db_mod.DB_DIR, M.REPORTS_DIR = old
 
     def test_the_stated_total_matches_the_listed_findings(self, tmp_path):
         p = self._prompt(tmp_path, [("Ghost", "rejected"), ("SQLi", "accepted")],

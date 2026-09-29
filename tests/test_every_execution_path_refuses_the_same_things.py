@@ -179,14 +179,21 @@ def test_the_corpus_is_what_narrowed_this_rule():
     import pathlib
 
     reports = pathlib.Path(__file__).resolve().parents[1] / "data" / "reports"
-    # THE REPORTS, NOT THE DIRECTORY. `data/` is gitignored, so a fresh clone has no
-    # corpus -- but another test writes a report during the run and creates
-    # `data/reports` on its way past, so by the time this runs the directory exists
-    # and is empty. Guarding on `is_dir()` then turned "structurally unrunnable from
+    # THE RECORDED CORPUS, NOT WHATEVER IS IN THE DIRECTORY. `data/` is gitignored,
+    # so a fresh clone has none -- but this ran on a clone and FAILED rather than
+    # skipping, because TestTheExecutiveSummaryPromptAgreesWithItself wrote
+    # `data/reports/s1.md` into the repository on its way past. Guarding on
+    # `is_dir()`, and then on "any *.md", both turned "structurally unrunnable from
     # a clean clone" into a failed assertion about a corpus that was never there.
+    #
+    # That leak is fixed at its source, and the skip is written against the corpus
+    # rather than against the directory anyway: a run that leaves one report behind
+    # must not make this look like a campaign that lost its idiom. The corpus is
+    # dozens of recorded sessions, so two is not it.
     recorded = sorted(reports.glob("*.md")) if reports.is_dir() else []
-    if not recorded:
-        pytest.skip("the recorded corpus is not present in this tree")
+    if len(recorded) < 5:
+        pytest.skip(f"the recorded corpus is not present in this tree "
+                    f"({len(recorded)} report(s) found)")
     idiom = [path for path in recorded
              if "> /tmp/login.json && curl" in path.read_text()]
     assert idiom, "the corpus no longer holds the idiom this rule was narrowed for"

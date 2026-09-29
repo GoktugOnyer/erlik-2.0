@@ -44,6 +44,18 @@ target_schema:
 steps:
   - name: fetch_headers
     tool: curl
+    # `grep -qiE`, NOT a `case` statement, for the session-shaped name test.
+    #
+    # bash 3.2 -- which is what macOS ships as /bin/bash -- cannot parse a `case`
+    # inside `$(...)`: it reads the pattern's `)` as closing the substitution and
+    # dies on the `;;`. This whole step is one big `$(...)`, so on a maintainer's
+    # own machine it produced NOTHING and the case reported clean against a target
+    # serving `Set-Cookie: session=abc123; Path=/`. 18 tests failed and the cause
+    # was not in any of them.
+    #
+    # The grep is equivalent -- same six substrings, and -i replaces the `tr` that
+    # was lower-casing the name first. tests/test_catalogue_shell_portability.py
+    # holds every shell step in the catalogue to parsing under the host's own bash.
     # -D - -o /dev/null rather than -i: the body cannot then be mistaken for a
     # header, which matters here because the parse greps for "^Set-Cookie:"
     # and a page echoing that string would otherwise be read as one.
@@ -57,9 +69,7 @@ steps:
       BAD=$(printf "%s\n" "$C" | while IFS= read -r L; do
       [ -z "$L" ] && continue;
       N=$(printf "%s" "$L" | sed -E "s/^[Ss]et-[Cc]ookie:[[:space:]]*([^=]+)=.*/\\1/");
-      case "$(printf "%s" "$N" | tr "A-Z" "a-z")" in
-      *sess*|*sid*|*token*|*jwt*|*auth*|*login*) ;;
-      *) continue;; esac;
+      printf "%s" "$N" | grep -qiE "sess|sid|token|jwt|auth|login" || continue;
       M="";
       printf "%s" "$L" | grep -qi "httponly" || M="$M HttpOnly";
       printf "%s" "$L" | grep -qi "samesite" || M="$M SameSite";
