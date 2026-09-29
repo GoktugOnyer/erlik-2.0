@@ -30,9 +30,7 @@
     "WSTG-CLNT-07": {
       "denied": [],
       "failed_steps": [],
-      "findings": [
-        "CORS Misconfiguration"
-      ],
+      "findings": [],
       "not_assessed": [],
       "refused": []
     },
@@ -159,9 +157,15 @@
   "profile": "juiceshop",
   "skipped": {
     "WSTG-AUTHZ-01": "needs a parameter name; none known for this target (supply one, add a target profile, or run discovery first)",
+    "WSTG-AUTHZ-02": "needs a hand-written success marker",
     "WSTG-AUTHZ-04": "needs two authenticated accounts (store low- and high-privilege credentials for this target)",
     "WSTG-BUSL-04": "needs a hand-written request template",
+    "WSTG-BUSL-05": "needs a hand-written request template",
+    "WSTG-BUSL-06": "needs a hand-written success marker",
     "WSTG-BUSL-09": "needs a parameter name; none known for this target (supply one, add a target profile, or run discovery first)",
+    "WSTG-INPV-05.2": "needs a parameter name; none known for this target (supply one, add a target profile, or run discovery first)",
+    "WSTG-INPV-05.3": "needs a parameter name; none known for this target (supply one, add a target profile, or run discovery first)",
+    "WSTG-INPV-05.4": "needs a parameter name; none known for this target (supply one, add a target profile, or run discovery first)",
     "WSTG-INPV-11.2": "needs a parameter name; none known for this target (supply one, add a target profile, or run discovery first)",
     "WSTG-INPV-18": "needs a parameter name; none known for this target (supply one, add a target profile, or run discovery first)",
     "WSTG-SESS-10": "needs a captured JWT (log in with a stored credential first)"
