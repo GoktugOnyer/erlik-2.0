@@ -35,12 +35,18 @@ import os
 
 import pytest
 
+from tests.lab import requires_dvwa
+
 from orchestrator.testcase.loader import load_catalog
 
 pytestmark = [
     pytest.mark.docker,
     pytest.mark.skipif(os.environ.get("ERLIK_DOCKER_TESTS") != "1",
                        reason="set ERLIK_DOCKER_TESTS=1 for the local DVWA lab"),
+    # The lab is not started by this file, so its absence is a skip and not a
+    # failure -- twelve tests went red in CI saying 'connection refused', which
+    # is a fact about the runner rather than about the case under test.
+    requires_dvwa,
 ]
 
 DVWA = "http://localhost:8081"

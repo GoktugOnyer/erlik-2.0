@@ -315,9 +315,26 @@ class Sandbox:
                 "--memory=2g", "--cpus=2", "--pids-limit=512", "--tmpfs", "/tmp:rw,nosuid,size=512m",
                 "-v", f"{self.input}:/input:ro", "-v", f"{self.output}:/output",
                 "--workdir", "/output"]
+        # A SCANNER'S PRIVATE CACHE IS NOT EVIDENCE, and `/output` is harvested as
+        # evidence: `adapters.py` rglobs every file under it and opens each one.
+        #
+        # The worker runs with `--workdir /output`, and Hypothesis (under Schemathesis)
+        # keeps its unicode tables in `.hypothesis/` relative to the CWD — so it wrote
+        # them into the artifact directory, as root, and the harvest running as the
+        # host user was refused:
+        #
+        #     PermissionError: [Errno 13] Permission denied:
+        #     '.../output/.hypothesis/unicode_data/15.0.0/charmap.json.gz'
+        #
+        # Seven Docker-gated tests failed on that, and none of them is about
+        # Hypothesis. Pointing the cache at the container's own tmpfs fixes the
+        # ownership problem by removing the file from the shared directory entirely,
+        # which is the right answer regardless of who could read it: an artifact set
+        # that carries a scanner's cache is one a reader has to sift.
         environment = {"HTTP_PROXY": self.proxy_url, "HTTPS_PROXY": self.proxy_url,
                        "http_proxy": self.proxy_url, "https_proxy": self.proxy_url, "NO_PROXY": "", "no_proxy": "",
-                       "SSL_CERT_FILE": "/input/ca.pem", "REQUESTS_CA_BUNDLE": "/input/ca.pem"}
+                       "SSL_CERT_FILE": "/input/ca.pem", "REQUESTS_CA_BUNDLE": "/input/ca.pem",
+                       "HYPOTHESIS_STORAGE_DIRECTORY": "/tmp/hypothesis"}
         environment.update(env or {})
         for key, value in environment.items():
             args += ["-e", f"{key}={value}"]
