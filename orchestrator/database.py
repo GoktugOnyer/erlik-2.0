@@ -127,6 +127,20 @@ async def init_db():
                 created_at TEXT NOT NULL DEFAULT (datetime('now'))
             );
 
+            -- NOTHING WRITES THIS TABLE. There is no INSERT into benchmark_results
+            -- anywhere in the codebase; per-session benchmark metrics are computed on
+            -- demand by _compute_benchmark_metrics() in orchestrator/main.py and
+            -- returned straight to the caller, never persisted.
+            --
+            -- Left declared rather than dropped: dropping it is a destructive migration
+            -- against every existing database to reclaim a table that is empty in all
+            -- of them, which is a worse trade than a comment. Recorded here because an
+            -- empty table with an index and a migration block reads exactly like a
+            -- feature that works, and this project's recurring defect is precisely
+            -- that — a producer nothing consumes, or here a store nothing fills.
+            --
+            -- If benchmark results ever do need persisting, this is the shape to use;
+            -- until then, treat a query against it as returning nothing by design.
             CREATE TABLE IF NOT EXISTS benchmark_results (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 benchmark_id TEXT NOT NULL REFERENCES benchmark_runs(id),
@@ -309,7 +323,9 @@ async def init_db():
             except Exception:
                 pass  # column already exists
 
-        # Migrations for benchmark_results table
+        # Migrations for benchmark_results table. Kept in step with the declaration
+        # above even though nothing writes the table, so that the schema does not
+        # silently diverge if it is ever put to use — see the note on the CREATE.
         bench_result_migrations = [
             ("toolset_preset", "TEXT DEFAULT NULL"),
         ]
@@ -423,6 +439,53 @@ async def init_db():
                     await db.execute(f"ALTER TABLE {table} ADD COLUMN {col_name} {col_def}")
                 except Exception:
                     pass  # column already exists
+
+        # WHO RAN IT. `ERLIK_API_TOKEN` is one shared secret that identifies
+        # nobody, so until now no run and no engagement edit could be
+        # attributed to a person. `engagement_revisions` in particular records
+        # the field, the old value, the new value and the timestamp -- an audit
+        # trail with no actor, which is the one column an audit trail exists
+        # for.
+        #
+        # See orchestrator/operators.py. The two synthetic ids are seeded here
+        # so that every row can carry an operator and nothing has to special
+        # case NULL; both are honest about identifying no one.
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS operators (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                token_hash TEXT,
+                status TEXT NOT NULL DEFAULT 'active',
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                last_seen_at TEXT,
+                created_by TEXT
+            )
+        """)
+        # Unique so two operators cannot share a token, which would put the
+        # attribution back where it started. Partial, because the synthetic
+        # rows have no token and NULLs must not collide.
+        await db.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_operators_token "
+            "ON operators(token_hash) WHERE token_hash IS NOT NULL")
+        for _id, _name in (
+            ("opr_shared_token", "shared token (not attributed to a person)"),
+            ("opr_unauthenticated", "unauthenticated (no token configured)"),
+        ):
+            await db.execute(
+                "INSERT OR IGNORE INTO operators (id, name, token_hash, status) "
+                "VALUES (?, ?, NULL, 'active')", (_id, _name))
+
+        # Evaluators that could not reach a verdict on this run. Additive.
+        #
+        # Without it a stored run cannot answer "was this actually checked?".
+        # An LLM evaluator whose backend is unreachable used to set
+        # matched=False -- the same value as a clean verdict -- so the run was
+        # persisted as findings-free and read back later as a pass.
+        try:
+            await db.execute(
+                "ALTER TABLE v2_runs ADD COLUMN not_assessed_json TEXT DEFAULT NULL")
+        except Exception:
+            pass  # column already exists
 
         # Whether the command in this step was REFUSED before it ran (scope,
         # toolset, safe mode, blocked pattern, container down). Additive.
@@ -755,6 +818,68 @@ async def init_db():
                     f"ALTER TABLE {table} ADD COLUMN {col} TEXT DEFAULT NULL")
             except Exception:
                 pass  # column already exists
+
+        # WHO DID IT, on the three tables that answer "who ran this test and
+        # who changed the authorisation record". Runs last, after every CREATE
+        # above, because ALTER on a table that does not exist yet raises the
+        # same Exception as "column already exists" and the bare except would
+        # swallow it -- which is exactly what happened on the first attempt:
+        # engagement_revisions is created below the point this was originally
+        # placed, and silently never got the column.
+        #
+        # Nullable on purpose. Rows written before erlik could attribute
+        # anything must read as unattributed, not be assigned to whoever
+        # happens to be first.
+        for _t in ("sessions", "v2_runs", "engagement_revisions"):
+            try:
+                await db.execute(
+                    f"ALTER TABLE {_t} ADD COLUMN operator_id TEXT DEFAULT NULL")
+            except Exception:
+                pass  # column already exists
+
+        # Who minted this operator, and what they are allowed to do.
+        #
+        # `created_by` is provenance: minting is privileged, so a name that
+        # appears in the audit trail must be traceable to whoever added it.
+        #
+        # `role` closes the escalation. Until it existed, ANY authenticated
+        # caller could mint an operator -- so a stolen operator token was
+        # enough to create a second identity and attribute work to a name
+        # nobody recognises. Only an admin may now mint, revoke or promote.
+        # Existing rows default to 'operator', which is the safe direction:
+        # an upgrade must not silently hand anyone privileges they did not
+        # have before.
+        for _c, _d in (("created_by", "TEXT DEFAULT NULL"),
+                       ("role", "TEXT NOT NULL DEFAULT 'operator'"),
+                       ("role_changed_by", "TEXT DEFAULT NULL"),
+                       ("role_changed_at", "TEXT DEFAULT NULL")):
+            try:
+                await db.execute(f"ALTER TABLE operators ADD COLUMN {_c} {_d}")
+            except Exception:
+                pass  # column already exists
+
+        # THE TWO SYNTHETIC IDENTITIES ARE ADMIN, for different reasons, and
+        # this runs after the ALTER because they were created before `role`
+        # existed and INSERT OR IGNORE above will not update an existing row.
+        #
+        #   opr_shared_token     ERLIK_API_TOKEN is the deployment's root
+        #                        secret -- whoever set it configured the
+        #                        instance. It has to be able to mint the FIRST
+        #                        admin or no admin can ever exist. Once one
+        #                        does, the shared token can be unset and the
+        #                        bootstrap path closes behind it.
+        #
+        #   opr_unauthenticated  only reachable on loopback with no token
+        #                        configured at all, where nothing is enforced
+        #                        and every route is already open. Refusing it
+        #                        here would break local development while
+        #                        protecting nothing.
+        #
+        # Neither is a person, so neither can be granted or revoked as an
+        # account; `set_role` and `revoke` refuse them by id.
+        await db.execute(
+            "UPDATE operators SET role = 'admin' WHERE id IN "
+            "('opr_shared_token', 'opr_unauthenticated')")
 
         await db.commit()
 

@@ -1,0 +1,184 @@
+{
+  "cases": {
+    "WSTG-ATHN-01": {
+      "denied": [],
+      "failed_steps": [],
+      "findings": [],
+      "not_assessed": [],
+      "refused": []
+    },
+    "WSTG-AUTHZ-05": {
+      "denied": [],
+      "failed_steps": [
+        "redirect_uri_not_validated"
+      ],
+      "findings": [],
+      "not_assessed": [],
+      "refused": [
+        "redirect_uri_suffix_bypass"
+      ]
+    },
+    "WSTG-CLNT-04": {
+      "denied": [],
+      "failed_steps": [],
+      "findings": [],
+      "not_assessed": [
+        "client_side_sink_review"
+      ],
+      "refused": []
+    },
+    "WSTG-CLNT-07": {
+      "denied": [],
+      "failed_steps": [],
+      "findings": [
+        "CORS Misconfiguration"
+      ],
+      "not_assessed": [],
+      "refused": []
+    },
+    "WSTG-CLNT-07b": {
+      "denied": [],
+      "failed_steps": [],
+      "findings": [],
+      "not_assessed": [],
+      "refused": []
+    },
+    "WSTG-CLNT-09": {
+      "denied": [],
+      "failed_steps": [],
+      "findings": [],
+      "not_assessed": [],
+      "refused": []
+    },
+    "WSTG-CONF-02": {
+      "denied": [],
+      "failed_steps": [],
+      "findings": [
+        "Prometheus Metrics Endpoint Publicly Readable"
+      ],
+      "not_assessed": [],
+      "refused": []
+    },
+    "WSTG-CONF-04": {
+      "denied": [],
+      "failed_steps": [],
+      "findings": [],
+      "not_assessed": [],
+      "refused": []
+    },
+    "WSTG-CONF-06": {
+      "denied": [
+        "put_probe"
+      ],
+      "failed_steps": [],
+      "findings": [],
+      "not_assessed": [],
+      "refused": []
+    },
+    "WSTG-ERRH-01": {
+      "denied": [],
+      "failed_steps": [],
+      "findings": [
+        "Verbose Error Message / Stack Trace Disclosure"
+      ],
+      "not_assessed": [],
+      "refused": []
+    },
+    "WSTG-INFO-03": {
+      "denied": [],
+      "failed_steps": [],
+      "findings": [
+        "robots.txt Discloses Paths",
+        "security.txt Present (informational)"
+      ],
+      "not_assessed": [],
+      "refused": []
+    },
+    "WSTG-INPV-05.6": {
+      "denied": [],
+      "failed_steps": [],
+      "findings": [],
+      "not_assessed": [
+        "operator_differential"
+      ],
+      "refused": []
+    },
+    "WSTG-INPV-06": {
+      "denied": [],
+      "failed_steps": [],
+      "findings": [],
+      "not_assessed": [
+        "wildcard_differential"
+      ],
+      "refused": []
+    },
+    "WSTG-INPV-07": {
+      "denied": [],
+      "failed_steps": [],
+      "findings": [],
+      "not_assessed": [
+        "blind_oob_entity"
+      ],
+      "refused": []
+    },
+    "WSTG-INPV-11": {
+      "denied": [],
+      "failed_steps": [],
+      "findings": [],
+      "not_assessed": [],
+      "refused": []
+    },
+    "WSTG-INPV-15": {
+      "denied": [],
+      "failed_steps": [],
+      "findings": [],
+      "not_assessed": [],
+      "refused": []
+    },
+    "WSTG-INPV-19": {
+      "denied": [],
+      "failed_steps": [],
+      "findings": [],
+      "not_assessed": [
+        "blind_callback",
+        "llm_judge_ambiguous"
+      ],
+      "refused": []
+    },
+    "WSTG-SESS-02": {
+      "denied": [],
+      "failed_steps": [],
+      "findings": [],
+      "not_assessed": [
+        "fetch_headers"
+      ],
+      "refused": []
+    }
+  },
+  "planned": 22,
+  "profile": "juiceshop",
+  "skipped": {
+    "WSTG-AUTHZ-01": "needs a parameter name; none known for this target (supply one, add a target profile, or run discovery first)",
+    "WSTG-AUTHZ-04": "needs two authenticated accounts (store low- and high-privilege credentials for this target)",
+    "WSTG-BUSL-04": "needs a hand-written request template",
+    "WSTG-BUSL-09": "needs a parameter name; none known for this target (supply one, add a target profile, or run discovery first)",
+    "WSTG-INPV-11.2": "needs a parameter name; none known for this target (supply one, add a target profile, or run discovery first)",
+    "WSTG-INPV-18": "needs a parameter name; none known for this target (supply one, add a target profile, or run discovery first)",
+    "WSTG-SESS-10": "needs a captured JWT (log in with a stored credential first)"
+  },
+  "unrunnable": {
+    "WSTG-CONF-07": [
+      "testssl"
+    ],
+    "WSTG-INFO-02": [
+      "wafw00f",
+      "whatweb"
+    ],
+    "WSTG-INPV-01": [
+      "dalfox"
+    ],
+    "WSTG-INPV-05": [
+      "sqlmap"
+    ]
+  }
+}

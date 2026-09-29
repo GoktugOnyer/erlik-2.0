@@ -1,6 +1,13 @@
 id: WSTG-CLNT-07
 name: Cross Origin Resource Sharing
 category: Client-side
+# The attacker origin is PAYLOAD: it is sent as a header VALUE and curl connects
+# only to `url`. Without this declaration `scope.check_command` refused the
+# first step on every run and the case had never produced a result -- a CORS
+# test cannot be written without naming an origin that is not the target.
+payload_hosts:
+  - evil.oastify.com
+
 attack_class: cors
 severity: medium
 references:
@@ -22,8 +29,15 @@ steps:
     # narrower — the server reflected OUR origin AND allows credentials — and
     # even that is header evidence, not a browser-confirmed read, which is why
     # the vuln_type says so and the evaluator grades it `suspected`.
+    #
+    # The origin MUST come from _OAST_DOMAINS in orchestrator/tool_executor.py.
+    # This read `evil.oast.test`, which is not in that tuple, so the scope guard
+    # refused the command and every CORS test failed before it ran. The header
+    # value is never contacted -- it only has to survive the guard. If the
+    # server reflects our arbitrary origin (or returns '*') together with
+    # credentials, cross-origin reads are possible.
     command: >-
-      curl -s -b "{{cookie}}" -H "{{auth_header}}" -i -H "Origin: https://evil.oast.test" "{{url}}"
+      curl -s -b "{{cookie}}" -H "{{auth_header}}" -i -H "Origin: https://evil.oastify.com" "{{url}}"
     evaluators:
       - type: cors
         emit_finding:

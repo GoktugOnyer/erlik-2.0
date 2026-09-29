@@ -173,7 +173,7 @@ def _step(name, output="body", ms=0, ok=True):
 
 
 async def _verdict(ev, step, prior):
-    finding, _, _, _ = await _run_evaluator(
+    finding, _, _, _, _ = await _run_evaluator(
         ev, step, find_by_id(BOOLEAN), {}, None, None, prior)
     return finding
 

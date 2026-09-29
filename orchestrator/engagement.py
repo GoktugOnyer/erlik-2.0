@@ -410,7 +410,8 @@ EDITABLE = ("client_name", "root_domain", "authorised_by",
             "authorised_from", "authorised_until", "notes")
 
 
-async def update(db, engagement_id: str, patch: dict) -> dict:
+async def update(db, engagement_id: str, patch: dict,
+                 operator_id: str | None = None) -> dict:
     """Apply an explicit edit, retaining every previous value.
 
     Returns {changed: [...], ignored: [...]}. Unknown keys are IGNORED rather
@@ -433,15 +434,17 @@ async def update(db, engagement_id: str, patch: dict) -> dict:
         if (old or "") == (new or ""):
             continue          # a no-op edit is not a revision
         await db.execute(
-            "INSERT INTO engagement_revisions (engagement_id, field, old_value, new_value) "
-            "VALUES (?,?,?,?)", (engagement_id, key, old, new))
+            "INSERT INTO engagement_revisions "
+            "(engagement_id, field, old_value, new_value, operator_id) "
+            "VALUES (?,?,?,?,?)", (engagement_id, key, old, new, operator_id))
         await db.execute(f"UPDATE engagements SET {key} = ? WHERE id = ?",
                          (new, engagement_id))
         changed.append(key)
     return {"changed": changed, "ignored": ignored}
 
 
-async def archive(db, engagement_id: str, archived: bool = True) -> bool:
+async def archive(db, engagement_id: str, archived: bool = True,
+                  operator_id: str | None = None) -> bool:
     """Close an engagement without destroying it.
 
     Never a DELETE. Sessions, findings, scope rules and assets all reference
@@ -457,17 +460,25 @@ async def archive(db, engagement_id: str, archived: bool = True) -> bool:
     if old == new:
         return True
     await db.execute(
-        "INSERT INTO engagement_revisions (engagement_id, field, old_value, new_value) "
-        "VALUES (?,?,?,?)", (engagement_id, "status", old, new))
+        "INSERT INTO engagement_revisions "
+        "(engagement_id, field, old_value, new_value, operator_id) "
+        "VALUES (?,?,?,?,?)", (engagement_id, "status", old, new, operator_id))
     await db.execute("UPDATE engagements SET status = ? WHERE id = ?", (new, engagement_id))
     return True
 
 
 async def revisions(db, engagement_id: str, limit: int = 100) -> list[dict]:
     """The edit history, newest first."""
+    # LEFT JOIN, not JOIN: revisions written before erlik could attribute
+    # anything have a NULL operator_id and must still appear. They read as
+    # "unattributed", which is the truth about them.
     cur = await db.execute(
-        "SELECT field, old_value, new_value, changed_at FROM engagement_revisions "
-        "WHERE engagement_id = ? ORDER BY id DESC LIMIT ?", (engagement_id, limit))
+        "SELECT r.field, r.old_value, r.new_value, r.changed_at, "
+        "       r.operator_id, o.name "
+        "FROM engagement_revisions r "
+        "LEFT JOIN operators o ON o.id = r.operator_id "
+        "WHERE r.engagement_id = ? ORDER BY r.id DESC LIMIT ?",
+        (engagement_id, limit))
     return [dict(r) for r in await cur.fetchall()]
 
 

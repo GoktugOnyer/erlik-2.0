@@ -120,8 +120,14 @@ async def test_coverage_still_cannot_see_this_case_at_all(lane):
 
 async def test_the_record_survives_a_later_case_setting_the_stage_reason(lane):
     """Why it is an observation and not the stage reason: the reason is one string, and the
-    next case to set one wins."""
-    result = await run_catalogue(lane, ["WSTG-INPV-19", "WSTG-CONF-06"])
+    next case to set one wins.
+
+    The second case was WSTG-CONF-06 until CONF-06 stopped being lane-runnable — one of
+    its steps is a `bash -c` shell program now, which curl_request refuses. WSTG-CLNT-07
+    plays the same part: a case that also cannot run in this harness, for a reason of its
+    own that is not the missing collector.
+    """
+    result = await run_catalogue(lane, ["WSTG-INPV-19", "WSTG-CLNT-07"])
     assert not_run(result, "WSTG-INPV-19"), (
         f"the skip was lost; reason is now {result.reason!r}")
 
@@ -133,8 +139,8 @@ async def test_the_record_is_specific_to_the_missing_collector(lane):
     (The first version of this asserted the OTHER case recorded nothing, which was simply
     false in this harness: without a real sandbox it cannot run either, and it says so.)
     """
-    result = await run_catalogue(lane, ["WSTG-INPV-19", "WSTG-CONF-06"])
+    result = await run_catalogue(lane, ["WSTG-INPV-19", "WSTG-CLNT-07"])
     reasons = {o["test_case_id"]: o["reason"] for o in result.observations
                if o.get("type") == "test_case_not_run"}
     assert "collector" in reasons["WSTG-INPV-19"]
-    assert "collector" not in reasons.get("WSTG-CONF-06", ""), reasons
+    assert "collector" not in reasons.get("WSTG-CLNT-07", ""), reasons

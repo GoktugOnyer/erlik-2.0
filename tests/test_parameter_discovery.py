@@ -197,11 +197,19 @@ def test_a_case_that_tests_a_parameter_runs_only_where_there_is_one():
 def test_what_the_lane_can_run():
     """Pinned so a catalogue edit that quietly removes a case from the lane —
     a shell in one step, a field nothing supplies — fails here rather than
-    showing up as a quieter assessment."""
+    showing up as a quieter assessment.
+
+    IT DID EXACTLY THAT on 2026-09-29 and this is the test that caught it: three
+    cases left at once, WSTG-CONF-06 and WSTG-SESS-02 to a `bash -c` rewrite of one
+    step each and WSTG-INPV-07 to an out-of-band step whose {{collaborator_host}}
+    the lane does not supply. They are named with their causes in
+    test_curl_dialect.TestWhatTheLaneCannotRunIsDeclared rather than just deleted
+    from this set.
+    """
     assert set(executable_test_cases()) == {
-        "WSTG-CLNT-04", "WSTG-CLNT-07", "WSTG-CLNT-07b", "WSTG-CONF-06", "WSTG-INFO-03",
+        "WSTG-CLNT-04", "WSTG-CLNT-07", "WSTG-CLNT-07b", "WSTG-INFO-03",
         "WSTG-INPV-05.2", "WSTG-INPV-05.3", "WSTG-INPV-05.4",
-        "WSTG-INPV-07", "WSTG-INPV-11.2", "WSTG-INPV-18", "WSTG-SESS-02"}
+        "WSTG-INPV-11.2", "WSTG-INPV-18"}
 
 
 # --- end to end through the adapter -----------------------------------------
@@ -472,7 +480,10 @@ async def test_a_stage_that_runs_out_of_time_keeps_what_it_found(database, tmp_p
     A fake clock tests exactly that, deterministically, and the test no longer sleeps
     at all.
     """
-    cfg = config(active=True, test_cases=["WSTG-SESS-02", "WSTG-INFO-03"],
+    # WSTG-CLNT-07, not WSTG-SESS-02: SESS-02 is no longer lane-runnable (see
+    # test_curl_dialect.TestWhatTheLaneCannotRunIsDeclared). Any two runnable
+    # url-only cases serve here — what is under test is the clock, not the cases.
+    cfg = config(active=True, test_cases=["WSTG-CLNT-07", "WSTG-INFO-03"],
                  budget={"stage_seconds": 8})
     await database.persist_result("s", "discovery", StageResult(endpoints=[
         Endpoint(url=f"https://app.test/p{n}", source="katana", identity="anonymous")

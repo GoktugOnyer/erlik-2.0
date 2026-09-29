@@ -151,6 +151,53 @@ class TestReadApi:
         assert d["count"] == len(C.wstg_ids())
         assert d["load_errors"] == []
 
+    def test_every_case_reports_a_real_name(self, client):
+        """The route read `doc.get("title")` and no case has a `title`: all 29
+        use `name`, which is also what the loader and runner call it (`tc.name`).
+        Every case reported an empty string, and nothing noticed because the
+        only assertions were on count and load_errors."""
+        d = client.get("/api/library/testcases").json()
+        assert d["cases"], "no cases — the assertion below would be vacuous"
+        blank = [c["file"] for c in d["cases"] if not c.get("name")]
+        assert not blank, f"cases with no name: {blank}"
+
+    def test_the_names_are_the_ones_on_disk(self, client):
+        """Not just non-empty — the value must come from the YAML, so a default
+        or a placeholder cannot satisfy the test above."""
+        import yaml
+
+        d = client.get("/api/library/testcases").json()
+        served = {c["file"]: c["name"] for c in d["cases"]}
+        for f, name in served.items():
+            doc = yaml.safe_load((C.WSTG_DIR / f).read_text(encoding="utf-8"))
+            assert name == doc["name"], f
+
+    def test_a_case_missing_required_keys_is_an_error_not_a_case(self, client, tmp_path,
+                                                                 monkeypatch):
+        """"Parses as YAML" is not "loads". A file that parses to a mapping with
+        no id is just as broken for the engine, and used to appear here as a
+        valid case with a null id — invisible in the one view whose job is to
+        make broken cases visible."""
+        import shutil
+
+        stage = tmp_path / "wstg"
+        stage.mkdir()
+        real = sorted(C.WSTG_DIR.glob("*.yaml"))[0]
+        shutil.copy(real, stage / real.name)
+        (stage / "broken_no_id.yaml").write_text("name: has a name but no id\nsteps: []\n")
+        (stage / "broken_scalar.yaml").write_text("just a string\n")
+        (stage / "broken_syntax.yaml").write_text("id: x\n  bad: [indent\n")
+
+        monkeypatch.setattr(C, "WSTG_DIR", stage)
+        d = client.get("/api/library/testcases").json()
+
+        assert d["count"] == 1, d["cases"]
+        bad = {e["file"] for e in d["load_errors"]}
+        assert bad == {"broken_no_id.yaml", "broken_scalar.yaml", "broken_syntax.yaml"}, bad
+        # Each error has to say what is wrong, or the view only reports a count.
+        for e in d["load_errors"]:
+            assert e["error"].strip(), e
+
     def test_routing_explain_uses_the_real_selector(self, client):
         """The explainer must not reimplement ranking — a second implementation
         drifts, and then the UI confidently shows what runs do not do."""
@@ -215,6 +262,38 @@ class TestProducedOutputIsActuallyRead:
         assert "/api/v2/sweep/plan" in src
         assert "view-testlab" in src
 
+    def test_the_provider_selector_is_wired_end_to_end(self):
+        """`/api/v2/providers` was the only endpoint in the repo with no caller
+        of any kind, while the run endpoint had always read `provider` from the
+        body and persisted it to v2_runs.provider. Both ends existed; only the
+        wire was missing, so the column was NULL for every run ever recorded.
+
+        Three links, all of which have to hold for the value to arrive."""
+        src = self.UI.read_text()
+        assert "/api/v2/providers" in src, "the endpoint is fetched by nothing"
+        assert 'id="tl-provider"' in src, "no control for the operator to choose with"
+        # Anchor on the JSON.stringify block itself, not a character window.
+        # A 900-char window failed the moment an explanatory comment was added
+        # above the new line -- the same trap that bit bootFromUrl's proximity
+        # test in an earlier change.
+        i = src.index("/api/v2/testcases/${encodeURIComponent(id)}/run")
+        j = src.index("body: JSON.stringify(", i)
+        # Close on the terminator at this indentation. Searching for a bare
+        # "})" stops early on `|| {}).value` inside the engagement_id line.
+        body = src[j:src.index("\n                    })", j)]
+        assert "provider:" in body, f"the run body still omits the chosen provider: {body}"
+        assert "engagement_id:" in body, "wrong block located"
+
+    def test_the_providers_endpoint_agrees_with_the_client(self, client):
+        """The list is a literal in the route. If a provider is added to
+        llm_client and not here, the UI silently cannot select it."""
+        from orchestrator import llm_client
+
+        d = client.get("/api/v2/providers").json()
+        assert d["current"] == llm_client.PROVIDER
+        assert d["default_model"] == llm_client.DEFAULT_MODEL
+        assert set(d["providers"]) == {"ollama", "openai"}, d["providers"]
+
     def test_not_assessed_is_distinguishable_from_clean(self):
         """WSTG-CLNT-09 against a host that 302s emits
         ERLIK_FRAMING_NOT_ASSESSED_REDIRECT — it declined to assess. Rendering
@@ -224,6 +303,48 @@ class TestProducedOutputIsActuallyRead:
         assert "NOT_ASSESSED" in src
         assert "not assessed" in src
         assert "tlVerdict" in src
+
+
+class TestControlsSurviveTheRunTheyDescribe:
+    """A control rendered into a cell that a run REPLACES is a control the
+    operator loses precisely when they need it.
+
+    `tlRunOne` sets `fd.innerHTML` on the `tlfd-` cell -- on both the success
+    and the error path -- so anything placed there is gone the moment the case
+    is run, and gone from every row after a sweep. VIEW opens the case
+    DEFINITION, which does not change when the case runs; it must therefore
+    live in a cell the run does not touch.
+    """
+
+    UI = (__import__("pathlib").Path(__file__).resolve().parents[1]
+          / "dashboard" / "templates" / "index.html")
+
+    @staticmethod
+    def _findings_cell(src):
+        """The `tlfd-` <td> of the row template, from its opening tag to the
+        matching </td>."""
+        start = src.index('id="tlfd-')
+        start = src.rindex("<td", 0, start)
+        return src[start:src.index("</td>", start)]
+
+    def test_the_premise_still_holds(self):
+        """If tlRunOne stops overwriting the cell, this whole class is vacuous
+        and should be reconsidered rather than left as a green no-op."""
+        src = self.UI.read_text()
+        body = src[src.index("async function tlRunOne"):]
+        body = body[:body.index("async function tlSweep")]
+        assert "fd.innerHTML" in body
+
+    def test_view_is_offered_at_all(self):
+        assert "data-tlview" in self.UI.read_text()
+
+    def test_view_is_not_in_the_cell_the_run_overwrites(self):
+        cell = self._findings_cell(self.UI.read_text())
+        assert "data-tlrun-case" in cell, "wrong cell located -- RUN lives here"
+        assert "data-tlview" not in cell, (
+            "VIEW is rendered into the cell tlRunOne replaces, so it vanishes "
+            "from every case that has been run"
+        )
 
 
 class TestHostedProviderRateLimit:

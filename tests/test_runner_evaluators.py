@@ -3,8 +3,8 @@ from orchestrator.testcase.runner import StepResult, _run_evaluator, run_test_ca
 from orchestrator.testcase.schema import TestCase as Case, Evaluator
 
 
-def step(output, code=0, name="probe"):
-    return StepResult(step=name, command="curl", success=code == 0, output=output, duration_ms=1, exit_code=code)
+def step(output, code=0, name="probe", command="curl"):
+    return StepResult(step=name, command=command, success=code == 0, output=output, duration_ms=1, exit_code=code)
 
 
 def case():
@@ -26,14 +26,60 @@ async def test_race_marker_count_across_lines():
     assert (await _run_evaluator(ev, step('success[1]'), case(), {"success_marker": "success[1]"}, None, None))[0] is None
 
 
+CORS_RESPONSE = ("HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: {origin}\r\n"
+                 "Access-Control-Allow-Credentials: true\r\n\r\npublic")
+
+
 @pytest.mark.asyncio
 async def test_cors_wildcard_never_means_credentialed_read():
+    """A browser refuses the wildcard the moment credentials are attached, so
+    reporting it as a credentialed read is a false positive with a severity on it."""
     ev = Evaluator(type="cors", emit_finding={})
-    response = "HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Credentials: true\r\n\r\npublic"
-    assert (await _run_evaluator(ev, step(response), case(), {}, None, None))[0] is None
-    response = response.replace("Origin: *", "Origin: https://evil.oast.test")
-    finding = (await _run_evaluator(ev, step(response), case(), {}, None, None))[0]
+    wildcard = step(CORS_RESPONSE.format(origin="*"))
+    assert (await _run_evaluator(ev, wildcard, case(), {}, None, None))[0] is None
+
+    reflected = step(CORS_RESPONSE.format(origin="https://evil.oastify.com"))
+    finding = (await _run_evaluator(ev, reflected, case(), {}, None, None))[0]
     assert finding.confidence == "suspected"
+
+
+@pytest.mark.asyncio
+async def test_cors_judges_the_origin_the_step_actually_sent():
+    """The evaluator used to compare against a constant, and the constant drifted
+    away from the origin the case sends -- so a server reflecting the attacker
+    origin with credentials produced no finding at all, which reads as a correctly
+    configured application. It reads the Origin off the step's own command now.
+
+    The origin here is deliberately neither the constant nor anything in the
+    catalogue: the only way to match it is to have read the command.
+    """
+    ev = Evaluator(type="cors", emit_finding={})
+    command = 'curl -s -i -H "Origin: https://attacker.example" "https://app.test/"'
+    reflected = step(CORS_RESPONSE.format(origin="https://attacker.example"),
+                     command=command)
+    assert (await _run_evaluator(ev, reflected, case(), {}, None, None))[0] is not None
+
+
+@pytest.mark.asyncio
+async def test_cors_does_not_fire_on_an_origin_the_step_did_not_send():
+    """The negative half. A server that reflects SOMEONE ELSE'S origin has not
+    reflected ours, and a check that accepted any reflected origin would report
+    every correctly configured allowlist as a finding."""
+    ev = Evaluator(type="cors", emit_finding={})
+    command = 'curl -s -i -H "Origin: https://attacker.example" "https://app.test/"'
+    other = step(CORS_RESPONSE.format(origin="https://trusted.example"), command=command)
+    assert (await _run_evaluator(ev, other, case(), {}, None, None))[0] is None
+
+
+@pytest.mark.asyncio
+async def test_cors_lets_the_target_override_the_origin():
+    """`test_origin` still wins, for a caller that sends its own header."""
+    ev = Evaluator(type="cors", emit_finding={})
+    command = 'curl -s -i -H "Origin: https://attacker.example" "https://app.test/"'
+    reflected = step(CORS_RESPONSE.format(origin="https://chosen.example"), command=command)
+    assert (await _run_evaluator(ev, reflected, case(),
+                                 {"test_origin": "https://chosen.example"},
+                                 None, None))[0] is not None
 
 
 @pytest.mark.asyncio

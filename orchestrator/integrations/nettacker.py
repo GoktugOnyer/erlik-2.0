@@ -54,7 +54,15 @@ SCENARIOS: dict[str, dict] = {
     "kev":       {"profile": "cisa_kev",         "desc": "CISA Known-Exploited-Vulnerabilities subset."},
     "critical":  {"profile": "critical_severity","desc": "Only critical-severity modules."},
     "wordpress": {"profile": "wordpress",        "desc": "WordPress core / plugin / theme checks."},
-    "brute":     {"profile": "brute",            "desc": "Credential brute-force — needs -u/-p; CAN LOCK ACCOUNTS."},
+    # Offered but not runnable from here. _nettacker_argv builds only
+    # -i/--profile/-o: it has no path to the -u/-p credential lists this
+    # profile needs, so selecting it launches a brute-force with nothing to
+    # try. It stays listed, and disabled, rather than being deleted -- an
+    # operator looking for it should learn why it cannot run, not find it
+    # silently absent. Supply ERLIK_NETTACKER_CMD with the credential
+    # arguments to run it deliberately.
+    "brute":     {"profile": "brute",            "desc": "Credential brute-force — needs -u/-p; CAN LOCK ACCOUNTS.",
+                  "unavailable": "erlik passes no -u/-p, so this would brute-force with no credential list"},
     "full":      {"profile": "all",              "desc": "Every module — slow and noisy."},
 }
 DEFAULT_SCENARIO = "recon"
@@ -63,6 +71,16 @@ DEFAULT_SCENARIO = "recon"
 def list_scenarios() -> dict[str, str]:
     """Friendly run modes → one-line description (for UIs / the CLI)."""
     return {k: v["desc"] for k, v in SCENARIOS.items()}
+
+
+def unavailable_scenarios() -> dict[str, str]:
+    """Run modes that are listed but cannot be launched → why not.
+
+    Kept separate from list_scenarios() so the name still appears everywhere it
+    did before; callers that render a chooser should disable these rather than
+    hide them.
+    """
+    return {k: v["unavailable"] for k, v in SCENARIOS.items() if v.get("unavailable")}
 
 
 def nettacker_enabled() -> bool:
@@ -375,8 +393,11 @@ def _cli(argv: list[str] | None = None) -> int:
 
     if ns.scenarios:
         print("Nettacker scenarios (ERLIK_NETTACKER_SCENARIO):")
+        _blocked = unavailable_scenarios()
         for name, desc in list_scenarios().items():
             mark = "  (default)" if name == DEFAULT_SCENARIO else ""
+            if name in _blocked:
+                mark = f"  [UNAVAILABLE: {_blocked[name]}]"
             print(f"  {name:10} {desc}{mark}")
         return 0
     if not ns.target:

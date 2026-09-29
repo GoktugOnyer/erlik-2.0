@@ -12,6 +12,7 @@ from orchestrator import http_capture
 from orchestrator import llm_client
 from orchestrator import credentials as _CRED
 from orchestrator.testcase.schema import TestCase, TestStep, Evaluator
+from orchestrator import collaborator as _oast
 from orchestrator.testcase.scope import Scope, ScopeViolation, check_command, from_target
 from orchestrator.tool_executor import (_safe_mode_violation, execute_tool,
                                         write_confinement_violation)
@@ -52,6 +53,22 @@ class StepResult(BaseModel):
     obligation_id: str | None = None
 
 
+class NotAssessed(BaseModel):
+    """An evaluator that could not reach a verdict, as opposed to one that
+    reached "no".
+
+    `matched = False` means both "checked, target is fine" and "could not
+    check" unless they are kept apart. They were not: the llm branch caught its
+    exception, set matched = False and printed to stderr, so a run with an
+    unreachable LLM returned findings: [], success: true, error: null. On a
+    client engagement that reports a control as sound when it was never tested.
+    """
+
+    step: str
+    evaluator: str
+    reason: str
+
+
 class RunResult(BaseModel):
     test_case_id: str
     target: dict[str, Any]
@@ -69,6 +86,9 @@ class RunResult(BaseModel):
     # A case that finds three parameters can retarget three children; without
     # this the chain walker hands every child the same target it started with.
     produced: dict[str, list[str]] = Field(default_factory=dict)
+    # Evaluators that could not run. Empty is the only honest way to read a
+    # findings-free result as "nothing found here".
+    not_assessed: list[NotAssessed] = Field(default_factory=list)
 
 
 _TOOLS_ALL = [
@@ -131,6 +151,58 @@ def _eval_when(when: str | None, findings: list[Finding], last: StepResult | Non
         return last is not None and not last.success
     # Unknown -> default to true (don't silently skip)
     return True
+
+
+def _primary_url(target: dict[str, Any]) -> str | None:
+    """The URL a step is actually aimed at, for cases that do not call it `url`.
+
+    Four of the 29 cases name their target something else -- ATHN-01
+    `login_url`, AUTHZ-04 `url_template`, BUSL-04 `request_template`, CONF-07
+    `host` -- and `target.get("url")` is None for every one of them. That None
+    reached `execute_tool`, whose `_sanitize_command` then had no destination to
+    rewrite to and used its placeholder default, re-pointing the command at
+    localhost:80 and downgrading https to http before it ran. `_sanitize_command`
+    no longer invents a destination; this gives it the real one, so a loopback
+    target under docker is still resolved to the host gateway for these cases
+    as it always was for the other 25.
+
+    Order matters only in that `url` stays first, so nothing changes for the
+    cases that already worked.
+    """
+    for key in ("url", "login_url", "url_template", "base_url", "endpoint"):
+        v = target.get(key)
+        if isinstance(v, str) and "://" in v:
+            return v
+    host = target.get("host")
+    if isinstance(host, str) and host:
+        port = target.get("port")
+        scheme = "https" if str(port) in ("443", "8443") else "http"
+        return f"{scheme}://{host}" + (f":{port}" if port else "")
+    # A raw request template carries its URL inside a shell command.
+    #
+    # BY SHAPE, NOT BY NAME. This was `target.get("request_template")` alone, and
+    # three later cases named the same thing differently -- AUTHZ-02 `read_request`
+    # and `transfer_request`, BUSL-06 `final_request` -- so `_primary_url` returned
+    # None for them and `_sanitize_command` had no destination under docker, which is
+    # the exact defect this function exists to prevent, reintroduced one case at a
+    # time. A suffix rule cannot go stale that way, and
+    # test_target_rewrite.TestTheRunnerSuppliesTheRealTarget keeps it honest against
+    # the whole catalogue.
+    #
+    # Sorted, so a case declaring several is deterministic about which one it names.
+    # Which one wins matters less than it looks: this value picks the destination
+    # `_sanitize_command` rewrites to, and every URL in the rendered command is
+    # checked against scope separately by `check_command`, so a second arm pointing
+    # somewhere else is refused rather than silently reached.
+    for key in sorted(target):
+        if not (key == "request_template" or key.endswith(("_request", "_template"))):
+            continue
+        value = target.get(key)
+        if isinstance(value, str):
+            m = re.search(r'https?://[^\s\'"\\<>|]+', value)
+            if m:
+                return m.group(0)
+    return None
 
 
 def _validate_target(tc: TestCase, target: dict[str, Any]) -> str | None:
@@ -302,6 +374,42 @@ MAX_EVIDENCE = 1500
 SECRET_MARGIN = 1024
 
 
+# A verdict line a case wrote about itself: `ERLIK_BUSL_RACE: the request
+# succeeded 8 times out of 8 ...`. Hyphens as well as underscores, because
+# AUTHZ-04's markers are spelled `ERLIK-AUTHZ-IDOR`.
+_CANARY_LINE = re.compile(r"^.*\bERLIK[_-][A-Z0-9][A-Z0-9_-]*\b.*$", re.MULTILINE)
+MAX_BASIS = 400
+
+
+def _canary_basis(output: str, at: int, duration_ms: int | None) -> str | None:
+    """The case's own verdict sentence, when the thing that matched is one.
+
+    A regex finding's description was "regex evaluator matched captured tool output"
+    -- true of every regex finding ever emitted, and the sentence a client reads.
+    Where a case emits a CANARY it has already written the specific sentence: the
+    marker is generated by the step's own script, from numbers only that run knows,
+    and saying "something matched" instead throws it away. Measured on WSTG-BUSL-04:
+    the finding for a coupon redeemed eight times out of eight was word-for-word the
+    finding for one redeemed twice.
+
+    Only for canary lines. A pattern like `^Disallow:` matches a line of the
+    TARGET's output, and promoting that to the description would put text the
+    target chose where a reader expects erlik's own account of what it concluded.
+
+    The duration goes with it for the same reason it does in the count and blind
+    evaluators: for a race it is what says the requests overlapped, and no verdict
+    line can know it.
+    """
+    line_start = output.rfind("\n", 0, at) + 1
+    line_end = output.find("\n", at)
+    line = output[line_start:line_end if line_end != -1 else len(output)].strip()
+    if not _CANARY_LINE.fullmatch(line):
+        return None
+    if len(line) > MAX_BASIS:
+        line = line[:MAX_BASIS].rstrip() + "..."
+    return line + (f"; the step completed in {duration_ms}ms" if duration_ms else "")
+
+
 def _around(output: str, at: int, span: int = MAX_EVIDENCE + 2 * SECRET_MARGIN) -> str:
     """The neighbourhood of the MATCH, not the head of the response.
 
@@ -467,10 +575,16 @@ async def _run_evaluator(
     provider: str | None,
     model: str | None,
     prior_steps: list[StepResult] | None = None,
-) -> tuple[Finding | None, list[str], bool, dict[str, list[str]]]:
-    """Apply one evaluator. Returns (finding_or_none, chain_to, stop, produced)."""
+) -> tuple[Finding | None, list[str], bool, dict[str, list[str]], NotAssessed | None]:
+    """Apply one evaluator.
+
+    Returns (finding, chain_to, stop, produced, not_assessed). The last element
+    is set when the evaluator could not reach a verdict at all; the caller must
+    surface it rather than letting it read as a clean result.
+    """
     matched = False
     produced: dict[str, list[str]] = {}
+    unassessed: NotAssessed | None = None
     # A blind evaluator's proof is a COMPARISON, not a response — the true
     # condition on its own is an ordinary page. These let those branches say
     # what they actually saw instead of handing a reader the raw body.
@@ -505,6 +619,8 @@ async def _run_evaluator(
                 # dismiss a real finding.
                 hit = _caused_occurrence(pattern, flags, step_result, ev, prior_steps) or hit
                 evidence = _around(step_result.output, hit.start())
+                basis = _canary_basis(step_result.output, hit.start(),
+                                      step_result.duration_ms) or basis
             if matched and ev.differs_from:
                 # ATTRIBUTION. The pattern says the evidence is there; this says
                 # the payload put it there. A page that carries the signature
@@ -561,7 +677,23 @@ async def _run_evaluator(
         # so reporting it as one is a false positive with a CVSS score attached.
         # What matters is the server reflecting OUR origin back.
         headers = _response_headers(step_result.output)
-        origin = str(target.get("test_origin", "") or "https://evil.oast.test")
+        # THE ORIGIN THE STEP ACTUALLY SENT, read off its own command.
+        #
+        # This was a constant, and it drifted: the case's payload host moved to
+        # `evil.oastify.com` (the only spelling `_scope_allows` permits) while the
+        # evaluator went on looking for `evil.oast.test`. A server reflecting the
+        # attacker origin with credentials -- the finding this case exists for, and
+        # what tests/targets plants -- then produced nothing at all, which reads as a
+        # correctly configured application.
+        #
+        # An evaluator judging a header value that the step chose should ask the step
+        # what it chose. A `test_origin` on the target still wins, for a caller that
+        # sends its own; the constant remains only for a command with no Origin at
+        # all, where there is nothing to read.
+        sent = re.search(r'(?i)-H\s+["\']?Origin:\s*([^"\'\s]+)', step_result.command or "")
+        origin = str(target.get("test_origin", "")
+                     or (sent.group(1) if sent else "")
+                     or "https://evil.oastify.com")
         reflected = re.search(r"(?im)^Access-Control-Allow-Origin:\s*" + re.escape(origin) + r"\s*$", headers)
         matched = bool(
             reflected and re.search(r"(?im)^Access-Control-Allow-Credentials:\s*true\s*$", headers))
@@ -908,9 +1040,25 @@ async def _run_evaluator(
         except Exception as e:
             matched = False
             print(f"[runner] llm evaluator error: {e}", file=sys.stderr)
+            unassessed = NotAssessed(
+                step=step_result.step, evaluator="llm",
+                reason=f"LLM evaluator could not run: {str(e)[:160]}")
+
+    elif ev.type == "llm":
+        # Declared llm with no instruction: nothing to ask, so nothing was
+        # judged. Silently false would read as clean.
+        unassessed = NotAssessed(step=step_result.step, evaluator="llm",
+                                 reason="llm evaluator has no instruction")
+    else:
+        # An evaluator type no branch above handles -- a typo in a case, or a
+        # type added to the schema before the runner learned it. It asserted
+        # nothing, and must not be counted as having asserted "no".
+        unassessed = NotAssessed(
+            step=step_result.step, evaluator=str(ev.type),
+            reason=f"unsupported evaluator type {ev.type!r}")
 
     if not matched:
-        return None, [], False, produced
+        return None, [], False, produced, unassessed
 
     finding = None
     # `is not None`, not truthiness: `emit_finding: {}` is a case asking for a
@@ -934,7 +1082,7 @@ async def _run_evaluator(
             confidence=confidence or ("confirmed" if ev.type == "idor" else "suspected"),
             basis=basis or f"{ev.type} evaluator matched captured tool output",
         )
-    return finding, ev.chain_to or [], ev.stop_after, produced
+    return finding, ev.chain_to or [], ev.stop_after, produced, None
 
 
 def _scrub_for_storage(result: RunResult, secrets: tuple[str, ...]) -> None:
@@ -1096,9 +1244,62 @@ async def run_test_case(
     resolved_secrets: list[str] = []
     chain_set: list[str] = []
     scope = from_target(target)
+
+    # A UNIQUE name per RUN, minted once and shared by every OOB step in it.
+    # Per-run rather than per-step so several probes in one case correlate to
+    # the same run, and per-run rather than global so an interaction identifies
+    # WHICH run caused it -- a blind finding that cannot be attributed to a
+    # payload is not evidence a client can act on.
+    #
+    # An operator-supplied `collaborator_host` wins: someone running their own
+    # Burp Collaborator has a name erlik cannot mint.
+    oast_token = ""
+    oast_host = str(target.get("collaborator_host") or "")
+    if tc.needs_collaborator and not oast_host and _oast.is_enabled():
+        oast_token = _oast.new_token()
+        try:
+            oast_host = _oast.host_for(oast_token)
+        except _oast.CollaboratorError:
+            oast_token, oast_host = "", ""
+
+    # THE COLLABORATOR IS A PAYLOAD HOST, and has to be declared as one or the
+    # scope guard refuses the only step that can prove a blind finding: the
+    # name is minted per run, so no case file could ever list it.
+    #
+    # It is not a hole in the guard. `payload_allowlist` still filters it
+    # against `deny_hosts`, so an operator who excluded the domain keeps it
+    # excluded; it does not touch `allow_hosts`, so it cannot widen where the
+    # case is AIMED (the primary URL is checked against the engagement scope
+    # alone); and the name only exists because the operator configured
+    # ERLIK_OAST_DOMAIN or passed `collaborator_host` themselves. That
+    # configuration IS the declaration.
+    step_payload_hosts = list(tc.payload_hosts)
+    if oast_host:
+        step_payload_hosts.append(oast_host)
+
+    # Whether a payload naming the collaborator was actually SENT. Not
+    # `any(st.oob for st in tc.steps)`: a `when:` guard, a dry run or a scope
+    # refusal all leave an OOB step un-sent, and reporting "payloads were sent,
+    # go check your collaborator" for a probe that never left is the same class
+    # of untrue interface label as the silence it replaces.
+    oob_sent = False
     try:
         for step in tc.steps:
             if not _eval_when(step.when, result.findings, last_step):
+                continue
+
+            # AN OOB STEP WITHOUT A COLLABORATOR IS NOT RUN.
+            #
+            # Its payload can only be proven by something contacting a name we
+            # control; planting one nobody can read back would leave the case
+            # reporting a clean verdict for a check that was never performed.
+            # That is reported as not-assessed, which is the difference between
+            # "no blind vulnerability" and "blind detection was off".
+            if step.oob and not oast_host:
+                result.not_assessed.append(NotAssessed(
+                    step=step.name, evaluator="collaborator",
+                    reason=_oast.status().get("reason", "out-of-band detection "
+                                              "is unavailable")))
                 continue
 
             # DERIVED from the endpoint, so every caller has them without
@@ -1111,6 +1312,8 @@ async def run_test_case(
             derived = _origin_fields(endpoint_of(target))
             ctx: dict[str, Any] = {**derived, **target,
                                    "step": {s.step: s for s in result.steps}}
+            if oast_host:
+                ctx["collaborator_host"] = oast_host
             if tc.id == "WSTG-BUSL-04":
                 ctx["parallel_n"] = max(2, min(20, int(target.get("parallel_n", 2) or 2)))
             cmd = _render(step.command, ctx)
@@ -1168,7 +1371,9 @@ async def run_test_case(
             # Safety floor: every command must pass scope check before exec.
             if scope is not None:
                 try:
-                    (command_checker or check_command)(cmd, scope, primary_url=endpoint_of(target))
+                    (command_checker or check_command)(
+                        cmd, scope, primary_url=_primary_url(target),
+                        payload_hosts=step_payload_hosts)
                 except ScopeViolation as e:
                     result.steps.append(StepResult(
                         step=step.name,
@@ -1193,6 +1398,9 @@ async def run_test_case(
                 result.steps.append(sr)
                 last_step = sr
                 continue
+
+            if step.oob:
+                oob_sent = True
 
             # AUTH RESOLUTION. `cmd` carries opaque handles; the secret exists
             # only in `live_cmd`, only for the duration of this call, and is
@@ -1261,7 +1469,7 @@ async def run_test_case(
             raw = await (executor or execute_tool)(
                 live_cmd,
                 enabled_tools=_TOOLS_ALL,
-                target_url=endpoint_of(target),
+                target_url=_primary_url(target),
                 no_timeout=False,
                 tool_hint=step.tool,
                 # Every case that declared `timeout:` in YAML was running on the
@@ -1298,9 +1506,11 @@ async def run_test_case(
                     continue
                 if not _eval_when(ev.when, result.findings, sr):
                     continue
-                finding, chain_to, stop_after, produced = await _run_evaluator(
+                finding, chain_to, stop_after, produced, unassessed = await _run_evaluator(
                     ev, sr, tc, target, provider, model, result.steps
                 )
+                if unassessed:
+                    result.not_assessed.append(unassessed)
                 for field, values in produced.items():
                     bucket = result.produced.setdefault(field, [])
                     for v in values:
@@ -1393,6 +1603,54 @@ async def run_test_case(
         for outcome in result.cleanups:
             await _discharge_obligation(db, outcome)
 
+    # OUT-OF-BAND EVIDENCE, collected after the probes have been sent.
+    #
+    # Polled once at the end rather than after each step: the target may take a
+    # moment to make the call, and several probes in one case share the run's
+    # token, so one poll answers for all of them.
+    #
+    # A collaborator erlik did not mint cannot be polled: the receiver API is
+    # keyed by the token, and a Burp Collaborator instance has neither that
+    # token nor this API. Without this branch the probe would be SENT and
+    # nothing reported either way -- no finding, no not-assessed -- which is
+    # the clean-looking non-result the rest of this file exists to prevent.
+    # The operator has to read their own collaborator; the run says so.
+    if oast_host and not oast_token and oob_sent:
+        result.not_assessed.append(NotAssessed(
+            step="collaborator_poll", evaluator="collaborator",
+            reason=f"out-of-band payloads naming {oast_host} were sent, but "
+                   f"that collaborator was supplied rather than minted by "
+                   f"erlik, which cannot poll it — check it yourself for "
+                   f"interactions from this run"))
+    elif oast_token:
+        try:
+            hits = _oast.poll(oast_token)
+        except _oast.CollaboratorError as e:
+            # A receiver that is down must not read as "nothing called out".
+            # Silence from an unreachable poller is exactly the clean-looking
+            # non-result this project treats as equal to a crash.
+            result.not_assessed.append(NotAssessed(
+                step="collaborator_poll", evaluator="collaborator",
+                reason=f"out-of-band payloads were planted but could not be "
+                       f"read back: {e}"))
+        else:
+            if hits:
+                result.findings.append(Finding(
+                    test_case_id=tc.id,
+                    step="collaborator_poll",
+                    vuln_type=f"Out-of-Band Interaction ({tc.attack_class or 'blind'})",
+                    severity=tc.severity,
+                    url=target.get("url") or target.get("url_template"),
+                    parameter=target.get("parameter"),
+                    evidence=(f"The target contacted {oast_host}, which only "
+                              f"this run's payload named.\n"
+                              + _oast.describe(hits))[:1500],
+                ))
+
+    # SCRUBBED LAST, AFTER the out-of-band findings above are appended. This redacts
+    # every resolved secret from what leaves the function, so anything added after it
+    # would leave unredacted — and the collaborator evidence quotes the target's own
+    # response. Merge order, not style.
     _scrub_for_storage(result, tuple(dict.fromkeys(resolved_secrets)))
     result.duration_ms = int((time.time() - started) * 1000)
     return result

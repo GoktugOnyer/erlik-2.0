@@ -17,7 +17,6 @@ Code in erlik-2.0 adapted from this project:
 | `orchestrator/models.py` (`ReportFinding`, `PentestReport`) + report calibration prose in `orchestrator/main.py` | `formats/data.md`, `formats/transilience-report-style/pentest-report.md` (§5, §7) | Pragmatic subset of the `pentest-report.json` schema and a condensed version of the Severity-Calibration rubric. |
 | `skills_catalog/**/*.md` | `skills/*/reference/*.md` | Vendored verbatim as a knowledge corpus (injection, server-side, client-side, api-security, authentication, web-app-logic, reconnaissance). See `skills_catalog/NOTICE.md`. |
 | `mcp_servers/cve/server.py` | `mcp/transilience-vuln/server.py` | MCP server shell (Server / list_tools / call_tool / stdio bootstrap, the sliding-window RateLimiter, and the disk cache) adapted; the hosted-SaaS backend replaced with erlik's NVD core. |
-| `orchestrator/bench/result_types.py`, `orchestrator/bench/results_io.py` | `benchmarks/_shared/result_types.py`, `results_io.py` | Vendored result dataclass + JSON writer (stable schema). |
 | `orchestrator/bench/agent_errors.py` | `benchmarks/_shared/agent_errors.py` | Fatal-error classification adapted from subprocess stderr parsing to erlik's httpx LLM error surface (HTTP 429/401/403 + quota/auth text). |
 
 The MIT license requires that the copyright notice and permission notice be
@@ -95,3 +94,22 @@ HackTricks technique cite the page in their `references:` field. Their probe
 logic is erlik's own expression of a publicly documented technique; the
 underlying techniques (a header name, a protocol behaviour, a well-known payload
 string) are facts, not the licensed text.
+
+## Rekono (design influence, no code)
+
+- Source: https://github.com/pablosnt/rekono — Pablo Santiago
+- License: **GPL-3.0**
+
+erlik is MIT and GPL-3.0 is copyleft, so no Rekono source is vendored, adapted or
+redistributed here. Two things were nonetheless taken from it, and neither
+carries a copyright obligation:
+
+| What was taken | Where it shows up | Why no obligation arises |
+|---|---|---|
+| The asset-tree idea — attach every finding to the host, port or technology it was found on, rather than to a flat URL list | `orchestrator/assets.py`, `orchestrator/database.py` | An architectural idea, not expression. The implementation is erlik's own and was written from the description, not from Rekono's source. Both files already say so inline. |
+| A tool list, matched for capability parity: theHarvester, dirsearch, sslscan, ssh-audit, smbmap, gitleaks, cmseek, joomscan, searchsploit | `Dockerfile.kali`, `orchestrator/models.py`, `orchestrator/tool_executor.py` | A list of third-party program names is not copyrightable expression. Each tool is installed from its own distribution package under its own licence, exactly as the runtime tools above. |
+
+Recorded here for completeness rather than compliance: this file otherwise
+documents every upstream erlik draws on, and Rekono's absence from it was the
+only gap. If GPL-licensed Rekono code is ever adapted into erlik, that is a
+different situation and this entry does not cover it.

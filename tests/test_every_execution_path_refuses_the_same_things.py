@@ -64,7 +64,11 @@ async def would_send(command, *, lane):
     if lane == "integration":
         kwargs["step_policy"] = lambda step, cmd: CatalogueAdapter._v1_step_policy(
             SCOPE, step, cmd)
-        kwargs["command_checker"] = lambda cmd, scope, primary_url=None: curl_request(cmd)
+        # The full signature of the real `check_command`, payload declaration included:
+        # a double whose parameters have drifted from the function it stands in for
+        # stops measuring that function and starts measuring itself.
+        kwargs["command_checker"] = (
+            lambda cmd, scope, primary_url=None, payload_hosts=None: curl_request(cmd))
     case = Case(id="T", name="t", category="authz", severity="high",
                 steps=[Step(name="s", tool="curl", command=command)])
     await run_test_case(case, {"url": "http://app.test/x", "scope": SCOPE}, **kwargs)
@@ -175,8 +179,14 @@ def test_the_corpus_is_what_narrowed_this_rule():
     import pathlib
 
     reports = pathlib.Path(__file__).resolve().parents[1] / "data" / "reports"
-    if not reports.is_dir():
+    # THE REPORTS, NOT THE DIRECTORY. `data/` is gitignored, so a fresh clone has no
+    # corpus -- but another test writes a report during the run and creates
+    # `data/reports` on its way past, so by the time this runs the directory exists
+    # and is empty. Guarding on `is_dir()` then turned "structurally unrunnable from
+    # a clean clone" into a failed assertion about a corpus that was never there.
+    recorded = sorted(reports.glob("*.md")) if reports.is_dir() else []
+    if not recorded:
         pytest.skip("the recorded corpus is not present in this tree")
-    idiom = [path for path in reports.glob("*.md")
+    idiom = [path for path in recorded
              if "> /tmp/login.json && curl" in path.read_text()]
     assert idiom, "the corpus no longer holds the idiom this rule was narrowed for"

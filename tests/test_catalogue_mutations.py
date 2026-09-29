@@ -52,6 +52,12 @@ def test_the_mutating_steps_are_the_ones_we_think_they_are():
         ("WSTG-INPV-07", "php_wrapper_read"),
         ("WSTG-INPV-07", "windows_file_read"),
         ("WSTG-INPV-07", "entity_parser_signature"),
+        # The fifth INPV-07 step, and the decision is the same one. It POSTs an XML
+        # document declaring an external entity pointed at the collaborator, so it is
+        # a write whose effect on the target's parser is unknowable from here -- which
+        # is the reason the other four are refused. Being `oob: true` narrows when it
+        # is attempted; it does not make the POST undoable.
+        ("WSTG-INPV-07", "blind_oob_entity"),
         ("WSTG-INPV-11", "php_object_probe"),
         ("WSTG-INPV-11", "java_stream_probe"),
         ("WSTG-INPV-11", "python_pickle_probe"),

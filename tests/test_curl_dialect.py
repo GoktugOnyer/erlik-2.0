@@ -386,3 +386,90 @@ class TestATargetCannotOpenTheArgv:
                                                            "allow_ports": [80]}})
         assert stored not in selected
         assert "http://app.test/clean" in selected, "only the hostile one is dropped"
+
+
+# --- and what it cannot run, named rather than merely absent -----------------
+
+class TestWhatTheLaneCannotRunIsDeclared:
+    r"""A case that leaves the lane leaves it QUIETLY: `executable_test_cases()` just
+    returns a shorter tuple, `AssessmentConfig` starts refusing the id, and nothing
+    says a check an operator was relying on is no longer available anywhere.
+
+    Measured on 2026-09-29, merging the two lines of work. THREE cases left at once
+    and the count went 12 -> 9, for two different reasons and neither visible from
+    the agent lane where the changes were made:
+
+      WSTG-SESS-02, WSTG-CONF-06   one step each rewritten from a curl invocation
+                                   into a `bash -c '...'` shell program, to reach a
+                                   deterministic verdict without a model. Good for
+                                   the agent lane; here `curl_request` refuses it --
+                                   "unsupported deterministic execution tool" -- and
+                                   the rule is ALL steps or none, so the whole case
+                                   goes. Cookie attributes, the most ordinary check
+                                   there is, stopped being selectable at all.
+
+      WSTG-INPV-07                 gained an out-of-band step that interpolates
+                                   {{collaborator_host}}, which this lane does not
+                                   supply to the capability probe. It costs least of
+                                   the three -- every other INPV-07 step is a POST the
+                                   mutation policy already refuses here -- and the
+                                   fix is different in kind: it belongs in
+                                   COLLECTOR_CASES with WSTG-INPV-19, once
+                                   CatalogueAdapter.run is able to route a case whose
+                                   steps are only PARTLY out-of-band.
+
+    So the exclusions are pinned, with the reason each one is out. Adding a fourth
+    means saying so; fixing one means deleting its row.
+    """
+
+    # case id -> (step that excludes it, why)
+    EXCLUDED = {
+        "WSTG-SESS-02": ("fetch_headers", "shell"),
+        "WSTG-CONF-06": ("trace_probe", "shell"),
+        "WSTG-INPV-07": ("blind_oob_entity", "collaborator"),
+    }
+
+    def _probe_target(self):
+        return {"url": "https://app.test/", "parameter": "erlikprobe", "step": {}}
+
+    @pytest.mark.parametrize("case_id", sorted(EXCLUDED))
+    def test_the_case_is_out_and_the_named_step_is_why(self, case_id):
+        from orchestrator.testcase.loader import load_catalog
+        from orchestrator.testcase.runner import _render
+        from orchestrator.integrations.inventory import unfilled_fields
+        step_name, reason = self.EXCLUDED[case_id]
+        catalog = load_catalog()
+        assert case_id in catalog, f"{case_id} is no longer in the catalogue"
+        assert case_id not in set(executable_test_cases()), (
+            f"{case_id} is runnable in the lane again -- good. Delete its row from "
+            "EXCLUDED so the list keeps meaning what it says.")
+        step = next(s for s in catalog[case_id].steps if s.name == step_name)
+        if reason == "shell":
+            assert step.command.strip().startswith("bash -c"), (
+                f"{case_id}/{step_name} is no longer a shell program, so this is not "
+                "why the case is excluded any more -- find the real reason")
+            with pytest.raises(ScopeViolation):
+                curl_request(_render(step.command, self._probe_target()))
+        else:
+            assert "collaborator_host" in unfilled_fields(
+                step.command, {"url": "https://app.test/", "parameter": "erlikprobe"}), (
+                f"{case_id}/{step_name} no longer waits on a collaborator host, so "
+                "this is not why the case is excluded any more")
+
+    def test_nothing_else_has_quietly_left(self):
+        """The count, so a FOURTH case dropping out fails here rather than reading as
+        a lane that was always this size."""
+        assert len(executable_test_cases()) == 9, (
+            f"the lane runs {sorted(executable_test_cases())}. If a case left, add it "
+            "to EXCLUDED with the step that excludes it; if one arrived, raise this "
+            "number.")
+
+    def test_the_exclusions_are_the_whole_difference(self):
+        """Guard on the pair. EXCLUDED and the count are two statements about one
+        set, and only together do they say "these three and no others"."""
+        from orchestrator.testcase.loader import load_catalog
+        parseable_before = set(executable_test_cases()) | set(self.EXCLUDED)
+        assert len(parseable_before) == len(executable_test_cases()) + len(self.EXCLUDED), (
+            "an EXCLUDED case is also reported runnable -- the two disagree")
+        assert set(self.EXCLUDED) <= set(load_catalog()), (
+            "EXCLUDED names a case the catalogue no longer has")

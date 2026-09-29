@@ -21,8 +21,21 @@ Every realistic business-logic target needs authentication. A coupon, a checkout
 — all of them are behind a session, and a session is passed with a quoted header. So these
 cases worked on exactly the targets where the flaws do not matter.
 
-THE WRAPPER IS GONE rather than escaped. Escaping would have needed the renderer to know
-which shell it was quoting for; not nesting a second shell needs nothing.
+THE TEMPLATE IS NO LONGER INSIDE THE WRAPPER. Escaping would have needed the renderer to
+know which shell it was quoting for, so two cases drop the wrapper entirely -- BUSL-05 and
+AUTHZ-02 write no shell of their own and need none.
+
+BUSL-04 CANNOT drop it, and that is the whole reason this file states its rule the way it
+does now. Its step is a shell program -- a burst, a count, a three-way verdict -- and
+`_command_segments` reads `case` and `for` as program names, so an unwrapped version is
+refused by the admission guard before any request goes out (see test_shell_steps.py). It
+keeps `bash -c '...'` and passes the operator's request POSITIONALLY, after the quoted
+script: the outer shell parses it once, where the operator wrote it, and the inner shell
+runs `("$@")` without re-parsing anything.
+
+So the rule is not "no wrapper". It is that the operator's request is never INTERPOLATED
+into a string the case quotes, which is what the guard below checks and what the two
+behavioural tests at the bottom measure.
 """
 import asyncio
 import pathlib
@@ -75,18 +88,55 @@ async def _local(command, *args, **kwargs):
             "duration_ms": 5, "error": None, "exit_code": process.returncode}
 
 
-# ------------------------------------------------------ no case nests a second shell
+# ---------------------------------- no case interpolates the template into its own quoting
+
+
+# The fields that hold a WHOLE operator-written command rather than a value. These are
+# the ones whose quoting is the operator's and not the case's.
+TEMPLATE_FIELDS = ("request_template", "read_request", "transfer_request", "final_request")
+
+
+def _single_quoted_spans(command: str):
+    """Every [start, end) region of `command` that a single-quoted string covers."""
+    spans, opened = [], None
+    for i, ch in enumerate(command):
+        if ch != "'":
+            continue
+        if opened is None:
+            opened = i
+        else:
+            spans.append((opened, i + 1))
+            opened = None
+    return spans
 
 
 @pytest.mark.parametrize("case_id", TEMPLATED_CASES)
-def test_no_case_wraps_the_operators_template_in_another_shell(case_id):
-    """The structural guard. `_sync_docker_exec` runs `bash -c command`, so a case adding
-    its own `bash -c '...'` is quoting the operator's request inside a string it does not
-    control — and the operator's own quotes end it early."""
+def test_no_case_interpolates_the_operators_template_into_its_own_quoting(case_id):
+    """The structural guard, stated as the defect rather than as one way of avoiding it.
+
+    `_sync_docker_exec` runs `bash -c command`, so a case that writes the operator's
+    request INSIDE a `bash -c '...'` of its own has put a string it does not control
+    inside quotes it does -- and the operator's own quotes end them early. Measured:
+    `-H 'Authorization: Bearer tok'` turned the whole command into three words, none a
+    URL, and the case reported clean.
+
+    Passing the request positionally, after the quoted script, is not that: the outer
+    shell parses it once and the inner one receives argv. So this checks WHERE the
+    placeholder sits, not whether a wrapper exists.
+    """
     case = load_catalog()[case_id]
     for step in case.steps:
-        assert "bash -c" not in step.command, (
-            f"{case_id} step {step.name!r} nests a second shell: {step.command!r}")
+        spans = _single_quoted_spans(step.command)
+        for field in TEMPLATE_FIELDS:
+            token = "{{" + field + "}}"
+            start = step.command.find(token)
+            while start != -1:
+                inside = next(((a, b) for a, b in spans if a < start < b), None)
+                assert inside is None, (
+                    f"{case_id} step {step.name!r} interpolates {token} inside its own "
+                    f"quoted string {step.command[inside[0]:inside[1]][:80]!r} — the "
+                    f"operator's quotes will close it early and the request is never made")
+                start = step.command.find(token, start + 1)
 
 
 def test_the_executor_is_what_supplies_the_shell():

@@ -51,7 +51,7 @@ docs/                Methodology + evaluation documentation
 
 ## WSTG test-case catalogue
 
-32 cases. The **Lane** column is not maintained by hand — it is what
+35 cases. The **Lane** column is not maintained by hand — it is what
 `inventory.executable_test_cases` answers when asked, and a case earns a `yes`
 only if *every* one of its steps runs inside the assessment lane's sandbox (see
 [Status](#status) for why a partly-runnable case is excluded outright). A case
@@ -71,7 +71,7 @@ without one still runs through the agent lane and the CLI.
 | WSTG-CLNT-09 | Clickjacking Protection Headers | — |
 | WSTG-CONF-02 | Platform Debug and Diagnostic Endpoint Exposure | — |
 | WSTG-CONF-04 | Unreferenced Backup, VCS and Build Artifacts | — |
-| WSTG-CONF-06 | HTTP Methods | yes |
+| WSTG-CONF-06 | HTTP Methods | — |
 | WSTG-CONF-07 | Transport Layer Security | — |
 | WSTG-ERRH-01 | Improper Error Handling | — |
 | WSTG-INFO-02 | Fingerprint Web Server | — |
@@ -83,13 +83,13 @@ without one still runs through the agent lane and the CLI.
 | WSTG-INPV-05.4 | SQL Injection (blind, time-based) | yes |
 | WSTG-INPV-05.6 | NoSQL Operator Injection | — |
 | WSTG-INPV-06 | LDAP Injection | — |
-| WSTG-INPV-07 | XML External Entity | yes |
+| WSTG-INPV-07 | XML External Entity | — |
 | WSTG-INPV-11 | Insecure Deserialization | — |
 | WSTG-INPV-11.2 | Injection — unclassified (interpreter error signatures) | yes |
 | WSTG-INPV-15 | Hop-by-Hop Header Handling | — |
 | WSTG-INPV-18 | Server-Side Template Injection | yes |
 | WSTG-INPV-19 | Server-Side Request Forgery | via collector |
-| WSTG-SESS-02 | Cookie Attributes | yes |
+| WSTG-SESS-02 | Cookie Attributes | — |
 | WSTG-SESS-10 | JSON Web Token Flaws | — |
 
 ## Prerequisites
@@ -120,8 +120,10 @@ docker compose up -d        # first run builds the Kali tools image (~10–20 mi
 
 > **Binding:** `run.sh` listens on `127.0.0.1:8002` — the API launches attacks, so it
 > is not exposed on the network by default. Override the host and port with
-> `ERLIK_HOST` and `ERLIK_PORT`; `ERLIK_RELOAD=1` enables auto-reload for
-> development.
+> `ERLIK_HOST` and `ERLIK_PORT`. Binding anywhere but loopback requires
+> `ERLIK_API_TOKEN`: with no token set, an off-loopback instance refuses every
+> `/api/*` request rather than serving sessions, findings and stored credentials
+> to the network. `ERLIK_RELOAD=1` enables auto-reload for development.
 
 Setting `ERLIK_API_TOKEN` protects every `/api/` and `/ws/` path, reads and
 WebSocket streams included — the guard is by path, not by method, because GET
@@ -334,8 +336,8 @@ DefectDojo export, each running as a Docker job behind a scope-checking egress
 proxy. It does not change the existing toolset presets; the dashboard is at
 `/integrations`.
 
-The sandboxed executor runs **12 of the 35** catalogue cases, and a thirteenth
-(`WSTG-INPV-19`) through the Interactsh collector instead. Which twelve is
+The sandboxed executor runs **9 of the 35** catalogue cases, and a tenth
+(`WSTG-INPV-19`) through the Interactsh collector instead. Which nine is
 derived from the parser itself (`inventory.executable_test_cases`), not written
 down: a case qualifies only when every one of its steps parses as a single
 curl request AND interpolates nothing the lane cannot supply, so a case that
@@ -358,21 +360,29 @@ unknown field names report critical template injection. The schema is the one
 source without that property, because the operator supplied it. A case that tests
 a parameter runs once per (endpoint, parameter) pair and only against a URL the
 parameter was actually observed on. That field is what **half the runnable
-catalogue** depends on: 6 of the 12 interpolate `{{parameter}}` — WSTG-CLNT-04,
+catalogue** depends on: 6 of the 9 interpolate `{{parameter}}` — WSTG-CLNT-04,
 the three WSTG-INPV-05.x injection cases, WSTG-INPV-11.2 and WSTG-INPV-18.
 Before it, discovery produced endpoints and every injection case sat idle for
 want of somewhere to inject.
 
-Of the 20 cases still out of reach: 6 run a shell pipeline or a tool that is not
-curl, 4 need a target field discovery does not produce (`login_url`, `host`,
-`jwt`, `request_template`/`success_marker` — one case each), 4 interpolate a
-field nothing supplies (three want a form `submit` control, and all three are
-shell cases regardless), 4 hit a dialect refusal, 1 needs credentials the lane
-cannot choose between — WSTG-AUTHZ-04, whose `required_any` names a
-high-privilege and a low-privilege identity, and which also wants a
+Of the 26 cases still out of reach: 8 run a shell pipeline or a tool that is not
+curl, 7 need a target field discovery does not produce (`login_url`, `host`,
+`jwt`, and the operator-written request templates the business-logic cases take),
+5 interpolate a field nothing supplies, 4 hit a dialect refusal, 1 needs
+credentials the lane cannot choose between — WSTG-AUTHZ-04, whose `required_any`
+names a high-privilege and a low-privilege identity, and which also wants a
 `url_template` nothing supplies — and 1 runs through the Interactsh collector
-instead. There is no longer a single change worth several cases — the remaining
-blockers are one-offs.
+instead.
+
+Three of those eight left the lane recently rather than never having been in it,
+and the shell bucket is why: WSTG-SESS-02 and WSTG-CONF-06 each had a step
+rewritten from a curl invocation into a `bash -c '...'` program, to reach a
+deterministic verdict without a model, and WSTG-INPV-07 gained an out-of-band
+step whose collaborator host this lane does not supply. Good changes in the agent
+lane, invisible from it, and they cost the assessment lane its cookie-attributes
+check. They are named with their causes in
+`tests/test_curl_dialect.py::TestWhatTheLaneCannotRunIsDeclared` so the count
+cannot shrink again without someone saying so.
 
 The dialect is deliberately narrower than "safe": `-w` and `-e` were allowed
 and then removed because ablation showed they bought zero runnable cases while

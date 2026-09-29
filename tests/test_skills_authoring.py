@@ -42,11 +42,17 @@ def sandbox(tmp_path, monkeypatch):
 
 @pytest.fixture
 def client():
-    # AccessMiddleware protects READS as well as writes once ERLIK_API_TOKEN is
-    # set (see orchestrator/integrations/access.py). The `sandbox` fixture sets
-    # it, so every request from this client presents it; the tests that assert a
-    # 403/503 gate still get one, because those gates are checked inside the
-    # route, after the token boundary.
+    """Carries the token the `sandbox` fixture configures.
+
+    TWO GUARDS COVER READS NOW, and either one is enough to make this necessary.
+    `_api_token_guard` used to cover writes only, so these reads went through
+    unauthenticated even with ERLIK_API_TOKEN set; AccessMiddleware
+    (orchestrator/integrations/access.py) additionally guards by PATH rather than
+    method, so /ws/ streams are covered too. Sending the token is the correct fix
+    either way: the subject of these tests is reachability reporting, not the guard.
+    The tests that assert a 403/503 gate still get one, because those gates are
+    checked inside the route, after the token boundary.
+    """
     return TestClient(M.app, headers={"X-API-Token": "t0ken"})
 
 

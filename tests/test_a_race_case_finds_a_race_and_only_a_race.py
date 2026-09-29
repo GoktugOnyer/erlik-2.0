@@ -172,31 +172,43 @@ async def test_the_two_endpoints_differ_only_in_the_lock(lab_host):
 async def test_the_finding_records_how_many_succeeded(lab_host):
     """E-013: "confidence records timing variability and does not infer impact from response
     counts alone". The count decides the finding, and it used to vanish — `basis` fell back
-    to "count evaluator matched captured tool output", so two-of-eight and eight-of-eight
+    to "<type> evaluator matched captured tool output", so two-of-eight and eight-of-eight
     were the same finding. `basis` is what the integration report renders as the
-    description, so this is the sentence a client reads."""
+    description, so this is the sentence a client reads.
+
+    THE MECHANISM CHANGED AND THE REQUIREMENT DID NOT. The verdict is now a canary the
+    step's own script emits — which is what lets a run where nothing succeeded be told
+    apart from an enforced control, something a marker count cannot do — and the runner
+    promotes that line to `basis`. So the numbers are asserted here rather than one
+    evaluator's phrasing of them: how many succeeded, out of how many were fired, and what
+    the endpoint was supposed to allow."""
     result = await run_against("/redeem", lab_host)
     finding = next(f for f in result.findings if "Race Condition" in (f.vuln_type or ""))
     assert "8 times" in finding.basis, finding.basis
-    assert "across 8 parallel attempts" in finding.basis
-    assert "at most 1 should have succeeded" in finding.basis
+    assert "out of 8" in finding.basis, finding.basis
+    assert "at most once" in finding.basis, finding.basis
 
 
 @pytest.mark.asyncio
 async def test_the_finding_records_the_burst_duration(lab_host):
     """What says the requests actually overlapped. A burst taking as long as eight
-    sequential requests raced nothing, and no count can show that."""
+    sequential requests raced nothing, and no count can show that — and no verdict line
+    the script writes can either, because the script cannot time itself. The runner adds
+    it to every canary basis for that reason."""
     result = await run_against("/redeem", lab_host)
     finding = next(f for f in result.findings if "Race Condition" in (f.vuln_type or ""))
-    assert re.search(r"burst completed in \d+ms", finding.basis), finding.basis
+    assert re.search(r"completed in \d+ms", finding.basis), finding.basis
 
 
 @pytest.mark.asyncio
 async def test_the_generic_fallback_is_not_what_a_race_reports(lab_host):
-    """The specific thing that was there before, asserted absent."""
+    """The specific thing that was there before, asserted absent. Both spellings: the
+    count evaluator's was the original, and the regex evaluator's is the one this case
+    would fall back to now."""
     result = await run_against("/redeem", lab_host)
     finding = next(f for f in result.findings if "Race Condition" in (f.vuln_type or ""))
     assert "count evaluator matched captured tool output" not in finding.basis
+    assert "regex evaluator matched captured tool output" not in finding.basis
 
 
 @pytest.mark.asyncio

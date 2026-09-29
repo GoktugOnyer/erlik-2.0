@@ -1,6 +1,19 @@
 id: WSTG-INPV-19
 name: Server-Side Request Forgery
 category: Input Validation
+# All PAYLOAD: each of these is put in a parameter VALUE for THE TARGET to
+# fetch. erlik connects only to `url`, and an SSRF probe that may not name an
+# address other than the target is not a probe.
+#
+#   169.254.169.254            AWS/Azure instance metadata (RFC 3927 link-local)
+#   metadata.google.internal   the GCP equivalent
+#   localhost                  the TARGET's own loopback, the classic
+#                              internal-service reach
+payload_hosts:
+  - 169.254.169.254
+  - metadata.google.internal
+  - localhost
+
 attack_class: ssrf
 severity: high
 references:
@@ -17,6 +30,14 @@ references:
 # supplies callback URLs — `collaborator_host` does not authorize a callback
 # service. A callback is interaction evidence (`likely`), never automatic proof
 # of metadata access or internal-network impact.
+
+# The four in-band probes prove SSRF when the fetched document comes back in
+# the response. They cannot prove BLIND SSRF -- where the request is made and
+# the response discarded -- which is the common case behind a firewall. That
+# needs an out-of-band name and a poll afterwards; see
+# orchestrator/collaborator.py.
+needs_collaborator: true
+
 target_schema:
   required: [url, parameter]
   # `cookie` is what lets this reach an endpoint behind a login. Every probe
@@ -92,3 +113,22 @@ steps:
         emit_finding:
           vuln_type: SSRF (suspected — LLM judged)
           severity: medium
+
+  # BLIND SSRF. The only probe here that does not depend on the fetched
+  # document coming back: the payload asks the target to call a name minted for
+  # this run, and the evidence is that something did.
+  #
+  # `oob: true` means the step is NOT RUN when no collaborator is configured.
+  # Planting a payload nobody can read back would leave this case reporting a
+  # clean verdict for a check that never happened; instead the run records that
+  # out-of-band detection was unavailable.
+  #
+  # No evaluator: there is nothing in this response to match on, which is the
+  # whole point of a blind probe. The finding comes from the runner's poll.
+  - name: blind_callback
+    tool: curl
+    oob: true
+    command: >-
+      curl -s -b "{{cookie}}" -o /dev/null --connect-timeout 5 --max-time 15
+      "{{url}}?{{parameter}}=http://{{collaborator_host}}/erlik-oob"
+    evaluators: []

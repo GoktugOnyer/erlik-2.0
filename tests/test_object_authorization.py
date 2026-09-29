@@ -60,7 +60,7 @@ async def verdict(caller_output, *, subject, owner_output=None, anon_output=None
         prior.append(step("read_as_owner", owner_output))
     if anon_output is not None:
         prior.append(step("read_anonymously", anon_output))
-    finding, _, _, _ = await _run_evaluator(
+    finding, _, _, _, _ = await _run_evaluator(
         evaluator, step("read_as_caller", caller_output), CASE,
         {"url": "http://app.test/rest/basket/1", "subject_id": subject},
         None, None, prior)

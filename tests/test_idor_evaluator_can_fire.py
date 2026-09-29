@@ -40,7 +40,7 @@ def step(name, body):
 
 async def verdict(target):
     baseline = step("fetch_as_high_priv", f"<p>{MARKER}</p>")
-    finding, _, _, _ = await _run_evaluator(
+    finding, _, _, _, _ = await _run_evaluator(
         EVALUATOR, step("fetch_as_low_priv", f"<p>{MARKER}</p>"), CASE,
         {"url": "http://app.test/account", "private_object_marker": MARKER, **target},
         None, None, [baseline])
@@ -135,7 +135,7 @@ async def three_arm(low_body, high_body, anon_body, *, marker=MARKER,
                           emit_finding={"vuln_type": "Broken Access Control", "severity": "high"})
     prior = [step_with("fetch_as_high_priv", high_status, high_body),
              step_with("fetch_anonymously", anon_status, anon_body)]
-    finding, _, _, _ = await _run_evaluator(
+    finding, _, _, _, _ = await _run_evaluator(
         evaluator, step_with("fetch_as_low_priv", low_status, low_body), CASE,
         {"url": "http://app.test/account", "private_object_marker": marker,
          "low_priv_cookie": "PHPSESSID=aaaa", "high_priv_cookie": "PHPSESSID=bbbb"},
@@ -169,7 +169,7 @@ async def test_an_absent_anonymous_step_still_produces_no_finding():
     evaluator = Evaluator(type="idor", anonymous_step="fetch_anonymously",
                           emit_finding={"vuln_type": "Broken Access Control", "severity": "high"})
     baseline = step("fetch_as_high_priv", f"<p>{MARKER}</p>")
-    finding, _, _, _ = await _run_evaluator(
+    finding, _, _, _, _ = await _run_evaluator(
         evaluator, step("fetch_as_low_priv", f"<p>{MARKER}</p>"), CASE,
         {"url": "http://app.test/account", "private_object_marker": MARKER,
          "low_priv_cookie": "a", "high_priv_cookie": "b"}, None, None, [baseline])

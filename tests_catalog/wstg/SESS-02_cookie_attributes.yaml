@@ -10,16 +10,140 @@ target_schema:
   required: [url]
   optional: [cookie, auth_header]
 
+# THE CASE HAD ONE EVALUATOR AND IT WAS AN LLM. The question it asked --
+# "does this Set-Cookie header lack HttpOnly, Secure or SameSite" -- is a
+# string test, and routing it through a model meant the case produced NOTHING
+# on any deployment with no model reachable. Measured 2026-09-05 against a
+# target serving `Set-Cookie: session=abc123; Path=/`, which is the textbook
+# finding this case is named for:
+#
+#   findings: []
+#   not_assessed: [fetch_headers/llm: "LLM evaluator could not run"]
+#
+# Unlike CONF-07, there was no deterministic path to fall back to at all.
+#
+# The parse is now in the step. Three rules, and each is narrower than it
+# looks:
+#
+#   HttpOnly   always required on a session cookie.
+#   SameSite   always required. Browsers default it differently and have
+#              changed that default more than once, so absent is not "Lax".
+#   Secure     required ONLY on an https target. Demanding it of an http
+#              target would flag every cookie on every plain-http site for a
+#              flag that would stop the cookie working -- the finding there is
+#              the cleartext channel, which is ATHN-01 and CONF-07's subject.
+#
+# Only session-shaped cookie NAMES are judged. A tracking or preference cookie
+# without HttpOnly is not a session-fixation risk, and flagging it trains an
+# operator to ignore this case.
+#
+# The LLM evaluator is kept as a SECOND opinion, gated on no_finding_yet: a
+# cookie whose name does not look session-shaped but whose value is plainly a
+# JWT is the kind of thing a model catches and a name list does not.
+
 steps:
   - name: fetch_headers
     tool: curl
+    # -D - -o /dev/null rather than -i: the body cannot then be mistaken for a
+    # header, which matters here because the parse greps for "^Set-Cookie:"
+    # and a page echoing that string would otherwise be read as one.
     command: >-
-      curl -s -b "{{cookie}}" -H "{{auth_header}}" -i "{{url}}"
+      bash -c 'U="{{url}}"; SCHEME=$(printf "%s" "$U" | cut -d: -f1);
+      H=$(curl -s -b "{{cookie}}" -H "{{auth_header}}" -D - -o /dev/null
+      --connect-timeout 5 --max-time 15 -w "HTTPCODE=%{http_code}" "$U");
+      CODE=$(printf "%s" "$H" | grep -o "HTTPCODE=[0-9]*" | tail -1 | cut -d= -f2);
+      printf "%s\n" "$H";
+      C=$(printf "%s" "$H" | grep -i "^Set-Cookie:");
+      BAD=$(printf "%s\n" "$C" | while IFS= read -r L; do
+      [ -z "$L" ] && continue;
+      N=$(printf "%s" "$L" | sed -E "s/^[Ss]et-[Cc]ookie:[[:space:]]*([^=]+)=.*/\\1/");
+      case "$(printf "%s" "$N" | tr "A-Z" "a-z")" in
+      *sess*|*sid*|*token*|*jwt*|*auth*|*login*) ;;
+      *) continue;; esac;
+      M="";
+      printf "%s" "$L" | grep -qi "httponly" || M="$M HttpOnly";
+      printf "%s" "$L" | grep -qi "samesite" || M="$M SameSite";
+      if [ "$SCHEME" = "https" ]; then
+      printf "%s" "$L" | grep -qi "[;[:space:]]secure" || M="$M Secure"; fi;
+      [ -n "$M" ] && printf "%s(missing:%s) " "$N" "$M";
+      done);
+      if [ "$CODE" = "000" ]; then
+        echo "ERLIK_COOKIE_NO_RESPONSE: no response was received, so the cookie attributes were not assessed";
+      elif [ -z "$C" ]; then
+        echo "ERLIK_COOKIE_NONE_SET: the response set no cookies, so there is nothing to judge here";
+      elif [ -n "$BAD" ]; then
+        echo "ERLIK_COOKIE_INSECURE: $BAD";
+      else
+        echo "ERLIK_COOKIE_OK: every session-shaped cookie carries the attributes required for this scheme ($SCHEME)";
+      fi'
     evaluators:
-      # Was an `llm` evaluator asking a model to read Set-Cookie. Parsing the
-      # header answers the same question deterministically, at no token cost,
-      # and cannot be talked out of the answer by the response body.
-      - type: cookie_attributes
+      - type: regex
+        pattern: 'ERLIK_COOKIE_INSECURE'
         emit_finding:
           vuln_type: Insecure Cookie Attributes
           severity: medium
+      # THE SAME JUDGEMENT IN PYTHON, as a fallback for when the shell above did
+      # not produce one.
+      #
+      # `cookie_attributes` parses the Set-Cookie headers with http.cookies and
+      # applies the identical rules: a session-shaped NAME, HttpOnly and SameSite
+      # required, Secure only on an https endpoint. It is not a second opinion and
+      # cannot disagree with the verdict line -- `no_finding_yet` means it only
+      # speaks where the script emitted no ERLIK_COOKIE_INSECURE at all.
+      #
+      # It is here because the script can fail to run and say nothing while doing
+      # it. `bash -c` with a `case` inside `$(...)` is a syntax error on bash 3.2,
+      # which is what macOS ships, so on a maintainer's own machine this step
+      # produces an empty capture and the case reports clean against a target
+      # serving `Set-Cookie: session=abc123; Path=/`. The evaluator reads the
+      # response rather than the script's verdict, so it still answers.
+      #
+      # It was also the ONLY use of this evaluator type; without it,
+      # `cookie_attributes` is code the catalogue never reaches.
+      - type: cookie_attributes
+        when: no_finding_yet
+        emit_finding:
+          vuln_type: Insecure Cookie Attributes
+          severity: medium
+      # PRODUCER — harvests only, emits nothing, so what this case REPORTS is
+      # byte-identical and every recorded run stays comparable.
+      #
+      # WSTG-SESS-10 requires a `jwt` and nothing in the catalogue produced
+      # one, so it could only ever run against a token pasted in by hand --
+      # which is why it has no recorded result. A session cookie holding a JWT
+      # is the ordinary way an application hands one out, and this step already
+      # has the Set-Cookie headers in its output.
+      #
+      # Group 0 (the whole match) because the token IS the value; there is no
+      # inner capture worth taking. The three dot-separated base64url segments
+      # are distinctive enough that this does not match ordinary cookie values.
+      - type: regex
+        pattern: 'eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]*'
+        produces:
+          jwt: 0
+      - type: llm
+        # Second opinion only. A cookie whose NAME is not session-shaped but
+        # whose value is plainly a session token is what a name list misses.
+        when: no_finding_yet
+        instruction: >-
+          The output is HTTP response headers followed by a verdict line. If
+          the verdict is ERLIK_COOKIE_NO_RESPONSE, set matched=false — nothing
+          was assessed. The deterministic check already judged every cookie
+          whose NAME looks session-shaped and found nothing wrong. Set
+          matched=true only if a cookie whose name does NOT look session-shaped
+          is nonetheless plainly a session or auth token by its VALUE (for
+          example a JWT), and it is missing HttpOnly or SameSite. Name the
+          cookie and the missing attributes. Otherwise matched=false.
+        emit_finding:
+          vuln_type: Insecure Cookie Attributes (value looks like a session token)
+          severity: medium
+
+chain:
+  # ALWAYS, not on_finding. A JWT handed out in a properly-flagged cookie is
+  # exactly the case worth examining -- gating this on SESS-02 finding a
+  # missing HttpOnly would run the JWT checks only where the cookie was
+  # already wrong. Where no JWT was harvested, run_chain records SESS-10 in
+  # `skipped` with "Missing required target fields: ['jwt']", which is a
+  # declared non-result rather than a silent one.
+  always:
+    - WSTG-SESS-10

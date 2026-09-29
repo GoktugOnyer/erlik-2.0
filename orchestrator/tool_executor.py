@@ -164,21 +164,45 @@ def _sanitize_command(command: str, target_url: str = None) -> str:
     # it never touches wordlist paths. This is what makes the target reachable;
     # previously `juice-shop:3000` (which works) was rewritten to `localhost`
     # (which doesn't, from inside the container).
-    aliases = ["juice-shop", "localhost", "127.0.0.1", "0.0.0.0"]
-    if target_host and target_host.lower() not in aliases:
-        aliases.append(target_host)
-    for a in aliases:
-        if a == exec_host:
-            continue
-        command = re.sub(r'https?://' + re.escape(a) + r'(?::\d+)?', f'http://{exec_hp}', command)
-        command = re.sub(r'(?<![\w.])' + re.escape(a) + r':\d+\b', exec_hp, command)
-    # Bare host with no port (e.g. `nmap localhost`, `nmap juice-shop`) -> exec
-    # host. Runs after the port-anchored rewrites, so only standalone hosts
-    # remain. Guarded so it never matches a longer host/IP (localhost.foo,
-    # 127.0.0.10).
-    for bare in ("juice-shop", "localhost", "127.0.0.1"):
-        if bare != exec_host:
-            command = re.sub(r'(?<![\w.-])' + re.escape(bare) + r'(?![\w.:-])', exec_host, command)
+    if target_url:
+        aliases = ["juice-shop", "localhost", "127.0.0.1", "0.0.0.0"]
+        if target_host and target_host.lower() not in aliases:
+            aliases.append(target_host)
+        for a in aliases:
+            if a == exec_host:
+                continue
+            command = re.sub(r'https?://' + re.escape(a) + r'(?::\d+)?', f'http://{exec_hp}', command)
+            command = re.sub(r'(?<![\w.])' + re.escape(a) + r':\d+\b', exec_hp, command)
+        # Bare host with no port (e.g. `nmap localhost`, `nmap juice-shop`) ->
+        # exec host. Runs after the port-anchored rewrites, so only standalone
+        # hosts remain. Guarded so it never matches a longer host/IP
+        # (localhost.foo, 127.0.0.10).
+        for bare in ("juice-shop", "localhost", "127.0.0.1"):
+            if bare != exec_host:
+                command = re.sub(r'(?<![\w.-])' + re.escape(bare) + r'(?![\w.:-])', exec_host, command)
+    else:
+        # NO TARGET TO REWRITE *TO*. `target_host` and `target_port` above are
+        # placeholders ("localhost", 80), and the block above treats them as if
+        # they were the real target. Measured 2026-09-05:
+        #
+        #   http://127.0.0.1:9020/login  -> http://localhost:80/login
+        #   https://127.0.0.1:9022/login -> http://localhost:80/login
+        #
+        # The written port is discarded and https is DOWNGRADED to http. Every
+        # test case whose target schema does not use the key `url` reached the
+        # shell that way, because runner.py passes `target.get("url")` --
+        # WSTG-ATHN-01 (login_url), AUTHZ-04 (url_template), BUSL-04
+        # (request_template) and CONF-07 (host). ATHN-01 exists to decide
+        # whether credentials travel encrypted; rewriting its probe to cleartext
+        # port 80 does not weaken that test, it inverts it.
+        #
+        # Under docker a loopback host must still become the gateway or it names
+        # the container instead of the target. That is a HOST substitution only:
+        # the scheme and any written port are facts about the target and survive.
+        if not ERLIK_NATIVE:
+            for a in ("localhost", "127.0.0.1", "0.0.0.0"):
+                command = re.sub(r'(?<![\w.-])' + re.escape(a) + r'(?![\w.-])',
+                                 DOCKER_HOST_GATEWAY, command)
 
     tool_name = _extract_tool_name(command)
     # Tools that need an explicit http:// scheme — fix a bare exec host:port.
@@ -846,12 +870,35 @@ def _scope_violation(command: str, target_url: str | None,
     return None
 
 
+# One leading `NAME=VALUE` assignment, the ordinary shell way to set a variable
+# for a single command. The value may be quoted and contain spaces.
+_ENV_PREFIX = r'[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|\'[^\']*\'|\S*)\s+'
+
+
 def _extract_tool_name(command: str) -> str | None:
-    """Extract the base tool name from a shell command."""
-    # Strip leading env vars, sudo, timeout wrappers
-    cmd = re.sub(r'^(sudo\s+|timeout\s+\d+\s+|env\s+\S+=\S+\s+)*', '', command.strip())
+    """Extract the base tool name from a shell command.
+
+    Returns None when the segment runs no program at all -- a bare assignment
+    such as `S="value"` is not a program and must not be reported as one.
+
+    The env-prefix case is why WSTG-CONF-04 could not run: it pipes into
+    `LC_ALL=C tr`, the old pattern stripped only the `env FOO=bar` COMMAND form
+    and not the bare prefix, so the segment's program name came back as
+    'LC_ALL=C' and the toolset guard refused all four of its steps. The failure
+    was in the safe direction -- a NAME=VALUE token can never equal an allowed
+    name, so such a command is refused rather than admitted -- but the case was
+    dead, and it is `tr` that should have been checked.
+    """
+    cmd = re.sub(r'^(sudo\s+|timeout\s+\d+\s+|env\s+\S+=\S+\s+|' + _ENV_PREFIX + r')*',
+                 '', command.strip())
     parts = cmd.split()
     if not parts:
+        return None
+    # A segment that is ONLY assignments -- `S="value"` with no command after
+    # it -- runs no program. The prefix pattern above needs trailing space to
+    # match, so such a segment survives it intact and would otherwise be
+    # reported as a program named `S="value"`.
+    if re.match(r'^[A-Za-z_][A-Za-z0-9_]*=', parts[0]):
         return None
     tool = parts[0].split("/")[-1]  # handle /usr/bin/nmap -> nmap
     return tool
@@ -1033,7 +1080,12 @@ async def execute_tool(command: str, enabled_tools: list[str], no_timeout: bool 
 
     # Check if tool is enabled
     # Map some tool names (e.g. ncat -> netcat, nc -> netcat)
-    tool_aliases = {"nc": "netcat", "ncat": "netcat", "zap-cli": "zap-cli", "jwt_tool.py": "jwt_tool"}
+    # theharvester is the apt package name and the spelling a model is most likely
+    # to emit, but the registered tool (models._DEFAULT_TOOLS, TOOL_TIMEOUTS) is
+    # theHarvester. Without this the allowlist refuses the lowercase form, which
+    # reads to the operator as the tool being disabled rather than misspelled.
+    tool_aliases = {"nc": "netcat", "ncat": "netcat", "zap-cli": "zap-cli",
+                    "jwt_tool.py": "jwt_tool", "theharvester": "theHarvester"}
     check_name = tool_aliases.get(tool_name, tool_name)
     if check_name not in enabled_tools and tool_name not in enabled_tools:
         return {"success": False, "output": "", "tool": tool_name, "duration_ms": 0,

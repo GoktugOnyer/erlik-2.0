@@ -109,15 +109,21 @@ async def test_a_case_eligible_for_nothing_is_named_not_hidden(store):
     nothing, and the zero reads as clean."""
     from orchestrator.integrations.inventory import preview
 
-    # WSTG-SESS-02 reads cookies and needs no parameter; WSTG-INPV-05.2 needs one and
-    # there is no parameter anywhere in this inventory.
+    # WSTG-INFO-03 reads webserver metafiles and needs no parameter; WSTG-INPV-05.2
+    # needs one and there is no parameter anywhere in this inventory.
+    #
+    # It was WSTG-SESS-02 in this role until SESS-02 stopped being lane-runnable --
+    # one of its steps is a `bash -c '...'` shell program now, which curl_request
+    # refuses. test_curl_dialect.TestWhatTheLaneCannotRunIsDeclared pins that and
+    # the two other cases it took with it; what INFO-03 stands for here is the same
+    # thing, a selected case that needs nothing discovery cannot supply.
     await endpoint(store, "http://app.test/p0", [])
     plan = await preview("s", config(max_urls=500,
-                                     test_cases=["WSTG-INPV-05.2", "WSTG-SESS-02"]))
+                                     test_cases=["WSTG-INPV-05.2", "WSTG-INFO-03"]))
     by_case = {row["test_case_id"]: row for row in plan["cases"]}
     assert by_case["WSTG-INPV-05.2"]["eligible_pairs"] == 0
     assert "parameter" in by_case["WSTG-INPV-05.2"]["note"].lower()
-    assert by_case["WSTG-SESS-02"]["eligible_pairs"] == 1
+    assert by_case["WSTG-INFO-03"]["eligible_pairs"] == 1
 
 
 async def test_the_preview_is_per_identity(store):

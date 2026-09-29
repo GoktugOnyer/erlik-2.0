@@ -53,15 +53,31 @@ steps:
   # parses brackets sees B and C as two identically unknown parameter names, so
   # they move together and the marker stays off. An endpoint whose response size
   # varies run to run fails the stability control instead of being reported.
+  # WRAPPED IN `bash -c` BECAUSE THE STEP HAD NEVER RUN. It wrote shell
+  # directly -- `if`, `[`, subshells -- and `_command_segments` splits on those
+  # and reads them as program names, so the admission guard refused it before
+  # any request went out:
+  #
+  #     TOOLSET: command segment runs 'if', which is not in this session's toolset
+  #
+  # Every other shell-writing case in the catalogue wraps its logic this way,
+  # which the guard admits via the step's declared `tool:`. Measured 2026-09-05.
+  #
+  # The `$ne`/`$eq` operators are the payload and must reach the target
+  # literally, so they are written `\$ne` inside the double quotes -- the outer
+  # single quotes keep the body intact for the inner shell, which then sees a
+  # plain `$`.
   - name: operator_differential
     tool: curl
     command: >-
-      A=$(curl -s -g -m 5 -o /dev/null -w '%{http_code}:%{size_download}' '{{url}}?{{parameter}}=erlikprobe9zq7');
-      A2=$(curl -s -g -m 5 -o /dev/null -w '%{http_code}:%{size_download}' '{{url}}?{{parameter}}=erlikprobe9zq7');
-      B=$(curl -s -g -m 5 -o /dev/null -w '%{http_code}:%{size_download}' '{{url}}?{{parameter}}[$ne]=erlikprobe9zq7');
-      C=$(curl -s -g -m 5 -o /dev/null -w '%{http_code}:%{size_download}' '{{url}}?{{parameter}}[$eq]=erlikprobe9zq7');
+      bash -c 'W="%{http_code}:%{size_download}";
+      A=$(curl -s -g -m 5 -o /dev/null -w "$W" "{{url}}?{{parameter}}=erlikprobe9zq7");
+      A2=$(curl -s -g -m 5 -o /dev/null -w "$W" "{{url}}?{{parameter}}=erlikprobe9zq7");
+      B=$(curl -s -g -m 5 -o /dev/null -w "$W" "{{url}}?{{parameter}}[\$ne]=erlikprobe9zq7");
+      C=$(curl -s -g -m 5 -o /dev/null -w "$W" "{{url}}?{{parameter}}[\$eq]=erlikprobe9zq7");
       echo "literal=$A literal_repeat=$A2 ne_operator=$B eq_operator=$C";
-      if [ "$A" = "$A2" ] && [ "$B" != "$A" ] && [ "$C" = "$A" ]; then echo ERLIK_NOSQL_OPERATOR_PARSED; fi
+      if [ "$A" = "$A2" ] && [ "$B" != "$A" ] && [ "$C" = "$A" ];
+      then echo ERLIK_NOSQL_OPERATOR_PARSED; fi'
     evaluators:
       - type: regex
         pattern: 'ERLIK_NOSQL_OPERATOR_PARSED'

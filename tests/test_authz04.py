@@ -151,7 +151,7 @@ class TestTheThreeWayDifferential:
         last = case["steps"][-1]
         evaluator = Evaluator(**last["evaluators"][0])
         prior = [outputs[name] for name in outputs if name != last["name"]]
-        finding, _, _, _ = asyncio.run(_run_evaluator(
+        finding, _, _, _, _ = asyncio.run(_run_evaluator(
             evaluator, outputs[last["name"]],
             _Case(id=case["id"], name=case["name"], category="Authorization",
                   steps=[_Step(name=last["name"], tool="curl", command="x")]),

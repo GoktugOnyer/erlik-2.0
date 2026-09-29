@@ -3,6 +3,7 @@ import asyncio
 import time
 import json
 import re
+import hmac
 import os
 from datetime import datetime
 from contextlib import asynccontextmanager
@@ -15,7 +16,7 @@ import httpx
 
 from orchestrator.database import init_db, get_db
 from orchestrator.models import (
-    SessionCreate, SessionResponse, ReportResponse, SessionMetrics,
+    SessionCreate, SessionResponse, ReportResponse,
     ChainCreate, ChainResponse, ChainSessionSummary,
     BenchmarkCreate, BenchmarkSessionResult, BenchmarkResponse,
     ReportFinding, PentestReport,
@@ -89,6 +90,190 @@ from orchestrator.integrations.api import router as integration_router
 app.add_middleware(AccessMiddleware)
 app.include_router(integration_router)
 
+def _is_loopback(host: str | None) -> bool:
+    """True only for an address that cannot be reached from the network.
+
+    A host that is not an IP at all -- Starlette's in-process TestClient
+    reports "testclient" -- is NOT treated as remote. This predicate is only
+    ever used to DENY, so an unparseable value must not manufacture a denial
+    on a deployment that is in fact local.
+    """
+    if not host:
+        return False
+    import ipaddress
+
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return host in ("localhost", "testclient")
+
+
+def _bind_is_exposed() -> bool:
+    """Whether the operator asked to listen beyond loopback.
+
+    ERLIK_HOST is what run.sh binds and what an operator sets deliberately;
+    several scripts under scripts/ bind 0.0.0.0. Unset means the run.sh default
+    of 127.0.0.1, so absence is not exposure.
+    """
+    host = os.environ.get("ERLIK_HOST", "").strip()
+    if not host:
+        return False
+    if host in ("0.0.0.0", "::", "*"):
+        return True
+    return not _is_loopback(host)
+
+
+def _request_is_remote(request: Request) -> bool:
+    """Whether THIS request plausibly came from off-box.
+
+    Complements _bind_is_exposed: someone running `uvicorn --host 0.0.0.0`
+    directly never sets ERLIK_HOST, so the bind check alone would miss it.
+
+    A forwarded header means a proxy sits in front, which makes the peer
+    address loopback and therefore useless as evidence of locality -- so its
+    presence counts as remote on its own.
+    """
+    if request.headers.get("x-forwarded-for") or request.headers.get("x-real-ip"):
+        return True
+    client = request.client.host if request.client else None
+    if client is None:
+        return False        # unknown: do not manufacture a denial
+    return not _is_loopback(client)
+
+
+_TRUTHY = frozenset({"1", "true", "yes", "on"})
+
+# Paths that stay reachable without the token even when one is configured.
+# Only liveness: it reports the provider name and whether Ollama answers, which
+# a load balancer needs and which discloses no engagement data.
+# From AccessMiddleware, not a second copy -- see the note on EXEMPT_PATHS.
+from orchestrator.integrations.access import EXEMPT_PATHS as _EXEMPT_PATHS
+_UNAUTHENTICATED_PATHS = frozenset(_EXEMPT_PATHS)
+
+
+@app.middleware("http")
+async def _api_token_guard(request: Request, call_next):
+    """Shared-secret guard for the API.
+
+    Off by default. When ERLIK_API_TOKEN is set, EVERY request to /api/* must
+    present the token via `X-API-Token: <t>` or `Authorization: Bearer <t>`.
+
+    Reads were not covered until now, and that was the larger hole. The guard
+    ran only on POST/PUT/PATCH/DELETE, so a deployment that set a token still
+    served 52 GET routes to anyone who could reach the port -- /api/engagements
+    (customer records), /api/v2/targets/credentials, /api/findings, every
+    report format, and /api/thesis/export, which dumps nine tables. Setting a
+    token bought protection against writes while every secret remained
+    readable.
+
+    With NO token configured the API now fails closed off-loopback. Previously
+    an unconfigured install served every route to anyone who could reach the
+    port, and the only thing standing between a hosted Erlik and its
+    engagement records was that the operator remembered to set a variable
+    nothing prompted them for. Local work is unaffected: a request from
+    127.0.0.1 to a loopback bind is still served with no token at all, which
+    is the entire development and thesis workflow.
+
+    Two independent signals decide "off-loopback", because either alone has a
+    blind spot: ERLIK_HOST catches `run.sh` and the scripts that bind
+    0.0.0.0 before any request arrives, and the peer address catches someone
+    running uvicorn --host 0.0.0.0 by hand, which sets nothing.
+
+    ERLIK_ALLOW_UNAUTHENTICATED=1 opts back out, for a deployment behind an
+    authenticating proxy. It is deliberately not the default and it is
+    deliberately loud in SECURITY.md.
+
+    The comparison is constant-time. `provided != token` leaks the length of
+    the matching prefix through timing, which is a real oracle against a shared
+    secret an attacker can probe at will.
+
+    IT ALSO RESOLVES WHO IS ASKING. `ERLIK_API_TOKEN` authenticates a request
+    and identifies nobody, so nothing written to the database could be
+    attributed to a person -- `engagement_revisions` recorded the field, the
+    old value, the new value and the timestamp, and no actor. An operator with
+    their own token (see orchestrator/operators.py) is resolved here and
+    stamped on what follows.
+
+    `request.state.operator_id` is always set, and never to None. A request
+    that authenticated with the shared secret carries `opr_shared_token`, and
+    one on the unauthenticated loopback path carries `opr_unauthenticated`;
+    both are named for what they are, so no caller has to decide what a NULL
+    means and no report can print one as though it were a person.
+    """
+    from fastapi.responses import JSONResponse
+    from orchestrator import operators as _ops
+    token = os.environ.get("ERLIK_API_TOKEN", "").strip()
+    if not request.url.path.startswith("/api/") \
+            or request.url.path in _UNAUTHENTICATED_PATHS:
+        return await call_next(request)
+
+    # Identity for this request, resolved once and read by everything that
+    # writes a row. Never None: the two synthetic ids say plainly that the
+    # request was authenticated without anyone being identified, so a caller
+    # never has to invent a name for a NULL.
+    request.state.operator_id = _ops.UNAUTHENTICATED_OPERATOR
+    request.state.operator_name = _ops.UNAUTHENTICATED_LABEL
+    request.state.operator_role = _ops.ROLE_ADMIN
+
+    # ONE DEFINITION OF "WHAT CREDENTIAL DID THIS REQUEST CARRY", shared with
+    # AccessMiddleware, which is the boundary in front of this one.
+    #
+    # This used to read the two headers itself and stop there, and the omission was
+    # the `erlik_token` cookie that /api/auth sets. A browser cannot put a header on
+    # a WebSocket handshake or an <img> report preview, which is the whole reason
+    # that cookie exists -- so the dashboard authenticated, passed the outer
+    # boundary, and was refused here on every /api/ route it then called. Two guards
+    # that each parse the credential their own way disagree about who is
+    # authenticated, and the disagreement is a 401 with no cause on its face.
+    from orchestrator.integrations.access import presented as _presented
+    if token:
+        provided = _presented(request.headers, request.cookies)
+
+        # An OPERATOR token is tried first, and only its own shape reaches the
+        # database -- so the shared secret is never used as a lookup key and an
+        # unknown token costs one indexed query, not a scan.
+        op_id = op_name = op_role = None
+        if _ops.looks_like_token(provided):
+            try:
+                db = await get_db()
+                try:
+                    op_id, op_name, op_role = await _ops.resolve(db, provided)
+                    if op_id:
+                        await _ops.touch(db, op_id)
+                finally:
+                    await db.close()
+            except Exception:
+                op_id = op_name = op_role = None   # a broken store must not authorise
+
+        if op_id:
+            request.state.operator_id = op_id
+            request.state.operator_name = op_name
+            request.state.operator_role = op_role or _ops.ROLE_OPERATOR
+        elif hmac.compare_digest(provided, token):
+            # The shared secret still works, and is still honest about what it
+            # is. A run stamped with this is authenticated and unattributed.
+            request.state.operator_id = _ops.SHARED_TOKEN_OPERATOR
+            request.state.operator_name = _ops.SHARED_TOKEN_LABEL
+            request.state.operator_role = _ops.ROLE_ADMIN
+        else:
+            return JSONResponse(
+                {"detail": "missing or invalid API token"}, status_code=401,
+                headers={"X-Erlik-Auth": "token-required"})
+    elif os.environ.get("ERLIK_ALLOW_UNAUTHENTICATED", "").strip().lower() not in _TRUTHY:
+        if _bind_is_exposed() or _request_is_remote(request):
+            # The two 401s are NOT interchangeable and the header says which is
+            # which. The dashboard's handler prompts for a token on 401; here
+            # there is no token to enter, so prompting would loop forever
+            # asking for a secret that does not exist.
+            return JSONResponse(
+                {"detail": "this instance is reachable off-loopback and has no "
+                           "ERLIK_API_TOKEN configured; set one (or set "
+                           "ERLIK_ALLOW_UNAUTHENTICATED=1 if authentication is "
+                           "enforced in front of it)"},
+                status_code=401,
+                headers={"X-Erlik-Auth": "unconfigured"},
+            )
+    return await call_next(request)
 
 # The shared-secret guard used to live here as an @app.middleware("http") that
 # only covered POST/PUT/PATCH/DELETE. It is now AccessMiddleware (added above),
@@ -122,6 +307,39 @@ async def authenticate_dashboard(request: Request, body: dict):
 @app.get("/integrations", response_class=HTMLResponse)
 async def integrations_dashboard(request: Request):
     return templates.TemplateResponse(request, "integrations.html")
+
+
+def _actor(request: Request) -> str:
+    """The operator id `_api_token_guard` resolved for this request.
+
+    Falls back to the unauthenticated id rather than None so a write site never
+    has to decide what a missing actor means -- and so a row can never be
+    stamped with a value that later reads as a person. The fallback is reached
+    only on paths the guard does not run for.
+    """
+    from orchestrator import operators as _ops
+    return getattr(request.state, "operator_id", None) or _ops.UNAUTHENTICATED_OPERATOR
+
+
+def _require_admin(request: Request) -> str:
+    """The operator id, if this request may mint, revoke or promote.
+
+    Read off the role `_api_token_guard` already resolved rather than querying
+    again -- one lookup per request, and no window in which the row changes
+    between the check and the action it guards.
+
+    Raises 403, not 404: hiding the existence of an endpoint the caller is
+    simply not allowed to use tells them nothing useful and makes the refusal
+    read like a bug.
+    """
+    from orchestrator import operators as _ops
+    role = getattr(request.state, "operator_role", None)
+    if role != _ops.ROLE_ADMIN:
+        raise HTTPException(
+            status_code=403,
+            detail="this action requires an admin operator; the token you "
+                   "presented is a regular operator")
+    return _actor(request)
 
 
 @app.exception_handler(RequestValidationError)
@@ -1154,6 +1372,15 @@ To run a tool:
 To report a vulnerability:
 {"action": "finding", "vuln_type": "SQL Injection", "severity": "high", "url": "{target_url}/endpoint?q=test", "parameter": "q", "evidence": "Error message revealed SQL syntax"}
 
+To run a DETERMINISTIC TEST CASE instead of improvising a command:
+{"action": "run_case", "case_id": "WSTG-INPV-05", "target": {"url": "{target_url}", "parameter": "q"}, "reason": "Found a search parameter"}
+
+Each case is a reviewed, fixed sequence of checks with a definite verdict. When
+you have found something a case covers — a parameter, a login form, an upload,
+a cookie, an API object id — running the case is more reliable than probing it
+yourself, and its result is recorded automatically. Cases and what they need:
+{case_catalogue}
+
 To finish (ONLY after covering at least 3 phases):
 {"action": "done", "summary": "Completed testing. Found 3 vulnerabilities."}
 
@@ -1162,8 +1389,8 @@ SEVERITY LEVELS: critical, high, medium, low, info
 TOOL USAGE EXAMPLES (use the target URL {target_url} — NEVER use any other hostname):
 - nmap -sV {target_host} -p {target_port}
 - whatweb {target_url}
-- gobuster dir -u {target_url} -w /usr/share/dirb/wordlists/common.txt {_discovery_filter(target_url)}
-- ffuf -u {target_url}/FUZZ -w /usr/share/dirb/wordlists/common.txt {_discovery_filter(target_url, 'ffuf')}
+- gobuster dir -u {target_url} -w /usr/share/dirb/wordlists/common.txt {discovery_filter}
+- ffuf -u {target_url}/FUZZ -w /usr/share/dirb/wordlists/common.txt {discovery_filter_ffuf}
 - sqlmap -u "{target_url}/endpoint?param=test" --batch --level=3
 - curl -s {target_url}/api/
 - curl -sI {target_url}  (check response headers)
@@ -2098,6 +2325,59 @@ def _discovery_filter(target_url: str, tool: str = "gobuster") -> str:
     """
     from orchestrator import soft404
     return soft404.filter_flag(soft404.recall(target_url), tool)
+
+
+def _case_catalogue_for_prompt() -> str:
+    """The deterministic cases the agent may name, and what each one needs.
+
+    Generated from the catalogue rather than written out, because a hand-listed
+    set is exactly the kind of thing that goes stale the first time a case is
+    added -- and a model told about a case that does not exist wastes a turn
+    discovering that. The required fields are included because without them the
+    model's first attempt at a case is a guess.
+    """
+    try:
+        catalog = load_catalog()
+    except Exception:
+        return "  (catalogue unavailable)"
+    lines = []
+    for tc_id in sorted(catalog):
+        tc = catalog[tc_id]
+        req = ", ".join(tc.target_schema.required) or "url"
+        lines.append(f"  {tc_id} — {tc.name} (needs: {req})")
+    return "\n".join(lines)
+
+
+def render_system_prompt(target_url: str) -> str:
+    """TOOL_USE_SYSTEM_PROMPT with every placeholder resolved for this target.
+
+    Extracted from the agent loop so the substitution can be tested. It was
+    inline, and one class of bug survived there unseen for months: the gobuster
+    and ffuf examples read `{_discovery_filter(target_url)}` inside a plain
+    (non-f) string. `.replace("{target_url}", ...)` does not touch that -- the
+    literal `{target_url}` is not a substring of `(target_url)` -- so the model
+    was shown a raw Python expression where the size-filter flag belongs, in
+    the two primary DISCOVERY-phase tools. A test that re-implemented this
+    chain would have passed anyway; only a test of the real function catches it.
+
+    Introduced 2026-08-16 (bd7b08b) and so absent from every April 2026
+    campaign, whose prompts carried the hardcoded flag this replaced.
+    """
+    from urllib.parse import urlparse
+
+    pu = urlparse(target_url)
+    host = pu.hostname or "target"
+    port = str(pu.port) if pu.port else ("443" if pu.scheme == "https" else "80")
+    return (TOOL_USE_SYSTEM_PROMPT
+            .replace("{target_url}", target_url)
+            .replace("{target_host}", host)
+            .replace("{target_port}", port)
+            .replace("{discovery_filter}", _discovery_filter(target_url))
+            .replace("{discovery_filter_ffuf}", _discovery_filter(target_url, "ffuf"))
+            .replace("{case_catalogue}", _case_catalogue_for_prompt())
+            # Residual literals from the era when the prompt was Juice-Shop-specific.
+            .replace("http://juice-shop:3000", target_url)
+            .replace("juice-shop", host))
 
 
 def current_scope_extra() -> list[str]:
@@ -3691,12 +3971,22 @@ async def _chain_auto_progress(session_id: str):
                 (chain_id,)
             )
             await db.commit()
-            # Broadcast that chain is paused, waiting for manual continue
+            # Broadcast that chain is paused, waiting for manual continue.
+            # The message names the endpoint rather than a CONTINUE button: the
+            # dashboard has never had one, and never calls /continue. It also
+            # only ever creates chains with auto_progress=true, so this state is
+            # reachable only for a chain created through the API and then
+            # watched from the dashboard -- exactly the operator who cannot
+            # guess how to resume it.
             await manager.broadcast(session_id, {
                 "type": "chain_ready",
                 "chain_id": chain_id,
                 "completed_phase": current_phase,
-                "message": "Chain paused. Click CONTINUE to proceed to next phase.",
+                "message": (
+                    f"Chain paused after {current_phase} (auto_progress is off). "
+                    f"Resume with: POST /api/chains/{chain_id}/continue "
+                    f"— the dashboard has no CONTINUE control."
+                ),
             })
             return
 
@@ -3829,6 +4119,76 @@ async def engagement_rows_for_session(session_id: str):
         await db.close()
 
 
+def _runnable_case_ids() -> list[str]:
+    """Case ids the agent may name in a `run_case` action."""
+    try:
+        return list(load_catalog().keys())
+    except Exception:
+        return []
+
+
+def _agent_scope_hosts(target_url: str) -> list[str]:
+    """Allow-list for a case invoked from inside an agent run.
+
+    Just the session's own target host. That is deliberately NARROWER than the
+    agent's tool scope: a case the model chose must be aimed at the thing the
+    session is aimed at, and cannot become a way to reach a second host that
+    the engagement happens to allow. Where a case legitimately needs to NAME
+    another host -- an attacker Origin, a metadata address -- that is its
+    declared `payload_hosts`, which the scope guard applies on top of this.
+    """
+    from urllib.parse import urlparse
+    u = target_url if "://" in (target_url or "") else f"http://{target_url}"
+    host = (urlparse(u).hostname or "").lower()
+    return [host] if host else []
+
+
+def _format_case_result_for_agent(case_id: str, tc, result) -> str:
+    """Render a case result as evidence for the model.
+
+    States the verdict and stops. It does NOT tell the agent what to do next:
+    a measured 12-run experiment found injected guidance costs recall
+    dose-dependently, which is why handoff.format_for_agent is terse for the
+    same reason. Facts, not instruction.
+
+    A case that DECLINED to assess is reported as such and never as clean --
+    the same rule the dashboard follows. "No finding" and "could not check"
+    are different answers and the model must not conflate them.
+    """
+    lines = [f"{case_id} ({tc.name}) ran."]
+    findings = getattr(result, "findings", []) or []
+    not_assessed = getattr(result, "not_assessed", []) or []
+    refused = [st for st in (getattr(result, "steps", []) or [])
+               if not getattr(st, "success", True)]
+
+    if findings:
+        lines.append(f"CONFIRMED {len(findings)} finding(s):")
+        for f in findings[:8]:
+            lines.append(f"  [{f.severity}] {f.vuln_type}"
+                         + (f" (parameter: {f.parameter})" if f.parameter else ""))
+    else:
+        lines.append("No finding.")
+
+    # What the case DISCOVERED. `produced` only ever reached chained children
+    # via _retarget, so a harvest was invisible to the agent that asked for the
+    # case -- it would go on to rediscover the same parameters with its own
+    # turns. These are already injection-gated and same-host restricted by
+    # _harvest, so they are safe to name.
+    produced = getattr(result, "produced", None) or {}
+    for field, values in produced.items():
+        shown = ", ".join(str(v) for v in values[:8])
+        lines.append(f"  DISCOVERED {field}: {shown}")
+    for na in not_assessed[:5]:
+        lines.append(f"  NOT ASSESSED — {na.step}: {na.reason}")
+    for st in refused[:5]:
+        lines.append(f"  STEP FAILED — {st.step}: {st.error}")
+
+    if not findings and (not_assessed or refused):
+        lines.append("Part of this case did not run, so its silence is not a "
+                     "clean result.")
+    return "\n".join(lines)
+
+
 async def agent_loop(session_id: str, target_url: str, scope_mode: str,
                      system_prompt: str, enabled_tools: list[str], model: str,
                      session_type: str = "cold", parent_session_id: str = None,
@@ -3840,6 +4200,23 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
     # would set up, inject context, then die on an opaque 404 at the first
     # generation. Never substitutes a near neighbour — see ensure_model_available.
     runcfg = await _load_run_config(session_id)
+    # Read once: a `run_case` action persists its run like any other, so it has
+    # to carry the same customer and the same operator as the session it came
+    # from -- otherwise a deterministic run invoked by the agent would be the
+    # one row in v2_runs that nobody can attribute.
+    session_engagement_id = session_operator_id = None
+    try:
+        _sdb = await get_db()
+        try:
+            _srow = await (await _sdb.execute(
+                "SELECT engagement_id, operator_id FROM sessions WHERE id = ?",
+                (session_id,))).fetchone()
+            if _srow:
+                session_engagement_id, session_operator_id = _srow[0], _srow[1]
+        finally:
+            await _sdb.close()
+    except Exception as e:
+        print(f"[agent {session_id[:8]}] could not read session owner: {e}", flush=True)
     _eng_rows = await engagement_rows_for_session(session_id)
     if _eng_rows is not None:
         print(f"[scope {session_id[:8]}] engagement scope active: "
@@ -3852,12 +4229,14 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
         await manager.broadcast(session_id, {
             "type": "error", "phase": "recon", "message": str(_mu),
         })
-        db = await get_db()
-        try:
-            await db.execute("UPDATE sessions SET status = 'failed' WHERE id = ?", (session_id,))
-            await db.commit()
-        finally:
-            await db.close()
+        # Finish through the same path as every other failure. This branch used
+        # to write status='failed' inline and return: 'failed' is a value no
+        # other session path produces and nothing reads, and returning early
+        # skipped the status broadcast entirely. Between that and a "type":
+        # "error" frame the dashboard had no handler for, the single most
+        # likely misconfiguration -- selecting a model that is not pulled --
+        # left the UI sitting at "running" with an empty log indefinitely.
+        await _finish_session(session_id, "error")
         return
 
     db = None
@@ -3988,17 +4367,8 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
         # ===== Phase 2: SCAN — build initial prompt & start agent loop =====
         await manager.broadcast(session_id, {"type": "phase", "active": "scan"})
 
-        # Build message history. Extract host+port for template substitution.
-        from urllib.parse import urlparse
-        _pu = urlparse(target_url)
-        _target_host = _pu.hostname or "target"
-        _target_port = str(_pu.port) if _pu.port else ("443" if _pu.scheme == "https" else "80")
-        combined_system = (TOOL_USE_SYSTEM_PROMPT
-                           .replace("{target_url}", target_url)
-                           .replace("{target_host}", _target_host)
-                           .replace("{target_port}", _target_port)
-                           .replace("http://juice-shop:3000", target_url)
-                           .replace("juice-shop", _target_host))
+        # Build message history.
+        combined_system = render_system_prompt(target_url)
         guided_mode = system_prompt and system_prompt.startswith("MISSION:")
         if system_prompt:
             combined_system += f"\n\nADDITIONAL INSTRUCTIONS:\n{system_prompt}"
@@ -5042,6 +5412,125 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
                     f"Continue testing with the next tool, or use 'done' if all tests are complete."
                 })
 
+            # --- ACTION: run_case ---
+            #
+            # THE HANDOFF WAS ONE-DIRECTIONAL. `orchestrator/handoff.py` gives
+            # the agent the deterministic lane's results at session start, so
+            # it does not rediscover ports and endpoints a scan already found.
+            # Nothing went the other way: `run_test_case` was reachable only
+            # from the v2 HTTP endpoints, so an agent that FOUND a parameter,
+            # a login form or an upload field had to keep probing it with LLM
+            # turns -- when a reviewed, mutation-tested case for exactly that
+            # already existed and costs a handful of curl requests.
+            #
+            # This lets the model spend a turn CHOOSING a probe instead of
+            # improvising one. The case still runs through `run_test_case`, so
+            # it goes through the same scope guard, the same admission control
+            # and the same evaluators as the deterministic lane -- there is no
+            # second path to the network here.
+            #
+            # THE RESULT IS NOT COPIED INTO `findings`, deliberately, and for
+            # the reason handoff.py already records: `findings` is what recall
+            # and precision are computed from, so counting a deterministic
+            # result there would inflate every agent-lane metric and make new
+            # runs incomparable with every recorded one. The run is persisted
+            # to v2_runs/v2_findings exactly as the deterministic lane does,
+            # and the agent is TOLD the verdict so it can act on it. Evidence,
+            # not credit.
+            elif action_type == "run_case":
+                case_id = (action.get("case_id") or "").strip()
+                case_target = action.get("target") or {}
+                reason = action.get("reason", "")
+
+                from orchestrator.testcase import find_by_id as _find_case
+                tc = _find_case(case_id)
+                if not tc:
+                    _ids = ", ".join(sorted(_runnable_case_ids())[:40])
+                    messages.append({"role": "assistant", "content": response})
+                    messages.append({"role": "user", "content":
+                        f"No test case '{case_id}'. Available: {_ids}. "
+                        f"Reply with a JSON action."})
+                    continue
+
+                # The session's own scope, not the case's. A case invoked from
+                # inside an agent run is bound by the engagement the run
+                # belongs to, exactly as a `run_tool` command is.
+                case_target = dict(case_target)
+                case_target.setdefault("url", target_url)
+                case_target["scope"] = {"allow_hosts": _agent_scope_hosts(target_url)}
+
+                await manager.broadcast(session_id, {
+                    "type": "log", "phase": phase,
+                    "message": f">> CASE {case_id}: {reason or tc.name}",
+                })
+
+                _t0 = time.time()
+                try:
+                    _cdb = await get_db()
+                    try:
+                        case_result = await run_test_case(
+                            tc, case_target, provider=None, model=None, db=_cdb)
+                    finally:
+                        await _cdb.close()
+                except ValueError as e:
+                    # Missing required target fields. Tell the model exactly
+                    # what the case needs rather than failing the turn.
+                    messages.append({"role": "assistant", "content": response})
+                    messages.append({"role": "user", "content":
+                        f"{case_id} could not run: {e}. Required: "
+                        f"{tc.target_schema.required}. Optional: "
+                        f"{tc.target_schema.optional}. Reply with a JSON action."})
+                    continue
+                except Exception as e:
+                    messages.append({"role": "assistant", "content": response})
+                    messages.append({"role": "user", "content":
+                        f"{case_id} failed to run: {e}. Try a different "
+                        f"approach. Reply with a JSON action."})
+                    continue
+                _case_ms = int((time.time() - _t0) * 1000)
+                # NO step_number increment here. It advances once per TURN at
+                # the top of the loop, for every action type -- `run_tool` and
+                # `finding` both rely on that and do not touch it. Adding one
+                # here double-counted every case: measured step_number=2 after
+                # a single case ran.
+                try:
+                    await save_v2_run(case_result, provider=None, model=None,
+                                      engagement_id=session_engagement_id,
+                                      operator_id=session_operator_id)
+                except Exception as e:
+                    print(f"[run_case {session_id[:8]}] persist failed: {e}", flush=True)
+
+                summary = _format_case_result_for_agent(case_id, tc, case_result)
+
+                db = await get_db()
+                await db.execute(
+                    "INSERT INTO steps (session_id, phase, step_number, prompt_sent, "
+                    "model_response, tool_called, tool_input, tool_output, duration_ms, denied) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (session_id, phase, step_number, reason[:500], response[:2000],
+                     f"case:{case_id}", json.dumps(case_target)[:1000],
+                     summary[:4000], _case_ms, 0),
+                )
+                await db.commit()
+                await db.close()
+                db = None
+
+                full_steps_data.append({
+                    "step": step_number, "phase": phase, "tool": f"case:{case_id}",
+                    "command": f"{case_id} {json.dumps(case_target)}",
+                    "reason": reason, "output": summary,
+                    "success": True, "duration_ms": _case_ms,
+                })
+
+                await manager.broadcast(session_id, {
+                    "type": "log", "phase": phase, "message": summary[:600]})
+
+                messages.append({"role": "assistant", "content": response})
+                messages.append({"role": "user", "content": summary +
+                    "\n\nThis was a deterministic check and is already recorded. "
+                    "Do not re-report it as a finding. Continue with the next "
+                    "action."})
+
             # --- ACTION: done ---
             elif action_type == "done":
                 summary = action.get("summary", "Testing complete.")
@@ -5180,12 +5669,24 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
 
         # Re-run PoCs for high/critical findings (driven by run config; default off).
         try:
+            # The dashboard has always had a VERIFY stage in its kill chain and a
+            # .log-verify style, and setPhase() already orders 'verify' between test
+            # and report — but nothing ever emitted the phase, so the bar could not
+            # light and this stage ran invisibly. Announced only when it will
+            # actually run: showing VERIFY for a stage that is switched off would be
+            # the same overclaim in the other direction. Mirrors the enable check in
+            # poc_reverify_session so the bar cannot disagree with the work.
+            _pocv_on = (runcfg["poc_verify"] if runcfg["poc_verify"] is not None else
+                        os.environ.get("ERLIK_POC_VERIFY", "").strip().lower()
+                        in ("1", "true", "yes", "on"))
+            if _pocv_on and "curl" in (enabled_tools or []):
+                await manager.broadcast(session_id, {"type": "phase", "active": "verify"})
             n_pocv = await poc_reverify_session(session_id, target_url, enabled_tools,
                                                 force=runcfg["poc_verify"],
                                                 safe_mode=runcfg.get("safe_mode", True))
             if n_pocv:
                 await manager.broadcast(session_id, {
-                    "type": "log", "phase": "report",
+                    "type": "log", "phase": "verify",
                     "message": f"PoC re-verification: {n_pocv} high/critical finding(s) confirmed",
                 })
         except Exception as _pv_err:  # noqa: BLE001
@@ -5608,7 +6109,7 @@ async def list_findings(engagement_id: str | None = None, severity: str | None =
 
 
 @app.put("/api/engagements/{engagement_id}")
-async def update_engagement(engagement_id: str, body: dict):
+async def update_engagement(engagement_id: str, body: dict, request: Request):
     """Correct an engagement record. Explicit save, previous value retained.
 
     PUT rather than PATCH-as-you-type on purpose: this record carries the
@@ -5619,7 +6120,8 @@ async def update_engagement(engagement_id: str, body: dict):
     db = await get_db()
     try:
         try:
-            result = await E.update(db, engagement_id, body or {})
+            result = await E.update(db, engagement_id, body or {},
+                                    operator_id=_actor(request))
         except KeyError:
             raise HTTPException(status_code=404, detail="engagement not found")
         await db.commit()
@@ -5631,14 +6133,16 @@ async def update_engagement(engagement_id: str, body: dict):
 
 
 @app.post("/api/engagements/{engagement_id}/archive")
-async def archive_engagement(engagement_id: str, body: dict | None = None):
+async def archive_engagement(engagement_id: str, request: Request,
+                             body: dict | None = None):
     """Close or reopen an engagement. Never deletes: sessions, findings, scope
     rules and assets all reference this row."""
     from orchestrator import engagement as E
     archived = True if not body else bool(body.get("archived", True))
     db = await get_db()
     try:
-        if not await E.archive(db, engagement_id, archived):
+        if not await E.archive(db, engagement_id, archived,
+                               operator_id=_actor(request)):
             raise HTTPException(status_code=404, detail="engagement not found")
         await db.commit()
         return await E.summary(db, engagement_id)
@@ -5655,6 +6159,130 @@ async def engagement_revisions(engagement_id: str):
         return {"revisions": await E.revisions(db, engagement_id)}
     finally:
         await db.close()
+
+
+@app.get("/api/operators")
+async def list_operators():
+    """Every operator, with what each has actually done.
+
+    Never returns a token or its hash. The two synthetic rows are included and
+    flagged `attributable: false` rather than hidden, because a deployment
+    where all the work sits under `opr_shared_token` is exactly the state an
+    operator needs to see.
+    """
+    from orchestrator import operators as _ops
+    db = await get_db()
+    try:
+        return {"operators": await _ops.listing(db)}
+    finally:
+        await db.close()
+
+
+@app.post("/api/operators")
+async def create_operator(body: dict, request: Request):
+    """Mint an operator. The token comes back ONCE and is never stored.
+
+    ADMIN ONLY. Until the role existed any authenticated caller could do this,
+    so a stolen operator token was enough to create a second identity and
+    attribute work to a name nobody recognises. `created_by` records which
+    admin did it, because minting stays privileged rather than becoming
+    impossible.
+
+    `role` may be "operator" (default) or "admin".
+    """
+    from orchestrator import operators as _ops
+    actor = _require_admin(request)
+    name = (body or {}).get("name") or ""
+    role = (body or {}).get("role") or _ops.ROLE_OPERATOR
+    db = await get_db()
+    try:
+        try:
+            created = await _ops.create(db, name, created_by=actor, role=role)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        return {
+            **created,
+            "warning": "This token is shown once and is not stored. "
+                       "It is bearer material: whoever holds it is this operator.",
+        }
+    finally:
+        await db.close()
+
+
+@app.post("/api/operators/{operator_id}/revoke")
+async def revoke_operator(operator_id: str, request: Request):
+    """Withdraw one operator's access. ADMIN ONLY. The row is never deleted.
+
+    Deleting it would turn every run that IS attributable to this person into
+    one that reads as unattributed -- destroying the record instead of ending
+    the access.
+
+    Refuses to revoke the last human admin: that would leave an instance
+    nobody can administer, recoverable only by setting ERLIK_API_TOKEN again,
+    which is the credential this role model exists to let a deployment retire.
+    """
+    from orchestrator import operators as _ops
+    _require_admin(request)
+    db = await get_db()
+    try:
+        try:
+            revoked = await _ops.revoke(db, operator_id)
+        except _ops.LastAdminError as e:
+            raise HTTPException(status_code=409, detail=str(e))
+        if not revoked:
+            raise HTTPException(
+                status_code=404,
+                detail="no active operator with that id (already revoked, "
+                       "unknown, or one of the synthetic identities)")
+        return {"revoked": operator_id}
+    finally:
+        await db.close()
+
+
+@app.post("/api/operators/{operator_id}/role")
+async def set_operator_role(operator_id: str, body: dict, request: Request):
+    """Promote or demote an operator. ADMIN ONLY.
+
+    Refuses to demote the last human admin, for the same reason revoke does.
+    `role_changed_by` is recorded: a promotion is the one action that changes
+    who can create identities, so it has to be traceable.
+    """
+    from orchestrator import operators as _ops
+    actor = _require_admin(request)
+    role = (body or {}).get("role") or ""
+    db = await get_db()
+    try:
+        try:
+            ok = await _ops.set_role(db, operator_id, role, changed_by=actor)
+        except _ops.LastAdminError as e:
+            raise HTTPException(status_code=409, detail=str(e))
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        if not ok:
+            raise HTTPException(status_code=404,
+                                detail="no active operator with that id")
+        return {"operator_id": operator_id, "role": role, "changed_by": actor}
+    finally:
+        await db.close()
+
+
+@app.get("/api/whoami")
+async def whoami(request: Request):
+    """Which identity this request is carrying.
+
+    The honest answer includes `attributable`, so a caller can tell an operator
+    from the shared token instead of reading a label and assuming it names a
+    person.
+    """
+    from orchestrator import operators as _ops
+    op_id = _actor(request)
+    return {
+        "operator_id": op_id,
+        "name": getattr(request.state, "operator_name", None)
+                or _ops.SYNTHETIC.get(op_id),
+        "attributable": _ops.is_attributable(op_id),
+        "role": getattr(request.state, "operator_role", _ops.ROLE_OPERATOR),
+    }
 
 
 @app.post("/api/engagements/{engagement_id}/scope")
@@ -5739,6 +6367,7 @@ async def engagement_recon_tools():
     out = []
     for name, spec in _R.TOOLS.items():
         out.append({"tool": name, "active": spec["active"], "what": spec["what"],
+                    "invoked": spec["invoked"],
                     "installed": await _R.tool_available(name)})
     return {"tools": out}
 
@@ -5790,6 +6419,10 @@ def _v2_case_summary(tc) -> dict:
         "severity": tc.severity,
         "target_schema": tc.target_schema.model_dump(),
         "steps": [s.name for s in tc.steps],
+        # Surfaced so a planner and an operator can both see, BEFORE a run,
+        # that part of this case can only be proven out of band. Without it a
+        # sweep with OAST off reads as complete coverage of a blind case.
+        "needs_collaborator": tc.needs_collaborator,
     }
 
 
@@ -5815,7 +6448,7 @@ async def get_test_case(test_case_id: str):
 
 
 @app.post("/api/v2/testcases/{test_case_id}/run")
-async def run_v2_test_case(test_case_id: str, body: dict):
+async def run_v2_test_case(test_case_id: str, body: dict, request: Request):
     """Execute one test case.
 
     Request body:
@@ -5849,7 +6482,8 @@ async def run_v2_test_case(test_case_id: str, body: dict):
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     run_id = await save_v2_run(result, provider=provider, model=model,
-                               engagement_id=engagement_id)
+                               engagement_id=engagement_id,
+                               operator_id=_actor(request))
     out = result.model_dump()
     out["run_id"] = run_id
     return out
@@ -6125,6 +6759,24 @@ async def v2_declared_retire(target: str, test_case_id: str, field: str):
     return {"ok": done, "declared": rows}
 
 
+@app.get("/api/v2/oast")
+async def v2_oast_status():
+    """Whether out-of-band detection is available, and what depends on it.
+
+    An operator has to be able to tell "no blind vulnerabilities" from "blind
+    detection was never running" — the two produce identical findings lists.
+    So the capability is reported with the cases it affects rather than left to
+    be inferred from an empty result.
+    """
+    from orchestrator import collaborator as _oast
+    catalog = load_catalog()
+    return {
+        **_oast.status(),
+        "cases": sorted(tid for tid, tc in catalog.items()
+                        if tc.needs_collaborator),
+    }
+
+
 @app.get("/api/v2/sweep/profiles")
 async def v2_sweep_profiles():
     """Named target profiles the sweep can apply."""
@@ -6148,7 +6800,7 @@ async def get_v2_run_endpoint(run_id: str):
 
 
 @app.post("/api/v2/runs")
-async def run_v2_chain(body: dict):
+async def run_v2_chain(body: dict, request: Request):
     """Execute a root test case + auto-follow its chain.
 
     Body:
@@ -6177,7 +6829,8 @@ async def run_v2_chain(body: dict):
         provider=provider, model=model,
         max_depth=max_depth, max_runs=max_runs,
     )
-    saved = await save_v2_chain(chain_result, provider=provider, model=model)
+    saved = await save_v2_chain(chain_result, provider=provider, model=model,
+                                operator_id=_actor(request))
     out = chain_result.model_dump()
     out["root_run_id"] = saved["root_run_id"]
     out["run_ids"] = saved["run_ids"]
@@ -6213,8 +6866,10 @@ async def get_run_presets():
 @app.get("/api/nettacker-scenarios")
 async def get_nettacker_scenarios():
     """Available Nettacker run modes (name → description) for the UI dropdown."""
-    from orchestrator.integrations.nettacker import list_scenarios, DEFAULT_SCENARIO
-    return {"scenarios": list_scenarios(), "default": DEFAULT_SCENARIO}
+    from orchestrator.integrations.nettacker import (DEFAULT_SCENARIO, list_scenarios,
+                                                      unavailable_scenarios)
+    return {"scenarios": list_scenarios(), "default": DEFAULT_SCENARIO,
+            "unavailable": unavailable_scenarios()}
 
 
 # ── Skills library (browse in the SKILLS tab) ──────────────────────────────
@@ -6318,10 +6973,18 @@ async def library_detectors():
 
 @app.get("/api/library/testcases")
 async def library_testcases():
-    """Deterministic WSTG cases, including any that failed to parse.
+    """Deterministic WSTG cases, including any that failed to load.
 
     `load_catalog()` swallows parse errors, so a malformed case silently
     vanishes from the engine. Surfacing it here is the only place it is visible.
+
+    Two things this got wrong. It read `doc.get("title")`, and no case has a
+    `title`: all 29 use `name`, which is also what the loader and runner call it
+    (`tc.name`). Every case reported an empty string. And it treated "parses as
+    YAML" as "loads": a file that parses to a dict with no `id` is just as
+    broken for the engine, but appeared here as a valid case with a null id --
+    invisible in exactly the view whose job is to make broken cases visible.
+    Both are now load errors.
     """
     import yaml
     from orchestrator import capabilities as C
@@ -6329,11 +6992,23 @@ async def library_testcases():
     for p in sorted(C.WSTG_DIR.glob("*.yaml")):
         try:
             doc = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
-            cases.append({"id": doc.get("id"), "title": doc.get("title", ""),
-                          "file": p.name,
-                          "steps": len(doc.get("steps") or [])})
         except Exception as e:  # noqa: BLE001
-            errors.append({"file": p.name, "error": str(e)[:200]})
+            errors.append({"file": p.name, "error": f"YAML parse failed: {str(e)[:200]}"})
+            continue
+        if not isinstance(doc, dict):
+            errors.append({"file": p.name,
+                           "error": f"top level is {type(doc).__name__}, expected a mapping"})
+            continue
+        missing = [k for k in ("id", "name", "steps") if not doc.get(k)]
+        if missing:
+            errors.append({"file": p.name,
+                           "error": f"missing or empty required key(s): {', '.join(missing)}"})
+            continue
+        cases.append({"id": doc["id"], "name": doc["name"],
+                      "category": doc.get("category", ""),
+                      "severity": doc.get("severity", ""),
+                      "file": p.name,
+                      "steps": len(doc["steps"])})
     return {"count": len(cases), "cases": cases, "load_errors": errors}
 
 
@@ -6609,7 +7284,7 @@ async def enforce_engagement_scope(engagement_id: str | None, target_url: str) -
 
 
 @app.post("/api/sessions", response_model=SessionResponse)
-async def create_session(data: SessionCreate):
+async def create_session(data: SessionCreate, request: Request):
     session_id = uuid.uuid4().hex[:12]
 
     # An integration assessment is validated at CREATION, not at start: scope,
@@ -6652,14 +7327,14 @@ async def create_session(data: SessionCreate):
             "INSERT INTO sessions (id, target_url, scope_mode, system_prompt, model, enabled_tools, "
             "session_type, parent_session_id, vuln_category, no_timeout, max_turns, "
             "toolset_preset, disable_stagnation, tool_timeout, run_config, scope_extra, "
-            "authorization_ref, engagement_id) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "authorization_ref, engagement_id, operator_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (session_id, data.target_url, data.scope_mode.value, data.system_prompt, data.model,
              enabled_tools_str, data.session_type, data.parent_session_id, data.vuln_category,
              1 if data.no_timeout else 0, effective_max_turns, data.toolset_preset,
              1 if data.disable_stagnation else 0, data.tool_timeout, _run_config_json,
              json.dumps(current_scope_extra()), data.authorization_ref,
-             data.engagement_id),
+             data.engagement_id, _actor(request)),
         )
         await db.commit()
         if integration_config is not None:
@@ -7020,95 +7695,6 @@ async def download_report_file(session_id: str):
     )
 
 
-@app.get("/api/thesis/comparison")
-async def thesis_comparison(vuln_category: str = None):
-    """Compare warm vs cold session metrics for thesis analysis."""
-    db = await get_db()
-    try:
-        query = """
-            SELECT s.id, s.target_url, s.session_type, s.vuln_category, s.status,
-                   s.total_steps, s.total_findings, s.total_duration_ms, s.created_at,
-                   s.parent_session_id
-            FROM sessions s
-            WHERE s.status = 'completed'
-        """
-        params = []
-        if vuln_category:
-            query += " AND s.vuln_category = ?"
-            params.append(vuln_category)
-        query += " ORDER BY s.created_at"
-
-        cursor = await db.execute(query, params)
-        sessions = await cursor.fetchall()
-
-        results = {"cold": [], "warm": []}
-        for s in sessions:
-            sid = s["id"]
-            # Get findings breakdown
-            fc = await db.execute(
-                "SELECT severity, COUNT(*) as cnt FROM findings WHERE session_id = ? GROUP BY severity",
-                (sid,)
-            )
-            sev_rows = await fc.fetchall()
-            by_severity = {r["severity"]: r["cnt"] for r in sev_rows}
-
-            fc2 = await db.execute(
-                "SELECT vuln_type, COUNT(*) as cnt FROM findings WHERE session_id = ? GROUP BY vuln_type",
-                (sid,)
-            )
-            type_rows = await fc2.fetchall()
-            by_type = {r["vuln_type"]: r["cnt"] for r in type_rows}
-
-            entry = {
-                "session_id": sid,
-                "target_url": s["target_url"],
-                "session_type": s["session_type"] or "cold",
-                "vuln_category": s["vuln_category"],
-                "total_steps": s["total_steps"] or 0,
-                "total_findings": s["total_findings"] or 0,
-                "total_duration_ms": s["total_duration_ms"],
-                "findings_by_severity": by_severity,
-                "findings_by_type": by_type,
-                "created_at": s["created_at"],
-            }
-
-            stype = s["session_type"] or "cold"
-            results.setdefault(stype, []).append(entry)
-
-        # Compute aggregates
-        summary = {}
-        for stype in ("cold", "warm"):
-            sessions_list = results.get(stype, [])
-            if sessions_list:
-                avg_findings = sum(s["total_findings"] for s in sessions_list) / len(sessions_list)
-                avg_steps = sum(s["total_steps"] for s in sessions_list) / len(sessions_list)
-                durations = [s["total_duration_ms"] for s in sessions_list if s["total_duration_ms"]]
-                avg_duration = sum(durations) / len(durations) if durations else 0
-                summary[stype] = {
-                    "count": len(sessions_list),
-                    "avg_findings": round(avg_findings, 2),
-                    "avg_steps": round(avg_steps, 2),
-                    "avg_duration_ms": round(avg_duration, 0),
-                }
-            else:
-                summary[stype] = {"count": 0, "avg_findings": 0, "avg_steps": 0, "avg_duration_ms": 0}
-
-        # Detection rate improvement
-        cold_avg = summary["cold"]["avg_findings"]
-        warm_avg = summary["warm"]["avg_findings"]
-        if cold_avg > 0:
-            improvement_pct = round(((warm_avg - cold_avg) / cold_avg) * 100, 1)
-        else:
-            improvement_pct = None
-
-        return {
-            "filter": {"vuln_category": vuln_category},
-            "summary": summary,
-            "detection_rate_improvement_pct": improvement_pct,
-            "sessions": results,
-        }
-    finally:
-        await db.close()
 
 
 # Columns that are ids, enums, timestamps, counts or controlled vocabulary —
@@ -7181,11 +7767,24 @@ def _mask_export_rows(rows: list[dict], counts: dict) -> list[dict]:
 
 @app.get("/api/thesis/export")
 async def thesis_export():
-    """Export all thesis data as JSON for analysis in pandas/R/Excel.
+    """Export the measurement tables as JSON for analysis in pandas/R/Excel.
 
-    Redacted. Every table is fetched with SELECT *, so a new column reaches
+    Redacted. Most tables are fetched with SELECT *, so a new column reaches
     this export the moment it exists — which is why masking is default-deny
     against a structural allowlist rather than a list of fields to scrub.
+
+    NOT everything in the database. The payload carries a `scope` block naming
+    exactly what is included and what is deliberately left out, because an
+    export that calls itself complete is the kind of overclaim this project
+    keeps having to correct. Two categories are excluded on purpose:
+
+      * engagement_* and destroyed_credentials — customer and credential
+        records. These are not measurement data and must not leave the host
+        in an analysis export, redacted or otherwise.
+      * the raw-output blobs on v2_runs (steps_json, chain_next_json) and the
+        per-run target_json — tool stdout from the probed host, which would
+        dominate the payload. The v2 step detail is available per run through
+        /api/v2/runs/{run_id}.
     """
     db = await get_db()
     try:
@@ -7209,6 +7808,28 @@ async def thesis_export():
         c5 = await db.execute("SELECT * FROM recon_context ORDER BY session_id, context_type")
         recon = [dict(r) for r in await c5.fetchall()]
 
+        # Chains. Sessions already carry chain_id, but the chain row holds the
+        # phase position and per-chain settings that a session does not.
+        c6 = await db.execute("SELECT * FROM chains ORDER BY created_at")
+        chains = [dict(r) for r in await c6.fetchall()]
+
+        # The ground truth as SEEDED for these runs, which is what coverage was
+        # actually scored against — not whatever the catalogue says today.
+        c7 = await db.execute("SELECT * FROM ground_truth ORDER BY id")
+        ground_truth = [dict(r) for r in await c7.fetchall()]
+
+        # The deterministic lane. Absent from this export until now, so an
+        # analysis of "what erlik ran" silently covered only the agent lane.
+        # Columns are named rather than SELECT *: steps_json and chain_next_json
+        # are raw tool stdout and would dominate the payload.
+        c8 = await db.execute(
+            "SELECT id, test_case_id, provider, model, duration_ms, stopped_early, "
+            "chain_root_run_id, created_at FROM v2_runs ORDER BY created_at")
+        v2_runs = [dict(r) for r in await c8.fetchall()]
+
+        c9 = await db.execute("SELECT * FROM v2_findings ORDER BY run_id, id")
+        v2_findings = [dict(r) for r in await c9.fetchall()]
+
         counts: dict = {}
         payload = {
             "exported_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -7217,6 +7838,28 @@ async def thesis_export():
             "steps": _mask_export_rows(steps, counts),
             "reports": _mask_export_rows(reports, counts),
             "recon_context": _mask_export_rows(recon, counts),
+            "chains": _mask_export_rows(chains, counts),
+            "ground_truth": _mask_export_rows(ground_truth, counts),
+            "v2_runs": _mask_export_rows(v2_runs, counts),
+            "v2_findings": _mask_export_rows(v2_findings, counts),
+        }
+        # Say what this is and is not, in the payload rather than only in a
+        # docstring the consumer never sees.
+        payload["scope"] = {
+            "included": ["sessions", "findings", "steps", "reports", "recon_context",
+                         "chains", "ground_truth", "v2_runs", "v2_findings"],
+            "excluded": {
+                "engagement_assets, engagement_credentials, engagement_revisions, "
+                "engagement_scope, engagement_sessions, engagement_targets, "
+                "engagements, destroyed_credentials":
+                    "customer and credential records — not measurement data, and "
+                    "not exported at any redaction level",
+                "v2_runs.steps_json, v2_runs.chain_next_json, v2_runs.target_json":
+                    "raw tool output from the probed host; fetch per run via "
+                    "/api/v2/runs/{run_id}",
+                "benchmark_results":
+                    "declared but never written; metrics are recomputed on demand",
+            },
         }
         # `applied` and `total` are SEPARATE facts: applied=true with total=0
         # means the pass ran and found nothing, which a reader cannot otherwise
@@ -8836,33 +9479,6 @@ async def get_session_metrics(session_id: str, target_name: str = "OWASP Juice S
     return metrics
 
 
-@app.get("/api/benchmark/compare")
-async def compare_sessions(session_ids: str, target_name: str = "OWASP Juice Shop"):
-    """Compare multiple sessions. Pass comma-separated session IDs."""
-    await _seed_ground_truth()
-    ids = [s.strip() for s in session_ids.split(",") if s.strip()]
-    if not ids:
-        raise HTTPException(400, "No session IDs provided")
-
-    db = await get_db()
-    try:
-        cursor = await db.execute(
-            "SELECT * FROM ground_truth WHERE target_name = ?", (target_name,)
-        )
-        ground_truths = [dict(r) for r in await cursor.fetchall()]
-    finally:
-        await db.close()
-
-    results = []
-    for sid in ids:
-        metrics = await _compute_benchmark_metrics(sid, ground_truths)
-        if metrics:
-            results.append(metrics)
-
-    return {
-        "ground_truth_count": len(ground_truths),
-        "sessions": results,
-    }
 
 
 @app.get("/api/benchmarks")

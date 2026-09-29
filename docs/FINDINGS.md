@@ -579,4 +579,4 @@ The OWASP coverage analysis identifies exactly which categories to prioritise in
 
 ### Argument 8: Tool Chaining Is Emergent Behaviour
 
-The most productive finding pattern (gobuster -> curl -> sqlmap) emerges without explicit instruction. The agent learns to chain discovery -> confirmation -> exploitation through the structured prompt and chain architecture. This validates the MCP orchestration approach: the protocol provides tool access, the chain provides methodology, and the agent learns the operational pattern.
+The most productive finding pattern (gobuster -> curl -> sqlmap) emerges without explicit instruction. The agent learns to chain discovery -> confirmation -> exploitation through the structured prompt and chain architecture. This supports the coarse-grained orchestration approach: the command interface provides tool access, the chain provides methodology, and the agent learns the operational pattern. (The tool interface is a JSON action protocol over the model's text channel, not MCP -- see METHODOLOGY.md Section 3.10.2.)

@@ -115,6 +115,58 @@ steps:
           vuln_type: phpinfo() Page Exposed
           severity: high
 
+  # Everything above is organised per PLATFORM: it knows Spring's /actuator,
+  # Apache's /server-status, PHP's /phpinfo.php, Symfony's /_profiler. An
+  # application that simply mounts /debug or /status of its own matches none of
+  # them. Found live against a target serving /debug with a datasource URL and
+  # a signing key in the body: every step above passed it clean.
+  #
+  # A 200 here is NOT a finding -- these are common healthy paths, and many
+  # apps answer 200 with an SPA shell for any path at all. Each evaluator
+  # therefore requires a signature of actual DISCLOSURE, not reachability.
+  #
+  # /debug/pprof is requested only as an index listing. The individual profiles
+  # under it are large downloads, and are left alone for the same reason
+  # /heapdump is above.
+  - name: generic_debug_endpoints
+    tool: curl
+    command: >-
+      curl -s -b "{{cookie}}" -H "{{auth_header}}" -L --max-redirs 3 -A "Mozilla/5.0" --connect-timeout 3 --max-time 6
+      -w "\n[erlik] %{http_code} %{url_effective}\n"
+      "{{url}}/debug" "{{url}}/debug/vars" "{{url}}/debug/pprof"
+      "{{url}}/status" "{{url}}/metrics"
+    evaluators:
+      - type: regex
+        # A URI carrying an inline credential pair. This is the signature that
+        # matters: not that a debug page answered, but that it handed over a
+        # secret. Requires scheme://user:pass@host, so a bare connection string
+        # without credentials does not qualify.
+        pattern: '\b(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis|amqp|ftp|mssql)://[^\s"''<>]+:[^\s"''<>@]+@'
+        emit_finding:
+          vuln_type: Credentials Disclosed by Debug Endpoint
+          severity: critical
+      - type: regex
+        # Go's expvar handler. Both keys together are distinctive; either alone
+        # appears in ordinary JSON.
+        pattern: '"cmdline"\s*:\s*\[[\s\S]{0,4000}?"memstats"\s*:\s*\{'
+        emit_finding:
+          vuln_type: Go expvar Debug Endpoint Exposed
+          severity: medium
+      - type: regex
+        # net/http/pprof index. Serving these lets anyone pull heap and
+        # goroutine profiles of a production process.
+        pattern: 'Types of profiles available|/debug/pprof/(goroutine|heap|threadcreate)\?'
+        emit_finding:
+          vuln_type: Go pprof Profiling Endpoints Exposed
+          severity: high
+      - type: regex
+        # Prometheus exposition format. Discloses internal topology and
+        # per-route traffic rather than credentials, hence low.
+        pattern: '^# TYPE \w+ (counter|gauge|histogram|summary)$'
+        emit_finding:
+          vuln_type: Prometheus Metrics Endpoint Publicly Readable
+          severity: low
+
   # Development-only consoles and profilers left enabled in a deployed app.
   # We only GET the landing page — no code is submitted to any console.
   - name: dev_debug_consoles

@@ -122,7 +122,7 @@ async def test_the_undo_runs_even_when_the_case_is_cut_short(monkeypatch):
         sent.append(cmd)
         return {"success": True, "output": "", "duration_ms": 1, "error": None}
 
-    def explode(cmd, scope, primary_url=None):
+    def explode(cmd, scope, primary_url=None, payload_hosts=None):
         # Only the SECOND step. A checker that also raised for the cleanup would be testing
         # the fake rather than the product — which an earlier version of this did.
         if cmd == 'curl -s "http://app.test/x"':
@@ -208,7 +208,7 @@ async def test_one_failed_undo_does_not_strand_the_others(monkeypatch):
     undo_a = 'curl -s -X DELETE "http://app.test/a"'
     undo_b = 'curl -s -X DELETE "http://app.test/b"'
 
-    def checker(cmd, scope, primary_url=None):
+    def checker(cmd, scope, primary_url=None, payload_hosts=None):
         if cmd == undo_b:
             raise ValueError("the checker itself fell over")
         return None

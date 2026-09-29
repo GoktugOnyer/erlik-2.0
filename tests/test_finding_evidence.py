@@ -492,7 +492,7 @@ async def test_the_idor_finding_shows_both_sides_of_its_own_differential():
                       output=page("admin view"), duration_ms=1, exit_code=0)
     low = StepResult(step="fetch_as_low_priv", command="curl", success=True,
                      output=page("guest view"), duration_ms=1, exit_code=0)
-    finding, _, _, _ = await _run_evaluator(
+    finding, _, _, _, _ = await _run_evaluator(
         Evaluator(type="idor", emit_finding={"vuln_type": "IDOR"}), low,
         TestCase(id="t", name="t", category="c", steps=[]),
         {"private_object_marker": marker, "low_priv_token": "a", "high_priv_token": "b",

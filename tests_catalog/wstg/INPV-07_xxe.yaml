@@ -6,15 +6,22 @@ severity: critical
 references:
   - https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/07-Input_Validation_Testing/07-Testing_for_XML_Injection
 
-# Every payload is a READ. None writes, and none uses an out-of-band channel by
-# default: a blind XXE confirmed through an external collaborator proves the
-# same thing while sending a client's internal data to a third party, so that
-# stays an operator's explicit choice rather than something the sweep does on
-# its own.
+# Every payload is a READ, and none of them exfiltrates. The out-of-band probe
+# below fetches a URL and nothing else: it does NOT use the parameter-entity
+# trick that appends a file's contents to the callback, because confirming a
+# blind XXE by sending a client's internal data to a third party proves the
+# same thing at a cost no engagement asked for. What it proves is that the
+# parser resolves external entities and makes outbound requests, which is the
+# finding; reading a file then follows in band with the operator's consent.
+#
+# It runs only with a collaborator configured, so it is an operator's explicit
+# choice rather than something the sweep does on its own.
 #
 # The parser-error step matters as much as the file read. "DOCTYPE is
 # disallowed" is a hardened parser saying so, and recording that is how a
 # re-scan can tell a fix from a coincidence.
+
+needs_collaborator: true
 
 target_schema:
   required: [url]
@@ -82,3 +89,23 @@ steps:
         emit_finding:
           vuln_type: XML parser processes user-supplied DOCTYPE (XXE surface confirmed)
           severity: high
+
+  # BLIND XXE. Every step above needs the entity's CONTENT to come back in the
+  # response. A parser that resolves entities and returns nothing -- the common
+  # hardened-error case -- is invisible to all four, and is exactly as
+  # vulnerable. The only evidence is that the parser made the request.
+  #
+  # `oob: true` means this is NOT RUN without a collaborator: an entity nobody
+  # can observe being fetched would leave the case reporting a clean verdict
+  # for a check that never happened. No evaluator, for the same reason -- there
+  # is nothing in the response to match on. The finding comes from the poll.
+  - name: blind_oob_entity
+    tool: curl
+    oob: true
+    when: no_finding_yet
+    command: >-
+      curl -s -b "{{cookie}}" -H "{{auth_header}}" -X POST -H "Content-Type: application/xml"
+      -o /dev/null --connect-timeout 5 --max-time 15 --data-binary
+      '<?xml version="1.0"?><!DOCTYPE r [<!ENTITY xxe SYSTEM "http://{{collaborator_host}}/erlik-oob">]><r>&xxe;</r>'
+      "{{url}}"
+    evaluators: []

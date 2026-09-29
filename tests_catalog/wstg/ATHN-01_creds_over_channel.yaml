@@ -6,27 +6,93 @@ severity: high
 references:
   - https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/04-Authentication_Testing/01-Testing_for_Credentials_Transported_over_an_Encrypted_Channel
 
+# THE OLD CASE NEVER LOOKED AT THE TARGET.
+#
+#   curl -s -o /dev/null -w "%{http_code} %{url_effective}" "{{login_url}}"
+#   regex: '^\d+ http://'   -> "Login Form Served Over HTTP", HIGH
+#
+# Without -L, `url_effective` is the URL you passed in, echoed back. So the
+# whole check reduced to "does the target string start with http://" — the
+# response was never consulted. Measured against a live target on 2026-09-05:
+#
+#   http://github.com/login  -> "301 http://github.com/login" -> HIGH FINDING
+#
+# A site that redirects http to https, which is the correct configuration and
+# the most common one on the web, was reported as serving a login form in
+# cleartext. And:
+#
+#   http://127.0.0.1:9099/   -> "000 http://127.0.0.1:9099/"  -> HIGH FINDING
+#
+# `%{http_code}` is 000 when curl never connected, `\d+` matches "000", and the
+# step exits 7 — so the case emitted a high-severity finding about a host that
+# answered nothing at all, from a step that failed.
+#
+# It also could not find the actual WSTG-ATHN-01 defect. A login page served
+# over https whose <form action> posts to http:// sends the password in
+# cleartext, and that is the canonical form of this issue. Nothing here looked
+# at the form.
+#
+# WHAT IS TESTED NOW. Follow the redirect, then decide from what came back:
+#
+#   no response                     -> ERLIK_ATHN_NO_RESPONSE      not assessed
+#   lands on http:// with a
+#     password field                -> ERLIK_ATHN_FORM_OVER_HTTP   FINDING
+#   lands on http://, no password
+#     field seen                    -> ERLIK_ATHN_NO_FORM          not assessed
+#   lands on https:// but the form
+#     posts to http://              -> ERLIK_ATHN_ACTION_OVER_HTTP FINDING
+#   lands on https://, form posts
+#     to https or a relative path   -> ERLIK_ATHN_OK               clean
+#
+# The verdict is a canary a regex matches, deterministic, so it does not depend
+# on a model being reachable — the same shape AUTHZ-04 and INPV-15 use.
+#
+# Read-only: two GETs of the login page. No credentials are submitted.
+
 target_schema:
   required: [login_url]
   optional: [username_field, password_field]
 
 steps:
-  - name: login_url_scheme
+  - name: login_channel
     tool: curl
+    # The scheme is compared by SPLITTING the effective URL, and the form
+    # action is matched on "http:" without the slashes, because the scope
+    # guard extracts every `http://…` substring of a rendered command and
+    # checks it as a target. A literal scheme written into a test's own shell
+    # -- in a bracket expression, or even in `${EFF#http://}` -- reaches that
+    # guard as a URL whose host is `[^` or `}`. It is right that the guard is
+    # that literal; the command has to be written for it.
     command: >-
-      curl -s -o /dev/null -w "%{http_code} %{url_effective}" "{{login_url}}"
+      bash -c 'U="{{login_url}}";
+      M=$(curl -s -L -o /dev/null --connect-timeout 5 --max-time 15 -w "%{http_code} %{url_effective}" "$U");
+      B=$(curl -s -L --connect-timeout 5 --max-time 15 "$U");
+      CODE=${M%% *}; EFF=${M#* }; SCHEME=$(printf "%s" "$EFF" | cut -d: -f1);
+      echo "final_status=$CODE final_scheme=$SCHEME";
+      PW=$(printf "%s" "$B" | grep -Eio "type=.?password" | head -1);
+      ACT=$(printf "%s" "$B" | tr "\047" "\042" | grep -Eio "action=.?http:" | head -1);
+      if [ "$CODE" = "000" ]; then
+        echo "ERLIK_ATHN_NO_RESPONSE: the login URL returned nothing (curl could not complete a request), so the transport of credentials was not assessed";
+      elif [ "$SCHEME" = "http" ]; then
+        if [ -n "$PW" ]; then
+          echo "ERLIK_ATHN_FORM_OVER_HTTP: after following redirects the login page is still served over cleartext and contains a password field";
+        else
+          echo "ERLIK_ATHN_NO_FORM: the page is served over cleartext but no password field was found on it, so this is not evidence that credentials travel in the clear";
+        fi;
+      elif [ -n "$ACT" ]; then
+        echo "ERLIK_ATHN_ACTION_OVER_HTTP: the page is served over TLS but its form posts to a cleartext action, so the password is submitted in the clear";
+      else
+        echo "ERLIK_ATHN_OK: the login page resolves to TLS and no cleartext form action was found";
+      fi'
     evaluators:
       - type: regex
-        pattern: '^\d+ http://'
+        pattern: 'ERLIK_ATHN_FORM_OVER_HTTP'
         emit_finding:
           vuln_type: Login Form Served Over HTTP
           severity: high
-      - type: llm
+      - type: regex
         when: no_finding_yet
-        instruction: >-
-          The output is a status code and effective URL. Set matched=true
-          ONLY if the effective URL uses http:// (cleartext) rather than
-          https://. Otherwise matched=false.
+        pattern: 'ERLIK_ATHN_ACTION_OVER_HTTP'
         emit_finding:
-          vuln_type: Credentials May Be Sent Over Cleartext
+          vuln_type: Login Form Posts Credentials to a Cleartext Action
           severity: high

@@ -1,7 +1,7 @@
 """Pydantic schema for YAML-defined test cases."""
 
 from typing import Literal, Optional, Any
-from pydantic import BaseModel, Field, model_validator, field_validator
+from pydantic import model_validator, BaseModel, Field, field_validator
 
 
 class TargetSchema(BaseModel):
@@ -214,6 +214,12 @@ class Evaluator(BaseModel):
 class TestStep(BaseModel):
     name: str
     tool: str
+    # This step plants an out-of-band payload and is meaningless without a
+    # collaborator. Marked per STEP, not per case: WSTG-INPV-19 proves most of
+    # its findings in band (a metadata document comes back in the response) and
+    # only the blind probe needs OOB, so disabling the whole case when OAST is
+    # off would lose coverage that works perfectly well without it.
+    oob: bool = False
     command: str  # {{var}} placeholders are filled from target + prior step outputs
     timeout: Optional[int] = None
     when: Optional[str] = None
@@ -288,8 +294,149 @@ class TestCase(BaseModel):
     # the whole time. Correct attribution needs a second opinion, and the case
     # itself is the one source that knows what it tests.
     attack_class: Optional[str] = None
+
+    # Hosts this case names as PAYLOAD, never as a destination.
+    #
+    # Some probes cannot be written without naming a host that is not the
+    # target: CLNT-07 has to send an attacker `Origin:` or it is not testing
+    # CORS, AUTHZ-05 has to offer an unregistered `redirect_uri`, and INPV-19
+    # has to ask the target to fetch the cloud metadata address. In each case
+    # erlik's own socket goes only to the in-scope target and the host appears
+    # in a header or parameter VALUE.
+    #
+    # `scope.check_command` extracts every host-shaped substring of a rendered
+    # command and refuses anything outside the engagement, which is right for a
+    # guard on where erlik connects -- but it meant those three cases aborted
+    # at their first step on every run and had never produced a result.
+    #
+    # A declaration here, in committed and reviewed YAML, is the narrow way to
+    # say "this string is data". It is deliberately weak on purpose:
+    #
+    #   * exact hostnames only, no globs -- a wildcard is how a per-case
+    #     allowance becomes a general bypass;
+    #   * it never covers the case's own target, which is checked against the
+    #     engagement scope as before;
+    #   * `deny_hosts` still wins, so an operator's explicit refusal cannot be
+    #     overridden by a case file;
+    #   * it applies to THIS case only, and a declared host that no step
+    #     actually names is a test failure, so unused permissions cannot
+    #     accumulate.
+    #
+    # It does not, and cannot, prove the host is unreachable -- a case author
+    # who wrote `curl http://declared-host/` would connect there. That is the
+    # same trust already placed in the step's command itself.
+    payload_hosts: list[str] = Field(default_factory=list)
+
+    # This case can only PROVE its finding out of band.
+    #
+    # Blind SQLi beyond timing, blind SSRF, blind XXE, blind command injection:
+    # the payload succeeds and the response is identical to a failure. The only
+    # evidence is that the target contacted a name the tester controls.
+    #
+    # A case declaring this gets `{{collaborator_host}}` rendered as a unique
+    # per-run subdomain, and its OOB steps are polled afterwards. With OAST
+    # unconfigured the steps are NOT run: planting a payload nobody can read
+    # back would produce a clean verdict for a check that was never performed,
+    # so the case reports that out-of-band detection was unavailable instead.
+    needs_collaborator: bool = False
+
+    # What the TARGET must look like for this case to be worth planning.
+    #
+    # Only `scheme` today, and it earns its place: WSTG-CONF-07 was planned
+    # against every base URL including plain http, where `plan_sweep` builds a
+    # scope of allow_ports=[80] and the case's own HSTS probe -- which must
+    # reach 443 -- is refused by the scope guard by construction. Measured
+    # 2026-09-05:
+    #
+    #   base http://app.example.test
+    #   tls_scan     ALLOWED   (90s of testssl against a port not in scope)
+    #   hsts_header  REFUSED   port 443 not in allow_ports [80]
+    #
+    # So the expensive half ran against a service the operator did not declare
+    # and the cheap half could not run at all. A case that cannot complete is
+    # better named in `skipped` with the reason than planned and half-run.
+    #
+    # This is a PLANNING hint, not a security control. Nothing here relaxes the
+    # scope guard; a case whose precondition passes is still bound by it.
+    preconditions: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("preconditions")
+    @classmethod
+    def _known_preconditions(cls, v: dict[str, str]) -> dict[str, str]:
+        for k in v:
+            if k != "scheme":
+                raise ValueError(
+                    f"unknown precondition {k!r}; only 'scheme' is understood, "
+                    "and a precondition nothing evaluates would silently never "
+                    "hold")
+        return v
+
+    @field_validator("payload_hosts")
+    @classmethod
+    def _payload_hosts_are_plain_exact_hosts(cls, v: list[str]) -> list[str]:
+        out = []
+        for h in v:
+            h = (h or "").strip().lower()
+            if not h:
+                raise ValueError("payload_hosts entries must not be empty")
+            if any(c in h for c in "*?["):
+                raise ValueError(
+                    f"payload_hosts must name exact hosts, not patterns: {h!r}. "
+                    "A glob turns a per-case allowance into a general bypass."
+                )
+            if "://" in h or "/" in h or " " in h:
+                raise ValueError(
+                    f"payload_hosts takes a bare hostname, not a URL: {h!r}"
+                )
+            out.append(h)
+        return out
+
     steps: list[TestStep]
     chain: Optional[ChainRule] = None
+
+    @model_validator(mode="after")
+    def _collaborator_declaration_matches_the_steps(self):
+        """A case may not ADVERTISE out-of-band confirmation it never performs.
+
+        `collaborator_host` sat in the optional target schema of three cases
+        and appeared in no step command in the whole catalogue. An operator
+        could declare a collaborator on any of them and every probe ignored it
+        -- a field promising a capability that did not exist, which this
+        project treats as the same defect class as a crash.
+
+        Both directions are checked, because either one alone leaves a gap:
+
+          * offering the field with no `oob:` step is the original defect;
+          * an `oob:` step with the field un-offered means the operator has no
+            way to supply their own collaborator, and the step silently only
+            ever works off a minted name.
+
+        `needs_collaborator` is tied to the same fact rather than trusted: it
+        is what makes the runner mint a name, so a case with an OOB step and
+        the flag unset would have its step skipped on every run.
+        """
+        oob_steps = [st.name for st in self.steps if st.oob]
+        offered = "collaborator_host" in (self.target_schema.optional or [])
+        if oob_steps and not offered:
+            raise ValueError(
+                f"{self.id}: steps {oob_steps} are out-of-band but "
+                "'collaborator_host' is not in target_schema.optional, so an "
+                "operator cannot supply their own collaborator")
+        if offered and not oob_steps:
+            raise ValueError(
+                f"{self.id}: target_schema offers 'collaborator_host' and no "
+                "step is marked `oob:`, so the field promises out-of-band "
+                "confirmation the case never performs")
+        if oob_steps and not self.needs_collaborator:
+            raise ValueError(
+                f"{self.id}: steps {oob_steps} are out-of-band but the case "
+                "does not declare `needs_collaborator: true`, so no name is "
+                "ever minted and they would be skipped on every run")
+        if self.needs_collaborator and not oob_steps:
+            raise ValueError(
+                f"{self.id}: declares `needs_collaborator: true` and has no "
+                "`oob:` step to use one")
+        return self
 
     # Deprecated freeform fallback — kept off by default
     legacy: bool = False

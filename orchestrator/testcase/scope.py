@@ -34,14 +34,122 @@ def _host_matches(host: str, patterns: list[str]) -> bool:
     return any(fnmatch.fnmatchcase(h, p.lower()) for p in patterns)
 
 
+
+def _safe_host(url: str) -> str | None:
+    """The hostname of `url`, or None if it cannot be parsed. Never raises."""
+    try:
+        parsed = urlparse(url if "://" in url else f"http://{url}")
+        return (parsed.hostname or "").lower() or None
+    except ValueError:
+        return None
+
+
+def _payload_denied(host: str, deny: list[str]) -> bool:
+    """Whether `host` falls under `deny_hosts` FOR PAYLOAD PURPOSES.
+
+    `_is_declared_payload` reaches UNDER a declared name -- `a.b.example` is
+    permitted by a declaration of `b.example` -- so the deny check has to reach
+    exactly as far, or the two are asymmetric in the one direction that must
+    never move. Measured before this existed:
+
+        Scope(allow_hosts=["127.0.0.1"], deny_hosts=["oast.test"])
+        payload_hosts=["abcd1234abcd1234.oast.test"]
+        curl http://abcd1234abcd1234.oast.test/erlik-oob    ALLOWED
+
+    An operator had excluded the domain and a declaration reached under it
+    anyway, because `deny_hosts` is a glob list and `oast.test` does not
+    fnmatch `abcd.oast.test`.
+
+    General scope matching is deliberately left alone: everywhere else a
+    `deny_hosts` entry is a glob (`*.example.com`) matched against the host,
+    symmetric with `allow_hosts`. The payload path is the only place a bare
+    name grants its subdomains, so it is the only place one must also deny
+    them.
+    """
+    h = (host or "").lower()
+    if _host_matches(h, deny):
+        return True
+    return any(h.endswith("." + d) for d in
+               ((p or "").strip().lower() for p in deny)
+               if d and "*" not in d and "?" not in d)
+
+
+def payload_allowlist(declared: list[str] | None, scope: Scope) -> set[str]:
+    """The declared payload hosts that are actually permitted for this run.
+
+    A case declares hosts it names as DATA -- an attacker `Origin:`, an
+    unregistered `redirect_uri`, the cloud metadata address a target is asked
+    to fetch. See TestCase.payload_hosts for why that declaration exists.
+
+    One thing is enforced here rather than in the schema, because it depends
+    on the run's scope rather than on the case:
+
+      * `deny_hosts` wins. An operator who explicitly excluded a host must not
+        have that reversed by a case file. This is the one direction the
+        declaration must never move.
+
+    A declared host that is ALREADY in `allow_hosts` is kept rather than
+    filtered out, because it costs nothing: `check_url` succeeds on it before
+    the allowance is ever consulted, so the entry is inert either way.
+    """
+    out: set[str] = set()
+    for h in declared or []:
+        h = (h or "").strip().lower()
+        if not h or _payload_denied(h, scope.deny_hosts):
+            continue
+        out.add(h)
+    return out
+
+
+def _is_declared_payload(host: str, permitted: set[str]) -> bool:
+    """Whether `host` is a declared payload host, or a name UNDER one.
+
+    Subdomains are included, and that is not a glob: `a.b.example` is permitted
+    by a declaration of `b.example`, and nothing else is -- not a sibling, not
+    a different TLD, not a name that merely contains the string. Two probes
+    need it and neither can be written with an exact host:
+
+      * AUTHZ-05's suffix-confusion probe offers
+        `redirect_uri={{url}}.erlik-not-registered.example`, so the host it
+        names depends on the target and cannot be written down in advance;
+      * OAST works by assigning a unique subdomain per probe, so an exact-host
+        declaration would have to be edited every time.
+
+    `deny_hosts` has already removed anything the operator excluded, and
+    `_payload_denied` is applied to the full host below as well -- reaching
+    under a denied name exactly as far as this reaches under a declared one, so
+    denying a domain also denies the subdomains a declaration would grant.
+    """
+    h = (host or "").lower()
+    return any(h == d or h.endswith("." + d) for d in permitted)
+
+
 def check_url(url: str, scope: Scope) -> None:
     """Raise ScopeViolation if `url` is out of scope. No return value."""
     if not url:
         raise ScopeViolation("empty URL")
-    parsed = urlparse(url if "://" in url else f"http://{url}")
+    # urlparse RAISES on some malformed inputs rather than returning an empty
+    # host -- `ValueError: Invalid IPv6 URL` for anything with an unbalanced
+    # `[` after the scheme. _URL_RX over-extracts on purpose, so a bracket
+    # expression in a step's own grep pattern reaches here as a "URL":
+    #
+    #   grep -Eio "action=[\"']?http://[^\" >]*"
+    #
+    # produced `http://[^\"` and killed the entire run with a traceback --
+    # not a refusal, not a result, no finding either way. An unparseable URL
+    # must be REFUSED, the same as any other host that cannot be shown to be
+    # in scope; this guard exists to fail closed.
+    try:
+        parsed = urlparse(url if "://" in url else f"http://{url}")
+    except ValueError as e:
+        raise ScopeViolation(f"could not parse URL {url!r}: {e}") from e
     host = parsed.hostname or ""
     if not host:
         raise ScopeViolation(f"could not parse host from URL: {url!r}")
+    try:
+        parsed.port          # also raises ValueError on a bad port
+    except ValueError as e:
+        raise ScopeViolation(f"could not parse port from URL {url!r}: {e}") from e
     if _host_matches(host, scope.deny_hosts):
         raise ScopeViolation(f"host {host!r} is explicitly denied")
     if not scope.allow_hosts:
@@ -65,18 +173,34 @@ _BARE_HOST_RX = re.compile(
 )
 
 
-def check_command(command: str, scope: Scope, primary_url: str | None = None) -> None:
+def check_command(command: str, scope: Scope, primary_url: str | None = None,
+                  payload_hosts: list[str] | None = None) -> None:
     """Validate every URL-shaped substring in `command` against `scope`.
 
     Always checks the primary target URL first if supplied. Bare hostnames
     are checked too — most pentest tools accept `-t target.com` without a
     scheme, and we must not let those through.
     """
+    # The primary target is checked against the engagement scope alone. A
+    # payload declaration says "this string is data"; it must never widen where
+    # the case is aimed.
     if primary_url:
         check_url(primary_url, scope)
 
+    permitted = payload_allowlist(payload_hosts, scope)
+
+    def _check(candidate: str) -> None:
+        try:
+            check_url(candidate, scope)
+        except ScopeViolation:
+            host = _safe_host(candidate)
+            if (host is not None and _is_declared_payload(host, permitted)
+                    and not _payload_denied(host, scope.deny_hosts)):
+                return
+            raise
+
     for m in _URL_RX.finditer(command):
-        check_url(m.group(0), scope)
+        _check(m.group(0))
 
     # Extract bare hostnames only outside of already-matched URLs to avoid
     # double-counting the host portion of an http://… URL we just validated.
@@ -94,7 +218,7 @@ def check_command(command: str, scope: Scope, primary_url: str | None = None) ->
     masked = HANDLE_RX.sub(" ", masked)
     for m in _BARE_HOST_RX.finditer(masked):
         try:
-            check_url(m.group(0), scope)
+            _check(m.group(0))
         except ScopeViolation:
             # Bare-host matches frequently catch wordlist filenames like
             # /usr/share/wordlists/common.txt — only fail if the candidate

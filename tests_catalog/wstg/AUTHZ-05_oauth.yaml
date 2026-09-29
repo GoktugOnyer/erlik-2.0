@@ -1,6 +1,17 @@
 id: WSTG-AUTHZ-05
 name: OAuth Authorisation Flow Weaknesses
 category: Authorization
+# PAYLOAD, not a destination: both probes put this host in a `redirect_uri`
+# query VALUE to see whether the authorisation server accepts an unregistered
+# callback. curl connects only to `url`. `.example` is RFC 2606 reserved and
+# cannot be registered by anyone.
+#
+# The suffix-confusion probe offers `{{url}}.erlik-not-registered.example`, so
+# the host it names depends on the target -- which is why payload_hosts permits
+# names UNDER a declared domain rather than only the exact string.
+payload_hosts:
+  - erlik-not-registered.example
+
 attack_class: oauth
 severity: high
 references:
@@ -15,9 +26,14 @@ references:
 # authorisation server to do something it should refuse, and reports its
 # ANSWER; no victim session is involved.
 
+# NO `collaborator_host`. It was listed here and rendered by no step, which
+# advertised out-of-band confirmation this case never performed. It does not
+# need one: every probe reads the authorisation server's own `Location` header,
+# which comes straight back to erlik. Nothing about this flow is blind, so the
+# right fix is to stop offering the field rather than to invent a probe for it.
 target_schema:
   required: [url]
-  optional: [client_id, collaborator_host, cookie, auth_header]
+  optional: [client_id, cookie, auth_header]
 
 steps:
   # The core OAuth failure: an authorisation server that redirects to a

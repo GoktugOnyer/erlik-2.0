@@ -75,10 +75,42 @@ class TestClaimedDefaultsAreReal:
         assert _safe_mode_enabled() is True
 
     def test_api_token_guard_is_off_by_default(self):
-        """SECURITY.md says the API is unauthenticated by default. If that ever
-        stops being true, the doc must change with it."""
+        """SECURITY.md says the API is unauthenticated ON LOOPBACK by default.
+        If that ever stops being true, the doc must change with it."""
         import os
         assert not os.environ.get("ERLIK_API_TOKEN")
+
+    def test_the_off_loopback_fallback_is_on_by_default(self):
+        """The other half of that claim: no token plus a network-reachable
+        bind must refuse. Asserted against the real middleware, since the doc
+        now promises a default behaviour rather than the absence of one."""
+        import importlib
+        import os
+
+        from fastapi.testclient import TestClient
+
+        old = os.environ.get("ERLIK_HOST")
+        os.environ["ERLIK_HOST"] = "0.0.0.0"
+        try:
+            import orchestrator.main as M
+            importlib.reload(M)
+            assert TestClient(M.app).get("/api/engagements").status_code == 401
+        finally:
+            if old is None:
+                os.environ.pop("ERLIK_HOST", None)
+            else:
+                os.environ["ERLIK_HOST"] = old
+            import orchestrator.main as M
+            importlib.reload(M)
+
+    def test_the_opt_out_the_doc_names_exists(self):
+        """SECURITY.md tells operators ERLIK_ALLOW_UNAUTHENTICATED=1 waives the
+        refusal. A documented escape hatch that does nothing is worse than
+        none: it is what someone reaches for when the app stops working."""
+        import inspect
+
+        import orchestrator.main as M
+        assert "ERLIK_ALLOW_UNAUTHENTICATED" in inspect.getsource(M._api_token_guard)
 
     def test_bind_address_defaults_to_loopback(self):
         assert 'ERLIK_HOST="${ERLIK_HOST:-127.0.0.1}"' in (ROOT / "run.sh").read_text()
@@ -166,3 +198,187 @@ class TestEveryWriteSiteCarriesTheColumn:
             assert len(stmts) == expected, f"{table}: found {len(stmts)}, expected {expected}"
             for st in stmts:
                 assert "authorization_ref" in st, f"{table} INSERT missing the column: {st[:90]}"
+
+class TestPayloadHostsDeclaration:
+    """SECURITY.md now describes a way a case can name a host outside the
+    engagement. Every constraint it promises is asserted against the code --
+    a documented limit that does not hold is worse than no document."""
+
+    def test_globs_are_rejected_as_documented(self):
+        import pytest as _pytest
+        from pydantic import ValidationError
+
+        from orchestrator.testcase.schema import TestCase as _Case
+        with _pytest.raises(ValidationError):
+            _Case(id="X", name="n", category="c", payload_hosts=["*.evil.example"],
+                  steps=[{"name": "s", "tool": "curl", "command": "curl x"}])
+
+    def test_deny_hosts_still_wins_as_documented(self):
+        import pytest as _pytest
+
+        from orchestrator.testcase.scope import (Scope, ScopeViolation,
+                                                 check_command)
+        scope = Scope(allow_hosts=["127.0.0.1"], deny_hosts=["evil.example"])
+        with _pytest.raises(ScopeViolation):
+            check_command('curl -H "Origin: https://evil.example" "http://127.0.0.1/"',
+                          scope, payload_hosts=["evil.example"])
+
+    def test_it_does_not_cover_the_target_as_documented(self):
+        import pytest as _pytest
+
+        from orchestrator.testcase.scope import (Scope, ScopeViolation,
+                                                 check_command)
+        with _pytest.raises(ScopeViolation):
+            check_command('curl "http://evil.example/"', Scope(allow_hosts=["127.0.0.1"]),
+                          primary_url="http://evil.example/",
+                          payload_hosts=["evil.example"])
+
+    def test_the_agent_lane_is_untouched_as_documented(self):
+        """The doc says the agent lane has its own guard and its own OAST
+        allowlist, and that nothing there changed."""
+        import inspect
+
+        import orchestrator.tool_executor as TE
+        assert "payload_hosts" not in inspect.getsource(TE._scope_violation)
+        assert TE._OAST_DOMAINS
+
+    def test_the_collaborator_name_is_declared_by_the_runner_as_documented(self):
+        """The doc says the runner adds the minted name to the case's
+        `payload_hosts` for the run. Asserted against `run_test_case` itself
+        rather than against a copy of the list it builds: a test that rebuilt
+        the list would pass on a runner that stopped passing it along.
+        """
+        import inspect
+
+        from orchestrator.testcase.runner import run_test_case
+        src = inspect.getsource(run_test_case)
+        assert "step_payload_hosts" in src
+        assert "payload_hosts=step_payload_hosts" in src, (
+            "the runner no longer passes the minted collaborator to the scope "
+            "guard; the only step that can prove a blind finding is refused")
+        assert "payload_hosts=tc.payload_hosts" not in src
+
+    def test_denying_a_domain_denies_the_names_under_it_as_documented(self):
+        """SECURITY.md promises `deny_hosts: [oast.test]` blocks
+        `abcd1234.oast.test`. It did not before -- deny is a glob list."""
+        import pytest as _pytest
+
+        from orchestrator.testcase.scope import (Scope, ScopeViolation,
+                                                 check_command)
+        scope = Scope(allow_hosts=["127.0.0.1"], deny_hosts=["oast.test"])
+        with _pytest.raises(ScopeViolation):
+            check_command("curl http://abcd1234abcd1234.oast.test/erlik-oob",
+                          scope, payload_hosts=["abcd1234abcd1234.oast.test"])
+
+    def test_a_name_under_a_declared_host_is_still_allowed(self):
+        """The negative control for the two above: without it they pass on a
+        guard that refuses every payload host."""
+        from orchestrator.testcase.scope import Scope, check_command
+        check_command("curl http://abcd1234abcd1234.oast.test/erlik-oob",
+                      Scope(allow_hosts=["127.0.0.1"]),
+                      payload_hosts=["oast.test"])
+
+    def test_general_deny_matching_is_unchanged_as_documented(self):
+        """The doc says only the PAYLOAD path gained subdomain-reaching deny.
+        A `deny_hosts` entry elsewhere is still a glob matched against the
+        host, symmetric with `allow_hosts`."""
+        import inspect
+
+        from orchestrator.testcase import scope as S
+        assert "_payload_denied" not in inspect.getsource(S.check_url), (
+            "check_url now uses the payload deny rule; deny_hosts and "
+            "allow_hosts are no longer symmetric outside the payload path")
+
+    def test_the_three_cases_the_doc_names_do_declare(self):
+        from orchestrator.testcase import load_catalog
+        cat = load_catalog()
+        for tid in ("WSTG-CLNT-07", "WSTG-AUTHZ-05", "WSTG-INPV-19"):
+            assert cat[tid].payload_hosts, f"{tid} declares nothing"
+
+
+class TestOperatorClaims:
+    """SECURITY.md now describes an operator model. Each limitation it admits
+    to is asserted against the code, and so is each capability -- a document
+    that overstates what erlik does is the defect this project treats as equal
+    to a crash, and one that understates it goes stale just as quietly."""
+
+    def test_the_shared_token_is_still_not_a_person(self):
+        from orchestrator import operators as O
+        assert O.is_attributable(O.SHARED_TOKEN_OPERATOR) is False
+        assert O.is_attributable(O.UNAUTHENTICATED_OPERATOR) is False
+
+    def test_tokens_are_stored_hashed_as_documented(self):
+        import inspect
+
+        from orchestrator import operators as O
+        assert "sha256" in inspect.getsource(O.token_hash)
+        t = O.new_token()
+        assert O.token_hash(t) != t
+
+    def test_revocation_does_not_delete_as_documented(self):
+        import inspect
+
+        from orchestrator import operators as O
+        src = inspect.getsource(O.revoke)
+        assert "DELETE" not in src.upper().replace("DELETING", "")
+
+    def test_minting_is_admin_only_as_documented(self):
+        """The doc says only an admin may mint, revoke or promote. This
+        replaces an earlier test asserting the opposite -- that one failed the
+        moment the role landed, which is the drift guard working."""
+        import inspect
+
+        import orchestrator.main as M
+        for fn in (M.create_operator, M.revoke_operator, M.set_operator_role):
+            assert "_require_admin(request)" in inspect.getsource(fn), (
+                f"{fn.__name__} does not require admin; SECURITY.md says it does"
+            )
+
+    def test_new_operators_are_not_admin_by_default_as_documented(self):
+        import inspect
+
+        from orchestrator import operators as O
+        sig = inspect.signature(O.create)
+        assert sig.parameters["role"].default == O.ROLE_OPERATOR
+
+    def test_the_shared_token_is_admin_but_not_counted_as_documented(self):
+        """Both halves of the load-bearing sentence: it can bootstrap, and it
+        does not keep the last human admin removable."""
+        import inspect
+
+        from orchestrator import operators as O
+        src = inspect.getsource(O._real_admins)
+        assert "SHARED_TOKEN_OPERATOR" in src and "NOT IN" in src
+
+    def test_the_last_admin_is_protected_as_documented(self):
+        import inspect
+
+        from orchestrator import operators as O
+        assert "LastAdminError" in inspect.getsource(O.revoke)
+        assert "LastAdminError" in inspect.getsource(O.set_role)
+
+    def test_provenance_is_recorded_as_documented(self):
+        import inspect
+
+        from orchestrator import operators as O
+        assert "created_by" in inspect.getsource(O.create)
+
+    def test_the_three_stamped_tables_are_the_ones_documented(self):
+        import asyncio
+        import pathlib
+        import sqlite3
+        import tempfile
+
+        import orchestrator.database as db_mod
+        with tempfile.TemporaryDirectory() as d:
+            old = db_mod.DB_DIR, db_mod.DB_PATH
+            db_mod.DB_DIR = pathlib.Path(d)
+            db_mod.DB_PATH = pathlib.Path(d) / "t.db"
+            try:
+                asyncio.run(db_mod.init_db())
+                con = sqlite3.connect(db_mod.DB_PATH)
+                for t in ("sessions", "v2_runs", "engagement_revisions"):
+                    cols = [r[1] for r in con.execute(f"PRAGMA table_info({t})")]
+                    assert "operator_id" in cols, t
+            finally:
+                db_mod.DB_DIR, db_mod.DB_PATH = old

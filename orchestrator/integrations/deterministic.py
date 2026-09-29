@@ -561,7 +561,20 @@ class CatalogueAdapter(BaseAdapter):
         # Code that cannot be read implies a record that is not there.
         result = StageResult(metadata={"executed_checks": 0})
         policy = EgressPolicy(sandbox.policy)
-        def check(command, scope, primary_url=None):
+        def check(command, scope, primary_url=None, payload_hosts=None):
+            # `payload_hosts` IS ACCEPTED AND DELIBERATELY UNUSED, and the reason is
+            # structural rather than an omission. It exists so the catalogue lane's
+            # `check_command` can tell a URL-shaped string that is DATA — an OAST marker
+            # sitting in a query value — from one that is a DESTINATION, because that
+            # checker scans every URL-shaped substring of the command.
+            #
+            # This one does not scan substrings. `curl_request` returns the single URL
+            # curl would actually connect to, and that is the only thing checked here, so
+            # a declared payload host never reaches a decision this function makes. There
+            # is nothing for the declaration to widen. If this ever starts reading the
+            # command body, it has to honour the list — the catalogue lane would otherwise
+            # refuse a marker that this lane admits, which is exactly the divergence
+            # test_every_execution_path_refuses_the_same_things.py exists to catch.
             _, url, method = curl_request(command)
             check_url(url, scope)
             permitted, reason = policy.check(url, method)
