@@ -15,7 +15,7 @@ below. When the two conflict, ask rather than assume.
 | Lane | Entry | Persists to | Notes |
 |---|---|---|---|
 | **Agent loop** | `POST /api/sessions/{id}/start` | `sessions`, `findings`, `steps` | LLM plans, orchestrator executes. Every reported thesis result comes from here. |
-| **Deterministic** | `/api/v2/*`, `orchestrator/testcase/` | `v2_runs`, `v2_findings` | YAML WSTG cases (29 in `tests_catalog/wstg/`), fixed command sequences with regex/status/llm evaluators. No thesis result uses it. |
+| **Deterministic** | `/api/v2/*`, `orchestrator/testcase/` | `v2_runs`, `v2_findings` | YAML WSTG cases (35 in `tests_catalog/wstg/`), fixed command sequences with regex/status/llm evaluators. No thesis result uses it. |
 
 The two lanes now talk **both ways**. `orchestrator/handoff.py` gives the agent
 the deterministic lane's results at session start; the `run_case` action lets
@@ -35,7 +35,7 @@ describes this accurately; earlier drafts did not.
 
 ## Layout
 
-- `orchestrator/main.py` — ~9.4k lines, routes + agent loop + prompt constants
+- `orchestrator/main.py` — ~10.2k lines, routes + agent loop + prompt constants
 - `orchestrator/tool_executor.py` — admission control and dispatch
 - `orchestrator/testcase/` — the deterministic lane
 - `dashboard/templates/index.html` — ~7.5k lines, **single file, all JS inline, no
@@ -45,7 +45,9 @@ describes this accurately; earlier drafts did not.
   Every case defect found on 2026-09-05 came from running these, none from
   reading YAML. A case must fire on the flaw AND stay silent on the control:
   half those defects were false positives.
-- `tests/` — 51 files, 1737 passing + 31 skipped. Run with `.venv/bin/python -m pytest -q`.
+- `tests/` — 190 files; a fresh clone reports 4751 passing + 89 skipped on its
+  first run (see README for why the second run differs). Run with
+  `.venv/bin/python -m pytest -q`.
 
 ## Conventions this codebase actually holds itself to
 
@@ -91,7 +93,7 @@ caught. Follow them.
   Product changes may drift from these — that is fine, but say so rather than
   editing the historical record.
 - **What was out of scope for a thesis is now roadmap**: per-session rate
-  limiting, PDF and HackerOne export, and WSTG breadth (29 of ~90+ cases).
+  limiting, PDF and HackerOne export, and WSTG breadth (35 of ~90+ cases).
   OAST has moved: `orchestrator/collaborator.py` mints a per-run name, cases
   declare `needs_collaborator` and steps `oob: true`, and a step whose result
   nobody could observe is reported not-assessed rather than run. It is off
