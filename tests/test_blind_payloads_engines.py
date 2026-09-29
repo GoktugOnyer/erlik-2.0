@@ -61,18 +61,36 @@ def _up(engine):
     # runs a temporary server while it initialises, and `mysqladmin ping`
     # answers from it — so every statement afterwards failed silently and every
     # payload looked fast. A ping that lies is worse than no check.
+    # A REAL QUERY CAN LIE TOO, and Postgres is where it does. Its entrypoint runs a
+    # temporary server for initdb, which accepts connections on the socket, and then
+    # SHUTS IT DOWN and starts the real one. So `SELECT 1` succeeds, the loop breaks,
+    # and the CREATE TABLE a moment later hits the gap:
+    #
+    #     psql: connection to server on socket "/var/run/postgresql/.s.PGSQL.5432"
+    #     failed: No such file or directory
+    #
+    # Measured 2026-09-29: 11 errors in one `-m docker` run and 11 passes in the
+    # next, on the same commit. A flaky Docker job is one nobody reads.
+    #
+    # So the wait is on the SETUP SUCCEEDING, not on a probe that precedes it. The
+    # group is re-runnable from the top -- `DROP TABLE IF EXISTS` first -- so a
+    # restart mid-sequence costs one retry rather than a failed run.
+    setup = ("DROP TABLE IF EXISTS users",
+             "CREATE TABLE users (id varchar(16), uid int, name varchar(16))",
+             "INSERT INTO users VALUES ('1',1,'admin'),('2',2,'gordonb'),('3',3,'pablo')")
+    last = ""
     for _ in range(90):
-        if _run(engine, "SELECT 1")[1].returncode == 0:
-            break
+        failed = None
+        for statement in setup:
+            done = _run(engine, statement)[1]
+            if done.returncode != 0:
+                failed = done.stderr.strip()
+                break
+        if failed is None and _run(engine, "SELECT COUNT(*) FROM users")[1].stdout.strip().endswith("3"):
+            return
+        last = failed or "the row count did not come back as 3"
         time.sleep(1)
-    else:
-        pytest.skip(f"{engine} never became ready")
-    for statement in ("DROP TABLE IF EXISTS users",
-                      "CREATE TABLE users (id varchar(16), uid int, name varchar(16))",
-                      "INSERT INTO users VALUES ('1',1,'admin'),('2',2,'gordonb'),('3',3,'pablo')"):
-        done = _run(engine, statement)[1]
-        assert done.returncode == 0, f"{engine} setup failed: {done.stderr}"
-    assert _run(engine, "SELECT COUNT(*) FROM users")[1].stdout.strip().endswith("3")
+    pytest.skip(f"{engine} never became usable: {last}")
 
 
 def _sql(engine, query):
@@ -87,11 +105,18 @@ def _sql(engine, query):
 
 @pytest.fixture(scope="module")
 def engines():
-    for engine in ENGINES:
-        _up(engine)
-    yield
-    for spec in ENGINES.values():
-        subprocess.run(["docker", "rm", "-f", "-v", spec["container"]], capture_output=True)
+    # try/finally, because a fixture that raises BEFORE its yield never reaches the
+    # teardown after it. The run where Postgres lost its socket left `erlik-test-pg`
+    # running for the rest of the session and into the next one -- the next run then
+    # reused a container it had not set up, which is how a flake becomes an order
+    # dependency.
+    try:
+        for engine in ENGINES:
+            _up(engine)
+        yield
+    finally:
+        for spec in ENGINES.values():
+            subprocess.run(["docker", "rm", "-f", "-v", spec["container"]], capture_output=True)
 
 
 def payload(step_name):

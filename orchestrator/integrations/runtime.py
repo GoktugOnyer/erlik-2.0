@@ -208,16 +208,50 @@ class Sandbox:
             "control_urls": sorted(control_urls or []),
         }
 
-    async def __aenter__(self):
+    # Extracted so it can be tested without a daemon. The failure it guards
+    # against is invisible on macOS and only reachable through the `docker` CI
+    # job, which is the worst possible place to find out.
+    def _prepare_directories(self):
+        """Create the bind-mount directories with modes the containers can use."""
         for path in (self.input, self.output, self.directory / "policy", self.directory / "audit"):
             path.mkdir(parents=True, exist_ok=True, mode=0o700)
-        # Ephemeral output shared with differently-privileged scanner images.
-        self.output.chmod(0o777)
+        # EVERY BIND MOUNT HAS TO BE REACHABLE BY A CAPABILITY-LESS ROOT.
+        #
+        # These containers run as root and with `--cap-drop=ALL`, which takes
+        # CAP_DAC_OVERRIDE with it -- so root does NOT bypass the permission bits, and
+        # a 0700 directory or a 0600 file written by the host user is simply refused.
+        # `output` already carried this treatment; `policy`, `audit` and `input` were
+        # missed, and the whole lane died at startup on a Linux host:
+        #
+        #     PermissionError: [Errno 13] Permission denied: '/policy/policy.json'
+        #     RuntimeError: egress proxy did not become ready
+        #
+        # It has never failed on a developer machine and it never will: Docker Desktop
+        # and OrbStack map bind-mount ownership to the container user, so the bits do
+        # not bite on macOS. Reproduced on a Linux filesystem (a named volume) instead
+        # -- root with default caps reads the file, root with --cap-drop=ALL does not.
+        #
+        # This costs nothing on the host. The privacy boundary is `runtime_root()`,
+        # which is created 0700 and re-chmodded 0700 on every call; these directories
+        # live under it, so widening them changes who can reach them by exactly
+        # nothing. The bind mount is of the directory itself, so its own mode is all
+        # the container ever sees.
+        self.output.chmod(0o777)     # written by scanners
+        (self.directory / "audit").chmod(0o777)   # written by the proxy
+        (self.directory / "policy").chmod(0o755)  # read by the proxy
+        self.input.chmod(0o711)      # traversable; the files carry their own 0644
+
+    async def __aenter__(self):
+        self._prepare_directories()
         self._write_manifest()
-        private_write(self.directory / "policy" / "policy.json", json.dumps(self.policy))
+        policy_file = self.directory / "policy" / "policy.json"
+        private_write(policy_file, json.dumps(self.policy))
+        policy_file.chmod(0o644)
         additional_ca = os.environ.get("ERLIK_INTEGRATION_CA_FILE")
         if additional_ca:
-            private_write(self.directory / "policy" / "extra-ca.pem", Path(additional_ca).read_bytes())
+            extra_ca = self.directory / "policy" / "extra-ca.pem"
+            private_write(extra_ca, Path(additional_ca).read_bytes())
+            extra_ca.chmod(0o644)
         try:
             await docker("network", "create", "--internal", "--label", OWNER, self.network)
             args = ["create", "--name", self.proxy, "--label", OWNER, "--network", self.network,

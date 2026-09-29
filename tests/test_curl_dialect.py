@@ -473,3 +473,33 @@ class TestWhatTheLaneCannotRunIsDeclared:
             "an EXCLUDED case is also reported runnable -- the two disagree")
         assert set(self.EXCLUDED) <= set(load_catalog()), (
             "EXCLUDED names a case the catalogue no longer has")
+
+    def test_the_coverage_benchmark_claims_only_what_the_lane_can_reach(self):
+        """WSTG-SESS-02 leaving took a scored rule out of the release benchmark with
+        it, and this is what remembers to put it back.
+
+        tests/test_integration_benchmark.py scores recall against a declared
+        ground-truth set. ("cookie", "/hidden") was one of three entries and came
+        from SESS-02; with the case unselectable, `AssessmentConfig` refuses the
+        whole configuration, so the benchmark could not run at all -- a
+        ValidationError in a Docker-gated test that only pull requests execute.
+
+        Stated as a BICONDITIONAL rather than "the benchmark must not claim cookie".
+        The fixture still plants the flagless cookie, so the moment SESS-02 is
+        runnable again the dimension should return, and a one-directional assertion
+        would let it stay at two rules forever with nothing complaining.
+        """
+        import pathlib
+        source = (pathlib.Path(__file__).resolve().parents[1] / "tests"
+                  / "test_integration_benchmark.py").read_text()
+        declared = source.split("EXPECTED = {", 1)[1].split("}", 1)[0]
+        claims_cookie = '"cookie"' in declared
+        runnable = "WSTG-SESS-02" in set(executable_test_cases())
+        assert claims_cookie == runnable, (
+            "the benchmark claims the cookie dimension "
+            + ("but WSTG-SESS-02 is not lane-runnable, so the configuration is "
+               "refused and the benchmark cannot run"
+               if claims_cookie else
+               "no longer, but WSTG-SESS-02 IS lane-runnable again — add "
+               '("cookie", "/hidden") back to EXPECTED, put WSTG-SESS-02 back in '
+               "test_cases, and restore the third scored rule in `limitations`"))

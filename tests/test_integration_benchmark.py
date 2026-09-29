@@ -20,7 +20,22 @@ from orchestrator.integrations.service import assertion_controls, register
 pytestmark = [pytest.mark.docker, pytest.mark.skipif(os.environ.get("ERLIK_DOCKER_TESTS") != "1", reason="local Docker benchmark opt-in")]
 ROOT = Path(__file__).resolve().parents[1]
 OPERATIONS = {"/visible", "/hidden", "/api/private", "/api/error"}
-EXPECTED = {("cookie", "/hidden"), ("cors", "/hidden"), ("authorization", "/api/private")}
+# TWO SCORED RULES, AND IT WAS THREE. ("cookie", "/hidden") is gone because
+# WSTG-SESS-02 is no longer runnable in the assessment lane: one of its steps became
+# a `bash -c '...'` shell program, which `curl_request` refuses, and the rule is all
+# steps or none (see test_curl_dialect.TestWhatTheLaneCannotRunIsDeclared). Selecting
+# it here is now refused at configuration time, which is how this surfaced -- a
+# ValidationError in a Docker-gated test, on a CI job that runs only on pull
+# requests.
+#
+# The fixture STILL PLANTS the flagless cookie on /hidden, deliberately: nothing
+# about the target changed, only what the lane can be pointed at. When SESS-02
+# returns to the lane the dimension comes back by adding this line, with no fixture
+# change and no re-baselining of the target.
+#
+# This is a measurement loss and is stated as one in `limitations` below, which is
+# what a reader of the published coverage report sees.
+EXPECTED = {("cors", "/hidden"), ("authorization", "/api/private")}
 
 
 @pytest.fixture
@@ -165,7 +180,7 @@ async def test_integrated_coverage_and_finding_benchmark(benchmark_lab):
     identity_id = SecretStore().put(identity.model_dump())
     cfg = AssessmentConfig(scope={"allow_hosts": ["target"], "allow_ports": [8080]}, identity_ids=[identity_id],
         stages=["katana", "zap", "schemathesis"], active=True,
-        test_cases=["WSTG-SESS-02", "WSTG-CLNT-07"], schema_input={"url": "http://target:8080/openapi.json"},
+        test_cases=["WSTG-CLNT-07"], schema_input={"url": "http://target:8080/openapi.json"},
         security_assertions=[{"identity_id": identity_id, "description": "Reader can access the admin object",
                               "request": {"url": "http://target:8080/api/private"}, "forbidden_marker": "admin-object-canary"}],
         budget={"stage_seconds": 120, "assessment_seconds": 600, "requests_per_second": 20})
@@ -207,7 +222,7 @@ async def test_integrated_coverage_and_finding_benchmark(benchmark_lab):
     report = {"fixture_version": "1.0", "fixture_sha256": hashlib.sha256(benchmark_lab.read_bytes()).hexdigest(),
         "baseline_crawler_sha256": hashlib.sha256((ROOT / "scripts/pw-crawl.js").read_bytes()).hexdigest(),
         "protocol": "Same local target, identity and budgets. Baseline: original crawler plus selected catalogue checks. Integrated: Katana, passive ZAP, active Schemathesis and the same catalogue checks.",
-        "limitations": "Scored rules are cookie attributes, credentialed CORS reflection and explicit authorization assertion only. Other scanner alerts remain unadjudicated. Evidence metric verifies stored evidence references, not manual evidentiary sufficiency. No client-target generalization.",
+        "limitations": "Scored rules are credentialed CORS reflection and explicit authorization assertion only. Cookie attributes WERE a third scored rule and are not any more: WSTG-SESS-02 stopped being runnable in the assessment lane on 2026-09-29 when one of its steps became a shell program the lane's curl parser refuses, so the lane cannot be pointed at it. The fixture still plants that flaw. Other scanner alerts remain unadjudicated. Evidence metric verifies stored evidence references, not manual evidentiary sufficiency. No client-target generalization.",
         "arms": arms}
     # Written BEFORE the assertions. A benchmark that only produces its report
     # when it passes cannot tell you what regressed when it fails, which is the
