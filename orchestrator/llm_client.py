@@ -5,6 +5,8 @@ import httpx
 import json
 import re
 
+from orchestrator.throttle import spacing_wait
+
 # Provider selection via env. Default keeps existing local Ollama behaviour.
 #   ERLIK_LLM_PROVIDER = ollama | openai
 #   ERLIK_LLM_MODEL    = model id override (provider-specific)
@@ -186,7 +188,9 @@ async def _pace() -> None:
         return
     interval = 60.0 / LLM_RPM
     async with _rate_lock:
-        wait = _last_call_at + interval - time.monotonic()
+        # Same arithmetic as SessionThrottle.before_llm, via the shared helper
+        # so the process-wide and per-session limiters cannot drift apart.
+        wait = spacing_wait(_last_call_at, interval, time.monotonic())
         if wait > 0:
             await asyncio.sleep(wait)
         _last_call_at = time.monotonic()

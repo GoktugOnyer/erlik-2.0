@@ -1897,7 +1897,8 @@ async def _load_primitives(session_id: str, chain_id: str | None = None) -> list
 async def run_ai_review(session_id: str, model: str, runcfg: dict,
                         enabled_tools: list[str], force: bool | None = None,
                         observed_ports: list[int] | None = None,
-                        observed_tech: list[str] | None = None) -> dict | None:
+                        observed_tech: list[str] | None = None,
+                        throttle: "SessionThrottle | None" = None) -> dict | None:
     """Critique the finished run and persist the suggestions. Never raises.
 
     Advisory only: this writes to `session_reviews` and nothing else. It creates
@@ -2035,6 +2036,10 @@ async def run_ai_review(session_id: str, model: str, runcfg: dict,
             print(f"[review {session_id[:8]}] reviewing with {review_model} "
                   f"(attack model was {model})", flush=True)
 
+        # This review is one of the session's LLM calls, so the per-session
+        # llm_rpm ceiling covers it too. No-op when throttle is None or off.
+        if throttle is not None:
+            await throttle.before_llm()
         raw = await llm_client.chat(
             [{"role": "system", "content": "You are a precise, sceptical security reviewer."},
              {"role": "user", "content": prompt}], model=review_model)
@@ -2139,7 +2144,8 @@ async def _set_poc_status(finding_id: int, status: str, verified: bool = False,
 
 async def poc_reverify_session(session_id: str, target_url: str, enabled_tools: list,
                                force: bool | None = None,
-                               safe_mode: bool | None = None) -> int:
+                               safe_mode: bool | None = None,
+                               throttle: "SessionThrottle | None" = None) -> int:
     """Re-run a lightweight PoC for high/critical findings and confirm by signature.
 
     Off unless enabled (run-config `poc_verify` / ERLIK_POC_VERIFY). For each
@@ -2208,6 +2214,12 @@ async def poc_reverify_session(session_id: str, target_url: str, enabled_tools: 
                 await _set_poc_status(r["id"], "untested")
                 untested += 1
                 continue
+
+            # Each re-verification is a real request to the target, so it is
+            # paced by the same per-session knob as the agent loop's tool calls.
+            # No-op when throttle is None or the delay is 0.
+            if throttle is not None:
+                await throttle.before_tool()
 
             quoted = "'" + url.replace("'", "'\\''") + "'"  # POSIX single-quote escape
             res = await execute_tool(f"curl -sS -i -m 15 {quoted}",
@@ -2517,7 +2529,8 @@ ALLOWED_UNGATED_REPORT_PATHS = {
 async def _generate_report(session_id: str, model: str, target_url: str,
                            session_type: str, vuln_category: str,
                            total_steps: int, total_findings: int,
-                           total_duration_ms: int):
+                           total_duration_ms: int,
+                           throttle: "SessionThrottle | None" = None):
     """Generate a hybrid pentest report: programmatic data sections + LLM analysis."""
     from orchestrator.redaction import mask as _mask
     db = await get_db()
@@ -2892,6 +2905,10 @@ async def _generate_report(session_id: str, model: str, target_url: str,
     start_time = time.time()
     llm_analysis = ""
     try:
+        # The report's analysis pass is a session LLM call, so the per-session
+        # llm_rpm ceiling covers it. No-op when throttle is None or off.
+        if throttle is not None:
+            await throttle.before_llm()
         llm_analysis = await llm_client.chat(
             [{"role": "user", "content": prompt}],
             model=model,
@@ -4491,6 +4508,16 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
                 "type": "log", "phase": "recon",
                 "message": f"Nettacker pre-scan running (deterministic recon, scenario={runcfg['nettacker_scenario']})…",
             })
+            # The pre-scan reaches the target like any other tool, so the pacing
+            # promise ("before every tool call") has to cover it too. before_tool
+            # is a no-op when the knob is off. (It paces the invocation, not the
+            # scanner's own internal request rate, which is Nettacker's to set.)
+            _nt_waited = await throttle.before_tool()
+            if _nt_waited > 0:
+                await manager.broadcast(session_id, {
+                    "type": "log", "phase": "recon",
+                    "message": f"THROTTLE: paused {_nt_waited:.1f}s before pre-scan",
+                })
             _nt = await _nt_mod.run_nettacker(target_url, scenario=runcfg["nettacker_scenario"])
             if _nt.get("error"):
                 print(f"[nettacker {session_id[:8]}] {_nt['error']}", flush=True)
@@ -5723,7 +5750,8 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
                 await manager.broadcast(session_id, {"type": "phase", "active": "verify"})
             n_pocv = await poc_reverify_session(session_id, target_url, enabled_tools,
                                                 force=runcfg["poc_verify"],
-                                                safe_mode=runcfg.get("safe_mode", True))
+                                                safe_mode=runcfg.get("safe_mode", True),
+                                                throttle=throttle)
             if n_pocv:
                 await manager.broadcast(session_id, {
                     "type": "log", "phase": "verify",
@@ -5743,6 +5771,7 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
                 total_steps=step_number,
                 total_findings=findings_count,
                 total_duration_ms=total_duration_ms,
+                throttle=throttle,
             )
             await manager.broadcast(session_id, {
                 "type": "log", "phase": "report",
@@ -5758,7 +5787,8 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
                                               enabled_tools,
                                               force=runcfg.get("ai_review"),
                                               observed_ports=_observed_ports,
-                                              observed_tech=_observed_tech)
+                                              observed_tech=_observed_tech,
+                                              throttle=throttle)
                 if _review:
                     from orchestrator.review import render_review_markdown
                     _rv_md = render_review_markdown(_review)

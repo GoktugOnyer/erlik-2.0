@@ -2430,22 +2430,20 @@
                          about how a run behaves. Declared here rather than hidden
                          so an operator can see the target is being paced. -->
                     <label class="font-mono rc-help" style="font-size:0.58rem;"
-                        data-tip="TOOL DELAY — Seconds to pause BEFORE every tool call and deterministic case this session runs. Paces the agent so it does not hit a customer target as fast as the model emits actions. 0 or blank = no delay (default, no pacing). Range 0–60s.">tool delay<span class="rc-q">?</span></label>
+                        data-tip="TOOL DELAY — Seconds to pause BEFORE every target-touching step this session runs: each agent tool call and deterministic case, the Nettacker pre-scan, and each PoC re-verification request. Paces the session so it does not hit a customer target as fast as the model emits actions. 0 or blank = no delay (default, no pacing). Range 0–60s.">tool delay<span class="rc-q">?</span></label>
                     <div class="flex items-center gap-2">
                         <input id="rc-tool-delay" type="number" min="0" max="60" step="0.5"
                             class="input-field font-mono px-2 py-1 rounded"
-                            style="font-size:0.58rem; width:110px;" placeholder="0"
-                            oninput="previewTuning()">
+                            style="font-size:0.58rem; width:110px;" placeholder="0">
                         <span class="font-mono" style="font-size:0.55rem; opacity:.6;">seconds, 0&ndash;60 (0 = off)</span>
                     </div>
 
                     <label class="font-mono rc-help" style="font-size:0.58rem;"
-                        data-tip="LLM RATE — Ceiling on LLM calls per minute for THIS session, spaced client-side. Keeps one session under a hosted provider's per-key quota without slowing others. 0 or blank = uncapped (default). Range 0–600 rpm.">LLM rpm<span class="rc-q">?</span></label>
+                        data-tip="LLM RATE — Ceiling on LLM calls per minute for THIS session, spaced client-side. Covers every model call the session makes — agent turns plus the end-of-run report and AI review. It paces this one session only; it does NOT bound a hosted provider's shared per-key quota across concurrent sessions (that is the process-wide ERLIK_LLM_RPM). 0 or blank = uncapped (default). Range 0–600 rpm.">LLM rpm<span class="rc-q">?</span></label>
                     <div class="flex items-center gap-2">
                         <input id="rc-llm-rpm" type="number" min="0" max="600" step="1"
                             class="input-field font-mono px-2 py-1 rounded"
-                            style="font-size:0.58rem; width:110px;" placeholder="0"
-                            oninput="previewTuning()">
+                            style="font-size:0.58rem; width:110px;" placeholder="0">
                         <span class="font-mono" style="font-size:0.55rem; opacity:.6;">req/min, 0&ndash;600 (0 = off)</span>
                     </div>
                 </div>

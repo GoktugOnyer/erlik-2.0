@@ -181,9 +181,69 @@ def test_agent_loop_paces_both_the_llm_and_the_tool_calls():
     src = _main_src()
     assert "await throttle.before_llm()" in src
     assert "await throttle.before_tool()" in src
-    # run_tool AND run_case both reach the target, so both are paced.
-    assert src.count("await throttle.before_tool()") >= 2, (
-        "both the run_tool and the run_case paths must be paced")
+
+
+def test_every_target_touching_step_is_paced():
+    """The tool-delay tooltip promises to pause before EVERY target-touching
+    step. Four reach the target: the agent-loop run_tool, run_case, the Nettacker
+    pre-scan, and each PoC re-verification curl. Drop the pace from any one and
+    this count falls — the honesty gap the review flagged (findings 1)."""
+    src = _main_src()
+    assert src.count("await throttle.before_tool()") >= 4, (
+        "run_tool, run_case, the pre-scan and PoC re-verify must all be paced")
+
+
+def test_every_session_llm_call_is_paced():
+    """The llm_rpm ceiling is 'for THIS session', so it must cover every model
+    call the session makes: the agent-loop generation, the AI review, and the
+    report analysis pass (finding 2)."""
+    src = _main_src()
+    assert src.count("await throttle.before_llm()") >= 3, (
+        "the generation call, the AI review and the report LLM call must "
+        "all be paced")
+
+
+def test_the_side_helpers_accept_and_are_handed_a_throttle():
+    """A helper that reaches the target or the model but takes no throttle can
+    never be paced. poc_reverify_session, run_ai_review and _generate_report all
+    carry the parameter, and the loop passes it to each."""
+    src = _main_src()
+    for fn in ("poc_reverify_session", "run_ai_review", "_generate_report"):
+        assert f"async def {fn}(" in src, fn
+    assert src.count('throttle: "SessionThrottle | None" = None') >= 3, (
+        "a target/model-touching helper is missing the throttle parameter")
+    assert src.count("throttle=throttle") >= 3, (
+        "the loop is not handing the throttle to every helper that needs it")
+
+
+# ------------------------------------------------- the two limiters cannot drift
+# before_llm and llm_client._pace both space calls client-side. They used to
+# carry two copies of the same arithmetic; a shared helper keeps them honest.
+
+def test_spacing_wait_is_off_when_the_interval_is_off():
+    from orchestrator.throttle import spacing_wait
+    assert spacing_wait(100.0, 0.0, 100.0) == 0.0
+    assert spacing_wait(100.0, -1.0, 100.0) == 0.0
+
+
+def test_spacing_wait_returns_zero_once_the_slot_has_elapsed():
+    from orchestrator.throttle import spacing_wait
+    assert spacing_wait(100.0, 1.0, 102.0) == 0.0
+
+
+def test_spacing_wait_returns_the_remaining_slot():
+    from orchestrator.throttle import spacing_wait
+    assert spacing_wait(100.0, 1.0, 100.3) == pytest.approx(0.7, abs=1e-9)
+
+
+def test_both_client_side_limiters_go_through_the_shared_helper():
+    """Guards against the copies drifting back apart: both the per-session and
+    the process-wide limiter must source their wait from spacing_wait."""
+    import inspect
+    import orchestrator.llm_client as L
+    from orchestrator.throttle import SessionThrottle
+    assert "spacing_wait" in inspect.getsource(L._pace)
+    assert "spacing_wait" in inspect.getsource(SessionThrottle.before_llm)
 
 
 # ---------------------------------------------------------- dashboard wiring
@@ -220,8 +280,8 @@ def test_the_controls_are_labelled_with_a_tooltip():
     """Consistent with the other run-config controls, which all carry an
     explanatory tooltip rather than a bare input."""
     h = _index_html()
-    td = h[h.index('id="rc-tool-delay"') - 400:h.index('id="rc-tool-delay"')]
-    rpm = h[h.index('id="rc-llm-rpm"') - 400:h.index('id="rc-llm-rpm"')]
+    td = h[h.index('id="rc-tool-delay"') - 800:h.index('id="rc-tool-delay"')]
+    rpm = h[h.index('id="rc-llm-rpm"') - 800:h.index('id="rc-llm-rpm"')]
     assert "TOOL DELAY" in td and "data-tip" in td
     assert "LLM RATE" in rpm and "data-tip" in rpm
 

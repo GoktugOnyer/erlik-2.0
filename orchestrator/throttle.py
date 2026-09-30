@@ -29,6 +29,19 @@ import asyncio
 import time
 
 
+def spacing_wait(last_call_at: float, interval: float, now: float) -> float:
+    """Seconds to wait so consecutive calls are at least `interval` apart.
+
+    The one piece of arithmetic shared by the two client-side limiters in this
+    codebase — this per-session `SessionThrottle` and the process-wide
+    `llm_client._pace` — extracted so they cannot drift. `interval <= 0` (the
+    limiter is off) and a slot that has already elapsed both return 0.0.
+    """
+    if interval <= 0:
+        return 0.0
+    return max(0.0, last_call_at + interval - now)
+
+
 class SessionThrottle:
     """Paces one agent session's tool and LLM calls.
 
@@ -73,8 +86,8 @@ class SessionThrottle:
         """
         if self.llm_rpm <= 0:
             return 0.0
-        wait = self._last_llm_at + self._llm_interval - self._clock()
+        wait = spacing_wait(self._last_llm_at, self._llm_interval, self._clock())
         if wait > 0:
             await asyncio.sleep(wait)
         self._last_llm_at = self._clock()
-        return max(0.0, wait)
+        return wait
