@@ -63,6 +63,50 @@ class TestMergeAgentAuth:
         assert merged == original, "a target with no session must not gain fields"
 
 
+def _badge(tmp_path, monkeypatch, *, seed=True):
+    import orchestrator.database as db_mod
+    monkeypatch.setattr(db_mod, "DB_PATH", str(tmp_path / "ab.db"))
+    from orchestrator.main import _auth_badge
+
+    async def go():
+        await db_mod.init_db()
+        if seed:
+            db = await db_mod.get_db()
+            cid = await C.store(db, "http://t.example", "a", "u", "p", role="high")
+            await C.save_session(db, cid, "t.example:80", token=JWT,
+                                 status="verified")
+            await db.commit()
+            await db.close()
+        return await _auth_badge("http://t.example")
+
+    return asyncio.run(go())
+
+
+class TestAuthBadge:
+    def test_it_names_the_verified_role_without_any_secret(self, tmp_path, monkeypatch):
+        badge = _badge(tmp_path, monkeypatch)
+        assert badge, "a verified session should produce a badge"
+        assert "high" in badge
+        assert JWT not in badge, "the badge leaked the token"
+        assert "run_case" in badge
+
+    def test_it_is_bounded(self, tmp_path, monkeypatch):
+        # Shares the system-prompt budget with handoff/memory/primitives.
+        assert len(_badge(tmp_path, monkeypatch)) <= 400
+
+    def test_no_verified_session_produces_no_badge(self, tmp_path, monkeypatch):
+        assert _badge(tmp_path, monkeypatch, seed=False) == ""
+
+
+def test_the_agent_loop_gates_the_badge_on_the_lever():
+    """Wiring guard: the auth badge must be injected only under agent_auth."""
+    import pathlib
+    src = (pathlib.Path(__file__).resolve().parents[1]
+           / "orchestrator" / "main.py").read_text()
+    assert 'if runcfg.get("agent_auth"):' in src
+    assert "_ab = await _auth_badge(target_url)" in src
+
+
 def test_the_run_case_action_gates_the_merge_on_the_lever():
     """Wiring guard: a run_config key nothing reads is this codebase's signature
     defect. agent_auth must gate the merge in the run_case action."""

@@ -4156,6 +4156,33 @@ async def _merge_agent_auth(case_target: dict, target_url: str) -> dict:
     return {**auth, **case_target} if auth else dict(case_target)
 
 
+async def _auth_badge(target_url: str) -> str:
+    """A terse, SECRET-FREE line telling the agent what it is authenticated as.
+
+    Only when a VERIFIED session exists. Names the roles and the derived state
+    from `credentials.auth_state` (never a token or cookie -- that function
+    returns labels and prose only). Bounded, because it shares the system-prompt
+    budget with handoff, target memory and primitives, and injected volume costs
+    recall dose-dependently. Empty string when nothing is verified, so nothing is
+    injected and the prompt is unchanged.
+    """
+    from orchestrator import credentials as _CRED
+    _adb = await get_db()
+    try:
+        state = await _CRED.auth_state(_adb, target_url)
+    finally:
+        await _adb.close()
+    if not state.get("verified_roles"):
+        return ""
+    roles = ", ".join(state["verified_roles"])
+    detail = (state.get("detail") or "").strip().rstrip(".")
+    badge = (f"AUTHENTICATION: verified session(s) held for this target as: "
+             f"{roles}. {detail}. A WSTG case you invoke with run_case runs "
+             f"authenticated automatically; you never handle the credential "
+             f"yourself.")
+    return badge[:400]
+
+
 def _format_case_result_for_agent(case_id: str, tc, result) -> str:
     """Render a case result as evidence for the model.
 
@@ -4665,6 +4692,17 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
                 await manager.broadcast(session_id, {
                     "type": "log", "phase": "recon",
                     "message": f"TARGET MEMORY: injected {len(_tm)} chars from prior runs on this target",
+                })
+
+        # Tell the agent what it is authenticated as (secret-free, bounded).
+        # Gated by agent_auth; OFF => no badge, prompt unchanged.
+        if runcfg.get("agent_auth"):
+            _ab = await _auth_badge(target_url)
+            if _ab:
+                combined_system += f"\n\n{_ab}"
+                print(f"[auth-badge {session_id[:8]}] injected {len(_ab)} chars", flush=True)
+                await manager.broadcast(session_id, {
+                    "type": "log", "phase": "recon", "message": _ab,
                 })
 
         # Inject warm-start context if applicable
