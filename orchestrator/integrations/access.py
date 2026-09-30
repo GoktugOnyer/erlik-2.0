@@ -111,14 +111,17 @@ def presented(headers, cookies) -> str:
     return provided or cookies.get("erlik_token", "")
 
 
-async def _is_operator_token(provided: str) -> bool:
+async def _is_operator_token(provided: str, *, touch: bool = False) -> bool:
     """Does this resolve to a live operator?
 
-    TWO BOUNDARIES MUST NOT DISAGREE ABOUT WHO IS AUTHENTICATED. This one is
-    outermost and refuses before `main._api_token_guard` runs, and that guard is
-    where an operator's personal token is resolved and stamped on what follows. So
+    TWO BOUNDARIES MUST NOT DISAGREE ABOUT WHO IS AUTHENTICATED. For HTTP,
+    `main._api_token_guard` is the OUTER guard -- an `@app.middleware("http")`
+    registered after this middleware, so it wraps it and runs first -- and it is
+    where an operator's personal token is resolved and stamped. This middleware is
+    inner there. For websockets that guard does not run at all, so this middleware
+    is the only boundary. Either way an operator token must be admitted here:
     while this function did not know about operator tokens, every request carrying
-    one was answered 401 here and the whole per-operator identity feature was
+    one was answered 401 and the whole per-operator identity feature was
     unreachable -- minting worked, and nothing the minted token was for did.
 
     It also has to hold with NO shared secret configured. Retiring
@@ -142,6 +145,11 @@ async def _is_operator_token(provided: str) -> bool:
         db = await get_db()
         try:
             op_id, _name, _role = await _ops.resolve(db, provided)
+            # The websocket path has no `_api_token_guard` behind it, so an
+            # operator's last-seen is stamped here or nowhere; HTTP callers leave
+            # touch False because that outer guard already records it.
+            if op_id and touch:
+                await _ops.touch(db, op_id)
         finally:
             await db.close()
         return bool(op_id)
@@ -176,9 +184,10 @@ async def _access_ok(path, headers, cookies, client_host, is_ws) -> bool:
         anyone who connected. Websockets now fail closed off-loopback exactly as
         the HTTP guard does, unless ERLIK_ALLOW_UNAUTHENTICATED is set.
       * An operator token could not authenticate once the shared secret was
-        retired -- the documented way to close the bootstrap credential -- because
-        this boundary never consulted operator tokens without one. It does now,
-        for both surfaces.
+        retired -- the documented way to close the bootstrap credential. For HTTP
+        that admission comes from the outer `_api_token_guard`; for websockets,
+        which that guard never sees, this middleware now admits (and stamps) an
+        operator token itself.
 
     HTTP off-loopback fail-close (and its labelled `X-Erlik-Auth` 401s) stays the
     job of `main._api_token_guard`; here we only decide whether an HTTP request may
@@ -193,13 +202,18 @@ async def _access_ok(path, headers, cookies, client_host, is_ws) -> bool:
     # Base /api/ and /ws/.
     if expected_token():
         return await authorized(headers, cookies)
-    # No shared secret configured. An operator token still authenticates.
-    if await _is_operator_token(presented(headers, cookies)):
-        return True
+    # No shared secret configured.
     if not is_ws:
-        return True   # HTTP fail-close belongs to _api_token_guard.
-    # Websocket, unauthenticated, no shared secret: allowed only where it cannot
-    # be reached from the network, unless explicitly opted out.
+        # HTTP: main._api_token_guard is the OUTER guard here -- it already
+        # resolves the operator token, stamps it, and fail-closes off-loopback.
+        # Re-resolving would just repeat that DB I/O, so let the request reach it.
+        return True
+    # Websocket: _api_token_guard never runs for /ws/, so an operator token is
+    # admitted -- and its last-seen stamped -- here or nowhere.
+    if await _is_operator_token(presented(headers, cookies), touch=True):
+        return True
+    # Unauthenticated ws, no shared secret: allowed only where it cannot be
+    # reached from the network, unless explicitly opted out.
     if allow_unauthenticated():
         return True
     return not (bind_is_exposed() or conn_is_remote(headers, client_host))

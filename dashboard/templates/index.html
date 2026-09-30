@@ -4955,6 +4955,7 @@
                 const data = await resp.json();
                 const dot = document.getElementById('health-dot');
                 const text = document.getElementById('health-text');
+                text.title = '';  // clear any tooltip a prior poll's branch set
                 if ((data.provider || 'ollama') === 'openai') {
                     // A deployment pinned to OpenAI carries none of the Ollama
                     // keys, so the header must branch on the provider or it

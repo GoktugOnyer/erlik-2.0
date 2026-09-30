@@ -204,7 +204,9 @@ async def _api_token_guard(request: Request, call_next):
     request.state.operator_role = _ops.ROLE_ADMIN
 
     # ONE DEFINITION OF "WHAT CREDENTIAL DID THIS REQUEST CARRY", shared with
-    # AccessMiddleware, which is the boundary in front of this one.
+    # AccessMiddleware, the inner boundary behind this one for HTTP (this guard is
+    # an `@app.middleware("http")` added later, so it wraps AccessMiddleware) and
+    # the only boundary for websockets, which this guard never sees.
     #
     # This used to read the two headers itself and stop there, and the omission was
     # the `erlik_token` cookie that /api/auth sets. A browser cannot put a header on

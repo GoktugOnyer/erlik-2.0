@@ -154,3 +154,23 @@ class TestOperatorTokenWithTheSharedSecretRetired:
         self._mint()
         bogus = operators.new_token()  # well-shaped, never stored
         assert _refused(TestClient(_app()), headers={"X-API-Token": bogus})
+
+    def test_the_ws_operator_path_stamps_last_seen(self, monkeypatch):
+        """main._api_token_guard records last-seen for HTTP, but it is an
+        @app.middleware("http") and never runs for /ws/. So the ws admission path
+        must stamp it here or a ws-only operator reads as permanently inactive."""
+        monkeypatch.setenv("ERLIK_HOST", "0.0.0.0")
+        op = self._mint()
+        touched = []
+        real_touch = operators.touch
+
+        async def _spy(db, op_id):
+            touched.append(op_id)
+            return await real_touch(db, op_id)
+
+        # access.py resolves `from orchestrator import operators as _ops` lazily,
+        # so patching the module attribute is what the ws path actually calls.
+        monkeypatch.setattr(operators, "touch", _spy)
+        assert _allowed(TestClient(_app()),
+                        headers={"X-API-Token": op["token"]}) == "live-agent-output"
+        assert op["id"] in touched, "ws operator admission did not stamp last-seen"
