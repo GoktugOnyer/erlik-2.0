@@ -40,6 +40,7 @@ publicly. There is no bug bounty.
 | Scope enforcement — refuse commands naming an unrelated public host | **on** | `orchestrator/tool_executor.py` (`_scope_enforced`, `_scope_violation`) |
 | Safe mode — refuse destructive actions against an in-scope host | **on** | `orchestrator/tool_executor.py` (`_safe_mode_violation`) |
 | Per-segment toolset check — every chained/piped program is checked | on | `orchestrator/tool_executor.py` (`_segment_violation`) |
+| argv transport — run an eligible single-tool, no-shell command as an argv list, not `bash -c <string>` | **off** | `orchestrator/tool_executor.py` (`_argv_eligible`, run-config `native_argv`) |
 | Export redaction — mask credentials leaving the system | on | `orchestrator/redaction.py` |
 | Submission policy — demote informational classes in reports | on | `orchestrator/submission_policy.py`, `policy_catalog/never_submit.yaml` |
 | Scope audit — flag findings naming a host outside the snapshot | on | `orchestrator/main.py` (`_scope_audit`) |
@@ -59,6 +60,7 @@ publicly. There is no bug bounty.
 | `ERLIK_HOST` | `127.0.0.1` | `0.0.0.0` exposes the API to the network; with no `ERLIK_API_TOKEN` set, `/api/*` then refuses every request |
 | `ERLIK_ALLOW_UNAUTHENTICATED` | unset | `1` waives that refusal, for an instance behind an authenticating proxy. It does **not** waive a configured `ERLIK_API_TOKEN` |
 | `ERLIK_NATIVE` | unset | When set, commands run **on the host as your user**, not in the container |
+| `ERLIK_NATIVE_ARGV` | unset | `1` (or run-config `native_argv`) runs eligible single-tool, no-shell commands as an argv list instead of `bash -c <string>`, so model-authored shell metacharacters are never interpreted. Defence in depth on top of the scope guard; off is an exact no-op |
 | `ERLIK_LLM_PROVIDER` | `ollama` | `openai` sends prompts to a third party (`orchestrator/llm_client.py`) |
 | `ERLIK_SKILL_AUTHORING` | unset | `1` enables writing skill sheets from the dashboard. Requires `ERLIK_API_TOKEN`, loopback, and non-native mode |
 
