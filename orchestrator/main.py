@@ -2320,7 +2320,19 @@ def _discovery_filter(target_url: str, tool: str = "gobuster") -> str:
     return soft404.filter_flag(soft404.recall(target_url), tool)
 
 
-def _case_catalogue_for_prompt() -> str:
+def _case_gated_out(tc, coverage_cases: bool) -> bool:
+    """An `ext`-tier case is INVISIBLE to the agent unless coverage_cases is on.
+
+    The one predicate every agent-facing surface consults, so the prompt
+    catalogue, the runnable-id list and the run_case resolver cannot disagree
+    about which cases the model may see or invoke. `core` (the default) is always
+    visible; the deterministic v2 lane and capabilities.audit() do not consult
+    this at all, so they still see every case.
+    """
+    return getattr(tc, "tier", "core") == "ext" and not coverage_cases
+
+
+def _case_catalogue_for_prompt(coverage_cases: bool = False) -> str:
     """The deterministic cases the agent may name, and what each one needs.
 
     Generated from the catalogue rather than written out, because a hand-listed
@@ -2328,6 +2340,9 @@ def _case_catalogue_for_prompt() -> str:
     added -- and a model told about a case that does not exist wastes a turn
     discovering that. The required fields are included because without them the
     model's first attempt at a case is a guess.
+
+    `ext`-tier cases are omitted unless coverage_cases is on, so adding a case to
+    the catalogue cannot mutate the prompt a frozen arm renders.
     """
     try:
         catalog = load_catalog()
@@ -2336,12 +2351,14 @@ def _case_catalogue_for_prompt() -> str:
     lines = []
     for tc_id in sorted(catalog):
         tc = catalog[tc_id]
+        if _case_gated_out(tc, coverage_cases):
+            continue
         req = ", ".join(tc.target_schema.required) or "url"
         lines.append(f"  {tc_id} — {tc.name} (needs: {req})")
     return "\n".join(lines)
 
 
-def render_system_prompt(target_url: str) -> str:
+def render_system_prompt(target_url: str, coverage_cases: bool = False) -> str:
     """TOOL_USE_SYSTEM_PROMPT with every placeholder resolved for this target.
 
     Extracted from the agent loop so the substitution can be tested. It was
@@ -2367,7 +2384,7 @@ def render_system_prompt(target_url: str) -> str:
             .replace("{target_port}", port)
             .replace("{discovery_filter}", _discovery_filter(target_url))
             .replace("{discovery_filter_ffuf}", _discovery_filter(target_url, "ffuf"))
-            .replace("{case_catalogue}", _case_catalogue_for_prompt())
+            .replace("{case_catalogue}", _case_catalogue_for_prompt(coverage_cases))
             # Residual literals from the era when the prompt was Juice-Shop-specific.
             .replace("http://juice-shop:3000", target_url)
             .replace("juice-shop", host))
@@ -4112,10 +4129,15 @@ async def engagement_rows_for_session(session_id: str):
         await db.close()
 
 
-def _runnable_case_ids() -> list[str]:
-    """Case ids the agent may name in a `run_case` action."""
+def _runnable_case_ids(coverage_cases: bool = False) -> list[str]:
+    """Case ids the agent may name in a `run_case` action.
+
+    `ext`-tier cases are excluded unless coverage_cases is on, matching what the
+    prompt catalogue shows and what the run_case resolver will admit.
+    """
     try:
-        return list(load_catalog().keys())
+        return [cid for cid, tc in load_catalog().items()
+                if not _case_gated_out(tc, coverage_cases)]
     except Exception:
         return []
 
@@ -4408,7 +4430,8 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
         await manager.broadcast(session_id, {"type": "phase", "active": "scan"})
 
         # Build message history.
-        combined_system = render_system_prompt(target_url)
+        combined_system = render_system_prompt(
+            target_url, coverage_cases=runcfg.get("coverage_cases", False))
         guided_mode = system_prompt and system_prompt.startswith("MISSION:")
         if system_prompt:
             combined_system += f"\n\nADDITIONAL INSTRUCTIONS:\n{system_prompt}"
@@ -5495,13 +5518,27 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
                 reason = action.get("reason", "")
 
                 from orchestrator.testcase import find_by_id as _find_case
+                _cov = runcfg.get("coverage_cases", False)
                 tc = _find_case(case_id)
                 if not tc:
-                    _ids = ", ".join(sorted(_runnable_case_ids())[:40])
+                    _ids = ", ".join(sorted(_runnable_case_ids(_cov))[:40])
                     messages.append({"role": "assistant", "content": response})
                     messages.append({"role": "user", "content":
                         f"No test case '{case_id}'. Available: {_ids}. "
                         f"Reply with a JSON action."})
+                    continue
+
+                # The REAL gate: find_by_id resolves by id with no tier check, so
+                # an ext case named directly would otherwise run (and write
+                # v2_runs) even with coverage_cases off. Refuse it here so the
+                # resolver agrees with the prompt catalogue and the runnable-id
+                # list -- the interface may not offer what it will not run.
+                if _case_gated_out(tc, _cov):
+                    _ids = ", ".join(sorted(_runnable_case_ids(_cov))[:40])
+                    messages.append({"role": "assistant", "content": response})
+                    messages.append({"role": "user", "content":
+                        f"Test case '{case_id}' is not enabled in this run. "
+                        f"Available: {_ids}. Reply with a JSON action."})
                     continue
 
                 # The session's own scope, not the case's. A case invoked from

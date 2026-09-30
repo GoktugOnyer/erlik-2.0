@@ -69,6 +69,23 @@ def test_agent_auth_defaults_off_and_is_tri_state(monkeypatch):
     assert rc.resolve({"preset": "custom"})["agent_auth"] is True
 
 
+def test_coverage_cases_is_env_proof_in_the_measured_arms(monkeypatch):
+    """coverage_cases makes ext cases visible to the agent (changing the prompt
+    catalogue). It must not turn on inside a measured arm from a stray env var."""
+    monkeypatch.setenv("ERLIK_COVERAGE_CASES", "true")
+    for preset in ("ai_only", "guided_ai"):
+        assert rc.resolve({"preset": preset})["coverage_cases"] is False, preset
+
+
+def test_coverage_cases_defaults_off_and_is_tri_state(monkeypatch):
+    assert rc.resolve({"preset": "custom"})["coverage_cases"] is False
+    r = rc.resolve({"preset": "custom", "coverage_cases": True})
+    assert r["coverage_cases"] is True
+    assert not any("coverage_cases" in w for w in r["run_config_warnings"])
+    monkeypatch.setenv("ERLIK_COVERAGE_CASES", "true")
+    assert rc.resolve({"preset": "custom"})["coverage_cases"] is True
+
+
 def test_client_facing_presets_reverify_their_findings():
     """A finding that reaches a report is something someone may act on. The
     presets meant for real use must re-test high/critical findings rather than

@@ -53,6 +53,10 @@ _BOOL_KEYS = {
     # OFF is an exact no-op: the case target is assembled byte-identically and no
     # credential is consulted, so the frozen arms are unaffected.
     "agent_auth": "ERLIK_AGENT_AUTH",
+    # Make `tier: ext` coverage cases visible to the agent (in the prompt
+    # catalogue and via run_case). OFF hides them, so a new case cannot mutate a
+    # recorded arm's prompt. With no ext case in the catalogue this is a no-op.
+    "coverage_cases": "ERLIK_COVERAGE_CASES",
 }
 
 # Sensible pre-selectable setups. Keys map to the flag bundle a preset turns on;
@@ -69,7 +73,7 @@ RUN_PRESETS: dict[str, dict] = {
                    "playbooks": "", "primitives": False, "target_memory": False,
                    "poc_verify": False, "techniques": False,
                    "ai_review": False, "native_argv": False,
-                   "agent_auth": False},
+                   "agent_auth": False, "coverage_cases": False},
     },
     "guided_ai": {
         "label": "Guided AI — skills + exploit playbooks (most effective)",
@@ -81,7 +85,7 @@ RUN_PRESETS: dict[str, dict] = {
         "config": {"skills": True, "cve_enrich": True, "nettacker": False,
                    "playbooks": "auto", "primitives": True,
                    "techniques": False, "ai_review": True, "native_argv": False,
-                   "agent_auth": False},
+                   "agent_auth": False, "coverage_cases": False},
     },
     "guided_techniques": {
         "label": "Guided Attack — environment-specific techniques",
@@ -153,7 +157,7 @@ def resolve(run_config=None) -> dict:
     # Explicit per-key values in the session config override the preset.
     for k in ("cve_enrich", "skills", "nettacker", "nettacker_findings",
               "nettacker_scenario", "playbooks", "max_playbooks", "provider", "poc_verify", "primitives",
-              "handoff", "native_argv", "agent_auth",
+              "handoff", "native_argv", "agent_auth", "coverage_cases",
               "target_memory", "techniques", "ai_review", "review_model",
               "skills_exclude", "skills_pin", "skills_max_chars",
               "safe_mode", "safe_mode_ack", "skills_max_files"):
@@ -166,7 +170,7 @@ def resolve(run_config=None) -> dict:
     warnings: list[str] = []
     _known = {"cve_enrich", "skills", "nettacker", "nettacker_findings",
               "nettacker_scenario", "playbooks", "max_playbooks", "provider", "poc_verify", "primitives",
-              "handoff", "native_argv", "agent_auth",
+              "handoff", "native_argv", "agent_auth", "coverage_cases",
               "target_memory", "techniques", "ai_review", "review_model",
               "skills_exclude", "skills_pin", "skills_max_chars",
               "safe_mode", "safe_mode_ack", "skills_max_files", "preset"}
@@ -305,6 +309,7 @@ def resolve(run_config=None) -> dict:
         "handoff": tri("handoff"),
         "native_argv": tri("native_argv"),
         "agent_auth": tri("agent_auth"),
+        "coverage_cases": tri("coverage_cases"),
     }
 
 
