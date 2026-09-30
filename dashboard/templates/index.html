@@ -2424,6 +2424,30 @@
                             oninput="previewTuning()">
                         <span class="font-mono" style="font-size:0.55rem; opacity:.6;">chars, 2000&ndash;40000</span>
                     </div>
+
+                    <!-- Per-session pacing (roadmap R1). Off by default (blank =
+                         0 = no pacing), so leaving these empty changes nothing
+                         about how a run behaves. Declared here rather than hidden
+                         so an operator can see the target is being paced. -->
+                    <label class="font-mono rc-help" style="font-size:0.58rem;"
+                        data-tip="TOOL DELAY — Seconds to pause BEFORE every tool call and deterministic case this session runs. Paces the agent so it does not hit a customer target as fast as the model emits actions. 0 or blank = no delay (default, no pacing). Range 0–60s.">tool delay<span class="rc-q">?</span></label>
+                    <div class="flex items-center gap-2">
+                        <input id="rc-tool-delay" type="number" min="0" max="60" step="0.5"
+                            class="input-field font-mono px-2 py-1 rounded"
+                            style="font-size:0.58rem; width:110px;" placeholder="0"
+                            oninput="previewTuning()">
+                        <span class="font-mono" style="font-size:0.55rem; opacity:.6;">seconds, 0&ndash;60 (0 = off)</span>
+                    </div>
+
+                    <label class="font-mono rc-help" style="font-size:0.58rem;"
+                        data-tip="LLM RATE — Ceiling on LLM calls per minute for THIS session, spaced client-side. Keeps one session under a hosted provider's per-key quota without slowing others. 0 or blank = uncapped (default). Range 0–600 rpm.">LLM rpm<span class="rc-q">?</span></label>
+                    <div class="flex items-center gap-2">
+                        <input id="rc-llm-rpm" type="number" min="0" max="600" step="1"
+                            class="input-field font-mono px-2 py-1 rounded"
+                            style="font-size:0.58rem; width:110px;" placeholder="0"
+                            oninput="previewTuning()">
+                        <span class="font-mono" style="font-size:0.55rem; opacity:.6;">req/min, 0&ndash;600 (0 = off)</span>
+                    </div>
                 </div>
 
                 <div class="mt-3">
@@ -7034,6 +7058,12 @@ ${htmlBody}
             // it took, and starting a run that never received the pin.
             // Untouched controls yield null, which resolve() skips, so a blank
             // panel still cannot overwrite what the preset chose.
+            // Pacing knobs (roadmap R1) are NOT part of the skills-routing
+            // preview, so they are read here rather than in tuningConfig(). A
+            // blank control yields null, which resolve() leaves at the 0 (off)
+            // default — an untouched panel cannot start pacing a run.
+            const _td = parseFloat(document.getElementById('rc-tool-delay')?.value);
+            const _rpm = parseInt(document.getElementById('rc-llm-rpm')?.value, 10);
             return Object.assign({
                 preset: presetSel.value,
                 cve_enrich: document.getElementById('rc-cve').checked,
@@ -7046,6 +7076,8 @@ ${htmlBody}
                 techniques: document.getElementById('rc-techniques').checked,
                 ai_review: document.getElementById('rc-aireview').checked,
                 target_memory: document.getElementById('rc-targetmem').checked,
+                tool_delay_seconds: Number.isFinite(_td) ? _td : null,
+                llm_rpm: Number.isFinite(_rpm) ? _rpm : null,
             }, tuningConfig());
         }
 

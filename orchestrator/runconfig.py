@@ -144,7 +144,8 @@ def resolve(run_config=None) -> dict:
               "handoff",
               "target_memory", "techniques", "ai_review", "review_model",
               "skills_exclude", "skills_pin", "skills_max_chars",
-              "safe_mode", "safe_mode_ack", "skills_max_files"):
+              "safe_mode", "safe_mode_ack", "skills_max_files",
+              "tool_delay_seconds", "llm_rpm"):
         if k in cfg and cfg[k] is not None:
             base[k] = cfg[k]
 
@@ -157,7 +158,8 @@ def resolve(run_config=None) -> dict:
               "handoff",
               "target_memory", "techniques", "ai_review", "review_model",
               "skills_exclude", "skills_pin", "skills_max_chars",
-              "safe_mode", "safe_mode_ack", "skills_max_files", "preset"}
+              "safe_mode", "safe_mode_ack", "skills_max_files",
+              "tool_delay_seconds", "llm_rpm", "preset"}
     for k in cfg:
         if k not in _known:
             warnings.append(f"run_config key {k!r} is not recognised and was ignored")
@@ -238,6 +240,37 @@ def resolve(run_config=None) -> dict:
             warnings.append(f"skills_max_files {_mf!r} is not a number; "
                             f"using {DEFAULT_SKILLS_FILES}")
 
+    # Per-session pacing (roadmap R1). Both clamped, not trusted, and both
+    # default to 0 = OFF. 0 is an EXACT no-op in the agent loop, which is what
+    # keeps the recorded thesis arms byte-for-byte unchanged — so a 0 here is a
+    # real "off", not a knob whose label lies. Out-of-band values fall back to
+    # the off default and warn rather than silently pacing (or not pacing) a run.
+    _td = base.get("tool_delay_seconds")
+    tool_delay_seconds = 0.0
+    if _td is not None:
+        try:
+            _td = float(_td)
+            if 0.0 <= _td <= 60.0:
+                tool_delay_seconds = _td
+            else:
+                warnings.append(
+                    f"tool_delay_seconds {_td} is outside 0-60; using 0 (off)")
+        except (TypeError, ValueError):
+            warnings.append(
+                f"tool_delay_seconds {_td!r} is not a number; using 0 (off)")
+
+    _rpm = base.get("llm_rpm")
+    llm_rpm = 0
+    if _rpm is not None:
+        try:
+            _rpm = int(_rpm)
+            if 0 <= _rpm <= 600:
+                llm_rpm = _rpm
+            else:
+                warnings.append(f"llm_rpm {_rpm} is outside 0-600; using 0 (off)")
+        except (TypeError, ValueError):
+            warnings.append(f"llm_rpm {_rpm!r} is not a number; using 0 (off)")
+
     def _as_list(v):
         if v is None:
             return []
@@ -275,6 +308,8 @@ def resolve(run_config=None) -> dict:
         "skills_pin": _as_list(base.get("skills_pin")),
         "skills_max_chars": skills_max_chars,
         "skills_max_files": skills_max_files,
+        "tool_delay_seconds": tool_delay_seconds,
+        "llm_rpm": llm_rpm,
         "run_config_warnings": warnings,
         "cve_enrich": tri("cve_enrich"),
         "skills": tri("skills"),

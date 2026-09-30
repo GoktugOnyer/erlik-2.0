@@ -23,6 +23,7 @@ from orchestrator.models import (
 )
 from orchestrator import llm_client
 from orchestrator import runconfig
+from orchestrator.throttle import SessionThrottle
 from orchestrator.bench import classify_llm_error, request_abort, abort_requested, clear_abort
 from orchestrator.enrichment import enrichment_enabled, find_cve_ids, lookup_cve
 from orchestrator.enrichment.nvd import severity_label as cvss_severity_label
@@ -4377,6 +4378,24 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
               f"skills={runcfg['skills']} nettacker={runcfg['nettacker']}"
               f"({runcfg['nettacker_scenario']}) cve={runcfg['cve_enrich']}", flush=True)
 
+        # Per-session pacing (roadmap R1). Off by default (0/0): with the knobs
+        # off, before_tool/before_llm return without awaiting, so the loop below
+        # is byte-for-byte the loop the thesis arms ran. When ON, the pace is
+        # declared here and each wait is logged where it happens, so an operator
+        # can SEE the loop is throttled rather than just trusting a config value.
+        throttle = SessionThrottle(
+            tool_delay_seconds=runcfg.get("tool_delay_seconds", 0.0),
+            llm_rpm=runcfg.get("llm_rpm", 0))
+        if throttle.enabled:
+            print(f"[throttle {session_id[:8]}] tool_delay={throttle.tool_delay_seconds}s "
+                  f"llm_rpm={throttle.llm_rpm}", flush=True)
+            await manager.broadcast(session_id, {
+                "type": "log", "phase": "recon",
+                "message": (f"THROTTLE: pacing this session — "
+                            f"tool delay {throttle.tool_delay_seconds}s, "
+                            f"LLM cap {throttle.llm_rpm or 'off'} rpm"),
+            })
+
         # Inject exploit playbooks for the 6 hard vulnerability classes when enabled
         # (per-session run config or ERLIK_PLAYBOOKS). See orchestrator/playbooks.py.
         try:
@@ -4828,6 +4847,17 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
                                       findings_data=full_findings_data,
                                       discoveries=sticky_discoveries)
 
+            # Per-session LLM rate limit. No-op when llm_rpm is 0; otherwise
+            # spaces this session's calls to its per-minute ceiling before the
+            # request goes out (client-side, not a reaction to a 429).
+            _llm_waited = await throttle.before_llm()
+            if _llm_waited > 0:
+                await manager.broadcast(session_id, {
+                    "type": "log", "phase": phase,
+                    "message": f"THROTTLE: waited {_llm_waited:.1f}s for LLM rate limit "
+                               f"({throttle.llm_rpm} rpm)",
+                })
+
             # Call LLM
             # Diagnostic prints + hard 5-min asyncio ceiling so a hung ollama
             # can't freeze the agent loop indefinitely. The httpx-level retry
@@ -5018,6 +5048,16 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
                     except Exception as _ci_err:  # noqa: BLE001
                         print(f"[primitives {session_id[:8]}] injection skipped: {_ci_err}",
                               flush=True)
+
+                # Per-session tool pacing. No-op when tool_delay_seconds is 0;
+                # otherwise a real pause before the target is touched, so the
+                # session cannot fire tools as fast as the model emits them.
+                _tool_waited = await throttle.before_tool()
+                if _tool_waited > 0:
+                    await manager.broadcast(session_id, {
+                        "type": "log", "phase": phase,
+                        "message": f"THROTTLE: paused {_tool_waited:.1f}s before tool",
+                    })
 
                 # Execute the tool
                 if kali_running:
@@ -5454,6 +5494,15 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
                     "type": "log", "phase": phase,
                     "message": f">> CASE {case_id}: {reason or tc.name}",
                 })
+
+                # A `run_case` reaches the target with real commands, so it is
+                # paced exactly like a `run_tool`: same knob, same honesty goal.
+                _case_waited = await throttle.before_tool()
+                if _case_waited > 0:
+                    await manager.broadcast(session_id, {
+                        "type": "log", "phase": phase,
+                        "message": f"THROTTLE: paused {_case_waited:.1f}s before case",
+                    })
 
                 _t0 = time.time()
                 try:
