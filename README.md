@@ -195,11 +195,13 @@ Run it from the repository root: `conftest.py` anchors the working directory
 there, and `orchestrator.main` builds its Jinja2 template path relative to the
 CWD.
 
-A **fresh clone** reports **4787 passed, 89 skipped** on its first run, and
-4789 passed / 87 skipped on every run after — the 2026-09-29 clone-and-run figure
-(4762 / 4764) plus the 25 tests added on this branch, each of which passes from a
-clean checkout, so only the passed count moves; `--collect-only` reports the 4876
-the first-run pair sums to.
+A **fresh clone** reports **4822 passed, 89 skipped** on its first run, and
+4824 passed / 87 skipped on every run after — the two that move are the
+database-hygiene checks that skip until the first run creates `data/pentest.db`,
+so only the passed/skipped split shifts and the total does not. The per-session
+throttling tests (`test_throttle.py` and the `resolve()` clamp tests) each pass
+from a clean checkout; `--collect-only` reports the 4911 the first-run pair
+sums to.
 
 > Re-measure this after any change under `tests/`. The first draft of this
 > paragraph was taken before the same commit finished adding tests, which is

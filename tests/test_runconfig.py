@@ -76,6 +76,73 @@ def test_all_presets_expose_label_and_config():
         assert p["name"] and p["label"] and isinstance(p["config"], dict)
 
 
+class TestSessionThrottleKnobs:
+    """Per-session pacing (roadmap R1). Off by default and clamped, exactly like
+    skills_max_chars — a 0 here is a real 'off' that leaves the thesis arms
+    unchanged, so an out-of-band value must fall back to 0 and warn rather than
+    silently pace (or fail to pace) a run."""
+
+    def test_default_is_off(self):
+        r = rc.resolve({"preset": "custom"})
+        assert r["tool_delay_seconds"] == 0.0
+        assert r["llm_rpm"] == 0
+
+    def test_preset_default_is_off_too(self):
+        """No preset turns pacing on — it is opt-in per session."""
+        r = rc.resolve({"preset": "guided_ai"})
+        assert r["tool_delay_seconds"] == 0.0
+        assert r["llm_rpm"] == 0
+
+    def test_valid_values_pass_through(self):
+        r = rc.resolve({"preset": "custom", "tool_delay_seconds": 2.5, "llm_rpm": 30})
+        assert r["tool_delay_seconds"] == 2.5
+        assert r["llm_rpm"] == 30
+
+    def test_zero_is_a_valid_explicit_off(self):
+        r = rc.resolve({"preset": "custom", "tool_delay_seconds": 0, "llm_rpm": 0})
+        assert r["tool_delay_seconds"] == 0.0
+        assert r["llm_rpm"] == 0
+        assert not any("tool_delay" in w or "llm_rpm" in w
+                       for w in r["run_config_warnings"]), "0 is in-band, not a warning"
+
+    def test_tool_delay_out_of_band_falls_back_and_warns(self):
+        r = rc.resolve({"preset": "custom", "tool_delay_seconds": 999})
+        assert r["tool_delay_seconds"] == 0.0
+        assert any("tool_delay_seconds" in w for w in r["run_config_warnings"])
+
+    def test_negative_tool_delay_is_rejected(self):
+        """A negative delay is nonsense and must not reach the loop as one."""
+        r = rc.resolve({"preset": "custom", "tool_delay_seconds": -1})
+        assert r["tool_delay_seconds"] == 0.0
+        assert any("tool_delay_seconds" in w for w in r["run_config_warnings"])
+
+    def test_llm_rpm_out_of_band_falls_back_and_warns(self):
+        r = rc.resolve({"preset": "custom", "llm_rpm": 5000})
+        assert r["llm_rpm"] == 0
+        assert any("llm_rpm" in w for w in r["run_config_warnings"])
+
+    def test_non_numeric_values_warn_rather_than_crash(self):
+        r = rc.resolve({"preset": "custom", "tool_delay_seconds": "fast",
+                        "llm_rpm": "lots"})
+        assert r["tool_delay_seconds"] == 0.0
+        assert r["llm_rpm"] == 0
+        assert sum("tool_delay_seconds" in w or "llm_rpm" in w
+                   for w in r["run_config_warnings"]) == 2
+
+    def test_the_keys_are_recognised_not_dropped(self):
+        """A recognised key must NOT show up in the unknown-key warnings — that
+        was the whole reason to add them to _known."""
+        r = rc.resolve({"preset": "custom", "tool_delay_seconds": 1, "llm_rpm": 10})
+        assert not any("not recognised" in w for w in r["run_config_warnings"])
+
+    def test_an_actually_unknown_key_still_warns(self):
+        """Guard on the guard: adding the pacing keys must not have widened the
+        allowlist so far that a typo passes silently."""
+        r = rc.resolve({"preset": "custom", "tool_delayy": 1})
+        assert any("tool_delayy" in w and "not recognised" in w
+                   for w in r["run_config_warnings"])
+
+
 class TestProviderIsPinnablePerRun:
     """Every recorded experiment ran on local Ollama with qwen2.5-coder:7b.
 
