@@ -195,9 +195,11 @@ Run it from the repository root: `conftest.py` anchors the working directory
 there, and `orchestrator.main` builds its Jinja2 template path relative to the
 CWD.
 
-A **fresh clone** reports **4762 passed, 89 skipped** on its first run, and
-4764 passed / 87 skipped on every run after — measured 2026-09-29 against this
-commit by cloning and running it, not quoted from a developer's tree.
+A **fresh clone** reports **4786 passed, 89 skipped** on its first run, and
+4788 passed / 87 skipped on every run after — the 2026-09-29 clone-and-run figure
+(4762 / 4764) plus the 24 tests added on this branch, each of which passes from a
+clean checkout, so only the passed count moves; `--collect-only` reports the 4875
+the first-run pair sums to.
 
 > Re-measure this after any change under `tests/`. The first draft of this
 > paragraph was taken before the same commit finished adding tests, which is

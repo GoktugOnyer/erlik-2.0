@@ -140,6 +140,10 @@ class TestCommandSegments:
         ("curl http://t/ | grep -i admin", ["curl", "grep"]),
         ("curl http://t/ && nmap -sV t", ["curl", "nmap"]),
         ("jwt_tool $(cat /tmp/a.jar) -C", ["jwt_tool", "cat"]),  # command substitution
+        # process substitution runs its own program -- the inner name must be found
+        ("curl http://t/ >(python3 -c 'x')", ["curl", "python3"]),
+        ("diff <(sort a) <(cat /etc/passwd)", ["diff", "sort", "cat"]),
+        ('curl -d "a>(b" http://t/', ["curl"]),                  # quoted: literal, not split
         ("/usr/bin/nmap -sV t", ["nmap"]),                       # path stripped
         ("sudo timeout 30 nmap -sV t", ["nmap"]),                # wrappers stripped
     ])
@@ -161,6 +165,24 @@ class TestSegmentToolset:
             "curl http://t/ && python -c 'import os'", TOOLSET, None, ALIASES)
         assert reason is not None
         assert "'python'" in reason
+
+    def test_interpreter_smuggled_in_process_substitution_refused(self):
+        """`>(python3 -c ...)` ran an unlisted interpreter that the old splitter
+        never saw -- it checked `curl` alone. It writes via the interpreter's own
+        syscalls, past the write-confinement regex, so the toolset allowlist is
+        the control that must catch it."""
+        reason = te._segment_violation(
+            "curl http://t/ >(python3 -c 'open(chr(47),\"w\")')",
+            TOOLSET, None, ALIASES)
+        assert reason is not None
+        assert "'python3'" in reason
+
+    def test_process_substitution_with_only_allowed_programs_ok(self):
+        """The negative control: legitimate `diff <(sort a) <(sort b)` must pass
+        when every program in it is permitted, or the guard is just 'refuse
+        process substitution' rather than 'check what it runs'."""
+        assert te._segment_violation(
+            "diff <(sort a) <(sort b)", TOOLSET + ["diff"], None, ALIASES) is None
 
     def test_safe_filters_allowed(self):
         assert te._segment_violation(

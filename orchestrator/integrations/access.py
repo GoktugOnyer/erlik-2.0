@@ -48,6 +48,60 @@ def expected_token():
     return os.environ.get("ERLIK_API_TOKEN", "").strip()
 
 
+_TRUTHY = frozenset({"1", "true", "yes", "on"})
+
+
+def allow_unauthenticated() -> bool:
+    """The deliberate opt-out for a deployment behind an authenticating proxy.
+
+    Guarded like the HTTP side: only the listed truthy words open it, so "0" and
+    "false" are not read as consent.
+    """
+    return os.environ.get("ERLIK_ALLOW_UNAUTHENTICATED", "").strip().lower() in _TRUTHY
+
+
+def is_loopback(host) -> bool:
+    """True only for an address that cannot be reached from the network.
+
+    THE ONE DEFINITION shared by both boundaries -- `main._is_loopback` delegates
+    here so the HTTP guard and this middleware cannot drift apart about what
+    counts as local. Used only to DENY, so an unparseable value must not
+    manufacture a denial on a box that is in fact local.
+    """
+    if not host:
+        return False
+    import ipaddress
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return host in ("localhost", "testclient")
+
+
+def bind_is_exposed() -> bool:
+    """Whether the operator asked to listen beyond loopback (ERLIK_HOST)."""
+    host = os.environ.get("ERLIK_HOST", "").strip()
+    if not host:
+        return False
+    if host in ("0.0.0.0", "::", "*"):
+        return True
+    return not is_loopback(host)
+
+
+def conn_is_remote(headers, client_host) -> bool:
+    """Whether this connection plausibly came from off-box.
+
+    A forwarded header means a proxy sits in front (peer address is then loopback
+    and worthless as evidence), so its presence counts as remote on its own.
+    Unknown peer is not evidence of remoteness -- a DENY predicate must not
+    invent one.
+    """
+    if headers.get("x-forwarded-for") or headers.get("x-real-ip"):
+        return True
+    if client_host is None:
+        return False
+    return not is_loopback(client_host)
+
+
 def presented(headers, cookies) -> str:
     """The credential this request carries, from whichever channel supplied it."""
     provided = headers.get("x-api-token", "")
@@ -109,12 +163,46 @@ async def authorized(headers, cookies):
     return await _is_operator_token(provided)
 
 
-def _protected(path: str) -> bool:
+async def _access_ok(path, headers, cookies, client_host, is_ws) -> bool:
+    """Whether a request/connection to `path` may proceed. One boundary, both
+    surfaces.
+
+    The base `/api/` and `/ws/` decision when NO shared secret is configured used
+    to be "not protected -> pass through", which had two holes this closes:
+
+      * A websocket had no second guard behind it (the HTTP guard is
+        `@app.middleware("http")` and never runs for `/ws/`), so an unconfigured
+        instance bound off-loopback streamed live agent output and findings to
+        anyone who connected. Websockets now fail closed off-loopback exactly as
+        the HTTP guard does, unless ERLIK_ALLOW_UNAUTHENTICATED is set.
+      * An operator token could not authenticate once the shared secret was
+        retired -- the documented way to close the bootstrap credential -- because
+        this boundary never consulted operator tokens without one. It does now,
+        for both surfaces.
+
+    HTTP off-loopback fail-close (and its labelled `X-Erlik-Auth` 401s) stays the
+    job of `main._api_token_guard`; here we only decide whether an HTTP request may
+    reach it.
+    """
     if path in _EXEMPT:
-        return False
-    if path.startswith(_ALWAYS_PROTECTED):
         return True
-    return bool(expected_token()) and path.startswith(_PROTECTED_PREFIXES)
+    if not path.startswith(_PROTECTED_PREFIXES):
+        return True
+    if path.startswith(_ALWAYS_PROTECTED):
+        return await authorized(headers, cookies)
+    # Base /api/ and /ws/.
+    if expected_token():
+        return await authorized(headers, cookies)
+    # No shared secret configured. An operator token still authenticates.
+    if await _is_operator_token(presented(headers, cookies)):
+        return True
+    if not is_ws:
+        return True   # HTTP fail-close belongs to _api_token_guard.
+    # Websocket, unauthenticated, no shared secret: allowed only where it cannot
+    # be reached from the network, unless explicitly opted out.
+    if allow_unauthenticated():
+        return True
+    return not (bind_is_exposed() or conn_is_remote(headers, client_host))
 
 
 class AccessMiddleware:
@@ -126,12 +214,14 @@ class AccessMiddleware:
         if scope["type"] not in ("http", "websocket"):
             return await self.app(scope, receive, send)
         connection = HTTPConnection(scope)
-        if _protected(scope.get("path", "")) and not await authorized(
-                connection.headers, connection.cookies):
+        is_ws = scope["type"] == "websocket"
+        client_host = connection.client.host if connection.client else None
+        if not await _access_ok(scope.get("path", ""), connection.headers,
+                                connection.cookies, client_host, is_ws):
             detail = ("Set ERLIK_API_TOKEN and authenticate to access assessment data"
                       if not expected_token() else
                       "missing or invalid API token")
-            if scope["type"] == "websocket":
+            if is_ws:
                 await send({"type": "websocket.close", "code": 4401})
             else:
                 await JSONResponse({"detail": detail}, status_code=401)(scope, receive, send)

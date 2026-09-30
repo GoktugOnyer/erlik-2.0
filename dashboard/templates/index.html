@@ -4746,7 +4746,7 @@
 
                     row.innerHTML = `
                         <span style="color:var(--neon-cyan); font-size:0.8rem;" title="${s.id}">${s.id.substring(0, 10)}…</span>
-                        <span class="target-truncate" style="color:#c0c0d0;" title="${s.target_url || ''}">${s.target_url || '---'}</span>
+                        <span class="target-truncate" style="color:#c0c0d0;" title="${escapeHtml(s.target_url || '')}">${escapeHtml(s.target_url || '---')}</span>
                         <span><span class="status-badge ${statusCls}">${s.status}</span></span>
                         <span><span class="type-badge ${typeCls}">${s.session_type || 'cold'}</span></span>
                         <span style="color:#8888aa;">${s.total_steps || 0}</span>
@@ -4933,6 +4933,27 @@
                 const data = await resp.json();
                 const dot = document.getElementById('health-dot');
                 const text = document.getElementById('health-text');
+                if ((data.provider || 'ollama') === 'openai') {
+                    // A deployment pinned to OpenAI carries none of the Ollama
+                    // keys, so the header must branch on the provider or it
+                    // always reads "Ollama offline" while OpenAI is configured
+                    // fine — the interface stating something that is not true.
+                    if (data.status === 'configured') {
+                        dot.style.background = 'var(--neon-green)';
+                        dot.style.boxShadow = '0 0 6px var(--neon-green)';
+                        text.textContent = data.target_model
+                            ? `OpenAI ready — ${data.target_model}`
+                            : 'OpenAI ready';
+                        text.style.color = 'var(--neon-green)';
+                        text.title = data.base_url || '';
+                    } else {
+                        dot.style.background = 'var(--neon-red)';
+                        dot.style.boxShadow = '0 0 6px var(--neon-red)';
+                        text.textContent = `OpenAI: ${data.error || 'not configured'}`;
+                        text.style.color = 'var(--neon-red)';
+                    }
+                    return;
+                }
                 if (data.ollama === 'connected') {
                     if (data.model_available) {
                         dot.style.background = 'var(--neon-green)';
@@ -6327,9 +6348,9 @@ ${htmlBody}
             });
 
             // Add vuln types found row
-            const cVulns = (cold.vuln_types_found || []).join(', ') || '---';
-            const wVulns = (warm.vuln_types_found || []).join(', ') || '---';
-            const chVulns = (chain.vuln_types_found || []).join(', ') || '---';
+            const cVulns = (cold.vuln_types_found || []).map(escapeHtml).join(', ') || '---';
+            const wVulns = (warm.vuln_types_found || []).map(escapeHtml).join(', ') || '---';
+            const chVulns = (chain.vuln_types_found || []).map(escapeHtml).join(', ') || '---';
             body.innerHTML += `
                 <tr style="border-bottom:1px solid #0a0a1a;">
                     <td class="px-4 py-1.5" style="color:#6a6a8a;">Vuln Types Found</td>
@@ -6501,7 +6522,7 @@ ${htmlBody}
                     div.innerHTML = `
                         <div>
                             <span class="font-mono" style="color:#8a8a9a; font-size:0.85rem;">${b.id}</span>
-                            <span class="font-mono ml-2" style="color:#5a5a6a; font-size:0.75rem;">${b.target_name || b.target_url}</span>
+                            <span class="font-mono ml-2" style="color:#5a5a6a; font-size:0.75rem;">${escapeHtml(b.target_name || b.target_url || '')}</span>
                         </div>
                         <div class="flex items-center gap-3">
                             <span class="font-mono" style="color:#5a5a6a; font-size:0.75rem;">${formatDate(b.created_at)}</span>

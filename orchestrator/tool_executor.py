@@ -956,6 +956,19 @@ def _command_segments(command: str) -> list[str]:
             buf.append(ch)
             i += 1
             continue
+        # Process substitution `<(cmd)` / `>(cmd)` runs its own program, so the
+        # inner program name must face the toolset allowlist (and write
+        # confinement) exactly as `$(...)` does. Handled here, in the UNQUOTED
+        # context, because that is the only place the shell treats it as process
+        # substitution — a `>(` inside a quoted argument is literal text and must
+        # not be split, or a legitimate quoted payload becomes a phantom segment.
+        # Without this, `curl http://t/ >(python3 -c '...')` was checked against
+        # `curl` alone and the interpreter never faced anything.
+        if ch in "<>" and command[i + 1:i + 2] == "(":
+            segs.append("".join(buf))
+            buf = []
+            i += 2
+            continue
         # Only `&&` chains commands. A LONE `&` is left alone: replaying all
         # 536 historical commands showed it is a URL query separator
         # (`?email=test&password=test`) or a hydra form spec

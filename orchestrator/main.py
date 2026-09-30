@@ -40,9 +40,30 @@ from orchestrator.testcase.persistence import (
 from orchestrator.detection import auto_detect_findings as _auto_detect_findings
 
 
+def _native_mode_warning() -> str | None:
+    """The loud notice for ERLIK_NATIVE, or None when it is off.
+
+    ERLIK_NATIVE removes the container boundary: model-authored commands run as
+    this process's own user, on this host -- the machine holding the encrypted
+    secret store and every engagement's evidence. It is off by default and a
+    deliberate operator choice, but until now it was only ever surfaced by the
+    readiness endpoint, which nobody reads until something is already wrong.
+    Extracted so a test asserts the real string startup prints, not a copy.
+    """
+    from orchestrator.tool_executor import ERLIK_NATIVE
+    if not ERLIK_NATIVE:
+        return None
+    return ("ERLIK_NATIVE is set -- tools run WITHOUT the container boundary, as "
+            "this user, on this host. Model-authored commands can read and write "
+            "anywhere this process can. Use only on an isolated, disposable machine.")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
+    _native_warning = _native_mode_warning()
+    if _native_warning:
+        print(f"[startup] WARNING: {_native_warning}", flush=True)
     # Ground truth is static reference data, but it was only ever seeded lazily
     # by a handful of API endpoints. A dashboard run that never touched those
     # left the table empty, so the post-run review's coverage measurement found
@@ -86,59 +107,25 @@ app = FastAPI(title="Erlik Pentest Agent", lifespan=lifespan)
 templates = Jinja2Templates(directory="dashboard/templates")
 
 from orchestrator.integrations.access import AccessMiddleware
+from orchestrator.integrations import access as _access
 from orchestrator.integrations.api import router as integration_router
 app.add_middleware(AccessMiddleware)
 app.include_router(integration_router)
 
+# ONE DEFINITION of what counts as local / exposed / remote, shared with
+# AccessMiddleware (orchestrator/integrations/access.py). Both boundaries must
+# agree, so these delegate rather than keep a second copy.
 def _is_loopback(host: str | None) -> bool:
-    """True only for an address that cannot be reached from the network.
-
-    A host that is not an IP at all -- Starlette's in-process TestClient
-    reports "testclient" -- is NOT treated as remote. This predicate is only
-    ever used to DENY, so an unparseable value must not manufacture a denial
-    on a deployment that is in fact local.
-    """
-    if not host:
-        return False
-    import ipaddress
-
-    try:
-        return ipaddress.ip_address(host).is_loopback
-    except ValueError:
-        return host in ("localhost", "testclient")
+    return _access.is_loopback(host)
 
 
 def _bind_is_exposed() -> bool:
-    """Whether the operator asked to listen beyond loopback.
-
-    ERLIK_HOST is what run.sh binds and what an operator sets deliberately;
-    several scripts under scripts/ bind 0.0.0.0. Unset means the run.sh default
-    of 127.0.0.1, so absence is not exposure.
-    """
-    host = os.environ.get("ERLIK_HOST", "").strip()
-    if not host:
-        return False
-    if host in ("0.0.0.0", "::", "*"):
-        return True
-    return not _is_loopback(host)
+    return _access.bind_is_exposed()
 
 
 def _request_is_remote(request: Request) -> bool:
-    """Whether THIS request plausibly came from off-box.
-
-    Complements _bind_is_exposed: someone running `uvicorn --host 0.0.0.0`
-    directly never sets ERLIK_HOST, so the bind check alone would miss it.
-
-    A forwarded header means a proxy sits in front, which makes the peer
-    address loopback and therefore useless as evidence of locality -- so its
-    presence counts as remote on its own.
-    """
-    if request.headers.get("x-forwarded-for") or request.headers.get("x-real-ip"):
-        return True
     client = request.client.host if request.client else None
-    if client is None:
-        return False        # unknown: do not manufacture a denial
-    return not _is_loopback(client)
+    return _access.conn_is_remote(request.headers, client)
 
 
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
@@ -226,30 +213,34 @@ async def _api_token_guard(request: Request, call_next):
     # that each parse the credential their own way disagree about who is
     # authenticated, and the disagreement is a 401 with no cause on its face.
     from orchestrator.integrations.access import presented as _presented
-    if token:
-        provided = _presented(request.headers, request.cookies)
+    provided = _presented(request.headers, request.cookies)
 
-        # An OPERATOR token is tried first, and only its own shape reaches the
-        # database -- so the shared secret is never used as a lookup key and an
-        # unknown token costs one indexed query, not a scan.
-        op_id = op_name = op_role = None
-        if _ops.looks_like_token(provided):
+    # An OPERATOR token authenticates WITH OR WITHOUT a shared secret configured.
+    # Retiring ERLIK_API_TOKEN once an admin operator exists is the documented way
+    # to close the bootstrap credential (see CLAUDE.md); resolving the operator
+    # token here regardless is what keeps that configuration usable off-loopback,
+    # instead of fail-closing a valid operator out of sessions/findings/engagements.
+    # Only an operator-shaped token reaches the database -- so the shared secret is
+    # never used as a lookup key and an unknown token costs one indexed query.
+    op_id = op_name = op_role = None
+    if _ops.looks_like_token(provided):
+        try:
+            db = await get_db()
             try:
-                db = await get_db()
-                try:
-                    op_id, op_name, op_role = await _ops.resolve(db, provided)
-                    if op_id:
-                        await _ops.touch(db, op_id)
-                finally:
-                    await db.close()
-            except Exception:
-                op_id = op_name = op_role = None   # a broken store must not authorise
+                op_id, op_name, op_role = await _ops.resolve(db, provided)
+                if op_id:
+                    await _ops.touch(db, op_id)
+            finally:
+                await db.close()
+        except Exception:
+            op_id = op_name = op_role = None   # a broken store must not authorise
 
-        if op_id:
-            request.state.operator_id = op_id
-            request.state.operator_name = op_name
-            request.state.operator_role = op_role or _ops.ROLE_OPERATOR
-        elif hmac.compare_digest(provided, token):
+    if op_id:
+        request.state.operator_id = op_id
+        request.state.operator_name = op_name
+        request.state.operator_role = op_role or _ops.ROLE_OPERATOR
+    elif token:
+        if hmac.compare_digest(provided, token):
             # The shared secret still works, and is still honest about what it
             # is. A run stamped with this is authenticated and unattributed.
             request.state.operator_id = _ops.SHARED_TOKEN_OPERATOR
