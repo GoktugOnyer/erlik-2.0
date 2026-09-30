@@ -50,6 +50,25 @@ def test_native_argv_defaults_off_and_is_tri_state(monkeypatch):
     assert rc.resolve({"preset": "custom"})["native_argv"] is True
 
 
+def test_agent_auth_is_env_proof_in_the_measured_arms(monkeypatch):
+    """agent_auth lets an agent-invoked case run authenticated. It must not flip
+    on inside a measured arm from a stray env var, or the baseline stops being
+    the unauthenticated measurement it claims to be."""
+    monkeypatch.setenv("ERLIK_AGENT_AUTH", "true")
+    for preset in ("ai_only", "guided_ai"):
+        assert rc.resolve({"preset": preset})["agent_auth"] is False, preset
+
+
+def test_agent_auth_defaults_off_and_is_tri_state(monkeypatch):
+    assert rc.resolve({"preset": "custom"})["agent_auth"] is False    # absent: off
+    r = rc.resolve({"preset": "custom", "agent_auth": True})          # explicit on
+    assert r["agent_auth"] is True
+    assert not any("agent_auth" in w for w in r["run_config_warnings"]), (
+        "agent_auth is a recognised key and must not warn")
+    monkeypatch.setenv("ERLIK_AGENT_AUTH", "true")                    # env fallback
+    assert rc.resolve({"preset": "custom"})["agent_auth"] is True
+
+
 def test_client_facing_presets_reverify_their_findings():
     """A finding that reaches a report is something someone may act on. The
     presets meant for real use must re-test high/critical findings rather than

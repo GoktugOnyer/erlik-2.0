@@ -4136,6 +4136,26 @@ def _agent_scope_hosts(target_url: str) -> list[str]:
     return [host] if host else []
 
 
+async def _merge_agent_auth(case_target: dict, target_url: str) -> dict:
+    """Fill credential fields the agent did not supply from VERIFIED sessions.
+
+    Only for an agent-invoked case when the `agent_auth` lever is on. Fields come
+    from `credentials.auth_inputs` as HANDLES, never plaintext -- `run_test_case`
+    resolves them at exec and scrubs them from stored output, exactly as the v2
+    sweep does. The agent's own `case_target` values WIN, so an explicit override
+    is never clobbered. Returns a new dict (the caller's is not mutated); when no
+    verified session exists the target is returned unchanged, so the case still
+    skips out loud rather than running unauthenticated.
+    """
+    from orchestrator import credentials as _CRED
+    _adb = await get_db()
+    try:
+        auth = await _CRED.auth_inputs(_adb, target_url)
+    finally:
+        await _adb.close()
+    return {**auth, **case_target} if auth else dict(case_target)
+
+
 def _format_case_result_for_agent(case_id: str, tc, result) -> str:
     """Render a case result as evidence for the model.
 
@@ -5452,6 +5472,12 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
                 case_target = dict(case_target)
                 case_target.setdefault("url", target_url)
                 case_target["scope"] = {"allow_hosts": _agent_scope_hosts(target_url)}
+
+                # When agent_auth is on, run the case AUTHENTICATED from the
+                # engagement's verified sessions (handles only; resolved and
+                # scrubbed at exec). OFF => skipped, case_target byte-identical.
+                if runcfg.get("agent_auth"):
+                    case_target = await _merge_agent_auth(case_target, target_url)
 
                 await manager.broadcast(session_id, {
                     "type": "log", "phase": phase,
