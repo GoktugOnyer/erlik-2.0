@@ -5027,7 +5027,8 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
                         command, enabled_tools, no_timeout=no_timeout,
                         target_url=target_url, custom_timeout=tool_timeout,
                         safe_mode=runcfg.get("safe_mode", True),
-                        engagement_rows=_eng_rows)
+                        engagement_rows=_eng_rows,
+                        native_argv=runcfg.get("native_argv", False))
 
                     tool_name = result["tool"]
                     # Only count a tool the command actually reached a shell

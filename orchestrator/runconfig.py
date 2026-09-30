@@ -43,6 +43,11 @@ _BOOL_KEYS = {
     # Deterministic WSTG results as the agent's starting context. Distinct
     # from target_memory, which also replays prior AGENT findings.
     "handoff": "ERLIK_HANDOFF",
+    # Execute a single-tool, no-shell command as an argv list instead of
+    # `bash -c <string>`, so shell metacharacters the model emits are never
+    # interpreted. OFF is an EXACT no-op (the sink builds the identical
+    # `bash -c` command), so the frozen arms are unaffected.
+    "native_argv": "ERLIK_NATIVE_ARGV",
 }
 
 # Sensible pre-selectable setups. Keys map to the flag bundle a preset turns on;
@@ -58,7 +63,7 @@ RUN_PRESETS: dict[str, dict] = {
         "config": {"cve_enrich": False, "skills": False, "nettacker": False,
                    "playbooks": "", "primitives": False, "target_memory": False,
                    "poc_verify": False, "techniques": False,
-                   "ai_review": False},
+                   "ai_review": False, "native_argv": False},
     },
     "guided_ai": {
         "label": "Guided AI — skills + exploit playbooks (most effective)",
@@ -69,7 +74,7 @@ RUN_PRESETS: dict[str, dict] = {
         # compared against ai_only, so no help lever may drift in from the env.
         "config": {"skills": True, "cve_enrich": True, "nettacker": False,
                    "playbooks": "auto", "primitives": True,
-                   "techniques": False, "ai_review": True},
+                   "techniques": False, "ai_review": True, "native_argv": False},
     },
     "guided_techniques": {
         "label": "Guided Attack — environment-specific techniques",
@@ -141,7 +146,7 @@ def resolve(run_config=None) -> dict:
     # Explicit per-key values in the session config override the preset.
     for k in ("cve_enrich", "skills", "nettacker", "nettacker_findings",
               "nettacker_scenario", "playbooks", "max_playbooks", "provider", "poc_verify", "primitives",
-              "handoff",
+              "handoff", "native_argv",
               "target_memory", "techniques", "ai_review", "review_model",
               "skills_exclude", "skills_pin", "skills_max_chars",
               "safe_mode", "safe_mode_ack", "skills_max_files"):
@@ -154,7 +159,7 @@ def resolve(run_config=None) -> dict:
     warnings: list[str] = []
     _known = {"cve_enrich", "skills", "nettacker", "nettacker_findings",
               "nettacker_scenario", "playbooks", "max_playbooks", "provider", "poc_verify", "primitives",
-              "handoff",
+              "handoff", "native_argv",
               "target_memory", "techniques", "ai_review", "review_model",
               "skills_exclude", "skills_pin", "skills_max_chars",
               "safe_mode", "safe_mode_ack", "skills_max_files", "preset"}
@@ -291,6 +296,7 @@ def resolve(run_config=None) -> dict:
         "playbooks": playbooks,
         "max_playbooks": max_playbooks,
         "handoff": tri("handoff"),
+        "native_argv": tri("native_argv"),
     }
 
 

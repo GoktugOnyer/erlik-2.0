@@ -31,6 +31,25 @@ def test_comparison_arms_are_env_proof(monkeypatch):
         assert r["nettacker"] is False, preset
 
 
+def test_native_argv_is_env_proof_in_the_measured_arms(monkeypatch):
+    """native_argv changes the exec TRANSPORT (argv vs bash -c). A stray env var
+    must not flip it inside a measured arm, or two runs labelled the same arm
+    could execute the same command two different ways."""
+    monkeypatch.setenv("ERLIK_NATIVE_ARGV", "true")
+    for preset in ("ai_only", "guided_ai"):
+        assert rc.resolve({"preset": preset})["native_argv"] is False, preset
+
+
+def test_native_argv_defaults_off_and_is_tri_state(monkeypatch):
+    assert rc.resolve({"preset": "custom"})["native_argv"] is False   # absent: off
+    r = rc.resolve({"preset": "custom", "native_argv": True})         # explicit on
+    assert r["native_argv"] is True
+    assert not any("native_argv" in w for w in r["run_config_warnings"]), (
+        "native_argv is a recognised key and must not warn")
+    monkeypatch.setenv("ERLIK_NATIVE_ARGV", "true")                   # env fallback
+    assert rc.resolve({"preset": "custom"})["native_argv"] is True
+
+
 def test_client_facing_presets_reverify_their_findings():
     """A finding that reaches a report is something someone may act on. The
     presets meant for real use must re-test high/critical findings rather than
