@@ -57,6 +57,10 @@ _BOOL_KEYS = {
     # catalogue and via run_case). OFF hides them, so a new case cannot mutate a
     # recorded arm's prompt. With no ext case in the catalogue this is a no-op.
     "coverage_cases": "ERLIK_COVERAGE_CASES",
+    # Learning loop (Track A). OFF: no candidate playbooks are harvested from a
+    # run's verified findings, and none are injected. An exact no-op, so the
+    # frozen arms neither write nor read learned context.
+    "learned_playbooks": "ERLIK_LEARNED_PLAYBOOKS",
 }
 
 # Sensible pre-selectable setups. Keys map to the flag bundle a preset turns on;
@@ -73,7 +77,8 @@ RUN_PRESETS: dict[str, dict] = {
                    "playbooks": "", "primitives": False, "target_memory": False,
                    "poc_verify": False, "techniques": False,
                    "ai_review": False, "native_argv": False,
-                   "agent_auth": False, "coverage_cases": False},
+                   "agent_auth": False, "coverage_cases": False,
+                   "learned_playbooks": False},
     },
     "guided_ai": {
         "label": "Guided AI — skills + exploit playbooks (most effective)",
@@ -85,7 +90,8 @@ RUN_PRESETS: dict[str, dict] = {
         "config": {"skills": True, "cve_enrich": True, "nettacker": False,
                    "playbooks": "auto", "primitives": True,
                    "techniques": False, "ai_review": True, "native_argv": False,
-                   "agent_auth": False, "coverage_cases": False},
+                   "agent_auth": False, "coverage_cases": False,
+                   "learned_playbooks": False},
     },
     "guided_techniques": {
         "label": "Guided Attack — environment-specific techniques",
@@ -158,6 +164,7 @@ def resolve(run_config=None) -> dict:
     for k in ("cve_enrich", "skills", "nettacker", "nettacker_findings",
               "nettacker_scenario", "playbooks", "max_playbooks", "provider", "poc_verify", "primitives",
               "handoff", "native_argv", "agent_auth", "coverage_cases",
+              "learned_playbooks",
               "target_memory", "techniques", "ai_review", "review_model",
               "skills_exclude", "skills_pin", "skills_max_chars",
               "safe_mode", "safe_mode_ack", "skills_max_files"):
@@ -171,6 +178,7 @@ def resolve(run_config=None) -> dict:
     _known = {"cve_enrich", "skills", "nettacker", "nettacker_findings",
               "nettacker_scenario", "playbooks", "max_playbooks", "provider", "poc_verify", "primitives",
               "handoff", "native_argv", "agent_auth", "coverage_cases",
+              "learned_playbooks",
               "target_memory", "techniques", "ai_review", "review_model",
               "skills_exclude", "skills_pin", "skills_max_chars",
               "safe_mode", "safe_mode_ack", "skills_max_files", "preset"}
@@ -310,6 +318,7 @@ def resolve(run_config=None) -> dict:
         "native_argv": tri("native_argv"),
         "agent_auth": tri("agent_auth"),
         "coverage_cases": tri("coverage_cases"),
+        "learned_playbooks": tri("learned_playbooks"),
     }
 
 

@@ -3325,6 +3325,100 @@ def _target_key(target_url: str) -> str:
     return f"{host}:{port}"
 
 
+def _candidate_body(finding: dict) -> str:
+    """A reusable play templated from a VERIFIED finding — no model (Track A is
+    mechanical), just the finding's own confirmed facts in the playbook_catalog
+    text shape so it routes and renders like a hand-authored one. Track B later
+    replaces this with a distiller-written body.
+    """
+    url = finding.get("url") or ""
+    param = finding.get("parameter") or ""
+    evidence = (finding.get("evidence") or "").strip()
+    vt = finding.get("vuln_type") or "finding"
+    sev = finding.get("severity") or "medium"
+    where = f"Verified on this target at: {url}"
+    if param:
+        where += f" (parameter `{param}`)"
+    return "\n".join([
+        f"### LEARNED PLAYBOOK — {vt} ({sev})",
+        "",
+        where,
+        "",
+        "Confirmed by PoC re-verification on a prior run. Evidence then:",
+        (f"  {evidence[:800]}" if evidence else "  (no evidence text recorded)"),
+        "",
+        "Re-test this exact location first — it is the fastest path to "
+        "re-confirming the issue on a repeat engagement.",
+    ])
+
+
+def _training_shard(finding: dict, session_id: str) -> dict:
+    """Track-B seam: the record a distiller would later turn into a fine-tuning
+    example, built from the SAME verified finding the candidate playbook comes
+    from — so one write-back event can feed both sinks. A1 computes and returns
+    it (and tests its shape) but DOES NOT persist it; Track B owns the sink.
+    """
+    return {
+        "session_id": session_id,
+        "finding_id": finding.get("id"),
+        "vuln_type": finding.get("vuln_type"),
+        "url": finding.get("url"),
+        "parameter": finding.get("parameter"),
+        "evidence": finding.get("evidence"),
+        "label": "verified_confirmed",
+    }
+
+
+async def _harvest_candidates(session_id: str) -> dict:
+    """Turn this run's VERIFIED, confirmed findings into pending candidate
+    playbooks. Reads `findings`, writes only `candidate_playbooks` — never the
+    other way, so no metric moves. Deduped within the run by target/class/url.
+    Returns {"candidates": n, "shards": [...]}; shards are the Track-B seam and
+    are NOT persisted here. Never raises.
+    """
+    from urllib.parse import urlparse
+    from orchestrator.playbooks import route_playbooks
+    try:
+        db = await get_db()
+        try:
+            srow = await (await db.execute(
+                "SELECT target_url FROM sessions WHERE id = ?", (session_id,))).fetchone()
+            tk = _target_key(srow["target_url"]) if srow else ""
+            if not tk:
+                return {"candidates": 0, "shards": []}
+            rows = await (await db.execute(
+                "SELECT id, vuln_type, severity, url, parameter, evidence "
+                "FROM findings WHERE session_id = ? AND verified = 1 "
+                "AND poc_status = 'confirmed' "
+                "AND (false_positive IS NULL OR false_positive = 0)",
+                (session_id,))).fetchall()
+            shards, seen, n = [], set(), 0
+            for r in rows:
+                f = dict(r)
+                shards.append(_training_shard(f, session_id))
+                sel, _ = route_playbooks(f.get("vuln_type") or "")
+                vuln_class = sel[0] if sel else "other"
+                u = urlparse(f.get("url") or "")
+                dedup = (vuln_class, f"{u.netloc}{u.path}")
+                if dedup in seen:
+                    continue
+                seen.add(dedup)
+                await db.execute(
+                    "INSERT INTO candidate_playbooks "
+                    "(target_key, vuln_class, title, body, source_session_id, "
+                    " source_finding_id, status) VALUES (?,?,?,?,?,?, 'pending')",
+                    (tk, vuln_class, f.get("vuln_type") or vuln_class,
+                     _candidate_body(f), session_id, f["id"]))
+                n += 1
+            await db.commit()
+            return {"candidates": n, "shards": shards}
+        finally:
+            await db.close()
+    except Exception as e:
+        print(f"[harvest {session_id[:8]}] skipped (non-fatal): {e}", flush=True)
+        return {"candidates": 0, "shards": []}
+
+
 async def _extract_recon_context(session_id: str):
     """Parse tool outputs from a completed session and store structured recon data."""
     db = await get_db()
@@ -5786,6 +5880,21 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
                 })
         except Exception as _pv_err:  # noqa: BLE001
             print(f"[poc-verify {session_id[:8]}] skipped: {_pv_err}")
+
+        # Learning loop (Track A): harvest this run's VERIFIED, confirmed findings
+        # into pending candidate playbooks. Runs after PoC re-verification so it
+        # only ever sees confirmed findings. Gated; OFF writes nothing.
+        if runcfg.get("learned_playbooks"):
+            try:
+                _h = await _harvest_candidates(session_id)
+                if _h["candidates"]:
+                    await manager.broadcast(session_id, {
+                        "type": "log", "phase": "report",
+                        "message": f"LEARNING: harvested {_h['candidates']} candidate "
+                                   f"playbook(s) from verified findings (pending review)",
+                    })
+            except Exception as _h_err:  # noqa: BLE001
+                print(f"[harvest {session_id[:8]}] skipped: {_h_err}")
 
         # Generate report
         try:

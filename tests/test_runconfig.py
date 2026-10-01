@@ -86,6 +86,23 @@ def test_coverage_cases_defaults_off_and_is_tri_state(monkeypatch):
     assert rc.resolve({"preset": "custom"})["coverage_cases"] is True
 
 
+def test_learned_playbooks_is_env_proof_in_the_measured_arms(monkeypatch):
+    """The learning loop neither harvests nor injects in a measured arm, or the
+    baseline is no longer the clean measurement it claims to be."""
+    monkeypatch.setenv("ERLIK_LEARNED_PLAYBOOKS", "true")
+    for preset in ("ai_only", "guided_ai"):
+        assert rc.resolve({"preset": preset})["learned_playbooks"] is False, preset
+
+
+def test_learned_playbooks_defaults_off_and_is_tri_state(monkeypatch):
+    assert rc.resolve({"preset": "custom"})["learned_playbooks"] is False
+    r = rc.resolve({"preset": "custom", "learned_playbooks": True})
+    assert r["learned_playbooks"] is True
+    assert not any("learned_playbooks" in w for w in r["run_config_warnings"])
+    monkeypatch.setenv("ERLIK_LEARNED_PLAYBOOKS", "true")
+    assert rc.resolve({"preset": "custom"})["learned_playbooks"] is True
+
+
 def test_client_facing_presets_reverify_their_findings():
     """A finding that reaches a report is something someone may act on. The
     presets meant for real use must re-test high/critical findings rather than
