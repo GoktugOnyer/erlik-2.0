@@ -8190,6 +8190,11 @@ async def thesis_export():
                     "/api/v2/runs/{run_id}",
                 "benchmark_results":
                     "declared but never written; metrics are recomputed on demand",
+                "candidate_playbooks":
+                    "learning-loop artifact, not measurement data; its body is "
+                    "templated from finding evidence (attacker-influenceable), so "
+                    "it is not shipped in an analysis export at any redaction "
+                    "level — the same posture as the engagement/credential tables",
             },
         }
         # `applied` and `total` are SEPARATE facts: applied=true with total=0

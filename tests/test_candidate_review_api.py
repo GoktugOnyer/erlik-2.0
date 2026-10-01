@@ -101,6 +101,23 @@ class TestReviewIsAdminOnly:
         assert r.status_code == 200 and r.json()["status"] == "rejected"
 
 
+class TestExportNeverLeaksCandidateBodies:
+    """Default-deny: a candidate body is templated from finding evidence
+    (attacker-influenceable), so it must never leave via the analysis export --
+    whether the table is excluded (as it is now) or someone later includes it."""
+
+    def test_a_candidate_body_secret_never_appears_in_the_export(self, client, mod):
+        _, db_mod = mod
+        # A distinctive marker, deliberately NOT shaped like a real provider key
+        # (that would trip push-protection); the test checks the body never
+        # reaches the export, so the string only needs to be unique.
+        secret = "CANDIDATE_BODY_LEAK_MARKER_7f3a"
+        _seed(db_mod, body=f"### play\nleaked: {secret}\n", status="approved")
+        r = client.get("/api/thesis/export", headers=SH)
+        assert r.status_code == 200
+        assert secret not in r.text, "candidate body leaked into the thesis export"
+
+
 class TestValidation:
     def test_an_invalid_status_is_refused(self, client, mod):
         _, db_mod = mod
