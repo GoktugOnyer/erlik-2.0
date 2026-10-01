@@ -220,7 +220,9 @@ class TestUnknownInputIsHandled:
 
     def test_an_unknown_case_id_lists_the_real_ones(self):
         block = self._block()
-        assert "_runnable_case_ids()" in block
+        # Coverage-aware since case tiering: the listing reflects what this run
+        # may actually invoke (ext cases hidden unless coverage_cases is on).
+        assert "_runnable_case_ids(_cov)" in block
 
     def test_a_missing_required_field_tells_the_model_what_is_needed(self):
         """`run_test_case` raises ValueError for an incomplete target. Failing

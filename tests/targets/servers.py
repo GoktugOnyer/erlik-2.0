@@ -326,3 +326,110 @@ class Ssrf(_Base):
                 pass
             return self._send(200, "fetched", "text/plain")
         self._send(400, "url parameter refused", "text/plain")
+
+
+class Ssti(_Base):
+    """WSTG-INPV-18's target. The flaw renders a query value through a template
+    engine; the control echoes it literally.
+
+    The case's evidence is arithmetic that cannot occur by chance: `{{31337*7}}`
+    is a finding only if the response contains `219359`. So the flaw evaluates
+    `{{ ... }}` (Jinja/Twig-shaped) and the control html-escapes and reflects the
+    raw braces -- `219359` appears on one and never on the other. Nothing here
+    executes; the "engine" only multiplies and repeats, which is all the case's
+    inert payloads exercise.
+    """
+
+    def _eval(self, expr: str) -> str:
+        expr = expr.strip()
+        m = re.fullmatch(r"(\d+)\s*\*\s*(\d+)", expr)              # 31337*7
+        if m:
+            return str(int(m.group(1)) * int(m.group(2)))
+        m = re.fullmatch(r"(\d+)\s*\*\s*'([^']*)'", expr)         # 7*'7'
+        if m:
+            return m.group(2) * int(m.group(1))
+        m = re.fullmatch(r"'([^']*)'\s*\*\s*(\d+)", expr)         # '7'*7
+        if m:
+            return m.group(1) * int(m.group(2))
+        raise ValueError(expr)
+
+    def _rendered(self, val: str) -> str | None:
+        """Evaluate the first {{ ... }} expression, as a template engine would."""
+        m = re.search(r"\{\{(.+?)\}\}", val)
+        if not m:
+            return None
+        return self._eval(m.group(1))
+
+    def do_GET(self):
+        u = urlparse(self.path)
+        vals = [v for vs in parse_qs(u.query, keep_blank_values=True).values()
+                for v in vs]
+        payload = vals[0] if vals else ""
+        if self.VULNERABLE:
+            try:
+                out = self._rendered(payload)
+            except ValueError:
+                # The engine tried to compile the expression and refused. It
+                # names itself in the error -- which is the case's `high` step.
+                return self._send(200, "jinja2.exceptions.TemplateSyntaxError: "
+                                  "unexpected char while parsing expression",
+                                  "text/plain")
+            if out is not None:
+                return self._send(200, f"<html><body>Hello {out}</body></html>")
+        # Control (and the flaw on a non-template value): reflect, encoded.
+        return self._send(200,
+                          f"<html><body>Hello {html.escape(payload)}</body></html>")
+
+
+class Deser(_Base):
+    """WSTG-INPV-11's target. The flaw feeds the POST body (or the session
+    cookie) to a language deserializer and leaks the runtime's own exception;
+    the control validates the input and returns a generic rejection.
+
+    Every probe the case sends is a WELL-FORMED but EMPTY serialized object, and
+    the evidence is the deserializer's exception text -- `__PHP_Incomplete_Class`,
+    `java.io.StreamCorruptedException`, `_pickle.UnpicklingError`. Those strings
+    do not occur in ordinary output; they occur when a deserializer was handed
+    something and objected. Nothing here deserializes for real: the flaw MATCHES
+    the payload's format and returns the exception that format would raise.
+    """
+
+    def _exception_for(self, blob: str) -> str | None:
+        b = blob.strip().strip('"')
+        if re.match(r'O:\d+:"', b):                       # PHP serialized object
+            return ("Notice: unserialize(): Error at offset 0 of 19 bytes\n"
+                    "object(__PHP_Incomplete_Class)")
+        if b.startswith("rO0AB"):                          # Java stream, base64
+            return ("java.io.StreamCorruptedException: invalid stream header\n"
+                    "\tat java.io.ObjectInputStream.readStreamHeader(...)")
+        if b.startswith("gAS") or b.startswith("gA"):      # Python pickle proto 2+
+            return "_pickle.UnpicklingError: invalid load key, '\\x00'."
+        if b.startswith("AAEAAAD"):                        # .NET BinaryFormatter
+            return ("System.Runtime.Serialization.SerializationException: "
+                    "End of Stream encountered before parsing was completed")
+        return None
+
+    def _handle(self, blob: str):
+        if self.VULNERABLE:
+            exc = self._exception_for(blob)
+            if exc is not None:
+                # The deserializer was reached and objected -- the finding.
+                return self._send(500, exc, "text/plain")
+            return self._send(200, "ok", "text/plain")
+        # Control: never deserialize, never leak internals.
+        return self._send(400, "input rejected: unrecognised payload", "text/plain")
+
+    def do_POST(self):
+        n = int(self.headers.get("Content-Length") or 0)
+        body = self.rfile.read(n).decode("latin-1") if n else ""
+        # The probes send `data=<blob>`; the Java one posts a raw base64 body.
+        blob = (parse_qs(body, keep_blank_values=True).get("data") or [body])[0]
+        return self._handle(blob)
+
+    def do_GET(self):
+        # serialized_cookie_probe: `-b 'session=O:8:"stdClass":0:{}'`.
+        cookie = self.headers.get("Cookie") or ""
+        m = re.search(r"session=([^;]+)", cookie)
+        if m:
+            return self._handle(m.group(1))
+        return self._send(200, "home", "text/plain")
