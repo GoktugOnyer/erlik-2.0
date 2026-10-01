@@ -7822,6 +7822,64 @@ async def triage_finding(finding_id: int, body: dict = Body(...)):
         await db.close()
 
 
+@app.get("/api/candidate-playbooks")
+async def list_candidate_playbooks(target_key: str = None, status: str = None):
+    """Candidate playbooks harvested from verified findings, for review.
+
+    Read-only; filter by target_key and/or status. Bodies derive from finding
+    evidence (attacker-influenceable), so the dashboard sanitises them on render
+    and they are never injected while `pending`.
+    """
+    q = "SELECT * FROM candidate_playbooks"
+    where, vals = [], []
+    if target_key:
+        where.append("target_key = ?"); vals.append(target_key)
+    if status:
+        where.append("status = ?"); vals.append(status)
+    if where:
+        q += " WHERE " + " AND ".join(where)
+    q += " ORDER BY created_at DESC, id DESC"
+    db = await get_db()
+    try:
+        rows = await (await db.execute(q, vals)).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        await db.close()
+
+
+@app.post("/api/candidate-playbooks/{candidate_id}/review")
+async def review_candidate_playbook(candidate_id: int, request: Request,
+                                    body: dict = Body(...)):
+    """Approve or reject a candidate playbook. ADMIN ONLY.
+
+    Approving lets a candidate's text enter a shell-executing agent's prompt on a
+    future run (PR-A3), so it is a minting-class privilege -- the same bar as
+    creating an operator, not the read token. A `pending` candidate is never
+    injected; only an `approved` one is, and a `rejected` one never again.
+    Body: {status: 'approved'|'rejected', note?: str}.
+    """
+    actor = _require_admin(request)
+    status = (body or {}).get("status")
+    if status not in ("approved", "rejected"):
+        raise HTTPException(400, "status must be 'approved' or 'rejected'")
+    db = await get_db()
+    try:
+        cur = await db.execute(
+            "SELECT id FROM candidate_playbooks WHERE id = ?", (candidate_id,))
+        if not await cur.fetchone():
+            raise HTTPException(404, "candidate playbook not found")
+        await db.execute(
+            "UPDATE candidate_playbooks SET status = ?, reviewed_by = ?, "
+            "review_note = ?, reviewed_at = datetime('now') WHERE id = ?",
+            (status, actor, (body or {}).get("note") or None, candidate_id))
+        await db.commit()
+        row = await (await db.execute(
+            "SELECT * FROM candidate_playbooks WHERE id = ?", (candidate_id,))).fetchone()
+        return dict(row)
+    finally:
+        await db.close()
+
+
 @app.get("/api/sessions/{session_id}/report.json")
 async def get_report_json(session_id: str):
     """Validated pentest-report.json for a session (Phase 2 structured schema).
