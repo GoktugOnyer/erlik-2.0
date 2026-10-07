@@ -104,10 +104,12 @@ def test_learned_playbooks_defaults_off_and_is_tri_state(monkeypatch):
 
 
 def test_stateful_session_is_env_proof_in_the_measured_arms(monkeypatch):
-    """The login provider SEEDS an authenticated session into the agent's
-    context — a help lever. A stray env var must not flip it on inside a
-    measured arm, or the baseline stops being the unauthenticated measurement
-    it claims to be."""
+    """stateful_session is the master switch for both halves of the feature: the
+    login provider SEEDS an authenticated session into the agent's context, and
+    the auto-attach path rides harvested auth onto dispatched commands. Either
+    way it is a help lever that changes what the agent is handed, so a stray env
+    var must not flip it on inside a measured arm, or the baseline stops being
+    the unauthenticated / no-stored-auth measurement it claims to be."""
     monkeypatch.setenv("ERLIK_STATEFUL_SESSION", "true")
     for preset in ("ai_only", "guided_ai"):
         assert rc.resolve({"preset": preset})["stateful_session"] is False, preset

@@ -61,12 +61,18 @@ _BOOL_KEYS = {
     # run's verified findings, and none are injected. An exact no-op, so the
     # frozen arms neither write nor read learned context.
     "learned_playbooks": "ERLIK_LEARNED_PLAYBOOKS",
-    # Config-driven login provider (P2-11). OFF: no login is performed at session
-    # start and nothing is seeded into the in-run session store, so the prompt
-    # and every existing auth path — login-helper included — are byte-identical
-    # to before. An exact no-op, so the frozen arms are unaffected. The sub-config
-    # that says WHICH credential to log in with is `login_provider` (below); this
-    # flag is the master switch, and with it off that sub-config is never read.
+    # Stateful session store (P2-11). The master switch for the whole
+    # stateful-session feature, shared by two cooperating slices:
+    #   - the config-driven login provider SEEDS the in-run session store at
+    #     session start (which credential to log in with is named by the
+    #     `login_provider` sub-config below), and
+    #   - the auto-attach path rides the session's harvested auth headers and
+    #     cookies onto the commands the agent dispatches, so the model need not
+    #     re-paste a token each turn.
+    # OFF: no login is performed, nothing is seeded, nothing is attached, and the
+    # prompt and command string are byte-identical to before (login-helper and
+    # every existing auth path untouched). An EXACT no-op, so the frozen arms are
+    # unaffected; with it off the `login_provider` sub-config is never read.
     "stateful_session": "ERLIK_STATEFUL_SESSION",
 }
 
