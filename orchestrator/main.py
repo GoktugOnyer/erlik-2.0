@@ -2407,7 +2407,125 @@ def _case_catalogue_for_prompt(coverage_cases: bool = False) -> str:
     return "\n".join(lines)
 
 
-def render_system_prompt(target_url: str, coverage_cases: bool = False) -> str:
+# --- Dynamic phase-scoped tool menu (ERLIK_DYNAMIC_MENU, OFF by default) ---
+#
+# Small local models degrade when the prompt lists ~30 tools on every turn: the
+# flat TOOL USAGE EXAMPLES block is a lot of surface to reason over, and a 7B
+# routinely picks a tool from the wrong phase. When ERLIK_DYNAMIC_MENU is on,
+# render_system_prompt() expands only the example lines whose tool belongs to
+# the session's current phase (plus the universal ones) and collapses the rest
+# into a name-only index grouped by phase.
+#
+# The collapsed tools are still DECLARED and still REACHABLE (CLAUDE.md #2):
+# the JSON action protocol lets the model invoke any command, and
+# tool_executor admits on the configured toolset, not on prompt presence, so a
+# tool named in the index runs exactly as before. Nothing is silently dropped.
+#
+# OFF is an EXACT no-op: with the flag unset render_system_prompt() returns
+# byte-for-byte today's prompt, so the frozen campaign prompt and every
+# recorded arm are untouched. This lever is deliberately NOT a TOOLSET_PRESET
+# and NOT a runconfig help-lever: it reshapes the menu's presentation, it does
+# not add, remove, or gate any capability.
+#
+# Classification keys off the first token of each example line, mapped to the
+# CHAIN_PHASES vocabulary. `curl` is universal -- it is the probe/verify tool
+# of every phase, so it is never collapsed. A token absent from the map is
+# kept expanded rather than collapsed, so a newly added example can never
+# vanish from the menu unannounced.
+_DYNAMIC_MENU_UNIVERSAL = frozenset({"curl"})
+
+_DYNAMIC_MENU_TOOL_PHASE: dict[str, str] = {
+    # recon — service/technology/TLS/SSH/SMB identification and passive OSINT
+    "nmap": "recon", "whatweb": "recon", "cmseek": "recon",
+    "sslscan": "recon", "ssh-audit": "recon", "smbmap": "recon",
+    "theHarvester": "recon",
+    # discovery — content, endpoint and parameter enumeration
+    "gobuster": "discovery", "ffuf": "discovery", "arjun": "discovery",
+    "pw-crawl": "discovery", "dirsearch": "discovery",
+    # vuln_scan — injection / XSS / misconfiguration / known-CVE testing
+    "sqlmap": "vuln_scan", "xsstrike": "vuln_scan", "dalfox": "vuln_scan",
+    "nuclei": "vuln_scan", "zap-cli": "vuln_scan", "nikto": "vuln_scan",
+    "joomscan": "vuln_scan", "searchsploit": "vuln_scan",
+    # exploitation — auth / token attacks and post-access looting
+    "hydra": "exploitation", "jwt_tool": "exploitation", "gitleaks": "exploitation",
+}
+
+_DYNAMIC_MENU_HEADER = "TOOL USAGE EXAMPLES"
+_DYNAMIC_MENU_END = "AVAILABLE RESOURCES ON THIS SYSTEM:"
+
+
+def _dynamic_menu_enabled(override: bool | None = None) -> bool:
+    """Whether the phase-scoped menu is on. `override` wins; else read env."""
+    if override is not None:
+        return bool(override)
+    return os.environ.get("ERLIK_DYNAMIC_MENU", "").strip().lower() in _TRUTHY
+
+
+def _example_tool(line: str) -> str | None:
+    """First token of a `- <tool> ...` example line, or None if not an example."""
+    if not line.startswith("- "):
+        return None
+    rest = line[2:].strip()
+    return rest.split()[0] if rest else None
+
+
+def _apply_dynamic_menu(template: str, phase: str) -> str:
+    """Rewrite the TOOL USAGE EXAMPLES block to foreground `phase`'s tools.
+
+    Keeps the full example line for every universal tool and every tool whose
+    phase matches (and for any unclassified tool, so nothing is dropped). Every
+    other tool is listed by name under its phase, so it stays declared and
+    reachable. If the block cannot be located the template is returned
+    unchanged -- the menu is a prompt convenience, never a reason to render a
+    broken prompt.
+    """
+    lines = template.split("\n")
+    start = next((i for i, l in enumerate(lines)
+                  if l.startswith(_DYNAMIC_MENU_HEADER)), None)
+    end = next((i for i, l in enumerate(lines)
+                if l.startswith(_DYNAMIC_MENU_END)), None)
+    if start is None or end is None or end <= start:
+        return template
+
+    header = lines[start]
+    kept: list[str] = []
+    hidden: dict[str, list[str]] = {}
+    seen_hidden: set[str] = set()
+    for l in lines[start + 1:end]:
+        tool = _example_tool(l)
+        if tool is None:
+            # Blank separators are reconstructed below; preserve any (unexpected)
+            # non-example prose rather than lose it.
+            if l.strip():
+                kept.append(l)
+            continue
+        tool_phase = _DYNAMIC_MENU_TOOL_PHASE.get(tool)
+        if (tool in _DYNAMIC_MENU_UNIVERSAL or tool_phase is None
+                or tool_phase == phase):
+            kept.append(l)
+        elif tool not in seen_hidden:
+            hidden.setdefault(tool_phase, []).append(tool)
+            seen_hidden.add(tool)
+
+    label = phase.replace("_", " ").upper()
+    out = [header, "",
+           f"CURRENT PHASE: {label}. Use these tools now (full examples below). "
+           f"curl works in every phase:"]
+    out += kept
+    if hidden:
+        out += ["",
+                "OTHER TOOLS (available now — invoke by name; their detailed "
+                "examples appear when you reach that phase):"]
+        for ph in CHAIN_PHASES:
+            if hidden.get(ph):
+                out.append(f"- {ph}: " + ", ".join(hidden[ph]))
+    out.append("")  # the blank line that separated the block from the next section
+    return "\n".join(lines[:start] + out + lines[end:])
+
+
+def render_system_prompt(target_url: str, coverage_cases: bool = False,
+                         phase: str | None = None,
+                         dynamic_menu: bool | None = None) -> str:
     """TOOL_USE_SYSTEM_PROMPT with every placeholder resolved for this target.
 
     Extracted from the agent loop so the substitution can be tested. It was
@@ -2421,13 +2539,27 @@ def render_system_prompt(target_url: str, coverage_cases: bool = False) -> str:
 
     Introduced 2026-08-16 (bd7b08b) and so absent from every April 2026
     campaign, whose prompts carried the hardcoded flag this replaced.
+
+    `dynamic_menu` (default: read ERLIK_DYNAMIC_MENU) scopes the tool-example
+    menu to `phase` (default: the first CHAIN_PHASE, recon). OFF is a
+    byte-identical no-op: the template is untouched and the substitution chain
+    below is exactly the one every recorded arm rendered. The system prompt is
+    built once per session, so with the flag on the menu is scoped to the
+    OPENING phase; collapsed tools stay declared and reachable, so a static
+    opening scope never strands the model. (The function accepts any phase, so
+    re-rendering on phase transition is a one-line caller change if wanted.)
     """
     from urllib.parse import urlparse
+
+    template = TOOL_USE_SYSTEM_PROMPT
+    if _dynamic_menu_enabled(dynamic_menu):
+        ph = phase if phase in CHAIN_PHASES else CHAIN_PHASES[0]
+        template = _apply_dynamic_menu(template, ph)
 
     pu = urlparse(target_url)
     host = pu.hostname or "target"
     port = str(pu.port) if pu.port else ("443" if pu.scheme == "https" else "80")
-    return (TOOL_USE_SYSTEM_PROMPT
+    return (template
             .replace("{target_url}", target_url)
             .replace("{target_host}", host)
             .replace("{target_port}", port)
