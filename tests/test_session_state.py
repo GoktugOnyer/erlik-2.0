@@ -20,6 +20,8 @@ from orchestrator.session_state import (
     PRIMITIVE_KINDS,
     Primitive,
     SessionStore,
+    _in_scope,
+    _normalize_host,
 )
 
 # A JWT-shaped secret long enough to be masked, and a short one that is not.
@@ -224,3 +226,101 @@ class TestSummaryFacts:
         s.add(tok())
         s.add(Primitive("cookie", "sid", COOKIE_VAL, "s", None))
         assert len(s.summary_facts()) == 2
+
+
+# --------------------------------------------------------------- host scoping
+
+class TestHostNormalization:
+    @pytest.mark.parametrize("value,expected", [
+        ("t.local", "t.local"),
+        ("T.Local", "t.local"),                       # case-insensitive
+        ("t.local:3000", "t.local"),                  # port stripped
+        ("http://t.local/path?x=1", "t.local"),       # scheme + path stripped
+        ("https://user@t.local:8443/a", "t.local"),   # userinfo stripped
+        ("[::1]:443", "::1"),                          # IPv6 literal
+        ("", ""),
+        (None, ""),
+    ])
+    def test_normalizes_to_a_bare_lowercased_hostname(self, value, expected):
+        assert _normalize_host(value) == expected
+
+
+class TestInScopeRule:
+    def test_no_host_filter_admits_everything(self):
+        assert _in_scope(Primitive("token", None, TOKEN, "s", "a.local"), None) is True
+        assert _in_scope(Primitive("token", None, TOKEN, "s", None), None) is True
+
+    def test_a_matching_host_is_in_scope_ignoring_port_and_case(self):
+        p = Primitive("cookie", "sid", "aaaaaaaa", "s", "t.local:3000")
+        assert _in_scope(p, "http://T.LOCAL/x") is True
+
+    def test_a_different_host_is_out_of_scope(self):
+        p = Primitive("cookie", "sid", "aaaaaaaa", "s", "t.local")
+        assert _in_scope(p, "evil.example") is False
+
+    def test_an_unscoped_primitive_is_denied_under_a_host_filter(self):
+        """Default-deny: the store will not guess that a credential with no
+        recorded host is safe to send to a specific one."""
+        assert _in_scope(Primitive("token", None, TOKEN, "s", None), "t.local") is False
+
+    def test_a_host_that_normalizes_to_nothing_matches_nothing(self):
+        p = Primitive("cookie", "sid", "aaaaaaaa", "s", "t.local")
+        assert _in_scope(p, "://") is False
+
+
+class TestHostScopedReads:
+    def _two_host_store(self):
+        s = SessionStore()
+        s.add(Primitive("cookie", "sid", "cookie-for-a", "s", "a.local"))
+        s.add(Primitive("cookie", "sid", "cookie-for-b", "s", "b.local"))
+        s.add(Primitive("token", None, TOKEN, "s", "a.local"))
+        s.add(Primitive("csrf", "_csrf", CSRF_VAL, "s", "b.local"))
+        s.add(Primitive("header", "X-Api", "key-for-a", "s", "a.local"))
+        return s
+
+    def test_get_returns_only_the_matching_hosts_primitive(self):
+        s = self._two_host_store()
+        assert s.get("cookie", "sid", host="a.local").value == "cookie-for-a"
+        assert s.get("cookie", "sid", host="b.local").value == "cookie-for-b"
+
+    def test_get_excludes_a_token_scoped_to_another_host(self):
+        s = self._two_host_store()
+        assert s.get("token", host="a.local") is not None
+        assert s.get("token", host="b.local") is None
+
+    def test_all_filters_by_host(self):
+        s = self._two_host_store()
+        assert {p.value for p in s.all(host="a.local")} == {
+            "cookie-for-a", TOKEN, "key-for-a"}
+        assert {p.value for p in s.all("cookie", host="b.local")} == {"cookie-for-b"}
+
+    def test_auth_headers_are_host_scoped(self):
+        s = self._two_host_store()
+        a = s.auth_headers(host="a.local")
+        assert a == {"X-Api": "key-for-a", "Authorization": f"Bearer {TOKEN}"}
+        b = s.auth_headers(host="b.local")
+        assert b == {}, "a.local's header and token must not leak to b.local"
+
+    def test_cookies_and_csrf_are_host_scoped(self):
+        s = self._two_host_store()
+        assert s.cookies(host="a.local") == {"sid": "cookie-for-a"}
+        assert s.cookies(host="b.local") == {"sid": "cookie-for-b"}
+        assert s.csrf_tokens(host="a.local") == {}
+        assert s.csrf_tokens(host="b.local") == {"_csrf": CSRF_VAL}
+
+    def test_summary_facts_are_host_scoped(self):
+        s = self._two_host_store()
+        assert len(s.summary_facts(host="a.local")) == 3   # cookie, token, header
+        assert len(s.summary_facts(host="b.local")) == 2    # cookie, csrf
+
+    def test_without_a_host_the_whole_session_is_returned(self):
+        """Backward compatible: the no-host form is unchanged."""
+        s = self._two_host_store()
+        assert len(s.all()) == 5
+        assert s.cookies() == {"sid": "cookie-for-b"}       # newest wins, unscoped
+
+    def test_an_unscoped_credential_is_withheld_from_a_host_but_served_unscoped(self):
+        s = SessionStore()
+        s.add(Primitive("token", None, TOKEN, "s", None))
+        assert s.auth_headers() == {"Authorization": f"Bearer {TOKEN}"}
+        assert s.auth_headers(host="t.local") == {}

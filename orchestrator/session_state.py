@@ -21,6 +21,13 @@ It deliberately does nothing clever:
     and `summary_facts()` are the safe surfaces; `auth_headers()` / `cookies()` /
     `csrf_tokens()` return the raw values because their only caller is request
     construction, never a log line.
+  - **Host-scoped by default-deny.** Every read takes an optional `host`; given
+    one, a primitive comes back only if it was captured from that same host. A
+    cookie scoped to origin A is therefore never returned for a request aimed at
+    origin B — the credential-exfiltration guard primitives.inject_credentials
+    already applies, made structural in the store so a sibling cannot forget it.
+    The no-host form returns the whole session and is for callers that have
+    already fixed the target.
 
 GATED OFF BY DEFAULT. Nothing here runs unless a session's run config turns on
 `stateful_session` (`ERLIK_STATEFUL_SESSION`). The flag exists now so sibling PRs
@@ -52,6 +59,50 @@ PRIMITIVE_KINDS = frozenset({"token", "cookie", "csrf", "header", "injection_poi
 _SECRET_KINDS = frozenset({"token", "cookie", "csrf", "header"})
 
 
+def _normalize_host(value: str | None) -> str:
+    """Bare, lowercased hostname from a host, authority, or URL. '' if none.
+
+    `scope_host` and a query host may each arrive as a bare host (`t.local`), a
+    host:port (`t.local:3000`), or a full URL (`http://user@t.local:3000/x`).
+    Comparison is on the hostname alone — a port or scheme difference is still
+    the same host, matching primitives.inject_credentials, which compares
+    `host.split(":")[0]`. An IPv6 literal keeps its brackets' contents.
+    """
+    if not value:
+        return ""
+    v = value.strip()
+    if "://" in v:
+        v = v.split("://", 1)[1]
+    v = v.split("/", 1)[0].split("?", 1)[0]
+    if "@" in v:
+        v = v.rsplit("@", 1)[1]
+    if v.startswith("["):                      # [::1]:443 -> ::1
+        v = v[1:].split("]", 1)[0]
+    else:
+        v = v.split(":", 1)[0]
+    return v.lower()
+
+
+def _in_scope(primitive: "Primitive", host: str | None) -> bool:
+    """Whether `primitive` may be returned for a read scoped to `host`.
+
+    `host is None` means the caller asked for no host filtering, so everything is
+    in scope (backward compatible, and the right answer when the target host is
+    already fixed by the caller). With a host given, the rule is DEFAULT-DENY: the
+    primitive's scope_host must normalize to the same hostname. A primitive with
+    no scope_host does NOT match a specific host — the store will not guess that
+    an unscoped credential is safe to send somewhere — and a host that normalizes
+    to nothing (garbage in) matches nothing, mirroring inject_credentials refusing
+    when it cannot identify an explicit target.
+    """
+    if host is None:
+        return True
+    want = _normalize_host(host)
+    if not want:
+        return False
+    return _normalize_host(primitive.scope_host) == want
+
+
 @dataclass
 class Primitive:
     """One reusable fact captured during a run.
@@ -62,10 +113,15 @@ class Primitive:
     `value`      the secret or location itself.
     `source`     where it came from (a tool name, a step id) — provenance for the
                  operator, never used for matching.
-    `scope_host` the host this primitive belongs to, so a caller can refuse to
-                 attach a session cookie to a request aimed at another origin
-                 (the credential-exfiltration guard primitives.inject_credentials
-                 already enforces). Stored here; enforcement is the caller's.
+    `scope_host` the host this primitive belongs to. The store ENFORCES it: a
+                 host-scoped read (`get`/`all`/`auth_headers`/`cookies`/
+                 `csrf_tokens` given a `host`) returns a primitive only when its
+                 scope_host is that same host, so a session cookie captured from
+                 one origin is never handed to a request aimed at another — the
+                 credential-exfiltration guard primitives.inject_credentials
+                 already applies, made structural here. None means "no host
+                 recorded", which is excluded from every host-scoped read (see
+                 SessionStore).
     """
 
     kind: str
@@ -112,46 +168,65 @@ class SessionStore:
         return primitive
 
     # -- retrieval ----------------------------------------------------------
-    def get(self, kind: str, name: str | None = None) -> Primitive | None:
-        """The most recently added primitive of `kind` (and `name`, if given)."""
+    # Every read takes an optional `host`. With it, only primitives captured from
+    # that host come back (default-deny; see _in_scope). The safe call for
+    # building a request is the host-scoped one; the no-host form returns the
+    # whole session and is for when the caller has already fixed the target.
+    def get(self, kind: str, name: str | None = None,
+            host: str | None = None) -> Primitive | None:
+        """The most recently added primitive of `kind` (and `name`, if given).
+
+        Scoped to `host` when one is passed, so a stale credential from another
+        origin is never returned as the current one for this host.
+        """
         match = [p for p in self._items
-                 if p.kind == kind and (name is None or p.name == name)]
+                 if p.kind == kind and (name is None or p.name == name)
+                 and _in_scope(p, host)]
         return match[-1] if match else None
 
-    def all(self, kind: str | None = None) -> list[Primitive]:
-        """Every stored primitive, in insertion order, optionally filtered."""
-        return [p for p in self._items if kind is None or p.kind == kind]
+    def all(self, kind: str | None = None,
+            host: str | None = None) -> list[Primitive]:
+        """Every stored primitive, in insertion order, optionally filtered by
+        `kind` and/or `host`."""
+        return [p for p in self._items
+                if (kind is None or p.kind == kind) and _in_scope(p, host)]
 
     # -- request-side views (RAW values; callers build real requests) -------
-    def auth_headers(self) -> dict[str, str]:
+    def auth_headers(self, host: str | None = None) -> dict[str, str]:
         """HTTP headers to send on an authenticated request.
 
         Explicit `header` primitives win, since the agent named them on purpose.
         A `token` primitive becomes `Authorization: Bearer <value>` only if no
         explicit Authorization header is already present — a header the model set
         deliberately must never be silently overwritten by a scraped token.
+
+        Pass `host` to get only credentials captured from that host; this is the
+        safe form when building a request, as a token scoped to another origin is
+        then excluded rather than attached.
         """
         headers: dict[str, str] = {}
-        for p in self.all("header"):
+        for p in self.all("header", host=host):
             if p.name and p.value:
                 headers[p.name] = p.value
-        token = self.get("token")
+        token = self.get("token", host=host)
         if token and token.value and "Authorization" not in headers:
             headers["Authorization"] = f"Bearer {token.value}"
         return headers
 
-    def cookies(self) -> dict[str, str]:
-        """Captured cookies as {name: value}, newest value per name."""
+    def cookies(self, host: str | None = None) -> dict[str, str]:
+        """Captured cookies as {name: value}, newest value per name; scoped to
+        `host` when one is given."""
         out: dict[str, str] = {}
-        for p in self.all("cookie"):
+        for p in self.all("cookie", host=host):
             if p.name and p.value:
                 out[p.name] = p.value
         return out
 
-    def csrf_tokens(self) -> dict[str, str]:
-        """Captured CSRF tokens as {name: value}, newest value per name."""
+    def csrf_tokens(self, host: str | None = None) -> dict[str, str]:
+        """Captured CSRF tokens as {name: value}, newest value per name; scoped
+        to `host` when one is given."""
         out: dict[str, str] = {}
-        for p in self.all("csrf"):
+        for p in self.all("csrf", host=host):
             if p.name and p.value:
                 out[p.name] = p.value
         return out
@@ -178,16 +253,19 @@ class SessionStore:
             out = out.replace(value, f"<{kind}:redacted:{_digest(value)}>")
         return out
 
-    def summary_facts(self) -> list[str]:
+    def summary_facts(self, host: str | None = None) -> list[str]:
         """Short "you now hold <kind> <name>" lines, secret values masked.
 
         This is what the loop will fold into the model's context: a standing
         reminder of what the session is carrying, with no secret in the clear. A
         secret kind shows its masked value; `injection_point` shows its location,
         which is the whole point of surfacing it.
+
+        Pass `host` to list only what is in scope for that host, so a per-host
+        reminder does not advertise a credential that would never be sent there.
         """
         facts: list[str] = []
-        for p in self._items:
+        for p in self.all(host=host):
             label = p.name if p.name else "(unnamed)"
             article = "an" if p.kind[:1].lower() in "aeiou" else "a"
             if p.kind in _SECRET_KINDS:
