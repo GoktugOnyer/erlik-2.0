@@ -48,10 +48,31 @@ def _get_inference_seed() -> int | None:
         return None
 
 
+_TRUTHY = frozenset({"1", "true", "yes", "on"})
+
+
+# Constrained / structured JSON decoding. OFF by default.
+#
+# The tool interface is a JSON action protocol over the model's text channel,
+# and small local models frequently emit malformed JSON (trailing prose, an
+# unclosed brace, a fenced block). When this knob is on, a JSON-shaped request
+# asks the provider's OWN decoder to guarantee syntactically valid JSON —
+# Ollama's `format`, OpenAI's `response_format`. It is a decoding constraint on
+# the provider, not a change to any prompt.
+#
+# Read live (like the inference seed) rather than frozen at import, so a run or
+# a test can toggle it without reimporting. When off, request bodies are
+# byte-for-byte what they were before this knob existed — nothing drifts, and
+# every recorded campaign stays comparable.
+def _constrained_json_enabled() -> bool:
+    return os.environ.get("ERLIK_CONSTRAINED_JSON", "").strip().lower() in _TRUTHY
+
+
 # ---------- Ollama (local inference) ----------
 
 async def _ollama_chat(messages: list[dict], model: str, max_retries: int,
-                       num_ctx: int | None = None) -> str:
+                       num_ctx: int | None = None, want_json: bool = False,
+                       json_schema: dict | None = None) -> str:
     body = {"model": model, "messages": messages, "stream": False}
     options = {}
     seed = _get_inference_seed()
@@ -69,6 +90,12 @@ async def _ollama_chat(messages: list[dict], model: str, max_retries: int,
         options["num_ctx"] = int(num_ctx)
     if options:
         body["options"] = options
+    if want_json and _constrained_json_enabled():
+        # Ollama structured outputs. `format` is either the literal "json" (any
+        # syntactically valid JSON) or a JSON schema the output must conform to.
+        # A schema is strictly stronger, so prefer it when the caller supplies
+        # one; older Ollama builds ignore an unknown `format` rather than error.
+        body["format"] = json_schema if json_schema else "json"
 
     last_error = None
     for attempt in range(max_retries):
@@ -203,12 +230,24 @@ def _retry_after(resp) -> float | None:
         return None
 
 
-async def _openai_chat(messages: list[dict], model: str, max_retries: int) -> str:
+async def _openai_chat(messages: list[dict], model: str, max_retries: int,
+                       want_json: bool = False,
+                       json_schema: dict | None = None) -> str:
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
         raise RuntimeError("OPENAI_API_KEY is not set")
 
     body = {"model": model, "messages": messages}
+    if want_json and _constrained_json_enabled():
+        # OpenAI-compatible JSON mode. A bare {"type": "json_object"} forces
+        # syntactically valid JSON; a supplied schema upgrades to strict
+        # json_schema. Providers that do not implement it reject the request
+        # rather than silently ignoring it, which is why it is opt-in — the
+        # operator enables it only against a provider known to support it.
+        if json_schema:
+            body["response_format"] = {"type": "json_schema", "json_schema": json_schema}
+        else:
+            body["response_format"] = {"type": "json_object"}
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
@@ -348,21 +387,37 @@ async def ensure_model_available(model: str | None = None,
 
 
 async def chat(messages: list[dict], model: str | None = None, max_retries: int = 3,
-               num_ctx: int | None = None, provider: str | None = None) -> str:
+               num_ctx: int | None = None, provider: str | None = None,
+               want_json: bool = False, json_schema: dict | None = None) -> str:
     """Send a conversation to the configured provider.
 
     `num_ctx` sizes the LOCAL model's context allocation. It is ignored by
     hosted providers, which size their own.
+
+    `want_json` marks this call as expecting a JSON reply. It changes the
+    request ONLY when ERLIK_CONSTRAINED_JSON is enabled; then the provider's
+    own constrained decoder is asked to emit valid JSON (Ollama `format`,
+    OpenAI `response_format`). With the knob off — the default — `want_json`
+    and `json_schema` have no effect and the request is byte-for-byte
+    unchanged. `json_schema`, when given, upgrades the constraint from "any
+    valid JSON" to "JSON matching this schema" where the provider supports it.
     """
     use_model = model or default_model_for(provider)
     if resolve_provider(provider) == "openai":
-        return await _openai_chat(messages, use_model, max_retries)
-    return await _ollama_chat(messages, use_model, max_retries, num_ctx=num_ctx)
+        return await _openai_chat(messages, use_model, max_retries,
+                                  want_json=want_json, json_schema=json_schema)
+    return await _ollama_chat(messages, use_model, max_retries, num_ctx=num_ctx,
+                              want_json=want_json, json_schema=json_schema)
 
 
 async def chat_json(messages: list[dict], model: str | None = None,
-                    provider: str | None = None) -> dict | None:
-    content = await chat(messages, model=model, provider=provider)
+                    provider: str | None = None,
+                    json_schema: dict | None = None) -> dict | None:
+    # A JSON reply is the whole point here, so always declare want_json. It is
+    # inert unless ERLIK_CONSTRAINED_JSON is on; when it is, the provider is
+    # asked to guarantee valid JSON and the parse below stops being a gamble.
+    content = await chat(messages, model=model, provider=provider,
+                         want_json=True, json_schema=json_schema)
     try:
         return json.loads(content)
     except json.JSONDecodeError:
