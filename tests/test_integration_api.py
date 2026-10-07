@@ -66,3 +66,31 @@ def test_missing_scope_or_policy_rejected_before_execution(client):
     client.post("/api/auth", json={"token": "api-test-token"})
     response = client.post("/api/sessions", json={"target_url": "https://app.test", "integration_config": {"stages": ["zap"]}})
     assert response.status_code == 422
+
+
+def test_list_assessments_feeds_the_picker(client, monkeypatch):
+    """GET /api/integrations/sessions is what the Authorization panel's picker reads.
+
+    It must list every assessment with the one field the cross-arm checks gate on
+    (status), and it must stay target-only: the config holds operator declarations and
+    lives behind the secret store, so it never travels in this list.
+    """
+    import orchestrator.integrations.service as service
+    monkeypatch.setattr(service, "preflight", AsyncMock())
+    client.post("/api/auth", json={"token": "api-test-token"})
+    assert client.get("/api/integrations/sessions").json() == []
+    created = client.post("/api/sessions", json={"target_url": "https://app.test", "integration_config": {
+        "scope": {"allow_hosts": ["app.test"], "allow_ports": [443]}, "stages": ["zap"]}})
+    session_id = created.json()["id"]
+
+    listed = client.get("/api/integrations/sessions")
+    assert listed.status_code == 200
+    rows = listed.json()
+    assert [row["session_id"] for row in rows] == [session_id]
+    assert rows[0]["target"] == "https://app.test"
+    assert rows[0]["status"] == "queued"
+    # Target-only: the config (and its secret handle) must not leak into the picker feed.
+    assert "config" not in rows[0] and "config_secret_id" not in rows[0]
+    # And the route is read-protected like every other /api/ route.
+    client.cookies.clear()
+    assert client.get("/api/integrations/sessions").status_code == 401

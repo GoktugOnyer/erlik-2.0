@@ -916,6 +916,9 @@
             <button id="nav-testlab" onclick="switchView('testlab')" class="side-link" type="button">
                 <span class="side-ico">&#9635;</span><span>Test Lab</span>
             </button>
+            <button id="nav-authz" onclick="switchView('authz')" class="side-link" type="button">
+                <span class="side-ico">&#9878;</span><span>Authorization</span>
+            </button>
             <button id="nav-arsenal" onclick="switchView('arsenal')" class="side-link" type="button">
                 <span class="side-ico">&#9876;</span><span>Arsenal</span>
             </button>
@@ -2315,6 +2318,109 @@
         </div><!-- /view-testlab -->
 
 
+        <!-- ===== AUTHORIZATION: cross-arm object- & function-level checks, finally clickable =====
+             E-011's authorization engine (cross_arm_authorization / cross_arm_privileged_function)
+             and the coverage report were API-only: an operator had to POST raw JSON over a
+             finished assessment to run the product's flagship differentiator. This drives them.
+             The cardinal rule of this panel, enforced in authzRenderOutcome: a refusal is shown
+             BEFORE findings, and an empty findings list on a refusal (or on incomplete coverage)
+             never renders as a clean pass. All target-influenced data is rendered through text
+             nodes, never innerHTML, per test_dashboard_injection. -->
+        <div id="view-authz" class="hidden space-y-5">
+
+            <div class="panel rounded p-4">
+                <div class="flex items-baseline justify-between flex-wrap gap-2">
+                    <h2 class="font-pixel" style="font-size:0.7rem;">&#9878; AUTHORIZATION</h2>
+                    <div id="authz-meta" class="font-mono" style="font-size:0.6rem; opacity:.75;"></div>
+                </div>
+                <p class="font-mono mt-2" style="font-size:0.6rem; opacity:.7; max-width:92ch;">
+                    Object- and function-level authorization, compared across the arms of a
+                    <b>finished</b> integration assessment. A lane stage carries one identity, so
+                    the three-arm question is asked of what each stage recorded.
+                    <b style="color:var(--neon-red);">Read the refusal first:</b> a refusal means
+                    the comparison did not run, and an empty findings list is then not a clean result.
+                </p>
+                <div class="flex gap-2 mt-3 flex-wrap items-center">
+                    <label class="font-mono" style="font-size:0.6rem; opacity:.75;">assessment</label>
+                    <select id="authz-session" class="input-field font-mono px-2 py-1 rounded"
+                        style="font-size:0.6rem; min-width:300px;"></select>
+                    <input id="authz-session-manual" class="input-field font-mono px-2 py-1 rounded"
+                        style="font-size:0.6rem; width:220px;" placeholder="or paste a session id">
+                    <button onclick="authzLoad()" class="font-pixel px-3 py-1 rounded border"
+                        style="font-size:0.55rem; color:var(--neon-cyan); border-color:var(--neon-cyan);">LOAD</button>
+                </div>
+                <div id="authz-assessment" class="mt-3 font-mono" style="font-size:0.6rem;"></div>
+            </div>
+
+            <!-- OBJECT-LEVEL -->
+            <div id="authz-obj-card" class="panel rounded p-4 hidden">
+                <h3 class="font-pixel" style="font-size:0.62rem; color:var(--neon-magenta);">OBJECT-LEVEL &mdash; who owns this record?</h3>
+                <p class="font-mono mt-1" style="font-size:0.58rem; opacity:.7; max-width:92ch;">
+                    Compares a <b>caller</b> arm against the declared <b>owner</b> arm, with an
+                    <b>anonymous</b> arm to rule out published content. <b>owner_field</b> is a
+                    dotted path into the response body that names the object's owner
+                    (Juice Shop: <code>data.UserId</code>).
+                </p>
+                <div class="flex gap-2 mt-2 flex-wrap items-end" style="font-size:0.58rem;">
+                    <div class="flex flex-col gap-1"><label class="font-mono" style="opacity:.75;">caller</label>
+                        <select id="authz-obj-caller" class="input-field font-mono px-2 py-1 rounded" style="font-size:0.58rem; min-width:170px;"></select></div>
+                    <div class="flex flex-col gap-1"><label class="font-mono" style="opacity:.75;">owner</label>
+                        <select id="authz-obj-owner" class="input-field font-mono px-2 py-1 rounded" style="font-size:0.58rem; min-width:170px;"></select></div>
+                    <div class="flex flex-col gap-1"><label class="font-mono" style="opacity:.75;">anonymous</label>
+                        <select id="authz-obj-anon" class="input-field font-mono px-2 py-1 rounded" style="font-size:0.58rem; min-width:150px;"></select></div>
+                    <div class="flex flex-col gap-1"><label class="font-mono" style="opacity:.75;">owner_field</label>
+                        <input id="authz-obj-field" class="input-field font-mono px-2 py-1 rounded" style="font-size:0.58rem; width:150px;" placeholder="data.UserId"></div>
+                    <button onclick="authzRunObject()" class="font-pixel px-3 py-1 rounded border"
+                        style="font-size:0.55rem; color:var(--neon-magenta); border-color:var(--neon-magenta);">RUN OBJECT CHECK</button>
+                </div>
+                <div id="authz-obj-result" class="mt-3"></div>
+            </div>
+
+            <!-- FUNCTION-LEVEL -->
+            <div id="authz-fn-card" class="panel rounded p-4 hidden">
+                <h3 class="font-pixel" style="font-size:0.62rem; color:var(--neon-purple);">FUNCTION-LEVEL &mdash; may this role call this?</h3>
+                <p class="font-mono mt-1" style="font-size:0.58rem; opacity:.7; max-width:92ch;">
+                    Compares a <b>privileged</b> arm against an <b>unprivileged</b> one, with an
+                    <b>anonymous</b> arm. <b>marker</b> is a substring that identifies PRIVILEGED
+                    data in a response (e.g. <code>"email":"admin@juice-sh.op"</code>). It is never
+                    echoed back into a finding &mdash; a finding travels into an export.
+                </p>
+                <div class="flex gap-2 mt-2 flex-wrap items-end" style="font-size:0.58rem;">
+                    <div class="flex flex-col gap-1"><label class="font-mono" style="opacity:.75;">privileged</label>
+                        <select id="authz-fn-priv" class="input-field font-mono px-2 py-1 rounded" style="font-size:0.58rem; min-width:170px;"></select></div>
+                    <div class="flex flex-col gap-1"><label class="font-mono" style="opacity:.75;">unprivileged</label>
+                        <select id="authz-fn-unpriv" class="input-field font-mono px-2 py-1 rounded" style="font-size:0.58rem; min-width:170px;"></select></div>
+                    <div class="flex flex-col gap-1"><label class="font-mono" style="opacity:.75;">anonymous</label>
+                        <select id="authz-fn-anon" class="input-field font-mono px-2 py-1 rounded" style="font-size:0.58rem; min-width:150px;"></select></div>
+                    <div class="flex flex-col gap-1"><label class="font-mono" style="opacity:.75;">marker</label>
+                        <input id="authz-fn-marker" class="input-field font-mono px-2 py-1 rounded" style="font-size:0.58rem; width:230px;" placeholder='"email":"admin@juice-sh.op"'></div>
+                    <button onclick="authzRunFunction()" class="font-pixel px-3 py-1 rounded border"
+                        style="font-size:0.55rem; color:var(--neon-purple); border-color:var(--neon-purple);">RUN FUNCTION CHECK</button>
+                </div>
+                <div id="authz-fn-result" class="mt-3"></div>
+            </div>
+
+            <!-- COVERAGE -->
+            <div id="authz-cov-card" class="panel rounded p-4 hidden">
+                <h3 class="font-pixel" style="font-size:0.62rem; color:var(--neon-cyan);">COVERAGE &mdash; what was tested, what was not, and why</h3>
+                <p class="font-mono mt-1" style="font-size:0.58rem; opacity:.7; max-width:92ch;">
+                    Per (operation, parameter, identity): the state and the reason. <code>verified</code>
+                    means a finding came out of the probe; <code>answered</code> means bytes came back and
+                    nothing matched &mdash; which is <b>not</b> proof the check exercised the application.
+                    No state means <b>tested</b>.
+                </p>
+                <div class="flex gap-2 mt-2 flex-wrap items-end" style="font-size:0.58rem;">
+                    <div class="flex flex-col gap-1"><label class="font-mono" style="opacity:.75;">identity (optional)</label>
+                        <select id="authz-cov-identity" class="input-field font-mono px-2 py-1 rounded" style="font-size:0.58rem; min-width:170px;"></select></div>
+                    <button onclick="authzRunCoverage()" class="font-pixel px-3 py-1 rounded border"
+                        style="font-size:0.55rem; color:var(--neon-cyan); border-color:var(--neon-cyan);">LOAD COVERAGE</button>
+                </div>
+                <div id="authz-cov-result" class="mt-3"></div>
+            </div>
+
+        </div><!-- /view-authz -->
+
+
         <!-- ===== ARSENAL: every attack erlik can run ===== -->
         <div id="view-arsenal" class="hidden space-y-5">
             <div class="panel rounded p-4">
@@ -2484,7 +2590,7 @@
 
         function switchView(view) {
             __currentView = view;
-            const views = ['overview', 'findings', 'scanner', 'reports', 'benchmark', 'monitor', 'engagements', 'testlab', 'skills', 'arsenal'];
+            const views = ['overview', 'findings', 'scanner', 'reports', 'benchmark', 'monitor', 'engagements', 'testlab', 'authz', 'skills', 'arsenal'];
             const panels = {
                 overview: document.getElementById('view-overview'),
                 findings: document.getElementById('view-findings'),
@@ -2494,6 +2600,7 @@
                 monitor: document.getElementById('view-monitor'),
                 engagements: document.getElementById('view-engagements'),
                 testlab: document.getElementById('view-testlab'),
+                authz: document.getElementById('view-authz'),
                 skills: document.getElementById('view-skills'),
                 arsenal: document.getElementById('view-arsenal'),
             };
@@ -2506,6 +2613,7 @@
                 monitor: document.getElementById('nav-monitor'),
                 engagements: document.getElementById('nav-engagements'),
                 testlab: document.getElementById('nav-testlab'),
+                authz: document.getElementById('nav-authz'),
                 skills: document.getElementById('nav-skills'),
                 arsenal: document.getElementById('nav-arsenal'),
             };
@@ -2529,10 +2637,379 @@
             if (view === 'benchmark') loadBenchmarkHistory();
             if (view === 'engagements') engLoad();
             if (view === 'testlab') { tlInit(); tlRunsLoad(); }
+            if (view === 'authz') authzInit();
             if (view === 'skills') loadSkills();
             if (view === 'arsenal') { loadArsenal(); loadAuthoring(); }
 
             urlWrite();
+        }
+
+
+        // ===== AUTHORIZATION: driving E-011's cross-arm checks + coverage =====
+        // The engine (cross_arm_authorization / cross_arm_privileged_function / coverage)
+        // shipped API-only. These functions are the operator surface for it. Every value
+        // rendered here is operator-declared OR TARGET-authored (urls, asserted owners,
+        // reasons, role labels, evidence ids), so NOTHING is written through innerHTML with
+        // interpolated data — authzText builds text nodes and new Option() sets .text, per
+        // the rule in test_dashboard_injection. The cardinal display rule (authzRenderOutcome):
+        // a refusal, and incomplete coverage, are shown BEFORE findings and an empty findings
+        // list never renders as a clean pass.
+        let __authzIdentities = [];   // [{id,name,target_origin}]
+        let __authzSession = null;    // the loaded assessment's session id
+
+        function authzText(tag, text, style, cls) {
+            const e = document.createElement(tag);
+            if (text != null && text !== '') e.textContent = text;   // text node — never parsed as HTML
+            if (style) e.setAttribute('style', style);
+            if (cls) e.className = cls;
+            return e;
+        }
+
+        async function authzInit() {
+            try {
+                const sessions = await (await fetch('/api/integrations/sessions')).json();
+                const sel = document.getElementById('authz-session');
+                sel.innerHTML = '';
+                if (!Array.isArray(sessions) || !sessions.length) {
+                    sel.appendChild(new Option('(no integration assessments yet)', ''));
+                } else {
+                    sel.appendChild(new Option('— select an assessment —', ''));
+                    for (const s of sessions) {
+                        // new Option(text, value): text is assigned as a text node, so a target
+                        // url carrying markup cannot break out of the list.
+                        sel.appendChild(new Option(`${s.status || '?'} · ${s.target || ''} · ${s.session_id}`, s.session_id));
+                    }
+                }
+            } catch (e) { /* the fetch wrapper surfaces a 401 as the auth banner */ }
+            await authzLoadIdentities();
+        }
+
+        async function authzLoadIdentities() {
+            try {
+                __authzIdentities = (await (await fetch('/api/integrations/identities')).json()) || [];
+            } catch (e) { __authzIdentities = []; }
+            // caller / owner / privileged / unprivileged are real subjects, so identities only.
+            ['authz-obj-caller', 'authz-obj-owner', 'authz-fn-priv', 'authz-fn-unpriv']
+                .forEach(id => authzFillIdentitySelect(id, {}));
+            // the anonymous arm is the literal "anonymous", any identity, or (none).
+            ['authz-obj-anon', 'authz-fn-anon']
+                .forEach(id => authzFillIdentitySelect(id, { anonymous: true, none: true }));
+            // coverage filter: all identities, a specific one, or the anonymous arm.
+            authzFillIdentitySelect('authz-cov-identity', { anonymous: true, allLabel: '(all identities)' });
+        }
+
+        function authzFillIdentitySelect(selectId, opts) {
+            const sel = document.getElementById(selectId);
+            if (!sel) return;
+            const prev = sel.value;
+            sel.innerHTML = '';
+            if (opts.allLabel) sel.appendChild(new Option(opts.allLabel, ''));
+            else if (opts.none) sel.appendChild(new Option('(none)', ''));
+            if (opts.anonymous) sel.appendChild(new Option('anonymous (unauthenticated arm)', 'anonymous'));
+            for (const idn of __authzIdentities) {
+                sel.appendChild(new Option(`${idn.name || '?'} — ${idn.id}`, idn.id));
+            }
+            if (prev) sel.value = prev;
+        }
+
+        function authzSelectedSession() {
+            const manual = (document.getElementById('authz-session-manual').value || '').trim();
+            return manual || (document.getElementById('authz-session').value || '').trim();
+        }
+
+        async function authzLoad() {
+            const sid = authzSelectedSession();
+            const box = document.getElementById('authz-assessment');
+            box.innerHTML = '';
+            ['authz-obj-card', 'authz-fn-card', 'authz-cov-card']
+                .forEach(c => document.getElementById(c).classList.add('hidden'));
+            if (!sid) { box.appendChild(authzText('div', 'Select or paste an assessment session id.', 'color:var(--neon-orange);')); return; }
+            let data;
+            try {
+                const r = await fetch(`/api/integrations/sessions/${encodeURIComponent(sid)}`);
+                if (r.status === 404) { box.appendChild(authzText('div', 'No integration assessment with that session id.', 'color:var(--neon-red);')); return; }
+                data = await r.json();
+            } catch (e) { box.appendChild(authzText('div', 'Could not load the assessment.', 'color:var(--neon-red);')); return; }
+            __authzSession = sid;
+            const stages = Array.isArray(data.stages) ? data.stages : [];
+            const arms = Array.from(new Set(stages.map(s => s.identity_id).filter(Boolean)));
+            const head = authzText('div', null, 'display:flex; gap:10px; flex-wrap:wrap; align-items:baseline;');
+            head.appendChild(authzText('span', `status: ${data.status || '?'}`,
+                `color:${data.status === 'completed' ? 'var(--neon-green)' : 'var(--neon-orange)'};`));
+            head.appendChild(authzText('span', `session: ${sid}`, 'opacity:.7;'));
+            box.appendChild(head);
+            const armLine = authzText('div', null, 'margin-top:4px;');
+            armLine.appendChild(authzText('span', 'arms that ran: ', 'opacity:.6;'));
+            if (arms.length) arms.forEach(a => armLine.appendChild(authzText('span', a, 'margin-right:8px; color:var(--neon-cyan);')));
+            else armLine.appendChild(authzText('span', '(none recorded)', 'color:var(--neon-orange);'));
+            box.appendChild(armLine);
+            if (data.status !== 'completed') {
+                box.appendChild(authzText('div',
+                    'The cross-arm checks read FINISHED stages. An unfinished assessment can be queried, but a refusal or incomplete-coverage result is likely.',
+                    'margin-top:6px; color:var(--neon-orange);'));
+            }
+            ['authz-obj-card', 'authz-fn-card', 'authz-cov-card']
+                .forEach(c => document.getElementById(c).classList.remove('hidden'));
+            ['authz-obj-result', 'authz-fn-result', 'authz-cov-result']
+                .forEach(c => { document.getElementById(c).innerHTML = ''; });
+        }
+
+        async function authzPost(path, body, resultId) {
+            const out = document.getElementById(resultId);
+            out.innerHTML = '';
+            if (!__authzSession) { out.appendChild(authzText('div', 'Load an assessment first.', 'color:var(--neon-orange);')); return; }
+            out.appendChild(authzText('div', 'running…', 'opacity:.6;'));
+            let result, ok, status;
+            try {
+                const r = await fetch(`/api/integrations/sessions/${encodeURIComponent(__authzSession)}${path}`, {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+                });
+                ok = r.ok; status = r.status;
+                result = await r.json();
+            } catch (e) {
+                out.innerHTML = '';
+                out.appendChild(authzText('div', 'The check could not be run.', 'color:var(--neon-red);'));
+                return;
+            }
+            out.innerHTML = '';
+            if (!ok) {
+                out.appendChild(authzText('div',
+                    `Request refused (${status}): ${(result && result.detail) || 'invalid input'}`,
+                    'color:var(--neon-red); font-weight:bold;'));
+                return;
+            }
+            authzRenderOutcome(out, result);
+        }
+
+        function authzRunObject() {
+            const out = document.getElementById('authz-obj-result'); out.innerHTML = '';
+            const body = {
+                caller: document.getElementById('authz-obj-caller').value,
+                owner: document.getElementById('authz-obj-owner').value,
+                owner_field: (document.getElementById('authz-obj-field').value || '').trim(),
+            };
+            const anon = document.getElementById('authz-obj-anon').value;
+            if (anon) body.anonymous = anon;
+            if (!body.caller || !body.owner || !body.owner_field) {
+                out.appendChild(authzText('div', 'caller, owner and owner_field are all required.', 'color:var(--neon-orange);'));
+                return;
+            }
+            authzPost('/authorization', body, 'authz-obj-result');
+        }
+
+        function authzRunFunction() {
+            const out = document.getElementById('authz-fn-result'); out.innerHTML = '';
+            const body = {
+                privileged: document.getElementById('authz-fn-priv').value,
+                unprivileged: document.getElementById('authz-fn-unpriv').value,
+                marker: document.getElementById('authz-fn-marker').value,
+            };
+            const anon = document.getElementById('authz-fn-anon').value;
+            if (anon) body.anonymous = anon;
+            if (!body.privileged || !body.unprivileged || !body.marker) {
+                out.appendChild(authzText('div', 'privileged, unprivileged and marker are all required.', 'color:var(--neon-orange);'));
+                return;
+            }
+            authzPost('/privileged-function', body, 'authz-fn-result');
+        }
+
+        // The signals whose presence means an empty findings list is NOT a clean pass. One
+        // list, so the verdict and the caveat rendering can never disagree about what counts.
+        const AUTHZ_CAVEATS = [
+            ['contradicting_findings', 'this session already records the OPPOSITE privilege order — triage one of these'],
+            ['operations_the_other_arm_did_not_probe', 'operations the other arm never probed, so there was nothing to compare'],
+            ['arms_with_unfinished_stages', 'arms whose stages did not finish reading'],
+            ['not_comparable', 'operations both arms reached at different URLs, or only one arm saw'],
+            ['urls_not_shared_by_both_arms', 'URLs one arm has evidence for that the other never reached'],
+            ['ambiguous_evidence', 'requests one arm recorded twice with different captures (dropped)'],
+            ['skipped_reflected_marker', 'operations skipped because the marker was reflected back'],
+            ['skipped_anonymous_was_redirected', 'operations where the anonymous arm was redirected, not refused'],
+            ['skipped_url_names_the_caller', "operations addressed to the caller's own records"],
+            ['skipped_indistinct_response', 'operations whose response was one document repeated'],
+            ['declared_access_that_matched_nothing', 'may_access declarations that matched nothing — check the spelling'],
+            ['caller_own_records_not_excluded', 'no subject_id was declared, so the caller-owns-it clause could not run'],
+        ];
+
+        function authzSignalFilled(v) {
+            if (v == null) return false;
+            if (Array.isArray(v)) return v.length > 0;
+            if (typeof v === 'object') return Object.keys(v).length > 0;
+            if (typeof v === 'number') return v > 0;
+            if (typeof v === 'boolean') return v === true;
+            if (typeof v === 'string') return v.trim() !== '';
+            return !!v;
+        }
+
+        function authzSignalSummary(v) {
+            if (Array.isArray(v)) {
+                if (!v.length) return '0';
+                const shown = v.slice(0, 6).map(x => (typeof x === 'string' ? x : JSON.stringify(x)));
+                return shown.join(', ') + (v.length > 6 ? ` … (+${v.length - 6})` : '');
+            }
+            if (v && typeof v === 'object') return Object.keys(v).join(', ') || '(present)';
+            return String(v);
+        }
+
+        function authzRenderOutcome(out, result) {
+            const findings = Array.isArray(result.findings) ? result.findings : [];
+            const refused = Array.isArray(result.refused_because) ? result.refused_because : [];
+            const caveats = AUTHZ_CAVEATS.filter(([k]) => authzSignalFilled(result[k]));
+
+            // ---- verdict banner, ALWAYS first ----
+            let vTxt, vColor;
+            if (refused.length) {
+                vTxt = 'REFUSED — the comparison did not run. An empty findings list here is NOT a clean result.';
+                vColor = 'var(--neon-red)';
+            } else if (findings.length) {
+                vTxt = `${findings.length} authorization finding${findings.length === 1 ? '' : 's'}.`;
+                vColor = 'var(--neon-green)';
+            } else if (caveats.length) {
+                vTxt = 'No findings — but coverage was incomplete, so this is NOT a clean pass. See the caveats below.';
+                vColor = 'var(--neon-orange)';
+            } else {
+                vTxt = 'No authorization violations. The comparison ran across the arms.';
+                vColor = 'var(--neon-green)';
+            }
+            out.appendChild(authzText('div', vTxt,
+                `font-weight:bold; padding:6px 10px; border:1px solid ${vColor}; color:${vColor}; border-radius:4px;`));
+
+            // ---- refusal reasons (red), BEFORE findings ----
+            if (refused.length) {
+                const r = authzText('div', null, 'margin-top:8px;');
+                r.appendChild(authzText('div', 'refused because:', 'color:var(--neon-red); opacity:.85;'));
+                const ul = authzText('ul', null, 'margin:4px 0 0 16px; list-style:disc;');
+                refused.forEach(reason => ul.appendChild(authzText('li', String(reason), 'color:var(--neon-red);')));
+                r.appendChild(ul);
+                out.appendChild(r);
+            }
+
+            // ---- what the result establishes (always, muted) ----
+            if (result.establishes) {
+                out.appendChild(authzText('div', result.establishes,
+                    'margin-top:8px; opacity:.6; font-style:italic; max-width:92ch;'));
+            }
+
+            // ---- findings ----
+            if (findings.length) {
+                const fwrap = authzText('div', null, 'margin-top:10px; display:flex; flex-direction:column; gap:8px;');
+                findings.forEach(f => fwrap.appendChild(authzFindingCard(f)));
+                out.appendChild(fwrap);
+            }
+
+            // ---- coverage caveats (orange) ----
+            if (caveats.length) {
+                const c = authzText('div', null, 'margin-top:10px;');
+                c.appendChild(authzText('div', 'coverage caveats (why an empty result is not proof of safety):',
+                    'color:var(--neon-orange); opacity:.85;'));
+                const ul = authzText('ul', null, 'margin:4px 0 0 16px; list-style:disc;');
+                caveats.forEach(([k, desc]) => {
+                    const li = authzText('li', null, 'color:var(--neon-orange);');
+                    li.appendChild(authzText('span', desc + ': ', 'opacity:.85;'));
+                    li.appendChild(authzText('span', authzSignalSummary(result[k])));
+                    ul.appendChild(li);
+                });
+                c.appendChild(ul);
+                out.appendChild(c);
+            }
+
+            // ---- recorded fingerprints (muted) ----
+            const recorded = Array.isArray(result.recorded) ? result.recorded : [];
+            if (recorded.length) {
+                out.appendChild(authzText('div',
+                    `recorded to findings: ${recorded.length} (${recorded.join(', ')})`,
+                    'margin-top:8px; opacity:.55; word-break:break-all;'));
+            }
+        }
+
+        function authzFindingCard(f) {
+            const card = authzText('div', null, 'border:1px solid var(--neon-green); border-radius:4px; padding:8px 10px;');
+            if (f.url) {
+                const h = authzText('div', null, 'display:flex; gap:8px; align-items:baseline; flex-wrap:wrap;');
+                h.appendChild(authzText('span', 'URL', 'color:var(--neon-green); opacity:.7;'));
+                h.appendChild(authzText('code', f.url, 'color:var(--neon-green); word-break:break-all;'));
+                card.appendChild(h);
+            }
+            if (f.detail) card.appendChild(authzText('div', f.detail, 'margin-top:4px; opacity:.85;'));
+            const roles = [];
+            if (f.caller) roles.push(`caller=${f.caller}${f.caller_subject_id ? ` (subject ${f.caller_subject_id})` : ''}`);
+            if (f.owner) roles.push(`owner=${f.owner}`);
+            if (f.asserted_owner) roles.push(`asserted_owner=${f.asserted_owner}`);
+            if (f.privileged) roles.push(`privileged=${f.privileged}${f.privileged_role ? ` (${f.privileged_role})` : ''}`);
+            if (f.unprivileged) roles.push(`unprivileged=${f.unprivileged}${f.unprivileged_role ? ` (${f.unprivileged_role})` : ''}`);
+            if (roles.length) card.appendChild(authzText('div', roles.join('  ·  '), 'margin-top:4px; opacity:.75;'));
+            if (f.arm_evidence && typeof f.arm_evidence === 'object') {
+                const ev = authzText('div', null, 'margin-top:4px; display:flex; gap:10px; flex-wrap:wrap; align-items:baseline;');
+                ev.appendChild(authzText('span', 'evidence:', 'opacity:.6;'));
+                for (const [arm, eid] of Object.entries(f.arm_evidence)) {
+                    const a = document.createElement('a');
+                    a.textContent = arm;                                     // arm label, text node
+                    a.href = `/api/integrations/evidence/${encodeURIComponent(eid)}`;
+                    a.target = '_blank'; a.rel = 'noopener';
+                    a.setAttribute('style', 'color:var(--neon-cyan); text-decoration:underline;');
+                    ev.appendChild(a);
+                }
+                card.appendChild(ev);
+            }
+            if (f.declaration_that_would_suppress) {
+                const d = authzText('div', null, 'margin-top:4px;');
+                d.appendChild(authzText('span', 'to suppress (only if entitled): ', 'opacity:.6;'));
+                d.appendChild(authzText('code',
+                    typeof f.declaration_that_would_suppress === 'string'
+                        ? f.declaration_that_would_suppress
+                        : JSON.stringify(f.declaration_that_would_suppress),
+                    'color:var(--neon-yellow);'));
+                card.appendChild(d);
+            }
+            if (f.marker_digest) {
+                card.appendChild(authzText('div', `marker digest: ${f.marker_digest} (the marker itself is never shown)`,
+                    'margin-top:4px; opacity:.55;'));
+            }
+            return card;
+        }
+
+        async function authzRunCoverage() {
+            const out = document.getElementById('authz-cov-result'); out.innerHTML = '';
+            if (!__authzSession) { out.appendChild(authzText('div', 'Load an assessment first.', 'color:var(--neon-orange);')); return; }
+            out.appendChild(authzText('div', 'loading…', 'opacity:.6;'));
+            const idn = document.getElementById('authz-cov-identity').value;
+            let data;
+            try {
+                const q = idn ? `?identity_id=${encodeURIComponent(idn)}` : '';
+                data = await (await fetch(`/api/integrations/sessions/${encodeURIComponent(__authzSession)}/coverage${q}`)).json();
+            } catch (e) { out.innerHTML = ''; out.appendChild(authzText('div', 'Could not load coverage.', 'color:var(--neon-red);')); return; }
+            out.innerHTML = '';
+            const summary = data.summary || {};
+            const chips = authzText('div', null, 'display:flex; gap:6px; flex-wrap:wrap;');
+            Object.keys(summary).forEach(state => {
+                if (!summary[state]) return;
+                const color = state === 'verified' ? 'var(--neon-green)'
+                    : (state === 'answered' ? 'var(--neon-yellow)' : 'var(--neon-orange)');
+                chips.appendChild(authzText('span', `${state}: ${summary[state]}`,
+                    `border:1px solid ${color}; color:${color}; padding:1px 6px; border-radius:3px;`));
+            });
+            out.appendChild(chips);
+            if (data.establishes) out.appendChild(authzText('div', data.establishes, 'margin-top:6px; opacity:.6; font-style:italic; max-width:92ch;'));
+            const rows = Array.isArray(data.rows) ? data.rows : [];
+            if (!rows.length) { out.appendChild(authzText('div', 'No coverage rows recorded for this assessment.', 'margin-top:8px; opacity:.7;')); return; }
+            const table = document.createElement('table');
+            table.setAttribute('style', 'margin-top:8px; width:100%; border-collapse:collapse;');
+            const thead = document.createElement('tr');
+            ['state', 'operation', 'parameter', 'identity', 'reason'].forEach(h =>
+                thead.appendChild(authzText('th', h, 'text-align:left; padding:3px 6px; border-bottom:1px solid var(--panel-border); opacity:.7;')));
+            table.appendChild(thead);
+            rows.slice(0, 400).forEach(row => {
+                const tr = document.createElement('tr');
+                const stateColor = row.state === 'verified' ? 'var(--neon-green)'
+                    : (row.state === 'answered' ? 'var(--neon-yellow)' : 'var(--neon-orange)');
+                tr.appendChild(authzText('td', row.state, `padding:3px 6px; color:${stateColor}; white-space:nowrap;`));
+                tr.appendChild(authzText('td', row.operation || `${row.method || ''} ${row.url || ''}`, 'padding:3px 6px; word-break:break-all;'));
+                tr.appendChild(authzText('td', row.parameter || '—', 'padding:3px 6px;'));
+                tr.appendChild(authzText('td', row.identity || '—', 'padding:3px 6px;'));
+                tr.appendChild(authzText('td', row.reason || '', 'padding:3px 6px; opacity:.8;'));
+                table.appendChild(tr);
+            });
+            out.appendChild(table);
+            if (rows.length > 400) out.appendChild(authzText('div', `… showing first 400 of ${rows.length} rows`, 'margin-top:4px; opacity:.55;'));
         }
 
 

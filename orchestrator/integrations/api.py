@@ -84,6 +84,20 @@ async def create_secret(body: ServiceSecret):
     return {"id": SecretStore().put(body.model_dump())}
 
 
+@router.get("/sessions")
+async def list_assessments():
+    """Every integration assessment, newest first — the picker the dashboard needs.
+
+    Read-only and target-only. The config holds the operator's declarations and lives
+    behind the secret store, so it is not returned here; `status` travels with the row
+    because it is what decides whether the cross-arm authorization checks can run (they
+    read FINISHED stages), so the operator does not have to open each one to find out.
+    """
+    return await db.rows(
+        "SELECT session_id, target, status, created_at FROM integration_assessments "
+        "ORDER BY created_at DESC, rowid DESC")
+
+
 @router.get("/sessions/{session_id}")
 async def assessment_status(session_id: str):
     assessment = await db.rows("SELECT * FROM integration_assessments WHERE session_id=?", (session_id,))
