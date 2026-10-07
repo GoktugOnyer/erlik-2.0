@@ -2840,11 +2840,17 @@
             return !!v;
         }
 
+        // Named display caps — never bare literals in a list render, per
+        // test_no_bare_numeric_slice_caps_remain_in_list_rendering. Each truncation is
+        // stated to the operator right where it happens (the "+N" and "showing first N of M").
+        const AUTHZ_SIGNAL_PREVIEW = 6;   // caveat values shown inline before the "+N" note
+        const AUTHZ_COV_CAP = 400;        // coverage rows rendered before the "showing first N of M" note
+
         function authzSignalSummary(v) {
             if (Array.isArray(v)) {
                 if (!v.length) return '0';
-                const shown = v.slice(0, 6).map(x => (typeof x === 'string' ? x : JSON.stringify(x)));
-                return shown.join(', ') + (v.length > 6 ? ` … (+${v.length - 6})` : '');
+                const shown = v.slice(0, AUTHZ_SIGNAL_PREVIEW).map(x => (typeof x === 'string' ? x : JSON.stringify(x)));
+                return shown.join(', ') + (v.length > AUTHZ_SIGNAL_PREVIEW ? ` … (+${v.length - AUTHZ_SIGNAL_PREVIEW})` : '');
             }
             if (v && typeof v === 'object') return Object.keys(v).join(', ') || '(present)';
             return String(v);
@@ -2997,7 +3003,7 @@
             ['state', 'operation', 'parameter', 'identity', 'reason'].forEach(h =>
                 thead.appendChild(authzText('th', h, 'text-align:left; padding:3px 6px; border-bottom:1px solid var(--panel-border); opacity:.7;')));
             table.appendChild(thead);
-            rows.slice(0, 400).forEach(row => {
+            rows.slice(0, AUTHZ_COV_CAP).forEach(row => {
                 const tr = document.createElement('tr');
                 const stateColor = row.state === 'verified' ? 'var(--neon-green)'
                     : (row.state === 'answered' ? 'var(--neon-yellow)' : 'var(--neon-orange)');
@@ -3009,7 +3015,7 @@
                 table.appendChild(tr);
             });
             out.appendChild(table);
-            if (rows.length > 400) out.appendChild(authzText('div', `… showing first 400 of ${rows.length} rows`, 'margin-top:4px; opacity:.55;'));
+            if (rows.length > AUTHZ_COV_CAP) out.appendChild(authzText('div', `… showing first ${AUTHZ_COV_CAP} of ${rows.length} rows`, 'margin-top:4px; opacity:.55;'));
         }
 
 
