@@ -987,6 +987,66 @@ def _command_segments(command: str) -> list[str]:
     return [s.strip() for s in segs if s.strip()]
 
 
+# --- P0-4: argv transport for single-tool, no-shell commands --------------- #
+# The model authors a free-form command STRING and the sink hands it to
+# `bash -c`, so any metacharacter the model emits is interpreted by a shell. For
+# a bounded, growing set of single-program invocations that need no shell at
+# all, we instead execute a real argv list (`subprocess.run([docker exec, *argv])`),
+# so those metacharacters are never interpreted. This is defence in depth on top
+# of the scope guard (still the primary control); it is OFF by default and only
+# runs when the `native_argv` run-config lever is set.
+#
+# The registry starts SMALL and grows tool-by-tool. Each entry is a single-shot
+# scanner that takes flags + a host/path and never needs a pipe, redirection,
+# variable or glob. argv changes argv[0] resolution and expansion semantics, so
+# a tool earns a place here only once its argv form is verified against the real
+# Kali container (convention 6) -- a step this environment cannot perform (no
+# container), which is why the set is deliberately conservative.
+ARGV_SAFE = frozenset({"nmap", "whatweb", "wafw00f"})
+
+# Shell-active characters. If ANY appears anywhere in the command we fall back to
+# bash -c instead of argv, because under `[docker exec, *argv]` no shell runs, so
+# `*` `~` `{a,b}` `$VAR` and friends would reach the tool UNEXPANDED -- a silent
+# behaviour change bash -c would not make. Failing closed keeps argv a pure
+# transport swap: the tool receives exactly what bash -c would have passed it. A
+# quoted occurrence is rejected too; that only costs a fall-back to the (correct)
+# bash -c path, never a wrong execution.
+_SHELL_ACTIVE = set("$`|;&<>()*?[]{}~!\\\n\r")
+
+
+def _argv_eligible(command: str, enabled_tools: list[str]) -> list[str] | None:
+    """Return an argv list if `command` can run WITHOUT a shell, else None.
+
+    Eligible means: no shell-active character; exactly one segment (no
+    pipe/chain/substitution, per the real `_command_segments`); shlex parses it;
+    the first program IS the tool (no env-assignment / sudo / timeout wrapper,
+    which `_extract_tool_name` would strip); that tool is in ARGV_SAFE and
+    enabled; and the tokens survive a shlex join+split round trip so the argv we
+    would run is faithful. None => the caller keeps the bash -c path.
+    """
+    if any(c in _SHELL_ACTIVE for c in command):
+        return None
+    if len(_command_segments(command)) != 1:
+        return None
+    try:
+        parts = shlex.split(command)
+    except ValueError:
+        return None
+    if not parts:
+        return None
+    # argv[0] must BE the program. `_extract_tool_name` strips a leading
+    # `NAME=VALUE` / sudo / timeout wrapper, so a wrapped command has
+    # parts[0] != the tool and is refused here -- it needs a shell anyway.
+    prog = parts[0].split("/")[-1]
+    if prog != _extract_tool_name(command):
+        return None
+    if prog not in ARGV_SAFE or prog not in enabled_tools:
+        return None
+    if shlex.split(shlex.join(parts)) != parts:
+        return None
+    return parts
+
+
 def _extract_tool_names(command: str) -> list[str]:
     """Every program name the command would run, in order."""
     names = []
@@ -1049,7 +1109,7 @@ def _sync_check_container() -> bool:
         return False
 
 
-async def execute_tool(command: str, enabled_tools: list[str], no_timeout: bool = False, target_url: str = None, tool_hint: str = None, custom_timeout: int = None, safe_mode: bool | None = None, engagement_rows=None) -> dict:
+async def execute_tool(command: str, enabled_tools: list[str], no_timeout: bool = False, target_url: str = None, tool_hint: str = None, custom_timeout: int = None, safe_mode: bool | None = None, engagement_rows=None, native_argv: bool = False) -> dict:
     """
     Execute a command in the kali-tools Docker container.
 
@@ -1159,11 +1219,18 @@ async def execute_tool(command: str, enabled_tools: list[str], no_timeout: bool 
                 "error": "kali-tools container is not running. Start it with: docker compose up -d kali-tools",
                 "executed": False}
 
+    # Transport: after every guard has passed on the STRING, a single-tool,
+    # no-shell command may run as an argv list instead of `bash -c <string>` so
+    # model-authored metacharacters are never interpreted. Off unless the run
+    # opted in; `_argv_eligible` fails closed to the shell path.
+    argv = _argv_eligible(sanitized, enabled_tools) if native_argv else None
+    transport = "argv" if argv is not None else "shell"
+
     # Execute in docker via sync subprocess in thread pool (Windows compatible)
     start = time.time()
     try:
         result = await asyncio.get_event_loop().run_in_executor(
-            None, lambda: _sync_docker_exec(sanitized, timeout)
+            None, lambda: _sync_docker_exec(sanitized, timeout, argv=argv)
         )
         duration_ms = int((time.time() - start) * 1000)
 
@@ -1193,20 +1260,32 @@ async def execute_tool(command: str, enabled_tools: list[str], no_timeout: bool 
             "duration_ms": duration_ms,
             "error": result.get("error"),
             "executed": True,
+            # Which transport actually ran: "argv" (no shell) or "shell"
+            # (bash -c). The interface may not overstate what happened, so this
+            # is the truth of the dispatch, not the request.
+            "transport": transport,
         }
 
     except Exception as e:
-        # The command DID reach a shell; the wrapper failed around it. Marked
+        # The command DID reach exec; the wrapper failed around it. Marked
         # executed so a genuine tool crash is not silently reclassified.
         duration_ms = int((time.time() - start) * 1000)
         return {"success": False, "output": "", "tool": tool_name,
-                "duration_ms": duration_ms, "error": str(e), "executed": True}
+                "duration_ms": duration_ms, "error": str(e), "executed": True,
+                "transport": transport}
 
 
-def _sync_docker_exec(command: str, timeout: int) -> dict:
-    """Run a command in the kali-tools container or natively (synchronous, for thread pool)."""
+def _sync_docker_exec(command: str, timeout: int, argv: list[str] | None = None) -> dict:
+    """Run a command in the kali-tools container or natively (synchronous, for thread pool).
+
+    When `argv` is given the command runs WITHOUT a shell (`[docker exec, *argv]`
+    / `[*argv]` native), so model-authored metacharacters cannot be interpreted.
+    When it is None the historical `bash -c <command>` path runs, unchanged.
+    """
     try:
-        if ERLIK_NATIVE:
+        if argv is not None:
+            cmd = list(argv) if ERLIK_NATIVE else [DOCKER_BIN, "exec", CONTAINER_NAME, *argv]
+        elif ERLIK_NATIVE:
             cmd = ["bash", "-c", command]
         else:
             cmd = [DOCKER_BIN, "exec", CONTAINER_NAME, "bash", "-c", command]

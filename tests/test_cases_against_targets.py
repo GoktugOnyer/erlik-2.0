@@ -70,6 +70,42 @@ class TestCookieAttributes:
         assert (r.produced or {}).get("jwt"), r.produced
 
 
+class TestSSTI:
+    """WSTG-INPV-18 ships inert and curl-based but had no flaw/control proof.
+    The flaw evaluates `{{31337*7}}` to 219359; the control reflects the raw
+    braces, so the arithmetic-that-cannot-occur-by-chance is present on one and
+    absent on the other."""
+
+    def test_it_fires_when_the_template_engine_evaluates(self, targets):
+        r = run_case("WSTG-INPV-18", url=targets["ssti"] + "/render", parameter="q")
+        assert "Server-Side Template Injection ({{ }} evaluated)" in vuln_types(r), \
+            vuln_types(r)
+
+    def test_it_is_silent_when_the_value_is_echoed_literally(self, targets):
+        r = run_case("WSTG-INPV-18", url=targets["ssti_control"] + "/render",
+                     parameter="q")
+        assert not vuln_types(r), vuln_types(r)
+        # Non-vacuous: the case must have actually run its probes against the
+        # control, not stayed silent because every step was refused.
+        assert r.steps, "no step ran; the silence is vacuous"
+
+
+class TestDeserialization:
+    """WSTG-INPV-11 ships inert and curl-based but had no flaw/control proof.
+    The flaw leaks the deserializer's own exception text; the control validates
+    the payload and returns a generic rejection."""
+
+    def test_it_fires_when_a_deserializer_leaks_its_exception(self, targets):
+        r = run_case("WSTG-INPV-11", url=targets["deser"] + "/import")
+        assert "PHP unserialize() reached by user input" in vuln_types(r), \
+            vuln_types(r)
+
+    def test_it_is_silent_when_the_input_is_validated(self, targets):
+        r = run_case("WSTG-INPV-11", url=targets["deser_control"] + "/import")
+        assert not vuln_types(r), vuln_types(r)
+        assert r.steps, "no step ran; the silence is vacuous"
+
+
 class TestClickjacking:
     def test_it_fires_when_no_framing_policy_is_set(self, targets):
         r = run_case("WSTG-CLNT-09", url=targets["web"] + "/")
