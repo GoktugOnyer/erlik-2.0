@@ -999,6 +999,74 @@ def context_budget_tokens(model: str = "") -> int:
 DENIED_FEEDBACK_MAX = 160
 
 
+def _structured_error_feedback(error_text: str, *, executed: bool,
+                               target_url: str = "",
+                               enabled_tools: list[str] | None = None) -> str:
+    """Reflexion-lite correction for a refused or failed tool action.
+
+    Returns a SHORT, STRUCTURED message — "what was wrong" plus "the minimal
+    shape of a valid retry" — keyed off the category prefix erlik's own refusal
+    strings already carry (SCOPE:/TOOLSET:/SAFE_MODE:/WRITE_CONFINEMENT:), with
+    a run-failure fallback for a non-zero exit. A small local model recovers
+    from an explicit "host X is out of scope, allowed host is Y" far better than
+    from a raw refusal line or a stack trace.
+
+    Only called when ERLIK_ERROR_FEEDBACK is on; off by default, so the loop's
+    error-path feedback is otherwise byte-for-byte unchanged.
+
+    Kept terse on purpose: every message is resent each turn and _trim_messages
+    evicts OLDER content to fit, so a long correction DISPLACES real tool output
+    — the mechanism behind the measured r = -0.796 between injected volume and
+    recall. Two lines, FIX then RETRY; it never echoes the full refusal.
+    """
+    txt = (error_text or "").strip()
+    first = txt.split("\n")[0][:DENIED_FEEDBACK_MAX]
+    low = txt.lower()
+    tools_hint = ", ".join(sorted(enabled_tools)[:10]) if enabled_tools else ""
+
+    if txt.startswith("SCOPE:") or "out-of-scope" in low:
+        host = ""
+        if target_url:
+            from urllib.parse import urlparse
+            host = urlparse(target_url if "://" in target_url
+                            else f"http://{target_url}").hostname or ""
+        allowed = host or "the session target"
+        return ("FIX: the command named a host outside this engagement's scope.\n"
+                f"RETRY: re-issue the same tool against {allowed} only, no other host.")
+    if txt.startswith("TOOLSET:") or "is not enabled" in low:
+        return ("FIX: that program is not in this session's enabled toolset.\n"
+                "RETRY: pick an enabled tool"
+                + (f" (one of: {tools_hint})" if tools_hint else "")
+                + " and re-issue.")
+    if txt.startswith("SAFE_MODE:"):
+        return ("FIX: safe mode refused this as destructive (write/delete verb).\n"
+                "RETRY: issue a read-only, non-destructive command instead.")
+    if txt.startswith("WRITE_CONFINEMENT:"):
+        return ("FIX: the command writes outside the permitted directory.\n"
+                "RETRY: write only under /tmp, then re-issue.")
+    if "container is not running" in low:
+        return ("FIX: the tools container is down, so no command can run now.\n"
+                "RETRY: reissue shortly, or use 'done' if testing is complete.")
+    if not executed:
+        return (f"FIX: the command was refused before running ({first}).\n"
+                "RETRY: do not repeat it or a variant; take a different approach.")
+    return (f"FIX: the command ran but failed ({first}).\n"
+            "RETRY: correct the arguments or switch tools; do not repeat it verbatim.")
+
+
+def _structured_json_retry(target_url: str) -> str:
+    """Reflexion-lite correction when the model's reply was not a usable action.
+
+    Names the single required field and the minimal valid object, which a small
+    model acts on more reliably than a bare "please use JSON". Gated behind
+    ERLIK_ERROR_FEEDBACK with everything else here.
+    """
+    return ("FIX: your reply was not a single JSON object with an \"action\" field.\n"
+            "RETRY: reply with exactly one JSON object, e.g. "
+            '{"action": "run_tool", "command": "whatweb ' + target_url +
+            '", "reason": "..."}')
+
+
 def _estimate_tokens(messages: list[dict]) -> int:
     """Rough token count: ~4 chars per token."""
     return sum(len(m.get("content", "")) for m in messages) // 4
@@ -4432,6 +4500,10 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
         print(f"[scope {session_id[:8]}] engagement scope active: "
               f"{len(_eng_rows)} rule(s)", flush=True)
     _provider = runcfg.get("provider")
+    # Structured error feedback (Reflexion-lite). OFF by default; when on, a
+    # refused/failed tool action and an unparseable reply get a short "what was
+    # wrong + minimal valid retry" correction instead of erlik's terse default.
+    error_feedback_on = bool(runcfg.get("error_feedback"))
     try:
         await llm_client.ensure_model_available(model, provider=_provider)
     except llm_client.ModelUnavailable as _mu:
@@ -5169,10 +5241,13 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
 
                 # Nudge LLM to use JSON format
                 messages.append({"role": "assistant", "content": response})
-                messages.append({"role": "user", "content":
+                _json_nudge = (
                     "Please respond with a valid JSON object. Example: "
                     '{"action": "run_tool", "command": "whatweb ' + target_url + '", "reason": "Fingerprint the web server"}'
-                })
+                )
+                if error_feedback_on:
+                    _json_nudge = _structured_json_retry(target_url)
+                messages.append({"role": "user", "content": _json_nudge})
 
                 # Save step
                 db = await get_db()
@@ -5463,6 +5538,10 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
                             f"REFUSED (not run, no output): {_why}\n"
                             "Do not retry this or a variant. Different approach. JSON action."
                         )
+                        if error_feedback_on:
+                            tool_feedback = _structured_error_feedback(
+                                error_str or tool_output, executed=False,
+                                target_url=target_url, enabled_tools=enabled_tools)
                     else:
                         tool_feedback = (
                             f"Tool: {tool_name} | Status: FAILED | Duration: {tool_duration}ms\n"
@@ -5483,6 +5562,10 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
                         if uncovered:
                             tool_feedback += f"Move to an uncovered phase: {uncovered[0]}\n"
                         tool_feedback += "Respond with a JSON action."
+                        if error_feedback_on:
+                            tool_feedback = _structured_error_feedback(
+                                error_str or tool_output, executed=True,
+                                target_url=target_url, enabled_tools=enabled_tools)
 
                     # Stateful primitives: capture tokens/cookies/creds from this
                     # output and surface them for reuse on later steps. Off by
