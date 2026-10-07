@@ -1082,6 +1082,166 @@ def _shell_quote(s: str) -> str:
     return f'"{escaped}"'
 
 
+# --- P2-11: auto-attach stored session auth ------------------------------- #
+# When the stateful-session feature is on, the auth a session already harvested
+# (headers, cookies) rides along automatically on the commands the agent
+# dispatches, so the model does not have to re-paste a token every turn.
+#
+# OFF BY DEFAULT and an EXACT no-op when off: the attach step only runs when the
+# caller passes `stateful_session=True` AND a store, so the command string is
+# unchanged before dispatch and the frozen arms are byte-for-byte unaffected.
+#
+# This consumes the SessionStore contract (`auth_headers()`, `cookies()`, and
+# `all()` for scope) by DUCK TYPING — nothing here imports session_state — so the
+# slice lands and is testable even before that module is merged.
+#
+# How each HTTP tool takes an arbitrary request header and a cookie string. The
+# set is deliberately SMALL and only lists forms that are standard and certain,
+# because this environment cannot exercise the real Kali tools (no container) —
+# the same reason ARGV_SAFE stays small. A tool absent here gets NO auto-attach
+# rather than a guessed flag that might change how it runs.
+#   header: the flag preceding a quoted "Name: value"
+#   cookie: ("flag", "<flag>") a quoted "k=v; k2=v2" after <flag>, or
+#           ("header",)        a Cookie request header via the header flag
+_SESSION_AUTH_SYNTAX: dict[str, dict] = {
+    "curl":     {"header": "-H", "cookie": ("flag", "-b")},
+    "wfuzz":    {"header": "-H", "cookie": ("flag", "-b")},
+    "dalfox":   {"header": "-H", "cookie": ("flag", "-C")},
+    "ffuf":     {"header": "-H", "cookie": ("header",)},
+    "nuclei":   {"header": "-H", "cookie": ("header",)},
+    "gobuster": {"header": "-H", "cookie": ("header",)},
+}
+
+# A command that already carries ANY auth is left untouched — re-adding would
+# duplicate a header or override a credential the model chose on purpose. Reuses
+# the same shapes primitives.inject_credentials refuses, kept in sync by import
+# rather than a second copy.
+try:  # pragma: no cover - import indirection
+    from orchestrator.primitives import _ALREADY_AUTHED as _ALREADY_AUTHED_RX
+except Exception:  # noqa: BLE001 - primitives is in-tree; guard is belt-and-braces
+    _ALREADY_AUTHED_RX = re.compile(
+        r"(-H\s+['\"]?Authorization|--headers?[= ]['\"]?[^'\"]*Authorization|"
+        r"-b\s|--cookie|-C\s|-c\s+['\"]|Cookie:|-id\s)", re.IGNORECASE)
+
+
+def _auth_scoped_to_host(store, target_host: str) -> tuple[dict, dict]:
+    """(headers, cookies) from `store` that belong to `target_host`.
+
+    Consumes `store.auth_headers()` and `store.cookies()` for the values and
+    their formatting (so the store, not this module, owns how a token becomes a
+    header). Respects scope_host: any credential whose backing primitive was
+    harvested for a DIFFERENT host is dropped, so a token is never attached to a
+    host it was not harvested for.
+
+    The accessors carry no host, so scope_host is recovered from `store.all()` by
+    matching VALUES — robust to however the store names or formats a primitive.
+    When `all()` is unavailable the store is treated as single-host (nothing is
+    dropped here); the command-host gate in `attach_session_auth` is the floor
+    that still prevents attaching to any other host.
+    """
+    try:
+        headers = dict(store.auth_headers() or {})
+    except Exception:  # noqa: BLE001
+        headers = {}
+    try:
+        cookies = dict(store.cookies() or {})
+    except Exception:  # noqa: BLE001
+        cookies = {}
+    if not headers and not cookies:
+        return {}, {}
+
+    th = (target_host or "").lower().split(":")[0]
+    try:
+        prims = list(store.all() or [])
+    except Exception:  # noqa: BLE001
+        prims = []
+
+    def _elsewhere(p) -> bool:
+        sh = (getattr(p, "scope_host", "") or "").lower().split(":")[0]
+        return bool(sh) and bool(th) and sh != th
+
+    # Cookie values harvested for another host (exact match on the cookie value).
+    bad_cookie_vals = {(getattr(p, "value", "") or "")
+                       for p in prims
+                       if getattr(p, "kind", "") == "cookie" and _elsewhere(p)}
+    cookies = {k: v for k, v in cookies.items() if v not in bad_cookie_vals}
+
+    # Header values harvested for another host. A header value may wrap the
+    # primitive (e.g. "Bearer <token>"), so match the primitive value as a
+    # SUBSTRING of the header value.
+    bad_header_vals = [(getattr(p, "value", "") or "")
+                       for p in prims
+                       if getattr(p, "kind", "") in ("token", "header", "csrf")
+                       and _elsewhere(p)]
+    headers = {k: v for k, v in headers.items()
+               if not any(bv and bv in (v or "") for bv in bad_header_vals)}
+    return headers, cookies
+
+
+def attach_session_auth(command: str, store, target_url: str | None) -> tuple[str, str | None]:
+    """Attach the session store's auth headers and cookies to `command`.
+
+    Returns (command, note); note is None when nothing was added. Callers invoke
+    this only when the stateful-session feature is on and a store exists — when
+    it does not, the command is returned untouched.
+
+    SCOPE, matching primitives.inject_credentials: attaches only when every host
+    the command explicitly names is the session target, and never when it names
+    none (no guessing). Combined with the scope_host filter in
+    `_auth_scoped_to_host`, a session credential cannot be sent to a host it was
+    not harvested for.
+    """
+    if not command or store is None:
+        return command, None
+    tool = _extract_tool_name(command)
+    syntax = _SESSION_AUTH_SYNTAX.get(tool)
+    if not syntax:
+        return command, None
+    if _ALREADY_AUTHED_RX.search(command):
+        return command, None
+
+    target_host = ""
+    if target_url:
+        target_host = _safe_hostname(
+            target_url if "://" in target_url else f"http://{target_url}").lower()
+    if not target_host:
+        return command, None  # cannot bind the credential to a host — do not guess
+    want = target_host.split(":")[0]
+    hosts = set(re.findall(r"https?://([^/\s'\"]+)", command))
+    if not hosts or any(h.split(":")[0].lower() != want for h in hosts):
+        return command, None
+
+    headers, cookies = _auth_scoped_to_host(store, target_host)
+    if not headers and not cookies:
+        return command, None
+
+    additions: list[str] = []
+    added: list[str] = []
+    hflag = syntax.get("header")
+    if hflag:
+        for name, value in headers.items():
+            if not name or value is None:
+                continue
+            additions.append(f"{hflag} {shlex.quote(f'{name}: {value}')}")
+            added.append(str(name))
+
+    if cookies:
+        cookie_str = "; ".join(f"{k}={v}" for k, v in cookies.items())
+        mode = syntax.get("cookie")
+        if mode and mode[0] == "flag":
+            additions.append(f"{mode[1]} {shlex.quote(cookie_str)}")
+            added.append("cookie")
+        elif mode and mode[0] == "header" and hflag:
+            additions.append(f"{hflag} {shlex.quote(f'Cookie: {cookie_str}')}")
+            added.append("cookie")
+
+    if not additions:
+        return command, None
+    # The note names only the header/cookie NAMES, never their values, so it is
+    # safe to surface in logs without weakening redaction.
+    return f"{command} {' '.join(additions)}", "attached session auth: " + ", ".join(added)
+
+
 async def check_container_running() -> bool:
     """Check if the kali-tools container is running (or return True in native mode)."""
     if ERLIK_NATIVE:
@@ -1109,7 +1269,7 @@ def _sync_check_container() -> bool:
         return False
 
 
-async def execute_tool(command: str, enabled_tools: list[str], no_timeout: bool = False, target_url: str = None, tool_hint: str = None, custom_timeout: int = None, safe_mode: bool | None = None, engagement_rows=None, native_argv: bool = False) -> dict:
+async def execute_tool(command: str, enabled_tools: list[str], no_timeout: bool = False, target_url: str = None, tool_hint: str = None, custom_timeout: int = None, safe_mode: bool | None = None, engagement_rows=None, native_argv: bool = False, stateful_session: bool = False, session_store=None) -> dict:
     """
     Execute a command in the kali-tools Docker container.
 
@@ -1213,6 +1373,19 @@ async def execute_tool(command: str, enabled_tools: list[str], no_timeout: bool 
         return {"success": False, "output": "", "tool": tool_name, "duration_ms": 0,
                 "error": f"WRITE_CONFINEMENT: {write_err}", "executed": False, "denied": True}
 
+    # Auto-attach the session's stored auth — AFTER every admission guard has
+    # passed on the model's own command. Attaching here (not before the guards)
+    # keeps scope/safe-mode/write-confinement scanning the MODEL's string, so a
+    # credential value that happens to contain a host- or verb-shaped substring
+    # can never trip a guard into a false refusal. The attached material is
+    # trusted session auth harvested from in-scope responses, carries no new host
+    # or write target, and `attach_session_auth` refuses any command that names a
+    # host other than the target — so nothing here escapes the scope boundary.
+    # OFF (flag clear or no store) is an exact no-op: `sanitized` is untouched.
+    auth_note = None
+    if stateful_session and session_store is not None:
+        sanitized, auth_note = attach_session_auth(sanitized, session_store, target_url)
+
     # Check container is running
     if not await check_container_running():
         return {"success": False, "output": "", "tool": tool_name, "duration_ms": 0,
@@ -1264,6 +1437,10 @@ async def execute_tool(command: str, enabled_tools: list[str], no_timeout: bool 
             # (bash -c). The interface may not overstate what happened, so this
             # is the truth of the dispatch, not the request.
             "transport": transport,
+            # Present ONLY when stored session auth was actually attached (names
+            # the headers/cookies, never their values). Absent otherwise, so the
+            # interface never claims an attach that did not happen.
+            **({"auth_attached": auth_note} if auth_note else {}),
         }
 
     except Exception as e:
