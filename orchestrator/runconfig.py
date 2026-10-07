@@ -61,12 +61,18 @@ _BOOL_KEYS = {
     # run's verified findings, and none are injected. An exact no-op, so the
     # frozen arms neither write nor read learned context.
     "learned_playbooks": "ERLIK_LEARNED_PLAYBOOKS",
-    # Stateful session store (P2-11). OFF: no stored auth is attached to the
-    # commands the agent dispatches — each request carries only what the model
-    # itself wrote. ON: the session's harvested auth headers and cookies ride
-    # along automatically so the model need not re-paste a token each turn.
-    # OFF is an EXACT no-op (the command string is unchanged before dispatch),
-    # so the frozen arms are unaffected.
+    # Stateful session store (P2-11). The master switch for the whole
+    # stateful-session feature, shared by two cooperating slices:
+    #   - the config-driven login provider SEEDS the in-run session store at
+    #     session start (which credential to log in with is named by the
+    #     `login_provider` sub-config below), and
+    #   - the auto-attach path rides the session's harvested auth headers and
+    #     cookies onto the commands the agent dispatches, so the model need not
+    #     re-paste a token each turn.
+    # OFF: no login is performed, nothing is seeded, nothing is attached, and the
+    # prompt and command string are byte-identical to before (login-helper and
+    # every existing auth path untouched). An EXACT no-op, so the frozen arms are
+    # unaffected; with it off the `login_provider` sub-config is never read.
     "stateful_session": "ERLIK_STATEFUL_SESSION",
 }
 
@@ -171,7 +177,7 @@ def resolve(run_config=None) -> dict:
     for k in ("cve_enrich", "skills", "nettacker", "nettacker_findings",
               "nettacker_scenario", "playbooks", "max_playbooks", "provider", "poc_verify", "primitives",
               "handoff", "native_argv", "agent_auth", "coverage_cases",
-              "learned_playbooks", "stateful_session",
+              "learned_playbooks", "stateful_session", "login_provider",
               "target_memory", "techniques", "ai_review", "review_model",
               "skills_exclude", "skills_pin", "skills_max_chars",
               "safe_mode", "safe_mode_ack", "skills_max_files"):
@@ -185,7 +191,7 @@ def resolve(run_config=None) -> dict:
     _known = {"cve_enrich", "skills", "nettacker", "nettacker_findings",
               "nettacker_scenario", "playbooks", "max_playbooks", "provider", "poc_verify", "primitives",
               "handoff", "native_argv", "agent_auth", "coverage_cases",
-              "learned_playbooks", "stateful_session",
+              "learned_playbooks", "stateful_session", "login_provider",
               "target_memory", "techniques", "ai_review", "review_model",
               "skills_exclude", "skills_pin", "skills_max_chars",
               "safe_mode", "safe_mode_ack", "skills_max_files", "preset"}
@@ -269,6 +275,20 @@ def resolve(run_config=None) -> dict:
             warnings.append(f"skills_max_files {_mf!r} is not a number; "
                             f"using {DEFAULT_SKILLS_FILES}")
 
+    # Config-driven login provider sub-config (P2-11). This names WHICH stored
+    # credential to log in with and where its material should be scoped; it NEVER
+    # carries a password (that stays encrypted at rest and is resolved only
+    # inside login.authenticate). A present-but-malformed value is named rather
+    # than dropped silently, the same as any other recognised-but-wrong key — a
+    # string here is the likeliest mistake and would otherwise vanish without a
+    # word. The master switch is `stateful_session`; with it off this is inert.
+    login_provider = base.get("login_provider")
+    if login_provider is not None and not isinstance(login_provider, dict):
+        warnings.append(
+            "login_provider must be a JSON object (credential_id, optional "
+            "scope_host); the value given was ignored")
+        login_provider = None
+
     def _as_list(v):
         if v is None:
             return []
@@ -327,6 +347,7 @@ def resolve(run_config=None) -> dict:
         "coverage_cases": tri("coverage_cases"),
         "learned_playbooks": tri("learned_playbooks"),
         "stateful_session": tri("stateful_session"),
+        "login_provider": login_provider,
     }
 
 

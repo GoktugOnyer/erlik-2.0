@@ -104,23 +104,46 @@ def test_learned_playbooks_defaults_off_and_is_tri_state(monkeypatch):
 
 
 def test_stateful_session_is_env_proof_in_the_measured_arms(monkeypatch):
-    """stateful_session auto-attaches harvested auth to dispatched commands,
-    changing what each request carries. It must not flip on inside a measured
-    arm from a stray env var, or the baseline stops being the no-stored-auth
-    measurement it claims to be."""
+    """stateful_session is the master switch for both halves of the feature: the
+    login provider SEEDS an authenticated session into the agent's context, and
+    the auto-attach path rides harvested auth onto dispatched commands. Either
+    way it is a help lever that changes what the agent is handed, so a stray env
+    var must not flip it on inside a measured arm, or the baseline stops being
+    the unauthenticated / no-stored-auth measurement it claims to be."""
     monkeypatch.setenv("ERLIK_STATEFUL_SESSION", "true")
     for preset in ("ai_only", "guided_ai"):
         assert rc.resolve({"preset": preset})["stateful_session"] is False, preset
 
 
 def test_stateful_session_defaults_off_and_is_tri_state(monkeypatch):
-    assert rc.resolve({"preset": "custom"})["stateful_session"] is False  # absent: off
-    r = rc.resolve({"preset": "custom", "stateful_session": True})        # explicit on
+    assert rc.resolve({"preset": "custom"})["stateful_session"] is False   # absent: off
+    r = rc.resolve({"preset": "custom", "stateful_session": True})         # explicit on
     assert r["stateful_session"] is True
     assert not any("stateful_session" in w for w in r["run_config_warnings"]), (
         "stateful_session is a recognised key and must not warn")
-    monkeypatch.setenv("ERLIK_STATEFUL_SESSION", "true")                  # env fallback
+    monkeypatch.setenv("ERLIK_STATEFUL_SESSION", "true")                   # env fallback
     assert rc.resolve({"preset": "custom"})["stateful_session"] is True
+
+
+def test_login_provider_subconfig_passes_through_as_a_dict():
+    r = rc.resolve({"preset": "custom",
+                    "login_provider": {"credential_id": "cred1", "scope_host": "h:443"}})
+    assert r["login_provider"] == {"credential_id": "cred1", "scope_host": "h:443"}
+    assert not any("login_provider" in w for w in r["run_config_warnings"])
+
+
+def test_login_provider_absent_is_none_not_a_warning():
+    r = rc.resolve({"preset": "custom"})
+    assert r["login_provider"] is None
+    assert not any("login_provider" in w for w in r["run_config_warnings"])
+
+
+def test_a_malformed_login_provider_is_named_not_dropped():
+    """A string where an object belongs is the likeliest mistake; silently
+    dropping it would be the vanishing-key defect this project keeps removing."""
+    r = rc.resolve({"preset": "custom", "login_provider": "cred1"})
+    assert r["login_provider"] is None
+    assert any("login_provider" in w for w in r["run_config_warnings"])
 
 
 def test_client_facing_presets_reverify_their_findings():
