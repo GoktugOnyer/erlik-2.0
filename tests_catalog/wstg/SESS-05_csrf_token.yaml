@@ -1,0 +1,59 @@
+id: WSTG-SESS-05
+name: Cross-Site Request Forgery (no anti-CSRF token)
+category: Session Management
+attack_class: csrf
+severity: medium
+# ext tier -- see ATHN-06 for the rationale. Added after the campaign arms were
+# frozen; invisible to the agent prompt unless coverage_cases is on.
+tier: ext
+references:
+  - https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/06-Session_Management_Testing/05-Testing_for_Cross_Site_Request_Forgery
+
+target_schema:
+  required: [url]
+  optional: [cookie, auth_header]
+
+# The in-band half of WSTG-SESS-05: a state-changing POST form that carries no
+# anti-CSRF token can be submitted from any origin. This does not PROVE the
+# request succeeds cross-site -- a SameSite cookie or an Origin check could still
+# stop it, and neither is visible in the form markup -- so the finding is scoped
+# to what the markup does show: a POST form with no token field.
+#
+# Three verdicts the finding is NOT:
+#   no form / no POST form   there is nothing to forge, so nothing is reported
+#   a token field is present the standard mitigation is in place
+#   no response              the form was never seen, so it is NOT assessed
+#
+# Narrow on purpose. A GET form changes no state and is excluded; a page with a
+# hidden field whose name matches the common anti-CSRF spellings is treated as
+# protected rather than flagged, because flagging a protected form trains an
+# operator to ignore this case. The verdict is a deterministic canary, so the
+# case does not depend on a model being reachable.
+#
+# Read-only: one GET of the form page.
+steps:
+  - name: fetch_form
+    tool: curl
+    command: >-
+      bash -c 'U="{{url}}";
+      B=$(curl -s -b "{{cookie}}" -H "{{auth_header}}"
+      --connect-timeout 5 --max-time 15 -w "HTTPCODE=%{http_code}" "$U");
+      CODE=$(printf "%s" "$B" | grep -o "HTTPCODE=[0-9]*" | tail -1 | cut -d= -f2);
+      printf "%s\n" "$B";
+      FORM=$(printf "%s" "$B" | grep -ioE "method=.?post");
+      TOKEN=$(printf "%s" "$B" | grep -ioE "name=.?(csrf|xsrf|authenticity_token|csrfmiddlewaretoken|__requestverificationtoken)");
+      if [ "$CODE" = "000" ]; then
+      echo "ERLIK_CSRF_NO_RESPONSE: no response was received, so CSRF protection was not assessed";
+      elif [ -z "$FORM" ]; then
+      echo "ERLIK_CSRF_NO_FORM: the response carries no state-changing POST form, so there is nothing to judge here";
+      elif [ -n "$TOKEN" ]; then
+      echo "ERLIK_CSRF_OK: the POST form carries an anti-CSRF token field";
+      else
+      echo "ERLIK_CSRF_MISSING: a state-changing POST form carries no anti-CSRF token field";
+      fi'
+    evaluators:
+      - type: regex
+        pattern: 'ERLIK_CSRF_MISSING'
+        emit_finding:
+          vuln_type: Cross-Site Request Forgery (no anti-CSRF token)
+          severity: medium
