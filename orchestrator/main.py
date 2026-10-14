@@ -4925,6 +4925,50 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
                     "type": "log", "phase": "recon", "message": _ab,
                 })
 
+        # Config-driven login provider (P2-11): log in with a declared credential
+        # and SEED the in-run session store, so later steps run authenticated.
+        # Gated by stateful_session; OFF => no login, nothing seeded, prompt
+        # unchanged (and login-helper untouched). The summary injected here is
+        # SECRET-FREE by construction — store.summary_facts() never yields a
+        # token or cookie value — so nothing confidential reaches the prompt.
+        if runcfg.get("stateful_session"):
+            try:
+                from orchestrator import login_provider as _LP
+                _store = None
+                try:
+                    from orchestrator.session_state import SessionStore as _SS
+                    _store = _SS()
+                except Exception:  # noqa: BLE001 — sibling slice may be unmerged
+                    _store = None
+                _lpdb = await get_db()
+                try:
+                    _seed = await _LP.seed(_lpdb, _store, runcfg, target_url)
+                    await _lpdb.commit()
+                finally:
+                    await _lpdb.close()
+                if _seed.get("ran") and _store is not None:
+                    _facts = _store.summary_facts()
+                    if _facts:
+                        combined_system += f"\n\nAUTHENTICATED SESSION (seeded at start):\n{_facts}"
+                    await manager.broadcast(session_id, {
+                        "type": "log", "phase": "recon",
+                        "message": f"LOGIN PROVIDER: seeded {', '.join(_seed['seeded'])} "
+                                   f"for {_seed.get('scope_host') or 'target'} "
+                                   f"({_seed.get('reason')})",
+                    })
+                else:
+                    # Declare, don't drop: the operator asked for a seeded
+                    # session and did not get one — say why, rather than running
+                    # on silently as if nothing had been requested.
+                    print(f"[login-provider {session_id[:8]}] not seeded: "
+                          f"{_seed.get('reason')}", flush=True)
+                    await manager.broadcast(session_id, {
+                        "type": "log", "phase": "recon",
+                        "message": f"LOGIN PROVIDER: no session seeded — {_seed.get('reason')}",
+                    })
+            except Exception as e:  # noqa: BLE001 — best-effort, never abort a run
+                print(f"[login-provider {session_id[:8]}] error: {type(e).__name__}", flush=True)
+
         # Learning loop (Track A): inject APPROVED candidate playbooks, fenced as
         # untrusted data. Gated; OFF => nothing injected. Only human-approved
         # candidates are ever read, and each is fenced so attacker-influenced
