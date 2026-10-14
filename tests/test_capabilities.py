@@ -254,6 +254,20 @@ class TestProducedOutputIsActuallyRead:
         src = self.UI.read_text()
         assert "rc-aireview" in src and "ai_review" in src
 
+    def test_error_feedback_toggle_is_wired_end_to_end(self):
+        """ERROR FEEDBACK is a help lever like the others: a checkbox nobody
+        reads into run_config is a switch that silently does nothing. Keep the
+        control, the builder key and the preset-apply read together — if the
+        toggle is removed, remove this with it."""
+        src = self.UI.read_text()
+        assert "rc-errfeedback" in src, "no ERROR FEEDBACK control in the UI"
+        # The builder must send it to the backend...
+        assert "error_feedback: document.getElementById('rc-errfeedback').checked" in src, (
+            "the toggle is not read into run_config — it would be a dead switch")
+        # ...and a chosen preset must be able to set it, or the box never
+        # reflects what the preset turns on.
+        assert "document.getElementById('rc-errfeedback').checked = !!c.error_feedback" in src
+
     def test_the_deterministic_lane_is_reachable_from_the_ui(self):
         """All six /api/v2/* endpoints had zero callers: the 22 committed WSTG
         cases could not be listed, run or reviewed from the dashboard."""
