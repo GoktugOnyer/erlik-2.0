@@ -61,6 +61,14 @@ _BOOL_KEYS = {
     # run's verified findings, and none are injected. An exact no-op, so the
     # frozen arms neither write nor read learned context.
     "learned_playbooks": "ERLIK_LEARNED_PLAYBOOKS",
+    # Structured error feedback (Reflexion-lite). OFF: a refused or failed tool
+    # action feeds the model erlik's existing terse refusal/failure string. ON:
+    # it feeds a short "what was wrong + minimal shape of a valid retry"
+    # correction instead, which small local models recover from far better. It
+    # only rewrites the agent loop's error-path USER messages — it never touches
+    # the system prompt or a successful turn — so OFF is an exact no-op and no
+    # recorded arm drifts. Product behaviour, not campaign-era.
+    "error_feedback": "ERLIK_ERROR_FEEDBACK",
     # Stateful session store (P2-11, orchestrator/session_state.py). The master
     # switch for the whole stateful-session feature, shared by two cooperating
     # slices:
@@ -92,7 +100,8 @@ RUN_PRESETS: dict[str, dict] = {
                    "poc_verify": False, "techniques": False,
                    "ai_review": False, "native_argv": False,
                    "agent_auth": False, "coverage_cases": False,
-                   "learned_playbooks": False, "stateful_session": False},
+                   "learned_playbooks": False, "error_feedback": False,
+                   "stateful_session": False},
     },
     "guided_ai": {
         "label": "Guided AI — skills + exploit playbooks (most effective)",
@@ -105,7 +114,8 @@ RUN_PRESETS: dict[str, dict] = {
                    "playbooks": "auto", "primitives": True,
                    "techniques": False, "ai_review": True, "native_argv": False,
                    "agent_auth": False, "coverage_cases": False,
-                   "learned_playbooks": False, "stateful_session": False},
+                   "learned_playbooks": False, "error_feedback": False,
+                   "stateful_session": False},
     },
     "guided_techniques": {
         "label": "Guided Attack — environment-specific techniques",
@@ -178,7 +188,8 @@ def resolve(run_config=None) -> dict:
     for k in ("cve_enrich", "skills", "nettacker", "nettacker_findings",
               "nettacker_scenario", "playbooks", "max_playbooks", "provider", "poc_verify", "primitives",
               "handoff", "native_argv", "agent_auth", "coverage_cases",
-              "learned_playbooks", "stateful_session", "login_provider",
+              "learned_playbooks", "error_feedback",
+              "stateful_session", "login_provider",
               "target_memory", "techniques", "ai_review", "review_model",
               "skills_exclude", "skills_pin", "skills_max_chars",
               "safe_mode", "safe_mode_ack", "skills_max_files"):
@@ -192,7 +203,8 @@ def resolve(run_config=None) -> dict:
     _known = {"cve_enrich", "skills", "nettacker", "nettacker_findings",
               "nettacker_scenario", "playbooks", "max_playbooks", "provider", "poc_verify", "primitives",
               "handoff", "native_argv", "agent_auth", "coverage_cases",
-              "learned_playbooks", "stateful_session", "login_provider",
+              "learned_playbooks", "error_feedback",
+              "stateful_session", "login_provider",
               "target_memory", "techniques", "ai_review", "review_model",
               "skills_exclude", "skills_pin", "skills_max_chars",
               "safe_mode", "safe_mode_ack", "skills_max_files", "preset"}
@@ -347,6 +359,7 @@ def resolve(run_config=None) -> dict:
         "agent_auth": tri("agent_auth"),
         "coverage_cases": tri("coverage_cases"),
         "learned_playbooks": tri("learned_playbooks"),
+        "error_feedback": tri("error_feedback"),
         "stateful_session": tri("stateful_session"),
         "login_provider": login_provider,
     }
