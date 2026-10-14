@@ -146,6 +146,48 @@ class Web(_Base):
                 return self._send(200, body, "text/plain", h)
             return self._send(404, "not found", extra=h)
 
+        if p == "/account":
+            # ATHN-06: a sensitive, authenticated page. The flaw lets a shared
+            # or local cache retain it; the control forbids caching with
+            # no-store (and sends the belt-and-braces Pragma a control would).
+            cache = ("public, max-age=3600" if self.VULNERABLE
+                     else "no-store, no-cache, must-revalidate")
+            extra = {**h, "Cache-Control": cache}
+            if not self.VULNERABLE:
+                extra["Pragma"] = "no-cache"
+            return self._send(
+                200, "<html><body>Account balance: 4211.00 EUR</body></html>",
+                extra=extra)
+
+        if p == "/transfer":
+            # SESS-05: a state-changing POST form. The flaw omits the anti-CSRF
+            # token; the control carries a hidden csrf_token field.
+            token = ("" if self.VULNERABLE
+                     else '<input type="hidden" name="csrf_token" value="a1b2c3d4">')
+            body = ('<html><body><form method="post" action="/transfer">'
+                    f'{token}<input name="amount">'
+                    '<button>Send</button></form></body></html>')
+            return self._send(200, body, extra=h)
+
+        if p == "/admin":
+            # CONF-05: an administrative interface. The flaw serves it to an
+            # unauthenticated request; the control answers 403.
+            if self.VULNERABLE:
+                return self._send(
+                    200, "<html><body><h1>Admin Console</h1>"
+                    '<a href="/admin/users">User Management</a></body></html>',
+                    extra=h)
+            return self._send(403, "Forbidden", "text/plain", h)
+
+        if p == "/crossdomain.xml":
+            # CONF-08: the RIA cross-domain policy. The flaw grants access to any
+            # domain; the control names a concrete one.
+            domain = "*" if self.VULNERABLE else "assets.example.com"
+            body = ('<?xml version="1.0"?>\n<cross-domain-policy>'
+                    f'<allow-access-from domain="{domain}"/>'
+                    '</cross-domain-policy>')
+            return self._send(200, body, "text/x-cross-domain-policy", h)
+
         if p == "/search":
             v = (q.get("q") or [""])[0]
             if "'" in v:
@@ -433,3 +475,38 @@ class Deser(_Base):
         if m:
             return self._handle(m.group(1))
         return self._send(200, "home", "text/plain")
+
+
+class Cmd(_Base):
+    """WSTG-INPV-12's target: a `ping`-style endpoint that feeds a query value
+    to a shell.
+
+    Nothing executes here, exactly as Ssti's engine only multiplies and Deser
+    matches a serialized header: the flaw MATCHES a shell metacharacter followed
+    by `id` and returns the uid/gid line that command would print. The control
+    strips every metacharacter first, so the same payload produces only the
+    benign ping output and the differential the case depends on never appears.
+    """
+
+    _METACHAR_ID = re.compile(r"[;|&`]\s*id\b")
+
+    def do_GET(self):
+        u = urlparse(self.path)
+        vals = [v for vs in parse_qs(u.query, keep_blank_values=True).values()
+                for v in vs]
+        raw = vals[0] if vals else ""
+        if self.VULNERABLE:
+            host = re.split(r"[;|&`]", raw)[0] or raw
+            if self._METACHAR_ID.search(raw):
+                # The injected command ran -- its output comes back in band.
+                return self._send(
+                    200, f"PING {host}: 56 data bytes\n"
+                    "uid=33(www-data) gid=33(www-data) groups=33(www-data)\n",
+                    "text/plain")
+            return self._send(200, f"PING {host}: 56 data bytes\n"
+                              f"64 bytes from {host}\n", "text/plain")
+        # Control: only hostname-shaped characters survive, so a metacharacter
+        # payload can never reach a shell and `id` never runs.
+        safe = re.sub(r"[^A-Za-z0-9._-]", "", raw)
+        return self._send(200, f"PING {safe}: 56 data bytes\n"
+                          f"64 bytes from {safe}\n", "text/plain")

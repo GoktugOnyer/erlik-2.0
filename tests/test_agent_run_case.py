@@ -54,11 +54,21 @@ class TestTheModelIsToldTheActionExists:
         assert find_by_id(json.loads(line)["case_id"]) is not None
 
     def test_the_catalogue_is_generated_not_hand_listed(self):
-        """A hand-written list goes stale the first time a case is added."""
+        """A hand-written list goes stale the first time a case is added.
+
+        Tier-aware since the first ext coverage cases: a `core` case must appear
+        in the default prompt, and an `ext` case must NOT (it is hidden unless
+        coverage_cases is on — see test_case_tiering). Both halves matter: the
+        first catches a stale hand-list, the second catches an ext case leaking
+        into the frozen-arm prompt."""
         from orchestrator.testcase import load_catalog
         out = M.render_system_prompt("http://127.0.0.1:9000/")
-        for tc_id in load_catalog():
-            assert tc_id in out, f"{tc_id} is missing from the prompt catalogue"
+        for tc_id, tc in load_catalog().items():
+            if tc.tier == "ext":
+                assert tc_id not in out, (
+                    f"{tc_id} is ext but leaked into the default prompt catalogue")
+            else:
+                assert tc_id in out, f"{tc_id} is missing from the prompt catalogue"
 
     def test_each_entry_says_what_the_case_needs(self):
         """Without the required fields the model's first attempt is a guess."""
@@ -233,7 +243,13 @@ class TestUnknownInputIsHandled:
 
     def test_the_catalogue_ids_are_real(self):
         from orchestrator.testcase import load_catalog
-        assert set(M._runnable_case_ids()) == set(load_catalog())
+        catalog = load_catalog()
+        runnable = set(M._runnable_case_ids())
+        # Every id the model is offered exists in the catalogue ...
+        assert runnable <= set(catalog), sorted(runnable - set(catalog))
+        # ... and with coverage off the offered set is exactly the non-ext cases
+        # (ext coverage cases are hidden — see test_case_tiering).
+        assert runnable == {cid for cid, tc in catalog.items() if tc.tier != "ext"}
 
 
 class TestEndToEndThroughTheRealLoop:

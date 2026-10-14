@@ -61,9 +61,18 @@ def _case_summaries() -> list[dict]:
     Imported from `main` rather than rebuilt here: a second copy of this shape
     is how the planner comes to disagree with the catalogue about what a case
     requires.
+
+    EXT-TIER CASES ARE EXCLUDED, for the same reason they are hidden from the
+    frozen agent prompt: this Juice Shop baseline is a recorded artifact, and a
+    new coverage case must not perturb it without someone saying so. An ext case
+    aimed at the base URL would otherwise show up here as "ran, and the baseline
+    does not know about it" the moment it lands, turning every coverage addition
+    into a baseline-diff failure. The deterministic v2 lane and the planted-flaw
+    harness still exercise ext cases; only this frozen comparison skips them.
     """
     from orchestrator.main import _v2_case_summary
-    return [_v2_case_summary(tc) for tc in load_catalog().values()]
+    return [_v2_case_summary(tc) for tc in load_catalog().values()
+            if getattr(tc, "tier", "core") != "ext"]
 
 
 def _normalise(result) -> dict:

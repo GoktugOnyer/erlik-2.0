@@ -1,0 +1,58 @@
+id: WSTG-CONF-05
+name: Unauthenticated Admin Interface
+category: Configuration & Deployment Management
+attack_class: recon
+severity: high
+# ext tier -- see ATHN-06. Added after the campaign arms were frozen.
+tier: ext
+references:
+  - https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/02-Configuration_and_Deployment_Management_Testing/05-Enumerate_Infrastructure_and_Application_Admin_Interfaces
+
+target_schema:
+  required: [url]
+  optional: [cookie, auth_header]
+
+# WSTG-CONF-05 is enumeration; this case is the confirmation half of it. The
+# operator (or a prior content-discovery step) has found an admin path and points
+# `url` at it; the question here is whether that interface answers an
+# UNAUTHENTICATED request with administrative content.
+#
+# A 200 alone is not the finding -- a login page is also a 200, and so is a
+# generic error rendered with a 200. The signature is a 200 whose body carries an
+# administrative marker (an admin panel/console, or user-management
+# text). The clean verdicts are deliberately distinct from the finding:
+#   401 / 403                the interface requires authentication
+#   200 but no admin marker  this path is not an exposed admin interface
+#   no response              not assessed
+#
+# The markers are English-only, so a localized admin panel is a blind spot this
+# case states rather than hides -- the same limitation WSTG-INPV-05.2 documents
+# for engine error messages. The verdict is a deterministic canary.
+#
+# Read-only: one GET of the admin path with whatever credentials (if any) the
+# operator supplied -- the point is what it serves WITHOUT a session.
+steps:
+  - name: fetch_admin
+    tool: curl
+    command: >-
+      bash -c 'U="{{url}}";
+      H=$(curl -s -b "{{cookie}}" -H "{{auth_header}}" -i
+      --connect-timeout 5 --max-time 15 -w "HTTPCODE=%{http_code}" "$U");
+      CODE=$(printf "%s" "$H" | grep -o "HTTPCODE=[0-9]*" | tail -1 | cut -d= -f2);
+      printf "%s\n" "$H";
+      ADMIN=$(printf "%s" "$H" | grep -ioE "admin (panel|console)|user management|manage users");
+      if [ "$CODE" = "000" ]; then
+      echo "ERLIK_ADMIN_NO_RESPONSE: no response was received, so the admin interface was not assessed";
+      elif [ "$CODE" = "401" ] || [ "$CODE" = "403" ]; then
+      echo "ERLIK_ADMIN_PROTECTED: the admin interface requires authentication (HTTP $CODE)";
+      elif [ "$CODE" = "200" ] && [ -n "$ADMIN" ]; then
+      echo "ERLIK_ADMIN_OPEN: an administrative interface answered 200 to an unauthenticated request";
+      else
+      echo "ERLIK_ADMIN_NONE: no unauthenticated administrative interface was found at this path";
+      fi'
+    evaluators:
+      - type: regex
+        pattern: 'ERLIK_ADMIN_OPEN'
+        emit_finding:
+          vuln_type: Unauthenticated Admin Interface
+          severity: high

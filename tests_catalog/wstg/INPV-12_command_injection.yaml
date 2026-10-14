@@ -1,0 +1,57 @@
+id: WSTG-INPV-12
+name: OS Command Injection
+category: Input Validation
+attack_class: cmdi
+severity: high
+# ext tier -- see ATHN-06. Added after the campaign arms were frozen. It also
+# gives the `cmdi` capability class its first deterministic case; until now that
+# class had a detector (commix) but no catalogue entry.
+tier: ext
+references:
+  - https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/07-Input_Validation_Testing/12-Testing_for_Command_Injection
+
+target_schema:
+  required: [url, parameter]
+  optional: [cookie, auth_header]
+
+# Non-blind OS command injection: the parameter reaches a shell, and the output
+# of an injected `id` comes back in the response. `id` is the probe because its
+# output -- `uid=NNN(name) gid=NNN(name)` -- is distinctive, harmless, and does
+# not occur in ordinary application output, which is what makes the match safe.
+# A blind variant (no output returned) is out of scope here and belongs with the
+# OAST-backed cases.
+#
+# ATTRIBUTION IS THE WHOLE DIFFICULTY. A page could carry `uid=` for its own
+# reasons -- a Unix manual, a `/etc/passwd` tutorial, a profile showing a numeric
+# id. So the verdict is DIFFERENTIAL, the same shape WSTG-INPV-05.2 uses: a
+# benign request (`erlikprobe`) establishes what the page says without a payload,
+# and the finding requires the `id` output to appear in the INJECTED response and
+# NOT in the benign one. A page that prints `uid=` either way is reporting its
+# own content, not executing the probe, and is dropped.
+#
+# Both requests are sent in one step so the comparison is made here rather than
+# left to a cross-step evaluator that the single-curl lane cannot run anyway --
+# this case is shell-based and does not claim lane-runnability. The payload is a
+# metacharacter-prefixed `id` (`;id`); it names no host, so the scope guard needs
+# no payload_hosts declaration.
+steps:
+  - name: inject_id
+    tool: curl
+    command: >-
+      bash -c 'U="{{url}}"; P="{{parameter}}";
+      B0=$(curl -s -b "{{cookie}}" -H "{{auth_header}}"
+      --connect-timeout 5 --max-time 15 -G "$U" --data-urlencode "$P=erlikprobe");
+      B1=$(curl -s -b "{{cookie}}" -H "{{auth_header}}"
+      --connect-timeout 5 --max-time 15 -G "$U" --data-urlencode "$P=erlikprobe;id");
+      printf "BASELINE:\n%s\nINJECT:\n%s\n" "$B0" "$B1";
+      if printf "%s" "$B1" | grep -qE "uid=[0-9]+\([a-z_]" && ! printf "%s" "$B0" | grep -qE "uid=[0-9]+\("; then
+      echo "ERLIK_CMDI_EXEC: the injected id command returned uid/gid output that the benign baseline did not, so the parameter reaches a command interpreter";
+      else
+      echo "ERLIK_CMDI_NONE: the parameter returned no command output distinct from the benign baseline";
+      fi'
+    evaluators:
+      - type: regex
+        pattern: 'ERLIK_CMDI_EXEC'
+        emit_finding:
+          vuln_type: OS Command Injection
+          severity: high
