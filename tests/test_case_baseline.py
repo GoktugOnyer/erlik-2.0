@@ -312,6 +312,23 @@ class TestCIActuallyRunsIt:
         runs = " ".join(str(s.get("run", "")) for s in self._job()["steps"])
         assert "127.0.0.1:3000/" in runs and "seq 1" in runs
 
+    def test_ext_cases_are_excluded_from_the_baseline(self):
+        """ext-tier coverage cases stay out of the frozen Juice Shop baseline,
+        the same way they stay out of the frozen agent prompt. Without this, a
+        new coverage case lands as `ran, and the baseline does not know about
+        it` (or a new planner-skip entry) and fails the diff the day it is
+        added — perturbing a recorded artifact it was designed not to touch."""
+        from orchestrator.testcase import load_catalog
+        cat = load_catalog()
+        ext = {cid for cid, tc in cat.items() if tc.tier == "ext"}
+        assert ext, "no ext case in the catalogue; this guard would be vacuous"
+        summarised = {s["id"] for s in CB._case_summaries()}
+        leaked = sorted(summarised & ext)
+        assert not leaked, f"ext cases reached the baseline harness: {leaked}"
+        # ...and the core cases are all still there, so the exclusion is narrow.
+        core = {cid for cid, tc in cat.items() if tc.tier != "ext"}
+        assert summarised == core, sorted(summarised ^ core)
+
     def test_the_baseline_matches_the_catalogue_if_it_has_been_recorded(self):
         """Once CI has recorded a baseline, every case in it must still exist.
         A renamed or deleted case would otherwise sit in the file for ever,

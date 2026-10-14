@@ -51,7 +51,7 @@ docs/                Methodology + evaluation documentation
 
 ## WSTG test-case catalogue
 
-35 cases. The **Lane** column is not maintained by hand — it is what
+40 cases. The **Lane** column is not maintained by hand — it is what
 `inventory.executable_test_cases` answers when asked, and a case earns a `yes`
 only if *every* one of its steps runs inside the assessment lane's sandbox (see
 [Status](#status) for why a partly-runnable case is excluded outright). A case
@@ -60,6 +60,7 @@ without one still runs through the agent lane and the CLI.
 | ID | Test | Lane |
 |----|------|------|
 | WSTG-ATHN-01 | Credentials Transported over Encrypted Channel | — |
+| WSTG-ATHN-06 | Browser Cache Weakness | — |
 | WSTG-AUTHZ-01 | Directory Traversal / Local File Include | — |
 | WSTG-AUTHZ-04 | Insecure Direct Object References | — |
 | WSTG-AUTHZ-05 | OAuth Authorisation Flow Weaknesses | — |
@@ -71,8 +72,10 @@ without one still runs through the agent lane and the CLI.
 | WSTG-CLNT-09 | Clickjacking Protection Headers | — |
 | WSTG-CONF-02 | Platform Debug and Diagnostic Endpoint Exposure | — |
 | WSTG-CONF-04 | Unreferenced Backup, VCS and Build Artifacts | — |
+| WSTG-CONF-05 | Unauthenticated Admin Interface | — |
 | WSTG-CONF-06 | HTTP Methods | — |
 | WSTG-CONF-07 | Transport Layer Security | — |
+| WSTG-CONF-08 | Permissive RIA Cross-Domain Policy | — |
 | WSTG-ERRH-01 | Improper Error Handling | — |
 | WSTG-INFO-02 | Fingerprint Web Server | — |
 | WSTG-INFO-03 | Review Webserver Metafiles | yes |
@@ -86,10 +89,12 @@ without one still runs through the agent lane and the CLI.
 | WSTG-INPV-07 | XML External Entity | — |
 | WSTG-INPV-11 | Insecure Deserialization | — |
 | WSTG-INPV-11.2 | Injection — unclassified (interpreter error signatures) | yes |
+| WSTG-INPV-12 | OS Command Injection | — |
 | WSTG-INPV-15 | Hop-by-Hop Header Handling | — |
 | WSTG-INPV-18 | Server-Side Template Injection | yes |
 | WSTG-INPV-19 | Server-Side Request Forgery | via collector |
 | WSTG-SESS-02 | Cookie Attributes | — |
+| WSTG-SESS-05 | Cross-Site Request Forgery (no anti-CSRF token) | — |
 | WSTG-SESS-10 | JSON Web Token Flaws | — |
 
 ## Prerequisites
@@ -195,10 +200,10 @@ Run it from the repository root: `conftest.py` anchors the working directory
 there, and `orchestrator.main` builds its Jinja2 template path relative to the
 CWD.
 
-A **fresh clone** reports **5019 passed, 89 skipped** on its first run, and
-5021 passed / 87 skipped on every run after — the 2026-09-29 clone-and-run figure
-(4762 / 4764) plus the 257 tests added since, each of which passes from a
-clean checkout, so only the passed count moves; `--collect-only` reports the 5108
+A **fresh clone** reports **5161 passed, 89 skipped** on its first run, and
+5163 passed / 87 skipped on every run after — the 2026-09-29 clone-and-run figure
+(4762 / 4764) plus the 399 tests added since, each of which passes from a
+clean checkout, so only the passed count moves; `--collect-only` reports the 5250
 the first-run pair sums to.
 
 > Re-measure this after any change under `tests/`. The first draft of this
@@ -362,7 +367,7 @@ DefectDojo export, each running as a Docker job behind a scope-checking egress
 proxy. It does not change the existing toolset presets; the dashboard is at
 `/integrations`.
 
-The sandboxed executor runs **9 of the 35** catalogue cases, and a tenth
+The sandboxed executor runs **9 of the 40** catalogue cases, and a tenth
 (`WSTG-INPV-19`) through the Interactsh collector instead. Which nine is
 derived from the parser itself (`inventory.executable_test_cases`), not written
 down: a case qualifies only when every one of its steps parses as a single

@@ -78,7 +78,10 @@ class TestOverrideReachesTheGate:
 
     def test_agent_loop_passes_the_session_value(self):
         src = inspect.getsource(M)
-        assert 'safe_mode=runcfg.get("safe_mode", True))' in src
+        # The session's safe_mode reaches the gate, sourced from runcfg (True
+        # default), not the ambient env. Trailing args (engagement_rows,
+        # throttle) may follow, so this does not pin the closing paren.
+        assert 'safe_mode=runcfg.get("safe_mode", True)' in src
 
     def test_poc_verify_is_no_longer_left_on_the_env_default(self):
         """It ran with the ambient env, so an authorised destructive engagement

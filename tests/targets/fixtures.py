@@ -11,8 +11,8 @@ from pathlib import Path
 
 import pytest
 
-from tests.targets.servers import (Deser, Graphql, Ldap, Redirector, Ssti, Tls,
-                                    Web, serve)
+from tests.targets.servers import (Cmd, Deser, Graphql, Ldap, Redirector, Ssti,
+                                    Tls, Web, serve)
 
 
 # Filled in by the `targets` fixture and read by `_native_mode`, so the CA
@@ -94,6 +94,8 @@ def targets(tls_cert):
     up("deser_control", _mk(Deser, VULNERABLE=False))
     up("graphql", _mk(Graphql, VULNERABLE=True))
     up("graphql_control", _mk(Graphql, VULNERABLE=False))
+    up("cmd", _mk(Cmd, VULNERABLE=True))
+    up("cmd_control", _mk(Cmd, VULNERABLE=False))
     try:
         yield made
     finally:
