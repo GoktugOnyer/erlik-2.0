@@ -1409,6 +1409,8 @@ TOOL USAGE EXAMPLES (use the target URL {target_url} — NEVER use any other hos
 - gitleaks dir <path>   (secrets in a dumped .git or downloaded source. NOTE: `detect --no-git` was REMOVED in gitleaks 8 and silently reports "no leaks found" — always use `dir` or `git`)
 - theHarvester -d <domain> -b crtsh,duckduckgo -l 100   (passive OSINT: third-party datasets only, never the target)
 
+{exploit_tools}
+
 AVAILABLE RESOURCES ON THIS SYSTEM:
 - Wordlists: /usr/share/dirb/wordlists/common.txt, /usr/share/wordlists/rockyou.txt
 - ZAP proxy is running and accessible via zap-cli wrapper. Use "zap-cli spider" → "zap-cli active-scan" → "zap-cli alerts".
@@ -2407,6 +2409,21 @@ def _case_catalogue_for_prompt(coverage_cases: bool = False) -> str:
     return "\n".join(lines)
 
 
+def _exploit_tools_for_prompt(target_url: str) -> str:
+    """The opt-in exploitation tools and their live enabled/disabled status.
+
+    Delegates to exploit_tools so the prompt, the executor's admission branch and
+    the tests all read the SAME availability function — the interface cannot
+    advertise a tool as enabled that the executor would refuse, or hide one it
+    would run.
+    """
+    try:
+        from orchestrator import exploit_tools
+        return exploit_tools.prompt_section(target_url)
+    except Exception:
+        return "EXPLOITATION TOOLS: (unavailable)"
+
+
 def render_system_prompt(target_url: str, coverage_cases: bool = False) -> str:
     """TOOL_USE_SYSTEM_PROMPT with every placeholder resolved for this target.
 
@@ -2434,6 +2451,9 @@ def render_system_prompt(target_url: str, coverage_cases: bool = False) -> str:
             .replace("{discovery_filter}", _discovery_filter(target_url))
             .replace("{discovery_filter_ffuf}", _discovery_filter(target_url, "ffuf"))
             .replace("{case_catalogue}", _case_catalogue_for_prompt(coverage_cases))
+            # Declare-don't-drop: the opt-in exploit tools appear whether enabled
+            # or not, each carrying the reason it is off (exploit_tools.availability).
+            .replace("{exploit_tools}", _exploit_tools_for_prompt(target_url))
             # Residual literals from the era when the prompt was Juice-Shop-specific.
             .replace("http://juice-shop:3000", target_url)
             .replace("juice-shop", host))

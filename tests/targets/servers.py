@@ -216,6 +216,120 @@ class Redirector(_Base):
         self.end_headers()
 
 
+class Graphql(_Base):
+    """A minimal but faithful GraphQL endpoint for the graphql-probe tool.
+
+    Three abuse checks, each a real behaviour rather than a flag:
+
+      * introspection — the flaw answers `__schema`; the control refuses it.
+      * field-suggestion leakage — the flaw volunteers `Did you mean "X"?` for a
+        near-miss field name (including the universal `__typename`, which is
+        resolvable even when introspection is off, so the two are independent);
+        the control names no alternative.
+      * query batching — the flaw executes a JSON ARRAY of queries and returns an
+        array of results; the control rejects the batch.
+
+    Nothing here is a real GraphQL engine: it resolves a tiny fixed schema with
+    regex, which is all the probe's three queries exercise. The `User` type
+    carries a `passwordHash` field so introspection enumeration has something
+    worth disclosing.
+    """
+
+    # Query-root fields, plus the universal meta-field. The probe's suggestion
+    # query misspells `__typename`; `user`/`users`/`product` are the app surface.
+    KNOWN_FIELDS = ("user", "users", "product", "__typename")
+
+    _SCHEMA_TYPES = [
+        {"kind": "OBJECT", "name": "Query",
+         "fields": [{"name": "user"}, {"name": "users"}, {"name": "product"}]},
+        {"kind": "OBJECT", "name": "User",
+         "fields": [{"name": "id"}, {"name": "email"}, {"name": "passwordHash"}]},
+        {"kind": "OBJECT", "name": "Product",
+         "fields": [{"name": "id"}, {"name": "name"}, {"name": "price"}]},
+        # An introspection-machinery type: the probe must EXCLUDE it from the
+        # application surface it reports, so it is here to be excluded.
+        {"kind": "OBJECT", "name": "__Schema", "fields": [{"name": "types"}]},
+    ]
+
+    def _json(self, code, obj):
+        return self._send(code, json.dumps(obj), "application/json")
+
+    @staticmethod
+    def _edit_distance_1(a: str, b: str) -> bool:
+        if a == b:
+            return False
+        if abs(len(a) - len(b)) > 1:
+            return False
+        # one substitution
+        if len(a) == len(b):
+            return sum(x != y for x, y in zip(a, b)) == 1
+        # one insertion/deletion
+        short, long = (a, b) if len(a) < len(b) else (b, a)
+        i = j = 0
+        skipped = False
+        while i < len(short) and j < len(long):
+            if short[i] == long[j]:
+                i += 1
+                j += 1
+            elif skipped:
+                return False
+            else:
+                skipped = True
+                j += 1
+        return True
+
+    def _did_you_mean(self, field: str) -> str | None:
+        for known in self.KNOWN_FIELDS:
+            if self._edit_distance_1(field, known):
+                return known
+        return None
+
+    def _top_field(self, query: str) -> str | None:
+        m = re.search(r"\{\s*([_A-Za-z][_0-9A-Za-z]*)", query or "")
+        return m.group(1) if m else None
+
+    def _exec(self, query: str) -> dict:
+        field = self._top_field(query)
+        # Match the FIELD, not a substring: `__typenam` contains the text
+        # `__type` but is an ordinary (misspelled) field, not an introspection
+        # query — routing it to introspection would mask the suggestion probe.
+        if field in ("__schema", "__type"):
+            if self.VULNERABLE:
+                return {"data": {"__schema": {"queryType": {"name": "Query"},
+                                              "types": self._SCHEMA_TYPES}}}
+            return {"errors": [{"message": "GraphQL introspection is not allowed"}]}
+        if field and field not in self.KNOWN_FIELDS:
+            msg = f'Cannot query field "{field}" on type "Query".'
+            if self.VULNERABLE:
+                near = self._did_you_mean(field)
+                if near:
+                    msg = msg[:-1] + f'. Did you mean "{near}"?'
+            return {"errors": [{"message": msg}]}
+        return {"data": {field or "__typename": "Query"}}
+
+    def do_POST(self):
+        n = int(self.headers.get("Content-Length") or 0)
+        raw = self.rfile.read(n).decode("utf-8", "replace") if n else ""
+        try:
+            body = json.loads(raw)
+        except ValueError:
+            return self._json(400, {"errors": [{"message": "Must provide query string."}]})
+        if isinstance(body, list):
+            # Query batching: the flaw runs the whole array, the control refuses.
+            if self.VULNERABLE:
+                return self._json(200, [self._exec((q or {}).get("query", ""))
+                                        for q in body])
+            return self._json(200, {"errors": [{"message": "Batch queries are not allowed"}]})
+        return self._json(200, self._exec((body or {}).get("query", "")))
+
+    def do_GET(self):
+        u = urlparse(self.path)
+        q = (parse_qs(u.query).get("query") or [""])[0]
+        if not q:
+            return self._json(400, {"errors": [{"message": "Must provide query string."}]})
+        return self._json(200, self._exec(q))
+
+
 def serve(handler, tls: tuple[str, str] | None = None) -> tuple[ThreadingHTTPServer, int]:
     """Start `handler` on an EPHEMERAL port. Returns (server, port).
 

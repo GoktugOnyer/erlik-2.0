@@ -106,6 +106,11 @@ TOOL_TIMEOUTS = {
     # Capability helpers (2026-04-06) — dumb, deterministic, no detection logic
     "login-helper": 15,  # generic two-user token fetcher (lab helper)
     "diff-view": 30,     # HTTP response diff viewer (NOT a detector)
+    # Exploitation probe engines (roadmap item 12). These run IN-PROCESS (httpx),
+    # not in the Kali container, so the timeout bounds the whole probe sequence
+    # rather than one shell command. OFF by default — see exploit_tools.py.
+    "graphql-probe": 30,
+    "ssti-deser": 30,
 }
 
 # Commands that are never allowed
@@ -1331,6 +1336,37 @@ async def execute_tool(command: str, enabled_tools: list[str], no_timeout: bool 
     if seg_err:
         return {"success": False, "output": "", "tool": tool_name, "duration_ms": 0,
                 "error": f"TOOLSET: {seg_err}", "executed": False}
+
+    # --- Exploitation probe engines (roadmap item 12) ---------------------- #
+    # graphql-probe / ssti-deser run IN-PROCESS (httpx), not through the Kali
+    # container. They are OFF by default and stay VISIBLE-but-disabled with the
+    # reason (CLAUDE.md convention 2): the env-flag gate is this tool's admission
+    # control, reported as a refusal the model can read. The scope, safe-mode and
+    # write-confinement guards still apply — they run here on the model's own
+    # command string, and because the probe needs no docker host-gateway rewrite
+    # the UN-sanitized command is checked (so a loopback target stays loopback
+    # instead of being rewritten past the scope guard).
+    from orchestrator import exploit_tools as _exploit
+    if _exploit.is_exploit_tool(tool_name):
+        _av = _exploit.availability(tool_name)
+        if not _av.enabled:
+            return {"success": False, "output": "", "tool": tool_name, "duration_ms": 0,
+                    "error": f"DISABLED: {tool_name} is {_av.reason}", "executed": False,
+                    "denied": True}
+        scope_err = _scope_violation(command, target_url, engagement_rows)
+        if scope_err:
+            return {"success": False, "output": "", "tool": tool_name, "duration_ms": 0,
+                    "error": f"SCOPE: {scope_err}", "executed": False, "denied": True}
+        safe_err = _safe_mode_violation(command, enabled=safe_mode)
+        if safe_err:
+            return {"success": False, "output": "", "tool": tool_name, "duration_ms": 0,
+                    "error": f"SAFE_MODE: {safe_err}", "executed": False, "denied": True}
+        start = time.time()
+        probe = await asyncio.get_event_loop().run_in_executor(
+            None, lambda: _exploit.run(tool_name, command, target_url=target_url))
+        probe["duration_ms"] = int((time.time() - start) * 1000)
+        probe.setdefault("tool", tool_name)
+        return probe
 
     # Resolve timeout (seconds). Precedence:
     #   no_timeout=True       -> truly unlimited (None). Optional ERLIK_NO_TIMEOUT_CAP>0
