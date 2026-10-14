@@ -61,8 +61,9 @@ _BOOL_KEYS = {
     # run's verified findings, and none are injected. An exact no-op, so the
     # frozen arms neither write nor read learned context.
     "learned_playbooks": "ERLIK_LEARNED_PLAYBOOKS",
-    # Stateful session store (P2-11). The master switch for the whole
-    # stateful-session feature, shared by two cooperating slices:
+    # Stateful session store (P2-11, orchestrator/session_state.py). The master
+    # switch for the whole stateful-session feature, shared by two cooperating
+    # slices:
     #   - the config-driven login provider SEEDS the in-run session store at
     #     session start (which credential to log in with is named by the
     #     `login_provider` sub-config below), and
