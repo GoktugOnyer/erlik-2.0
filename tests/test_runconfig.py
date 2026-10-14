@@ -104,21 +104,22 @@ def test_learned_playbooks_defaults_off_and_is_tri_state(monkeypatch):
 
 
 def test_stateful_session_is_env_proof_in_the_measured_arms(monkeypatch):
-    """The stateful store carries credentials across turns, which is cross-turn
-    help. It must not switch on inside a measured arm from a stray env var, or the
-    baseline stops being the stateless measurement it claims to be."""
+    """stateful_session auto-attaches harvested auth to dispatched commands,
+    changing what each request carries. It must not flip on inside a measured
+    arm from a stray env var, or the baseline stops being the no-stored-auth
+    measurement it claims to be."""
     monkeypatch.setenv("ERLIK_STATEFUL_SESSION", "true")
     for preset in ("ai_only", "guided_ai"):
         assert rc.resolve({"preset": preset})["stateful_session"] is False, preset
 
 
 def test_stateful_session_defaults_off_and_is_tri_state(monkeypatch):
-    assert rc.resolve({"preset": "custom"})["stateful_session"] is False   # absent: off
-    r = rc.resolve({"preset": "custom", "stateful_session": True})         # explicit on
+    assert rc.resolve({"preset": "custom"})["stateful_session"] is False  # absent: off
+    r = rc.resolve({"preset": "custom", "stateful_session": True})        # explicit on
     assert r["stateful_session"] is True
     assert not any("stateful_session" in w for w in r["run_config_warnings"]), (
         "stateful_session is a recognised key and must not warn")
-    monkeypatch.setenv("ERLIK_STATEFUL_SESSION", "true")                   # env fallback
+    monkeypatch.setenv("ERLIK_STATEFUL_SESSION", "true")                  # env fallback
     assert rc.resolve({"preset": "custom"})["stateful_session"] is True
 
 
