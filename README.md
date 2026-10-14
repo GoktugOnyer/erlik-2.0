@@ -195,13 +195,11 @@ Run it from the repository root: `conftest.py` anchors the working directory
 there, and `orchestrator.main` builds its Jinja2 template path relative to the
 CWD.
 
-A **fresh clone** reports **4822 passed, 89 skipped** on its first run, and
-4824 passed / 87 skipped on every run after — the two that move are the
-database-hygiene checks that skip until the first run creates `data/pentest.db`,
-so only the passed/skipped split shifts and the total does not. The per-session
-throttling tests (`test_throttle.py` and the `resolve()` clamp tests) each pass
-from a clean checkout; `--collect-only` reports the 4911 the first-run pair
-sums to.
+A **fresh clone** reports **5079 passed, 89 skipped** on its first run, and
+5081 passed / 87 skipped on every run after — the 2026-09-29 clone-and-run figure
+(4762 / 4764) plus the 317 tests added since, each of which passes from a
+clean checkout, so only the passed count moves; `--collect-only` reports the 5168
+the first-run pair sums to.
 
 > Re-measure this after any change under `tests/`. The first draft of this
 > paragraph was taken before the same commit finished adding tests, which is
@@ -303,6 +301,28 @@ export OPENAI_API_KEY=...
 export OPENAI_BASE_URL=https://api.openai.com/v1   # or any compatible gateway
 export ERLIK_LLM_MODEL=gpt-4o
 ```
+
+### Constrained JSON decoding (small models)
+
+The tool interface is a JSON action protocol over the model's text channel, and
+small local models frequently emit malformed JSON. `ERLIK_CONSTRAINED_JSON`
+(**default off**) asks the provider's own decoder to guarantee valid JSON on
+JSON-shaped calls: `format: "json"` for Ollama, `response_format:
+{"type":"json_object"}` for OpenAI-compatible providers. A JSON schema, where
+the caller supplies one, upgrades the constraint to that schema.
+
+```bash
+export ERLIK_CONSTRAINED_JSON=1    # off by default
+```
+
+- **Off is byte-for-byte unchanged** — no request differs from before the knob
+  existed, so every recorded campaign stays comparable. Leave it off to
+  reproduce the frozen evaluation.
+- **Only JSON-shaped calls are constrained.** Prose calls (the session review,
+  the executive summary) are never forced into JSON.
+- OpenAI-compatible providers that do not implement `response_format` reject the
+  request rather than ignoring it — enable it only against a provider that
+  supports it.
 
 ## Authorisation & scope
 

@@ -277,6 +277,15 @@ class TestCase(BaseModel):
     name: str
     category: str  # e.g. "Input Validation"
     severity: str = "medium"
+    # Freeze-safe visibility tier. "core" (the default, every case shipped
+    # before tiering) is always visible to the agent. "ext" is a new
+    # coverage case that stays INVISIBLE to the agent -- absent from the
+    # `{case_catalogue}` the frozen-arm prompt embeds and un-runnable via
+    # run_case -- unless the run opts in with `coverage_cases`. The
+    # deterministic v2 lane and capabilities.audit() still see every case, so
+    # audit integrity and operator-driven runs are unaffected. Growing the
+    # catalogue therefore cannot silently mutate a recorded arm's prompt.
+    tier: str = "core"
     references: list[str] = Field(default_factory=list)
     target_schema: TargetSchema = Field(default_factory=TargetSchema)
     # Which attack CLASS this case proves, as a capabilities.CLASSES key.

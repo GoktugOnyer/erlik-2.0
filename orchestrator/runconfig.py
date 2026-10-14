@@ -43,6 +43,46 @@ _BOOL_KEYS = {
     # Deterministic WSTG results as the agent's starting context. Distinct
     # from target_memory, which also replays prior AGENT findings.
     "handoff": "ERLIK_HANDOFF",
+    # Execute a single-tool, no-shell command as an argv list instead of
+    # `bash -c <string>`, so shell metacharacters the model emits are never
+    # interpreted. OFF is an EXACT no-op (the sink builds the identical
+    # `bash -c` command), so the frozen arms are unaffected.
+    "native_argv": "ERLIK_NATIVE_ARGV",
+    # Let an agent-invoked WSTG case (the `run_case` action) run AUTHENTICATED,
+    # by merging the engagement's verified-session handles into the case target.
+    # OFF is an exact no-op: the case target is assembled byte-identically and no
+    # credential is consulted, so the frozen arms are unaffected.
+    "agent_auth": "ERLIK_AGENT_AUTH",
+    # Make `tier: ext` coverage cases visible to the agent (in the prompt
+    # catalogue and via run_case). OFF hides them, so a new case cannot mutate a
+    # recorded arm's prompt. With no ext case in the catalogue this is a no-op.
+    "coverage_cases": "ERLIK_COVERAGE_CASES",
+    # Learning loop (Track A). OFF: no candidate playbooks are harvested from a
+    # run's verified findings, and none are injected. An exact no-op, so the
+    # frozen arms neither write nor read learned context.
+    "learned_playbooks": "ERLIK_LEARNED_PLAYBOOKS",
+    # Structured error feedback (Reflexion-lite). OFF: a refused or failed tool
+    # action feeds the model erlik's existing terse refusal/failure string. ON:
+    # it feeds a short "what was wrong + minimal shape of a valid retry"
+    # correction instead, which small local models recover from far better. It
+    # only rewrites the agent loop's error-path USER messages — it never touches
+    # the system prompt or a successful turn — so OFF is an exact no-op and no
+    # recorded arm drifts. Product behaviour, not campaign-era.
+    "error_feedback": "ERLIK_ERROR_FEEDBACK",
+    # Stateful session store (P2-11, orchestrator/session_state.py). The master
+    # switch for the whole stateful-session feature, shared by two cooperating
+    # slices:
+    #   - the config-driven login provider SEEDS the in-run session store at
+    #     session start (which credential to log in with is named by the
+    #     `login_provider` sub-config below), and
+    #   - the auto-attach path rides the session's harvested auth headers and
+    #     cookies onto the commands the agent dispatches, so the model need not
+    #     re-paste a token each turn.
+    # OFF: no login is performed, nothing is seeded, nothing is attached, and the
+    # prompt and command string are byte-identical to before (login-helper and
+    # every existing auth path untouched). An EXACT no-op, so the frozen arms are
+    # unaffected; with it off the `login_provider` sub-config is never read.
+    "stateful_session": "ERLIK_STATEFUL_SESSION",
 }
 
 # Sensible pre-selectable setups. Keys map to the flag bundle a preset turns on;
@@ -58,7 +98,10 @@ RUN_PRESETS: dict[str, dict] = {
         "config": {"cve_enrich": False, "skills": False, "nettacker": False,
                    "playbooks": "", "primitives": False, "target_memory": False,
                    "poc_verify": False, "techniques": False,
-                   "ai_review": False},
+                   "ai_review": False, "native_argv": False,
+                   "agent_auth": False, "coverage_cases": False,
+                   "learned_playbooks": False, "error_feedback": False,
+                   "stateful_session": False},
     },
     "guided_ai": {
         "label": "Guided AI — skills + exploit playbooks (most effective)",
@@ -69,7 +112,10 @@ RUN_PRESETS: dict[str, dict] = {
         # compared against ai_only, so no help lever may drift in from the env.
         "config": {"skills": True, "cve_enrich": True, "nettacker": False,
                    "playbooks": "auto", "primitives": True,
-                   "techniques": False, "ai_review": True},
+                   "techniques": False, "ai_review": True, "native_argv": False,
+                   "agent_auth": False, "coverage_cases": False,
+                   "learned_playbooks": False, "error_feedback": False,
+                   "stateful_session": False},
     },
     "guided_techniques": {
         "label": "Guided Attack — environment-specific techniques",
@@ -141,7 +187,9 @@ def resolve(run_config=None) -> dict:
     # Explicit per-key values in the session config override the preset.
     for k in ("cve_enrich", "skills", "nettacker", "nettacker_findings",
               "nettacker_scenario", "playbooks", "max_playbooks", "provider", "poc_verify", "primitives",
-              "handoff",
+              "handoff", "native_argv", "agent_auth", "coverage_cases",
+              "learned_playbooks", "error_feedback",
+              "stateful_session", "login_provider",
               "target_memory", "techniques", "ai_review", "review_model",
               "skills_exclude", "skills_pin", "skills_max_chars",
               "safe_mode", "safe_mode_ack", "skills_max_files",
@@ -155,7 +203,9 @@ def resolve(run_config=None) -> dict:
     warnings: list[str] = []
     _known = {"cve_enrich", "skills", "nettacker", "nettacker_findings",
               "nettacker_scenario", "playbooks", "max_playbooks", "provider", "poc_verify", "primitives",
-              "handoff",
+              "handoff", "native_argv", "agent_auth", "coverage_cases",
+              "learned_playbooks", "error_feedback",
+              "stateful_session", "login_provider",
               "target_memory", "techniques", "ai_review", "review_model",
               "skills_exclude", "skills_pin", "skills_max_chars",
               "safe_mode", "safe_mode_ack", "skills_max_files",
@@ -271,6 +321,20 @@ def resolve(run_config=None) -> dict:
         except (TypeError, ValueError):
             warnings.append(f"llm_rpm {_rpm!r} is not a number; using 0 (off)")
 
+    # Config-driven login provider sub-config (P2-11). This names WHICH stored
+    # credential to log in with and where its material should be scoped; it NEVER
+    # carries a password (that stays encrypted at rest and is resolved only
+    # inside login.authenticate). A present-but-malformed value is named rather
+    # than dropped silently, the same as any other recognised-but-wrong key — a
+    # string here is the likeliest mistake and would otherwise vanish without a
+    # word. The master switch is `stateful_session`; with it off this is inert.
+    login_provider = base.get("login_provider")
+    if login_provider is not None and not isinstance(login_provider, dict):
+        warnings.append(
+            "login_provider must be a JSON object (credential_id, optional "
+            "scope_host); the value given was ignored")
+        login_provider = None
+
     def _as_list(v):
         if v is None:
             return []
@@ -326,6 +390,13 @@ def resolve(run_config=None) -> dict:
         "playbooks": playbooks,
         "max_playbooks": max_playbooks,
         "handoff": tri("handoff"),
+        "native_argv": tri("native_argv"),
+        "agent_auth": tri("agent_auth"),
+        "coverage_cases": tri("coverage_cases"),
+        "learned_playbooks": tri("learned_playbooks"),
+        "error_feedback": tri("error_feedback"),
+        "stateful_session": tri("stateful_session"),
+        "login_provider": login_provider,
     }
 
 

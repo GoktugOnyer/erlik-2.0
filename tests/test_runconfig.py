@@ -31,6 +31,121 @@ def test_comparison_arms_are_env_proof(monkeypatch):
         assert r["nettacker"] is False, preset
 
 
+def test_native_argv_is_env_proof_in_the_measured_arms(monkeypatch):
+    """native_argv changes the exec TRANSPORT (argv vs bash -c). A stray env var
+    must not flip it inside a measured arm, or two runs labelled the same arm
+    could execute the same command two different ways."""
+    monkeypatch.setenv("ERLIK_NATIVE_ARGV", "true")
+    for preset in ("ai_only", "guided_ai"):
+        assert rc.resolve({"preset": preset})["native_argv"] is False, preset
+
+
+def test_native_argv_defaults_off_and_is_tri_state(monkeypatch):
+    assert rc.resolve({"preset": "custom"})["native_argv"] is False   # absent: off
+    r = rc.resolve({"preset": "custom", "native_argv": True})         # explicit on
+    assert r["native_argv"] is True
+    assert not any("native_argv" in w for w in r["run_config_warnings"]), (
+        "native_argv is a recognised key and must not warn")
+    monkeypatch.setenv("ERLIK_NATIVE_ARGV", "true")                   # env fallback
+    assert rc.resolve({"preset": "custom"})["native_argv"] is True
+
+
+def test_agent_auth_is_env_proof_in_the_measured_arms(monkeypatch):
+    """agent_auth lets an agent-invoked case run authenticated. It must not flip
+    on inside a measured arm from a stray env var, or the baseline stops being
+    the unauthenticated measurement it claims to be."""
+    monkeypatch.setenv("ERLIK_AGENT_AUTH", "true")
+    for preset in ("ai_only", "guided_ai"):
+        assert rc.resolve({"preset": preset})["agent_auth"] is False, preset
+
+
+def test_agent_auth_defaults_off_and_is_tri_state(monkeypatch):
+    assert rc.resolve({"preset": "custom"})["agent_auth"] is False    # absent: off
+    r = rc.resolve({"preset": "custom", "agent_auth": True})          # explicit on
+    assert r["agent_auth"] is True
+    assert not any("agent_auth" in w for w in r["run_config_warnings"]), (
+        "agent_auth is a recognised key and must not warn")
+    monkeypatch.setenv("ERLIK_AGENT_AUTH", "true")                    # env fallback
+    assert rc.resolve({"preset": "custom"})["agent_auth"] is True
+
+
+def test_coverage_cases_is_env_proof_in_the_measured_arms(monkeypatch):
+    """coverage_cases makes ext cases visible to the agent (changing the prompt
+    catalogue). It must not turn on inside a measured arm from a stray env var."""
+    monkeypatch.setenv("ERLIK_COVERAGE_CASES", "true")
+    for preset in ("ai_only", "guided_ai"):
+        assert rc.resolve({"preset": preset})["coverage_cases"] is False, preset
+
+
+def test_coverage_cases_defaults_off_and_is_tri_state(monkeypatch):
+    assert rc.resolve({"preset": "custom"})["coverage_cases"] is False
+    r = rc.resolve({"preset": "custom", "coverage_cases": True})
+    assert r["coverage_cases"] is True
+    assert not any("coverage_cases" in w for w in r["run_config_warnings"])
+    monkeypatch.setenv("ERLIK_COVERAGE_CASES", "true")
+    assert rc.resolve({"preset": "custom"})["coverage_cases"] is True
+
+
+def test_learned_playbooks_is_env_proof_in_the_measured_arms(monkeypatch):
+    """The learning loop neither harvests nor injects in a measured arm, or the
+    baseline is no longer the clean measurement it claims to be."""
+    monkeypatch.setenv("ERLIK_LEARNED_PLAYBOOKS", "true")
+    for preset in ("ai_only", "guided_ai"):
+        assert rc.resolve({"preset": preset})["learned_playbooks"] is False, preset
+
+
+def test_learned_playbooks_defaults_off_and_is_tri_state(monkeypatch):
+    assert rc.resolve({"preset": "custom"})["learned_playbooks"] is False
+    r = rc.resolve({"preset": "custom", "learned_playbooks": True})
+    assert r["learned_playbooks"] is True
+    assert not any("learned_playbooks" in w for w in r["run_config_warnings"])
+    monkeypatch.setenv("ERLIK_LEARNED_PLAYBOOKS", "true")
+    assert rc.resolve({"preset": "custom"})["learned_playbooks"] is True
+
+
+def test_stateful_session_is_env_proof_in_the_measured_arms(monkeypatch):
+    """stateful_session is the master switch for both halves of the feature: the
+    login provider SEEDS an authenticated session into the agent's context, and
+    the auto-attach path rides harvested auth onto dispatched commands. Either
+    way it is a help lever that changes what the agent is handed, so a stray env
+    var must not flip it on inside a measured arm, or the baseline stops being
+    the unauthenticated / no-stored-auth measurement it claims to be."""
+    monkeypatch.setenv("ERLIK_STATEFUL_SESSION", "true")
+    for preset in ("ai_only", "guided_ai"):
+        assert rc.resolve({"preset": preset})["stateful_session"] is False, preset
+
+
+def test_stateful_session_defaults_off_and_is_tri_state(monkeypatch):
+    assert rc.resolve({"preset": "custom"})["stateful_session"] is False   # absent: off
+    r = rc.resolve({"preset": "custom", "stateful_session": True})         # explicit on
+    assert r["stateful_session"] is True
+    assert not any("stateful_session" in w for w in r["run_config_warnings"]), (
+        "stateful_session is a recognised key and must not warn")
+    monkeypatch.setenv("ERLIK_STATEFUL_SESSION", "true")                   # env fallback
+    assert rc.resolve({"preset": "custom"})["stateful_session"] is True
+
+
+def test_login_provider_subconfig_passes_through_as_a_dict():
+    r = rc.resolve({"preset": "custom",
+                    "login_provider": {"credential_id": "cred1", "scope_host": "h:443"}})
+    assert r["login_provider"] == {"credential_id": "cred1", "scope_host": "h:443"}
+    assert not any("login_provider" in w for w in r["run_config_warnings"])
+
+
+def test_login_provider_absent_is_none_not_a_warning():
+    r = rc.resolve({"preset": "custom"})
+    assert r["login_provider"] is None
+    assert not any("login_provider" in w for w in r["run_config_warnings"])
+
+
+def test_a_malformed_login_provider_is_named_not_dropped():
+    """A string where an object belongs is the likeliest mistake; silently
+    dropping it would be the vanishing-key defect this project keeps removing."""
+    r = rc.resolve({"preset": "custom", "login_provider": "cred1"})
+    assert r["login_provider"] is None
+    assert any("login_provider" in w for w in r["run_config_warnings"])
+
+
 def test_client_facing_presets_reverify_their_findings():
     """A finding that reaches a report is something someone may act on. The
     presets meant for real use must re-test high/critical findings rather than

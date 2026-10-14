@@ -79,13 +79,22 @@ def case():
 
 
 def target(path, host):
-    """The operator-supplied half. BUSL-04 fires `request_template` verbatim."""
+    """The operator-supplied half. BUSL-04 fires `request_template` verbatim.
+
+    The `X-Parties` header tells the lab how wide its check-then-act window is: the burst
+    fires exactly `parallel_n` requests, so the fixture holds the gap open until that many
+    have read the coupon and releases them together. That makes the race deterministic under
+    any scheduling — it does not change what is exercised. The header rides the operator's own
+    `request_template`, so both the racy and enforced endpoints receive an identical command
+    that differs only in the path.
+    """
+    parallel_n = 8
     url = f"http://{host}{path}"
     return {
         "url": url,
-        "request_template": f"curl -s -X POST {url}",
+        "request_template": f"curl -s -X POST -H 'X-Parties: {parallel_n}' {url}",
         "success_marker": "REDEEMED",
-        "parallel_n": 8,
+        "parallel_n": parallel_n,
         "scope": {"allow_hosts": [host.split(":")[0]], "allow_ports": [int(host.split(":")[1])]},
     }
 

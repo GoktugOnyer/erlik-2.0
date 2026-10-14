@@ -395,12 +395,19 @@ class TestTheReportMarkdownItself:
                 await db.commit()
                 await db.close()
 
+                _orig_chat = M.llm_client.chat
                 async def fake_chat(*a, **k):
                     return "stub"
                 M.llm_client.chat = fake_chat
-                md, _s, _ms = await M._generate_report(
-                    "s1", "m", "http://juice-shop:3000", "cold", "general",
-                    1, 1, 500)
+                try:
+                    md, _s, _ms = await M._generate_report(
+                        "s1", "m", "http://juice-shop:3000", "cold", "general",
+                        1, 1, 500)
+                finally:
+                    # Restore the module attribute: a bare reassignment leaks the
+                    # stub into every later test (it has no `old` to restore from),
+                    # which silently broke the constrained-JSON request-shape tests.
+                    M.llm_client.chat = _orig_chat
                 steps = [{"step": 1, "tool": "curl", "phase": "exploitation",
                           "success": True, "duration_ms": 120,
                           "command": cmd, "output": f"Set-Cookie: {cls.COOKIE}"}]

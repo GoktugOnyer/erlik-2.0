@@ -488,12 +488,19 @@ class TestTheMarkdownAgreesWithTheExports:
                 await db.commit()
                 await db.close()
 
+                _orig_chat = M.llm_client.chat
                 async def fake_chat(*a, **k):
                     return "stub"
                 M.llm_client.chat = fake_chat
-                md, _s, _ms = await M._generate_report(
-                    "s1", "m", "http://a", "cold", "general", 2, 2, 500)
-                await M._generate_chain_report("c1", "http://a")
+                try:
+                    md, _s, _ms = await M._generate_report(
+                        "s1", "m", "http://a", "cold", "general", 2, 2, 500)
+                    await M._generate_chain_report("c1", "http://a")
+                finally:
+                    # Restore the module attribute: a bare reassignment leaks the
+                    # stub into every later test and broke the constrained-JSON
+                    # request-shape tests, which depend on the real chat path.
+                    M.llm_client.chat = _orig_chat
                 return md, (M.REPORTS_DIR / "chain_c1.md").read_text()
 
             md, chain = asyncio.run(seed())
@@ -673,13 +680,19 @@ class TestTheExecutiveSummaryPromptAgreesWithItself:
                 await db.commit()
                 await db.close()
 
+                _orig_chat = M.llm_client.chat
                 async def spy(msgs, *a, **k):
                     seen["p"] = (msgs[0]["content"] if isinstance(msgs, list)
                                  else str(msgs))
                     return "stub"
                 M.llm_client.chat = spy
-                await M._generate_report("s1", "m", "http://a", "cold",
-                                         "general", 3, agent_counter, 500)
+                try:
+                    await M._generate_report("s1", "m", "http://a", "cold",
+                                             "general", 3, agent_counter, 500)
+                finally:
+                    # Restore: a bare reassignment leaks the spy into every later
+                    # test (it broke the constrained-JSON request-shape tests).
+                    M.llm_client.chat = _orig_chat
                 return seen["p"]
             return asyncio.run(go())
         finally:

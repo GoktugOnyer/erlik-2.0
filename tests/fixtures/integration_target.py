@@ -15,15 +15,99 @@ REQUESTS = []
 # neither "detect one seeded violation" nor "reject a correctly enforced control" had ever
 # been shown.
 #
-# /redeem is CHECK-THEN-ACT with a real gap. The sleep is what makes the race deterministic
-# rather than occasional: a test that wins the race one run in five is a flaky test, and a
-# flaky negative is indistinguishable from a working control.
+# /redeem is CHECK-THEN-ACT with a real gap. A RENDEZVOUS, not a fixed sleep, is what makes
+# the race deterministic rather than occasional: a test that wins the race one run in five is
+# a flaky test, and a flaky negative is indistinguishable from a working control.
 #
 # /redeem-safe does the same work holding a lock, so exactly one caller wins however many
 # arrive together. It is the negative control, and without it the case could report a race
 # on every endpoint and still pass.
 COUPON = {"redeem": 1, "safe": 1}
 COUPON_LOCK = threading.Lock()
+
+# THE CHECK-THEN-ACT WINDOW, HELD OPEN BY ARRIVALS RATHER THAN THE CLOCK.
+#
+# This used to be a flat `time.sleep(0.15)` between the read and the write. That made the
+# race deterministic ONLY while all N concurrent callers connected within 150ms of the first
+# one's read: the first writer decrements at read+150ms, and any curl that had not yet read
+# by then saw the coupon already spent and was refused. On an idle box all eight arrived in
+# time; under load a straggler occasionally did not, so the burst won 7-of-8 instead of 8-of-8
+# and test_the_finding_records_how_many_succeeded flaked (measured ~2-3% of bursts, and a
+# quiet-period heuristic still flaked under a heavily oversubscribed CPU).
+#
+# The gap is now held open until the whole declared burst has ARRIVED, keyed on a count and
+# not on any wall-clock interval. A caller that announces its burst size (the `X-Parties`
+# header the race case's own requests carry) parks until that many callers are in the gap
+# together, then every one of them is released at once — so the window is exactly as wide as
+# it needs to be however the scheduler spreads the requests, and a straggler extends it rather
+# than losing the race. That is the check-then-act defect the case exists to detect, exhibited
+# with no timing assumption at all. A caller that announces NO size (a lone sequential probe —
+# BUSL-05 replays /redeem one request at a time) falls back to a quiet-period rendezvous:
+# it proceeds once no new caller has arrived for `_GAP_QUIET`, so single-caller behaviour is
+# unchanged and no burst size is imposed on callers that did not declare one. `_GAP_CEILING`
+# bounds every caller's wait, so a dropped connection that leaves the party short can never
+# wedge the fixture — it degrades to acting on whatever did arrive. It is only a safety net:
+# a burst fires exactly N local curls, which always arrive, so the barrier trips in
+# milliseconds and the ceiling is reached only if a connection is genuinely lost. It is set
+# generously so that even a CPU so oversubscribed that the curl processes assemble slowly
+# still completes the party rather than timing an early caller out and serialising the rest.
+#
+# The header only sizes the lab's own window. It does not touch the coupon logic, the success
+# marker, or the finding: the race is still genuine (every caller reads the stale count and
+# writes), and adding the lock back to this path still makes the case go silent.
+_GAP_QUIET = 0.25
+_GAP_CEILING = 30.0
+_GAP = threading.Condition()
+_GAP_LAST_ARRIVAL = 0.0
+_BARRIERS = {}
+_BARRIERS_LOCK = threading.Lock()
+
+
+def _party_barrier(parties):
+    """One reusable barrier per declared burst size, created on demand."""
+    with _BARRIERS_LOCK:
+        barrier = _BARRIERS.get(parties)
+        if barrier is None:
+            barrier = threading.Barrier(parties)
+            _BARRIERS[parties] = barrier
+        return barrier
+
+
+def _hold_the_gap_open(parties=None):
+    """Park a check-then-act caller until its concurrent burst has assembled.
+
+    With `parties >= 2` known, wait on a barrier of that width: every caller is released the
+    instant the last one arrives, together and without consulting a clock, so load cannot
+    shrink the window. A barrier is used rather than a live in-flight count because a count
+    decremented as callers leave drops below the party size the moment the first one exits,
+    which would strand the rest until the ceiling. Without a size (a lone sequential probe),
+    release once arrivals have stalled for `_GAP_QUIET`. Either way never park longer than
+    `_GAP_CEILING`, so a burst that never fully assembles (a dropped connection) degrades to
+    acting on whatever arrived instead of wedging the fixture.
+    """
+    global _GAP_LAST_ARRIVAL
+    if parties and parties >= 2:
+        barrier = _party_barrier(parties)
+        try:
+            barrier.wait(timeout=_GAP_CEILING)
+        except threading.BrokenBarrierError:
+            # Short party or timeout: reset so a later burst of this size is not born broken,
+            # and proceed on the stale read this caller already took.
+            with _BARRIERS_LOCK:
+                try:
+                    barrier.reset()
+                except threading.BrokenBarrierError:
+                    pass
+        return
+    deadline = time.monotonic() + _GAP_CEILING
+    with _GAP:
+        _GAP_LAST_ARRIVAL = time.monotonic()
+        _GAP.notify_all()                       # wake earlier arrivals to re-evaluate
+        while time.monotonic() < deadline:
+            quiet_for = time.monotonic() - _GAP_LAST_ARRIVAL
+            if quiet_for >= _GAP_QUIET:
+                return
+            _GAP.wait(timeout=min(_GAP_QUIET - quiet_for, deadline - time.monotonic()))
 
 # A THREE-STEP CHECKOUT, enforced in one place and not the other — the pair WSTG-BUSL-06
 # needs. `/shop/confirm` finalises an order whether or not it was ever paid for, which is
@@ -159,7 +243,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         if self.path in ("/redeem", "/redeem-safe"):
             return self._coupon("redeem" if self.path == "/redeem" else "safe",
-                                locked=self.path == "/redeem-safe")
+                                locked=self.path == "/redeem-safe",
+                                parties=self.headers.get("X-Parties"))
         parts = urlsplit(self.path)
         if parts.path in ("/shop/pay", "/shop/confirm",
                           "/shop-strict/pay", "/shop-strict/confirm"):
@@ -192,23 +277,30 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _coupon(self, key, *, locked):
+    def _coupon(self, key, *, locked, parties=None):
         """Redeem a single-use coupon, correctly or otherwise.
 
-        The unlocked path reads the remaining count, yields the GIL for long enough that
-        every concurrent caller has read it too, and only then writes. That is the classic
-        check-then-act gap and it is what a race-condition case is supposed to find. The
-        locked path does the identical work inside a mutex and is supposed to defeat it.
+        The unlocked path reads the remaining count, holds the check-then-act gap open
+        until every concurrent caller has read it too, and only then writes. That is the
+        classic check-then-act gap and it is what a race-condition case is supposed to find.
+        The locked path does the identical work inside a mutex and is supposed to defeat it.
+
+        `parties` (the caller's `X-Parties` header) is the burst size, used ONLY to size the
+        gap deterministically; it never touches the coupon arithmetic.
         """
+        try:
+            parties = int(parties) if parties is not None else None
+        except (TypeError, ValueError):
+            parties = None
         if locked:
             with COUPON_LOCK:
                 won = COUPON[key] > 0
                 if won:
                     COUPON[key] -= 1
         else:
-            remaining = COUPON[key]
-            time.sleep(0.15)          # the window, wide enough to be deterministic
-            won = remaining > 0
+            remaining = COUPON[key]        # the CHECK
+            _hold_the_gap_open(parties)    # released once the whole burst has arrived
+            won = remaining > 0            # the ACT, decided on the stale count
             if won:
                 COUPON[key] = remaining - 1
         body = b'{"status":"REDEEMED"}' if won else b'{"status":"already used"}'

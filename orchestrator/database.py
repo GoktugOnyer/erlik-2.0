@@ -413,6 +413,34 @@ async def init_db():
             );
         """)
 
+        # Learning loop (Track A): a VERIFIED finding becomes a candidate
+        # playbook — a reusable play for this target/class that, once a human
+        # approves it, warm-starts future runs. Its own table, never `findings`:
+        # recall and precision are computed from `findings`, so a candidate that
+        # leaked in would make every new run incomparable with the recorded ones.
+        # `body`/`title` derive from attacker-influenceable evidence, so they are
+        # NOT export-structural (masked by default-deny) and are never injected
+        # while `status = 'pending'`.
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS candidate_playbooks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                target_key TEXT NOT NULL,
+                vuln_class TEXT NOT NULL,
+                title TEXT,
+                body TEXT,
+                source_session_id TEXT,
+                source_finding_id INTEGER,
+                status TEXT NOT NULL DEFAULT 'pending',
+                reviewed_by TEXT,
+                review_note TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                reviewed_at TEXT
+            );
+        """)
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_candidate_target "
+            "ON candidate_playbooks(target_key, status)")
+
         # session_reviews predates the measured-coverage column, and the CREATE
         # above only runs for a fresh database — an existing one needs the ALTER.
         try:
