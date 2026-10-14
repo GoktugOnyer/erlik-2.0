@@ -8401,6 +8401,41 @@ async def get_report_jira_csv(session_id: str):
         "Content-Disposition": f'attachment; filename="erlik-{session_id}.jira.csv"'})
 
 
+@app.get("/api/sessions/{session_id}/report.hackerone.json")
+async def get_report_hackerone(session_id: str):
+    """HackerOne report-submission JSON, from report.json.
+
+    One submission object per finding. Redacted at the export boundary
+    (export_redaction.redact_report) before shaping — the same default-deny
+    second defence the thesis export applies, which the five older formats do
+    not yet have.
+    """
+    from orchestrator.export_redaction import redact_report
+    from orchestrator.hackerone import report_to_hackerone
+    report = redact_report(await _build_report_json(session_id))
+    return report_to_hackerone(report, session_id)
+
+
+@app.get("/api/sessions/{session_id}/report.pdf")
+async def get_report_pdf(session_id: str):
+    """Client-ready PDF, rendered from the HTML report with headless Chromium.
+
+    Redacted at the export boundary before rendering. If Playwright or the
+    browser is unavailable the route answers 503 with the reason rather than a
+    silent empty file — declared and disabled, never faked.
+    """
+    from fastapi.responses import Response
+    from orchestrator.export_redaction import redact_report
+    from orchestrator.report_pdf import PdfUnavailable, report_to_pdf
+    report = redact_report(await _build_report_json(session_id))
+    try:
+        pdf = await report_to_pdf(report)
+    except PdfUnavailable as e:
+        raise HTTPException(503, f"PDF export unavailable: {e}")
+    return Response(pdf, media_type="application/pdf", headers={
+        "Content-Disposition": f'attachment; filename="erlik-{session_id}.pdf"'})
+
+
 @app.get("/api/sessions/{session_id}/report")
 async def get_report(session_id: str):
     """Get the generated report for a session."""

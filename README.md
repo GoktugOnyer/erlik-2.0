@@ -200,23 +200,25 @@ Run it from the repository root: `conftest.py` anchors the working directory
 there, and `orchestrator.main` builds its Jinja2 template path relative to the
 CWD.
 
-A **fresh clone** reports **5138 passed, 89 skipped** on its first run, and
-5140 passed / 87 skipped on every run after — the 2026-09-29 clone-and-run figure
-(4762 / 4764) plus the 376 tests added since, each of which passes from a
-clean checkout, so only the passed count moves; `--collect-only` reports the 5227
+A **fresh clone** reports **5158 passed, 92 skipped** on its first run, and
+5160 passed / 90 skipped on every run after — the 2026-09-29 clone-and-run figure
+(4762 / 4764) plus the 396 tests added since that pass from a clean checkout, so
+the passed count moves; and 3 more — the PDF-render tests — that skip without
+Playwright, so the skip count moves too. `--collect-only` reports the 5250
 the first-run pair sums to.
 
 > Re-measure this after any change under `tests/`. The first draft of this
 > paragraph was taken before the same commit finished adding tests, which is
 > exactly the staleness it was written to correct.
 
-Every skip is structural rather than broken, and the 89 account for themselves —
+Every skip is structural rather than broken, and the 92 account for themselves —
 counted from the run's own skip reasons, not apportioned by hand:
 
 | Count | Reason |
 |-------|--------|
 | 37 | need the recorded corpus or a live database — `data/pentest.db`, or the command corpus under `data/reports/` — `.gitignore` excludes `data/` because it holds real client findings (see `docs/REPRODUCIBILITY.md` and `tests/corpus.py`) |
 | 49 | container suites, behind `ERLIK_DOCKER_TESTS=1` |
+| 3 | need Playwright and its Chromium for PDF export — pinned in `requirements-browser-login.txt`, not the lean runtime install |
 | 2 | need a container lab **and** a real Interactsh (`ERLIK_REAL_INTERACTSH_TESTS=1`) |
 | 1 | needs a live DefectDojo (`ERLIK_DEFECTDOJO_LIVE_TESTS=1`) |
 
