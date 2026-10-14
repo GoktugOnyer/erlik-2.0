@@ -1483,6 +1483,8 @@ AVAILABLE RESOURCES ON THIS SYSTEM:
 - ZAP proxy is running and accessible via zap-cli wrapper. Use "zap-cli spider" → "zap-cli active-scan" → "zap-cli alerts".
 - All tools run inside a Kali Linux container with network access to the target.
 
+{exploit_tools}
+
 WORKFLOW STRATEGY:
 1. Reconnaissance: identify services, technologies, and security posture (Phase 1).
 2. Discovery: enumerate directories, API endpoints, and parameters (Phase 2).
@@ -2488,6 +2490,21 @@ def _case_catalogue_for_prompt(coverage_cases: bool = False) -> str:
     return "\n".join(lines)
 
 
+def _exploit_tools_for_prompt(target_url: str) -> str:
+    """The opt-in exploitation tools and their live enabled/disabled status.
+
+    Delegates to exploit_tools so the prompt, the executor's admission branch and
+    the tests all read the SAME availability function — the interface cannot
+    advertise a tool as enabled that the executor would refuse, or hide one it
+    would run.
+    """
+    try:
+        from orchestrator import exploit_tools
+        return exploit_tools.prompt_section(target_url)
+    except Exception:
+        return "EXPLOITATION TOOLS: (unavailable)"
+
+
 # --- Dynamic phase-scoped tool menu (ERLIK_DYNAMIC_MENU, OFF by default) ---
 #
 # Small local models degrade when the prompt lists ~30 tools on every turn: the
@@ -2647,6 +2664,9 @@ def render_system_prompt(target_url: str, coverage_cases: bool = False,
             .replace("{discovery_filter}", _discovery_filter(target_url))
             .replace("{discovery_filter_ffuf}", _discovery_filter(target_url, "ffuf"))
             .replace("{case_catalogue}", _case_catalogue_for_prompt(coverage_cases))
+            # Declare-don't-drop: the opt-in exploit tools appear whether enabled
+            # or not, each carrying the reason it is off (exploit_tools.availability).
+            .replace("{exploit_tools}", _exploit_tools_for_prompt(target_url))
             # Residual literals from the era when the prompt was Juice-Shop-specific.
             .replace("http://juice-shop:3000", target_url)
             .replace("juice-shop", host))
