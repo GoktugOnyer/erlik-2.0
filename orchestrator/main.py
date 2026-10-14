@@ -999,6 +999,74 @@ def context_budget_tokens(model: str = "") -> int:
 DENIED_FEEDBACK_MAX = 160
 
 
+def _structured_error_feedback(error_text: str, *, executed: bool,
+                               target_url: str = "",
+                               enabled_tools: list[str] | None = None) -> str:
+    """Reflexion-lite correction for a refused or failed tool action.
+
+    Returns a SHORT, STRUCTURED message — "what was wrong" plus "the minimal
+    shape of a valid retry" — keyed off the category prefix erlik's own refusal
+    strings already carry (SCOPE:/TOOLSET:/SAFE_MODE:/WRITE_CONFINEMENT:), with
+    a run-failure fallback for a non-zero exit. A small local model recovers
+    from an explicit "host X is out of scope, allowed host is Y" far better than
+    from a raw refusal line or a stack trace.
+
+    Only called when ERLIK_ERROR_FEEDBACK is on; off by default, so the loop's
+    error-path feedback is otherwise byte-for-byte unchanged.
+
+    Kept terse on purpose: every message is resent each turn and _trim_messages
+    evicts OLDER content to fit, so a long correction DISPLACES real tool output
+    — the mechanism behind the measured r = -0.796 between injected volume and
+    recall. Two lines, FIX then RETRY; it never echoes the full refusal.
+    """
+    txt = (error_text or "").strip()
+    first = txt.split("\n")[0][:DENIED_FEEDBACK_MAX]
+    low = txt.lower()
+    tools_hint = ", ".join(sorted(enabled_tools)[:10]) if enabled_tools else ""
+
+    if txt.startswith("SCOPE:") or "out-of-scope" in low:
+        host = ""
+        if target_url:
+            from urllib.parse import urlparse
+            host = urlparse(target_url if "://" in target_url
+                            else f"http://{target_url}").hostname or ""
+        allowed = host or "the session target"
+        return ("FIX: the command named a host outside this engagement's scope.\n"
+                f"RETRY: re-issue the same tool against {allowed} only, no other host.")
+    if txt.startswith("TOOLSET:") or "is not enabled" in low:
+        return ("FIX: that program is not in this session's enabled toolset.\n"
+                "RETRY: pick an enabled tool"
+                + (f" (one of: {tools_hint})" if tools_hint else "")
+                + " and re-issue.")
+    if txt.startswith("SAFE_MODE:"):
+        return ("FIX: safe mode refused this as destructive (write/delete verb).\n"
+                "RETRY: issue a read-only, non-destructive command instead.")
+    if txt.startswith("WRITE_CONFINEMENT:"):
+        return ("FIX: the command writes outside the permitted directory.\n"
+                "RETRY: write only under /tmp, then re-issue.")
+    if "container is not running" in low:
+        return ("FIX: the tools container is down, so no command can run now.\n"
+                "RETRY: reissue shortly, or use 'done' if testing is complete.")
+    if not executed:
+        return (f"FIX: the command was refused before running ({first}).\n"
+                "RETRY: do not repeat it or a variant; take a different approach.")
+    return (f"FIX: the command ran but failed ({first}).\n"
+            "RETRY: correct the arguments or switch tools; do not repeat it verbatim.")
+
+
+def _structured_json_retry(target_url: str) -> str:
+    """Reflexion-lite correction when the model's reply was not a usable action.
+
+    Names the single required field and the minimal valid object, which a small
+    model acts on more reliably than a bare "please use JSON". Gated behind
+    ERLIK_ERROR_FEEDBACK with everything else here.
+    """
+    return ("FIX: your reply was not a single JSON object with an \"action\" field.\n"
+            "RETRY: reply with exactly one JSON object, e.g. "
+            '{"action": "run_tool", "command": "whatweb ' + target_url +
+            '", "reason": "..."}')
+
+
 def _estimate_tokens(messages: list[dict]) -> int:
     """Rough token count: ~4 chars per token."""
     return sum(len(m.get("content", "")) for m in messages) // 4
@@ -1895,6 +1963,55 @@ async def _load_primitives(session_id: str, chain_id: str | None = None) -> list
         return []
 
 
+# How a stored primitive's kind maps onto the shared SessionStore contract's
+# kinds {token, cookie, csrf, header, injection_point}. A bare `.get` on this
+# with a "token" default keeps anything unmapped as an opaque token rather than
+# dropping it.
+_PRIMITIVE_KIND_TO_STORE = {
+    "jwt": "token", "bearer": "token", "token": "token", "basic_auth": "token",
+    "cookie": "cookie", "csrf": "csrf",
+}
+
+
+def _build_session_store(prims: list[dict], target_host: str | None):
+    """A SessionStore for the stateful-session feature, or None.
+
+    DEFENSIVE BY DESIGN. `orchestrator.session_state` is built by a sibling slice
+    and may not be merged yet; when it is absent (or its contract differs) this
+    returns None and the auto-attach step becomes an exact no-op. It is only ever
+    called when the `stateful_session` flag is on, so an off run never imports it.
+
+    Populated from the primitives this session already harvested, mapped onto the
+    documented `Primitive(kind, name, value, source, scope_host)` shape. This is
+    the bridge until session_state grows its own harvesting; `scope_host` is set
+    to the session target so the attach step's scope_host filter has something to
+    enforce against.
+    """
+    try:
+        from orchestrator import session_state as _ss
+    except Exception:  # noqa: BLE001 - module not merged yet; feature stays inert
+        return None
+    try:
+        store = _ss.SessionStore()
+        for p in prims or []:
+            kind = _PRIMITIVE_KIND_TO_STORE.get(p.get("kind"), "token")
+            value = (p.get("value") or "").strip()
+            if not value:
+                continue
+            if kind == "cookie" and "=" in value:
+                name, _, cval = value.partition("=")
+                name, value = name.strip(), cval.strip()
+            else:
+                name = "authorization" if kind == "token" else (p.get("kind") or kind)
+            store.add(_ss.Primitive(kind=kind, name=name, value=value,
+                                    source=p.get("tool") or "harvested",
+                                    scope_host=target_host))
+        return store
+    except Exception as e:  # noqa: BLE001 - never let the bridge break a run
+        print(f"[stateful_session] store build skipped (non-fatal): {e}", flush=True)
+        return None
+
+
 async def run_ai_review(session_id: str, model: str, runcfg: dict,
                         enabled_tools: list[str], force: bool | None = None,
                         observed_ports: list[int] | None = None,
@@ -2358,7 +2475,125 @@ def _case_catalogue_for_prompt(coverage_cases: bool = False) -> str:
     return "\n".join(lines)
 
 
-def render_system_prompt(target_url: str, coverage_cases: bool = False) -> str:
+# --- Dynamic phase-scoped tool menu (ERLIK_DYNAMIC_MENU, OFF by default) ---
+#
+# Small local models degrade when the prompt lists ~30 tools on every turn: the
+# flat TOOL USAGE EXAMPLES block is a lot of surface to reason over, and a 7B
+# routinely picks a tool from the wrong phase. When ERLIK_DYNAMIC_MENU is on,
+# render_system_prompt() expands only the example lines whose tool belongs to
+# the session's current phase (plus the universal ones) and collapses the rest
+# into a name-only index grouped by phase.
+#
+# The collapsed tools are still DECLARED and still REACHABLE (CLAUDE.md #2):
+# the JSON action protocol lets the model invoke any command, and
+# tool_executor admits on the configured toolset, not on prompt presence, so a
+# tool named in the index runs exactly as before. Nothing is silently dropped.
+#
+# OFF is an EXACT no-op: with the flag unset render_system_prompt() returns
+# byte-for-byte today's prompt, so the frozen campaign prompt and every
+# recorded arm are untouched. This lever is deliberately NOT a TOOLSET_PRESET
+# and NOT a runconfig help-lever: it reshapes the menu's presentation, it does
+# not add, remove, or gate any capability.
+#
+# Classification keys off the first token of each example line, mapped to the
+# CHAIN_PHASES vocabulary. `curl` is universal -- it is the probe/verify tool
+# of every phase, so it is never collapsed. A token absent from the map is
+# kept expanded rather than collapsed, so a newly added example can never
+# vanish from the menu unannounced.
+_DYNAMIC_MENU_UNIVERSAL = frozenset({"curl"})
+
+_DYNAMIC_MENU_TOOL_PHASE: dict[str, str] = {
+    # recon — service/technology/TLS/SSH/SMB identification and passive OSINT
+    "nmap": "recon", "whatweb": "recon", "cmseek": "recon",
+    "sslscan": "recon", "ssh-audit": "recon", "smbmap": "recon",
+    "theHarvester": "recon",
+    # discovery — content, endpoint and parameter enumeration
+    "gobuster": "discovery", "ffuf": "discovery", "arjun": "discovery",
+    "pw-crawl": "discovery", "dirsearch": "discovery",
+    # vuln_scan — injection / XSS / misconfiguration / known-CVE testing
+    "sqlmap": "vuln_scan", "xsstrike": "vuln_scan", "dalfox": "vuln_scan",
+    "nuclei": "vuln_scan", "zap-cli": "vuln_scan", "nikto": "vuln_scan",
+    "joomscan": "vuln_scan", "searchsploit": "vuln_scan",
+    # exploitation — auth / token attacks and post-access looting
+    "hydra": "exploitation", "jwt_tool": "exploitation", "gitleaks": "exploitation",
+}
+
+_DYNAMIC_MENU_HEADER = "TOOL USAGE EXAMPLES"
+_DYNAMIC_MENU_END = "AVAILABLE RESOURCES ON THIS SYSTEM:"
+
+
+def _dynamic_menu_enabled(override: bool | None = None) -> bool:
+    """Whether the phase-scoped menu is on. `override` wins; else read env."""
+    if override is not None:
+        return bool(override)
+    return os.environ.get("ERLIK_DYNAMIC_MENU", "").strip().lower() in _TRUTHY
+
+
+def _example_tool(line: str) -> str | None:
+    """First token of a `- <tool> ...` example line, or None if not an example."""
+    if not line.startswith("- "):
+        return None
+    rest = line[2:].strip()
+    return rest.split()[0] if rest else None
+
+
+def _apply_dynamic_menu(template: str, phase: str) -> str:
+    """Rewrite the TOOL USAGE EXAMPLES block to foreground `phase`'s tools.
+
+    Keeps the full example line for every universal tool and every tool whose
+    phase matches (and for any unclassified tool, so nothing is dropped). Every
+    other tool is listed by name under its phase, so it stays declared and
+    reachable. If the block cannot be located the template is returned
+    unchanged -- the menu is a prompt convenience, never a reason to render a
+    broken prompt.
+    """
+    lines = template.split("\n")
+    start = next((i for i, l in enumerate(lines)
+                  if l.startswith(_DYNAMIC_MENU_HEADER)), None)
+    end = next((i for i, l in enumerate(lines)
+                if l.startswith(_DYNAMIC_MENU_END)), None)
+    if start is None or end is None or end <= start:
+        return template
+
+    header = lines[start]
+    kept: list[str] = []
+    hidden: dict[str, list[str]] = {}
+    seen_hidden: set[str] = set()
+    for l in lines[start + 1:end]:
+        tool = _example_tool(l)
+        if tool is None:
+            # Blank separators are reconstructed below; preserve any (unexpected)
+            # non-example prose rather than lose it.
+            if l.strip():
+                kept.append(l)
+            continue
+        tool_phase = _DYNAMIC_MENU_TOOL_PHASE.get(tool)
+        if (tool in _DYNAMIC_MENU_UNIVERSAL or tool_phase is None
+                or tool_phase == phase):
+            kept.append(l)
+        elif tool not in seen_hidden:
+            hidden.setdefault(tool_phase, []).append(tool)
+            seen_hidden.add(tool)
+
+    label = phase.replace("_", " ").upper()
+    out = [header, "",
+           f"CURRENT PHASE: {label}. Use these tools now (full examples below). "
+           f"curl works in every phase:"]
+    out += kept
+    if hidden:
+        out += ["",
+                "OTHER TOOLS (available now — invoke by name; their detailed "
+                "examples appear when you reach that phase):"]
+        for ph in CHAIN_PHASES:
+            if hidden.get(ph):
+                out.append(f"- {ph}: " + ", ".join(hidden[ph]))
+    out.append("")  # the blank line that separated the block from the next section
+    return "\n".join(lines[:start] + out + lines[end:])
+
+
+def render_system_prompt(target_url: str, coverage_cases: bool = False,
+                         phase: str | None = None,
+                         dynamic_menu: bool | None = None) -> str:
     """TOOL_USE_SYSTEM_PROMPT with every placeholder resolved for this target.
 
     Extracted from the agent loop so the substitution can be tested. It was
@@ -2372,13 +2607,27 @@ def render_system_prompt(target_url: str, coverage_cases: bool = False) -> str:
 
     Introduced 2026-08-16 (bd7b08b) and so absent from every April 2026
     campaign, whose prompts carried the hardcoded flag this replaced.
+
+    `dynamic_menu` (default: read ERLIK_DYNAMIC_MENU) scopes the tool-example
+    menu to `phase` (default: the first CHAIN_PHASE, recon). OFF is a
+    byte-identical no-op: the template is untouched and the substitution chain
+    below is exactly the one every recorded arm rendered. The system prompt is
+    built once per session, so with the flag on the menu is scoped to the
+    OPENING phase; collapsed tools stay declared and reachable, so a static
+    opening scope never strands the model. (The function accepts any phase, so
+    re-rendering on phase transition is a one-line caller change if wanted.)
     """
     from urllib.parse import urlparse
+
+    template = TOOL_USE_SYSTEM_PROMPT
+    if _dynamic_menu_enabled(dynamic_menu):
+        ph = phase if phase in CHAIN_PHASES else CHAIN_PHASES[0]
+        template = _apply_dynamic_menu(template, ph)
 
     pu = urlparse(target_url)
     host = pu.hostname or "target"
     port = str(pu.port) if pu.port else ("443" if pu.scheme == "https" else "80")
-    return (TOOL_USE_SYSTEM_PROMPT
+    return (template
             .replace("{target_url}", target_url)
             .replace("{target_host}", host)
             .replace("{target_port}", port)
@@ -4432,6 +4681,10 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
         print(f"[scope {session_id[:8]}] engagement scope active: "
               f"{len(_eng_rows)} rule(s)", flush=True)
     _provider = runcfg.get("provider")
+    # Structured error feedback (Reflexion-lite). OFF by default; when on, a
+    # refused/failed tool action and an unparseable reply get a short "what was
+    # wrong + minimal valid retry" correction instead of erlik's terse default.
+    error_feedback_on = bool(runcfg.get("error_feedback"))
     try:
         await llm_client.ensure_model_available(model, provider=_provider)
     except llm_client.ModelUnavailable as _mu:
@@ -4876,6 +5129,50 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
                     "type": "log", "phase": "recon", "message": _ab,
                 })
 
+        # Config-driven login provider (P2-11): log in with a declared credential
+        # and SEED the in-run session store, so later steps run authenticated.
+        # Gated by stateful_session; OFF => no login, nothing seeded, prompt
+        # unchanged (and login-helper untouched). The summary injected here is
+        # SECRET-FREE by construction — store.summary_facts() never yields a
+        # token or cookie value — so nothing confidential reaches the prompt.
+        if runcfg.get("stateful_session"):
+            try:
+                from orchestrator import login_provider as _LP
+                _store = None
+                try:
+                    from orchestrator.session_state import SessionStore as _SS
+                    _store = _SS()
+                except Exception:  # noqa: BLE001 — sibling slice may be unmerged
+                    _store = None
+                _lpdb = await get_db()
+                try:
+                    _seed = await _LP.seed(_lpdb, _store, runcfg, target_url)
+                    await _lpdb.commit()
+                finally:
+                    await _lpdb.close()
+                if _seed.get("ran") and _store is not None:
+                    _facts = _store.summary_facts()
+                    if _facts:
+                        combined_system += f"\n\nAUTHENTICATED SESSION (seeded at start):\n{_facts}"
+                    await manager.broadcast(session_id, {
+                        "type": "log", "phase": "recon",
+                        "message": f"LOGIN PROVIDER: seeded {', '.join(_seed['seeded'])} "
+                                   f"for {_seed.get('scope_host') or 'target'} "
+                                   f"({_seed.get('reason')})",
+                    })
+                else:
+                    # Declare, don't drop: the operator asked for a seeded
+                    # session and did not get one — say why, rather than running
+                    # on silently as if nothing had been requested.
+                    print(f"[login-provider {session_id[:8]}] not seeded: "
+                          f"{_seed.get('reason')}", flush=True)
+                    await manager.broadcast(session_id, {
+                        "type": "log", "phase": "recon",
+                        "message": f"LOGIN PROVIDER: no session seeded — {_seed.get('reason')}",
+                    })
+            except Exception as e:  # noqa: BLE001 — best-effort, never abort a run
+                print(f"[login-provider {session_id[:8]}] error: {type(e).__name__}", flush=True)
+
         # Learning loop (Track A): inject APPROVED candidate playbooks, fenced as
         # untrusted data. Gated; OFF => nothing injected. Only human-approved
         # candidates are ever read, and each is fenced so attacker-influenced
@@ -5169,10 +5466,13 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
 
                 # Nudge LLM to use JSON format
                 messages.append({"role": "assistant", "content": response})
-                messages.append({"role": "user", "content":
+                _json_nudge = (
                     "Please respond with a valid JSON object. Example: "
                     '{"action": "run_tool", "command": "whatweb ' + target_url + '", "reason": "Fingerprint the web server"}'
-                })
+                )
+                if error_feedback_on:
+                    _json_nudge = _structured_json_retry(target_url)
+                messages.append({"role": "user", "content": _json_nudge})
 
                 # Save step
                 db = await get_db()
@@ -5265,6 +5565,20 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
                         print(f"[primitives {session_id[:8]}] injection skipped: {_ci_err}",
                               flush=True)
 
+                # Stateful-session auto-attach (P2-11). Only build a store when
+                # the flag is on; off is an exact no-op (None store, and
+                # execute_tool skips the attach entirely). Built fresh per
+                # dispatch so auth harvested on earlier turns is reflected.
+                _session_store = None
+                if runcfg.get("stateful_session"):
+                    try:
+                        _ss_prims = await _load_primitives(session_id, chain_id_for_primitives)
+                        _session_store = _build_session_store(
+                            _ss_prims, _target_host_for_creds)
+                    except Exception as _ss_err:  # noqa: BLE001
+                        print(f"[stateful_session {session_id[:8]}] skipped: {_ss_err}",
+                              flush=True)
+
                 # Execute the tool
                 if kali_running:
                     result = await execute_tool(
@@ -5272,7 +5586,17 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
                         target_url=target_url, custom_timeout=tool_timeout,
                         safe_mode=runcfg.get("safe_mode", True),
                         engagement_rows=_eng_rows,
-                        native_argv=runcfg.get("native_argv", False))
+                        native_argv=runcfg.get("native_argv", False),
+                        stateful_session=runcfg.get("stateful_session", False),
+                        session_store=_session_store)
+
+                    # Surface what actually rode along, so the interface reflects
+                    # the dispatch (names only, never the secret values).
+                    if result.get("auth_attached"):
+                        await manager.broadcast(session_id, {
+                            "type": "log", "phase": phase,
+                            "message": f"   AUTH: {result['auth_attached']}",
+                        })
 
                     tool_name = result["tool"]
                     # Only count a tool the command actually reached a shell
@@ -5463,6 +5787,10 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
                             f"REFUSED (not run, no output): {_why}\n"
                             "Do not retry this or a variant. Different approach. JSON action."
                         )
+                        if error_feedback_on:
+                            tool_feedback = _structured_error_feedback(
+                                error_str or tool_output, executed=False,
+                                target_url=target_url, enabled_tools=enabled_tools)
                     else:
                         tool_feedback = (
                             f"Tool: {tool_name} | Status: FAILED | Duration: {tool_duration}ms\n"
@@ -5483,6 +5811,10 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
                         if uncovered:
                             tool_feedback += f"Move to an uncovered phase: {uncovered[0]}\n"
                         tool_feedback += "Respond with a JSON action."
+                        if error_feedback_on:
+                            tool_feedback = _structured_error_feedback(
+                                error_str or tool_output, executed=True,
+                                target_url=target_url, enabled_tools=enabled_tools)
 
                     # Stateful primitives: capture tokens/cookies/creds from this
                     # output and surface them for reuse on later steps. Off by
