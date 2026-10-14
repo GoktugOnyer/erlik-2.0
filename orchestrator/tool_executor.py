@@ -1,6 +1,7 @@
 """Execute pentest tools inside the kali-tools Docker container (or natively via ERLIK_NATIVE)."""
 
 import asyncio
+import contextlib
 import fnmatch
 import ipaddress
 import os
@@ -10,9 +11,40 @@ import shlex
 import shutil
 import subprocess
 import time
+import weakref
 from urllib.parse import urlparse
 
 ERLIK_NATIVE = bool(os.environ.get("ERLIK_NATIVE", ""))
+
+# Global ceiling on tool subprocesses running at once. Every tool execution
+# ultimately lands in _sync_docker_exec on a worker thread; with N parallel
+# sessions (the matrix driver, several dashboard runs) nothing bounded how many
+# heavy scanners could be spawned simultaneously, so a busy host could thrash
+# or exhaust file descriptors. This bound is a throughput limit only — it never
+# changes a tool's output — so recorded campaigns stay byte-for-byte
+# comparable. Mirrors the LLM_RPM convention in llm_client: a non-positive
+# value disables the bound entirely (the historical unbounded behaviour).
+MAX_CONCURRENCY = int(os.environ.get("ERLIK_MAX_CONCURRENCY", "8") or 0)
+
+# The semaphore is created lazily and PER EVENT LOOP. A module-level
+# asyncio.Semaphore binds to the first loop that awaits it and then raises
+# "bound to a different event loop" under pytest-asyncio, which spins a fresh
+# loop per test. Keying by the running loop (weakly, so finished test loops are
+# collected) keeps one semaphore per loop without that cross-loop breakage.
+_exec_semaphores: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
+
+
+def _get_exec_semaphore():
+    """The concurrency semaphore for the current event loop, or None when the
+    bound is disabled (MAX_CONCURRENCY <= 0)."""
+    if MAX_CONCURRENCY <= 0:
+        return None
+    loop = asyncio.get_running_loop()
+    sem = _exec_semaphores.get(loop)
+    if sem is None:
+        sem = asyncio.Semaphore(MAX_CONCURRENCY)
+        _exec_semaphores[loop] = sem
+    return sem
 CONTAINER_NAME = "kali-tools"
 
 # Find docker binary — check PATH first, then well-known install locations on
@@ -1399,12 +1431,17 @@ async def execute_tool(command: str, enabled_tools: list[str], no_timeout: bool 
     argv = _argv_eligible(sanitized, enabled_tools) if native_argv else None
     transport = "argv" if argv is not None else "shell"
 
-    # Execute in docker via sync subprocess in thread pool (Windows compatible)
+    # Execute in docker via sync subprocess in thread pool (Windows compatible).
+    # Held behind the global concurrency semaphore so parallel sessions cannot
+    # spawn an unbounded number of tool subprocesses at once (no-op when the
+    # bound is disabled).
     start = time.time()
     try:
-        result = await asyncio.get_event_loop().run_in_executor(
-            None, lambda: _sync_docker_exec(sanitized, timeout, argv=argv)
-        )
+        _sem = _get_exec_semaphore()
+        async with (_sem if _sem is not None else contextlib.nullcontext()):
+            result = await asyncio.get_event_loop().run_in_executor(
+                None, lambda: _sync_docker_exec(sanitized, timeout, argv=argv)
+            )
         duration_ms = int((time.time() - start) * 1000)
 
         output = result["output"]
