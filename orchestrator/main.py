@@ -1963,6 +1963,55 @@ async def _load_primitives(session_id: str, chain_id: str | None = None) -> list
         return []
 
 
+# How a stored primitive's kind maps onto the shared SessionStore contract's
+# kinds {token, cookie, csrf, header, injection_point}. A bare `.get` on this
+# with a "token" default keeps anything unmapped as an opaque token rather than
+# dropping it.
+_PRIMITIVE_KIND_TO_STORE = {
+    "jwt": "token", "bearer": "token", "token": "token", "basic_auth": "token",
+    "cookie": "cookie", "csrf": "csrf",
+}
+
+
+def _build_session_store(prims: list[dict], target_host: str | None):
+    """A SessionStore for the stateful-session feature, or None.
+
+    DEFENSIVE BY DESIGN. `orchestrator.session_state` is built by a sibling slice
+    and may not be merged yet; when it is absent (or its contract differs) this
+    returns None and the auto-attach step becomes an exact no-op. It is only ever
+    called when the `stateful_session` flag is on, so an off run never imports it.
+
+    Populated from the primitives this session already harvested, mapped onto the
+    documented `Primitive(kind, name, value, source, scope_host)` shape. This is
+    the bridge until session_state grows its own harvesting; `scope_host` is set
+    to the session target so the attach step's scope_host filter has something to
+    enforce against.
+    """
+    try:
+        from orchestrator import session_state as _ss
+    except Exception:  # noqa: BLE001 - module not merged yet; feature stays inert
+        return None
+    try:
+        store = _ss.SessionStore()
+        for p in prims or []:
+            kind = _PRIMITIVE_KIND_TO_STORE.get(p.get("kind"), "token")
+            value = (p.get("value") or "").strip()
+            if not value:
+                continue
+            if kind == "cookie" and "=" in value:
+                name, _, cval = value.partition("=")
+                name, value = name.strip(), cval.strip()
+            else:
+                name = "authorization" if kind == "token" else (p.get("kind") or kind)
+            store.add(_ss.Primitive(kind=kind, name=name, value=value,
+                                    source=p.get("tool") or "harvested",
+                                    scope_host=target_host))
+        return store
+    except Exception as e:  # noqa: BLE001 - never let the bridge break a run
+        print(f"[stateful_session] store build skipped (non-fatal): {e}", flush=True)
+        return None
+
+
 async def run_ai_review(session_id: str, model: str, runcfg: dict,
                         enabled_tools: list[str], force: bool | None = None,
                         observed_ports: list[int] | None = None,
@@ -4948,6 +4997,50 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
                     "type": "log", "phase": "recon", "message": _ab,
                 })
 
+        # Config-driven login provider (P2-11): log in with a declared credential
+        # and SEED the in-run session store, so later steps run authenticated.
+        # Gated by stateful_session; OFF => no login, nothing seeded, prompt
+        # unchanged (and login-helper untouched). The summary injected here is
+        # SECRET-FREE by construction — store.summary_facts() never yields a
+        # token or cookie value — so nothing confidential reaches the prompt.
+        if runcfg.get("stateful_session"):
+            try:
+                from orchestrator import login_provider as _LP
+                _store = None
+                try:
+                    from orchestrator.session_state import SessionStore as _SS
+                    _store = _SS()
+                except Exception:  # noqa: BLE001 — sibling slice may be unmerged
+                    _store = None
+                _lpdb = await get_db()
+                try:
+                    _seed = await _LP.seed(_lpdb, _store, runcfg, target_url)
+                    await _lpdb.commit()
+                finally:
+                    await _lpdb.close()
+                if _seed.get("ran") and _store is not None:
+                    _facts = _store.summary_facts()
+                    if _facts:
+                        combined_system += f"\n\nAUTHENTICATED SESSION (seeded at start):\n{_facts}"
+                    await manager.broadcast(session_id, {
+                        "type": "log", "phase": "recon",
+                        "message": f"LOGIN PROVIDER: seeded {', '.join(_seed['seeded'])} "
+                                   f"for {_seed.get('scope_host') or 'target'} "
+                                   f"({_seed.get('reason')})",
+                    })
+                else:
+                    # Declare, don't drop: the operator asked for a seeded
+                    # session and did not get one — say why, rather than running
+                    # on silently as if nothing had been requested.
+                    print(f"[login-provider {session_id[:8]}] not seeded: "
+                          f"{_seed.get('reason')}", flush=True)
+                    await manager.broadcast(session_id, {
+                        "type": "log", "phase": "recon",
+                        "message": f"LOGIN PROVIDER: no session seeded — {_seed.get('reason')}",
+                    })
+            except Exception as e:  # noqa: BLE001 — best-effort, never abort a run
+                print(f"[login-provider {session_id[:8]}] error: {type(e).__name__}", flush=True)
+
         # Learning loop (Track A): inject APPROVED candidate playbooks, fenced as
         # untrusted data. Gated; OFF => nothing injected. Only human-approved
         # candidates are ever read, and each is fenced so attacker-influenced
@@ -5340,6 +5433,20 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
                         print(f"[primitives {session_id[:8]}] injection skipped: {_ci_err}",
                               flush=True)
 
+                # Stateful-session auto-attach (P2-11). Only build a store when
+                # the flag is on; off is an exact no-op (None store, and
+                # execute_tool skips the attach entirely). Built fresh per
+                # dispatch so auth harvested on earlier turns is reflected.
+                _session_store = None
+                if runcfg.get("stateful_session"):
+                    try:
+                        _ss_prims = await _load_primitives(session_id, chain_id_for_primitives)
+                        _session_store = _build_session_store(
+                            _ss_prims, _target_host_for_creds)
+                    except Exception as _ss_err:  # noqa: BLE001
+                        print(f"[stateful_session {session_id[:8]}] skipped: {_ss_err}",
+                              flush=True)
+
                 # Execute the tool
                 if kali_running:
                     result = await execute_tool(
@@ -5347,7 +5454,17 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
                         target_url=target_url, custom_timeout=tool_timeout,
                         safe_mode=runcfg.get("safe_mode", True),
                         engagement_rows=_eng_rows,
-                        native_argv=runcfg.get("native_argv", False))
+                        native_argv=runcfg.get("native_argv", False),
+                        stateful_session=runcfg.get("stateful_session", False),
+                        session_store=_session_store)
+
+                    # Surface what actually rode along, so the interface reflects
+                    # the dispatch (names only, never the secret values).
+                    if result.get("auth_attached"):
+                        await manager.broadcast(session_id, {
+                            "type": "log", "phase": phase,
+                            "message": f"   AUTH: {result['auth_attached']}",
+                        })
 
                     tool_name = result["tool"]
                     # Only count a tool the command actually reached a shell
