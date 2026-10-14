@@ -61,12 +61,12 @@ _BOOL_KEYS = {
     # run's verified findings, and none are injected. An exact no-op, so the
     # frozen arms neither write nor read learned context.
     "learned_playbooks": "ERLIK_LEARNED_PLAYBOOKS",
-    # Stateful session store (P2-11). OFF: no stored auth is attached to the
-    # commands the agent dispatches — each request carries only what the model
-    # itself wrote. ON: the session's harvested auth headers and cookies ride
-    # along automatically so the model need not re-paste a token each turn.
-    # OFF is an EXACT no-op (the command string is unchanged before dispatch),
-    # so the frozen arms are unaffected.
+    # Stateful session store (P2-11, orchestrator/session_state.py). OFF: no
+    # stored auth is attached to the commands the agent dispatches — each
+    # request carries only what the model itself wrote. ON: the session's
+    # harvested auth headers and cookies ride along automatically so the model
+    # need not re-paste a token each turn. OFF is an EXACT no-op (the command
+    # string is unchanged before dispatch), so the frozen arms are unaffected.
     "stateful_session": "ERLIK_STATEFUL_SESSION",
 }
 
