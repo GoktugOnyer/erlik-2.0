@@ -5,7 +5,8 @@ These assert against the real `extract`, never a re-implementation, and they
 cover the two properties the module exists to hold: header secrets are read
 only from the header block (a target cannot forge a cookie by echoing it into
 its body), and every candidate survives the same injection gate the
-deterministic lane applies.
+deterministic lane applies. They also check the extractor produces into the
+authoritative `session_state.Primitive` / `SessionStore` contract.
 
 Realistic fixtures: a login response (Set-Cookie + bearer), a page carrying a
 CSRF token three ways, and a negative response that must yield nothing.
@@ -14,8 +15,8 @@ Mutation-tested (CLAUDE.md convention 4): replacing the Set-Cookie capture
 group with a non-matching literal fails
 `test_login_response_yields_session_cookie_and_bearer_token`,
 `test_safe_cookie_value_still_survives` and
-`test_enabled_store_roundtrips_extracted_primitives` — so those three are
-attributable to the cookie parse, not passing on silence.
+`test_store_roundtrips_extracted_primitives` — so those three are attributable
+to the cookie parse, not passing on silence.
 """
 
 from __future__ import annotations
@@ -23,7 +24,7 @@ from __future__ import annotations
 import pytest
 
 from orchestrator.primitive_extract import extract
-from orchestrator.session_state import KINDS, Primitive, SessionStore
+from orchestrator.session_state import PRIMITIVE_KINDS, Primitive, SessionStore
 
 
 # ---------------------------------------------------------------------------
@@ -67,16 +68,15 @@ The resource you requested could not be found."""
 
 def test_login_response_yields_session_cookie_and_bearer_token():
     prims = extract(LOGIN_RESPONSE, "juice.local")
-    by_kind = {}
+    by_kind: dict[str, list[Primitive]] = {}
     for p in prims:
         by_kind.setdefault(p.kind, []).append(p)
 
     cookies = by_kind.get("cookie", [])
-    assert [c.value for c in cookies] == ["session=abc123DEF456"], (
-        "the session cookie is captured as its name=value pair, attributes stripped")
-    assert cookies[0].name == "session"
-    assert cookies[0].source_host == "juice.local", (
-        "the issuing host is recorded as the reuse boundary")
+    assert [(c.name, c.value) for c in cookies] == [("session", "abc123DEF456")], (
+        "the session cookie is captured as name + value, attributes stripped")
+    assert cookies[0].scope_host == "juice.local", (
+        "the issuing host is recorded as the reuse boundary (scope_host)")
 
     tokens = by_kind.get("token", [])
     assert any(t.value.startswith("eyJhbGciOiJIUzI1NiJ9.") for t in tokens), (
@@ -171,7 +171,7 @@ def test_safe_cookie_value_still_survives():
     failing on the whole line."""
     capture = ('HTTP/1.1 200 OK\n'
                'Set-Cookie: session=abcSAFEdef; Path=/\n\nbody')
-    assert any(p.kind == "cookie" and p.value == "session=abcSAFEdef"
+    assert any(p.kind == "cookie" and p.value == "abcSAFEdef"
                for p in extract(capture, "x.local"))
 
 
@@ -191,34 +191,36 @@ def test_injection_point_names_that_are_unsafe_are_dropped():
 def test_every_emitted_kind_is_in_the_declared_set():
     for fixture in (LOGIN_RESPONSE, CSRF_PAGE):
         for p in extract(fixture, "h"):
-            assert p.kind in KINDS
+            assert p.kind in PRIMITIVE_KINDS
 
 
 def test_primitive_rejects_an_unknown_kind():
     with pytest.raises(ValueError):
-        Primitive(kind="totally_made_up", value="x")
+        Primitive(kind="totally_made_up", name=None, value="x",
+                  source="t", scope_host=None)
 
 
-def test_store_is_off_by_default_and_holds_nothing():
-    store = SessionStore()  # enabled defaults to False
+def test_store_roundtrips_extracted_primitives():
+    store = SessionStore(session_id="s1")
     for p in extract(LOGIN_RESPONSE, "juice.local"):
         store.add(p)
-    assert len(store) == 0, "a disabled store must not accumulate credentials"
-
-
-def test_enabled_store_roundtrips_extracted_primitives():
-    store = SessionStore(enabled=True)
-    added = store.extend(extract(LOGIN_RESPONSE, "juice.local"))
-    assert added >= 2
-    assert store.cookies().get("session") == "abc123DEF456"
-    assert any(h.startswith("Bearer ") for h in store.auth_headers().values())
+    assert len(store) >= 2
+    # Host-scoped reads return what was captured from that host.
+    assert store.cookies(host="juice.local").get("session") == "abc123DEF456"
+    assert any(v.startswith("Bearer ")
+               for v in store.auth_headers(host="juice.local").values())
+    # A credential captured from one origin is never returned for another.
+    assert store.cookies(host="evil.local") == {}
     # redact() masks a captured secret wherever it is echoed back.
-    assert "abc123DEF456" not in store.redact("leak: session=abc123DEF456 trailing")
+    masked = store.redact("leak: abc123DEF456 trailing")
+    assert "abc123DEF456" not in masked
 
 
 def test_store_deduplicates_identical_primitives():
-    store = SessionStore(enabled=True)
-    store.extend(extract(LOGIN_RESPONSE, "juice.local"))
+    store = SessionStore(session_id="s1")
+    for p in extract(LOGIN_RESPONSE, "juice.local"):
+        store.add(p)
     before = len(store)
-    store.extend(extract(LOGIN_RESPONSE, "juice.local"))  # same response again
+    for p in extract(LOGIN_RESPONSE, "juice.local"):  # same response again
+        store.add(p)
     assert len(store) == before, "the same primitive seen twice is held once"

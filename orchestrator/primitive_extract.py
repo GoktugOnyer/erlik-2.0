@@ -4,8 +4,14 @@ PURE. Given a raw response string and the host it came from, `extract` returns
 the `Primitive` candidates found — bearer/Authorization tokens, Set-Cookie
 session cookies, CSRF tokens (hidden input / meta / JSON field) and obvious
 injection-point hints. It touches no database, no run config and no agent
-state; attaching primitives and feeding them back to the model is the job of
-other modules (`session_state.py`, the agent loop). This file only reads.
+state; holding primitives across turns and feeding them back to the model is the
+job of `session_state.SessionStore` and the agent loop. This file only reads.
+
+It produces into the store's vocabulary: every returned value is a
+`session_state.Primitive(kind, name, value, source, scope_host)`, with the
+originating host recorded as `scope_host` so the store's default-deny host
+scoping can keep a credential captured from one origin off a request aimed at
+another.
 
 TWO RULES IT INHERITS FROM THE DETERMINISTIC LANE, because the same response is
 forgeable in the same two ways:
@@ -40,6 +46,10 @@ from orchestrator import http_capture
 from orchestrator.engagement import looks_injectable
 from orchestrator.session_state import Primitive
 
+# Default provenance recorded on a primitive when the caller names none. The
+# store treats `source` as operator-facing provenance only, never for matching.
+_DEFAULT_SOURCE = "primitive_extract"
+
 # A cookie or token name that reads as a *session* credential, not an analytics
 # or preference cookie. Identical to the filter `runner.py` applies before it
 # will grade a cookie's attributes — a session cookie is the thing worth reusing
@@ -54,25 +64,25 @@ _JWT = re.compile(r"\beyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}
 # the body — Keystone's `X-Subject-Token`, gateway/session token headers, or an
 # `Authorization` line present in a framed header block. Matched only inside the
 # header region, so a line a target printed into its body is never read as one.
-# The name is kept alongside the value so the primitive replays verbatim.
 _AUTH_HEADER = re.compile(
     r"(?im)^(Authorization|X-Subject-Token|X-Auth-Token|X-Amz-Security-Token)"
     r":\s*([^\r\n]+?)\s*$")
 
-# Token-bearing JSON fields in a response body (a login endpoint's reply).
+# Token-bearing JSON fields in a response body (a login endpoint's reply). The
+# field name is captured so it can be recorded as the primitive's name.
 _JSON_TOKEN = re.compile(
-    r'"(?:access_token|accessToken|authToken|id_token|idToken|bearer|token|jwt)"'
+    r'"(access_token|accessToken|authToken|id_token|idToken|bearer|token|jwt)"'
     r'\s*:\s*"([^"]{8,})"')
 
-# CSRF delivered as a JSON field.
+# CSRF delivered as a JSON field; the key is captured as the name.
 _JSON_CSRF = re.compile(
-    r'"(?:csrf[_-]?token|_csrf|xsrf[_-]?token|csrfToken|xsrfToken)"'
+    r'"(csrf[_-]?token|_csrf|xsrf[_-]?token|csrfToken|xsrfToken)"'
     r'\s*:\s*"([^"]{6,})"', re.I)
 
 # CSRF delivered in a <meta> tag. name/content order varies, so the tag is
 # matched and its attributes read independently below.
 _META_TAG = re.compile(r"(?is)<meta\b[^>]*>")
-# Any <input ...> / <textarea ...> tag; attributes parsed order-independently.
+# Any <input ...> / <textarea ...> / <select ...> tag; attributes read below.
 _INPUT_TAG = re.compile(r"(?is)<(input|textarea|select)\b[^>]*>")
 
 
@@ -87,11 +97,15 @@ def _attr(tag: str, name: str) -> str:
 
 def _safe(value: str) -> str:
     """The value if it survives the injection gate, else "". Strips surrounding
-    whitespace first; a value that is empty after stripping is not a primitive."""
+    whitespace first; a value empty after stripping is not a primitive."""
     v = (value or "").strip()
     if not v or looks_injectable(v):
         return ""
     return v
+
+
+def _is_csrf_name(name: str) -> bool:
+    return bool(re.search(r"csrf|xsrf", name or "", re.I))
 
 
 def _header_region(raw: str) -> str:
@@ -119,60 +133,60 @@ def _body_region(raw: str) -> str:
     return http_capture.body(raw)
 
 
-def extract(raw: str, source_host: str = "") -> list[Primitive]:
+def extract(raw: str, source_host: str = "", source: str = _DEFAULT_SOURCE) -> list[Primitive]:
     """Primitive candidates found in one response. Pure; order is stable.
 
-    `source_host` is recorded on each primitive as the reuse boundary — a
-    captured session token belongs to the host that issued it and nowhere else.
+    `source_host` is recorded on each primitive as its `scope_host` — the reuse
+    boundary the store enforces, so a captured session token belongs to the host
+    that issued it and nowhere else. `source` is operator-facing provenance (a
+    tool name or step id); it never affects matching.
     """
     if not raw:
         return []
 
-    host = (source_host or "").strip()
+    host = (source_host or "").strip() or None
     headers = _header_region(raw)
     body = _body_region(raw)
 
     out: list[Primitive] = []
-    seen: set[tuple[str, str, str]] = set()
+    seen: set[tuple[str, str | None, str]] = set()
 
-    def emit(kind: str, value: str, name: str = "", hint: str = "") -> None:
+    def emit(kind: str, value: str, name: str | None = None) -> None:
         key = (kind, name, value)
         if value and key not in seen:
             seen.add(key)
-            out.append(Primitive(kind=kind, value=value, source_host=host,
-                                  name=name, hint=hint))
+            out.append(Primitive(kind=kind, name=name, value=value,
+                                  source=source, scope_host=host))
 
-    # -- header block: Set-Cookie session cookies, Authorization headers ----
+    # -- header block: Set-Cookie session cookies, auth token headers -------
     for line in re.findall(r"(?im)^Set-Cookie:\s*([^\r\n]+)", headers):
         jar = SimpleCookie()
         try:
             jar.load(line)
         except Exception:
             continue
-        for name, morsel in jar.items():
-            if not _SESSION_NAME.search(name):
+        for cname, morsel in jar.items():
+            if not _SESSION_NAME.search(cname):
                 continue
-            pair = _safe(f"{name}={morsel.value}")
-            if pair:
-                emit("cookie", pair, name=name,
-                     hint='reuse as --cookie "<name=value>"')
+            value = _safe(morsel.value)
+            if value:
+                emit("cookie", value, name=cname)
 
     for hname, hval in _AUTH_HEADER.findall(headers):
         value = _safe(hval)
         if value:
-            emit("header", value, name=hname,
-                 hint=f'reuse as -H "{hname}: <value>"')
+            emit("header", value, name=hname)
 
-    # -- body: bearer/JWT/JSON tokens --------------------------------------
+    # -- body: bearer/JWT/JSON tokens (unnamed bearer -> name None) ---------
     for tok in _JWT.findall(body):
         value = _safe(tok)
         if value:
-            emit("token", value, hint='reuse as -H "Authorization: Bearer <token>"')
+            emit("token", value, name=None)
 
-    for tok in _JSON_TOKEN.findall(body):
+    for fname, tok in _JSON_TOKEN.findall(body):
         value = _safe(tok)
         if value:
-            emit("token", value, hint='reuse as -H "Authorization: Bearer <token>"')
+            emit("token", value, name=fname)
 
     # -- body: CSRF tokens (hidden input / meta / json) --------------------
     for tag in _META_TAG.findall(body):
@@ -180,13 +194,12 @@ def extract(raw: str, source_host: str = "") -> list[Primitive]:
         if name and _is_csrf_name(name):
             value = _safe(_attr(tag, "content"))
             if value:
-                emit("csrf", value, name=name,
-                     hint="send as the CSRF token on state-changing requests")
+                emit("csrf", value, name=name)
 
-    for cval in _JSON_CSRF.findall(body):
+    for fname, cval in _JSON_CSRF.findall(body):
         value = _safe(cval)
         if value:
-            emit("csrf", value, hint="send as the CSRF token on state-changing requests")
+            emit("csrf", value, name=fname)
 
     # -- body: form fields -> CSRF (hidden) or injection-point (editable) --
     for m in _INPUT_TAG.finditer(body):
@@ -199,22 +212,17 @@ def extract(raw: str, source_host: str = "") -> list[Primitive]:
         if _is_csrf_name(name):
             value = _safe(_attr(tag, "value"))
             if value:
-                emit("csrf", value, name=name,
-                     hint="send as the CSRF token on state-changing requests")
+                emit("csrf", value, name=name)
             continue
         # Editable, user-controllable field names are the obvious injection
         # points. Non-interactive field types (hidden/submit/button/…) are not,
         # and are skipped — a hidden field without a CSRF-ish name is state the
-        # user does not type into.
+        # user does not type into. The field name is both the location (value)
+        # and the handle (name).
         if itype in ("hidden", "submit", "button", "image", "reset", "file"):
             continue
         safe_name = _safe(name)
         if safe_name:
-            emit("injection_point", safe_name, name=safe_name,
-                 hint=f"user-controllable `{kind_tag}` field — candidate injection point")
+            emit("injection_point", safe_name, name=safe_name)
 
     return out
-
-
-def _is_csrf_name(name: str) -> bool:
-    return bool(re.search(r"csrf|xsrf", name or "", re.I))
