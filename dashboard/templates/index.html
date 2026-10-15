@@ -1195,6 +1195,10 @@
                         <input type="checkbox" id="rc-aireview" class="accent-purple-400" style="width:14px;height:14px;" onchange="markCustomPreset()">
                         <span class="font-pixel" style="font-size:0.5rem; color:#8a8aa0;">AI REVIEW</span><span class="rc-q">?</span>
                     </label>
+                    <label class="flex items-center gap-1.5 cursor-pointer rc-help" data-tip="ERROR FEEDBACK — When a tool action is refused or fails (out-of-scope host, disabled tool, bad JSON, non-zero exit), hand the model a short 'what was wrong + the minimal shape of a valid retry' correction instead of the raw error or a bare retry nudge. Helps a smaller local model recover and stop re-issuing a broken call. Kept to two terse lines so it never crowds out real tool output. OFF by default; has no effect on the frozen measured arms (ai_only / guided_ai pin it off).">
+                        <input type="checkbox" id="rc-errfeedback" class="accent-purple-400" style="width:14px;height:14px;" onchange="markCustomPreset()">
+                        <span class="font-pixel" style="font-size:0.5rem; color:#8a8aa0;">ERROR FEEDBACK</span><span class="rc-q">?</span>
+                    </label>
                 </div>
             </div>
 
@@ -5979,7 +5983,8 @@ ${htmlBody}
             // Run Configuration panel
             'rc-preset', 'rc-cve', 'rc-skills', 'rc-nettacker',
             'rc-nettacker-scenario', 'rc-nettacker-findings',
-            'rc-poc', 'rc-primitives', 'rc-targetmem', 'rc-techniques', 'rc-aireview'
+            'rc-poc', 'rc-primitives', 'rc-targetmem', 'rc-techniques', 'rc-aireview',
+            'rc-errfeedback'
         ];
 
         function lockSettings() {
@@ -7523,6 +7528,7 @@ ${htmlBody}
             document.getElementById('rc-primitives').checked = !!c.primitives;
             document.getElementById('rc-techniques').checked = !!c.techniques;
             document.getElementById('rc-aireview').checked = !!c.ai_review;
+            document.getElementById('rc-errfeedback').checked = !!c.error_feedback;
             document.getElementById('rc-targetmem').checked = !!c.target_memory;
             if (c.nettacker_scenario) document.getElementById('rc-nettacker-scenario').value = c.nettacker_scenario;
             toggleNettackerOpts();
@@ -7567,6 +7573,7 @@ ${htmlBody}
                 primitives: document.getElementById('rc-primitives').checked,
                 techniques: document.getElementById('rc-techniques').checked,
                 ai_review: document.getElementById('rc-aireview').checked,
+                error_feedback: document.getElementById('rc-errfeedback').checked,
                 target_memory: document.getElementById('rc-targetmem').checked,
                 tool_delay_seconds: Number.isFinite(_td) ? _td : null,
                 llm_rpm: Number.isFinite(_rpm) ? _rpm : null,
@@ -7597,6 +7604,8 @@ ${htmlBody}
                 el.appendChild(mk('SKILLS', eff.skills, 'Skill knowledge injection was ' + (eff.skills ? 'on' : 'off')));
                 el.appendChild(mk(eff.nettacker ? `NETTACKER:${eff.nettacker_scenario}` : 'NETTACKER',
                                   eff.nettacker, 'Deterministic Nettacker pre-scan was ' + (eff.nettacker ? 'on' : 'off')));
+                el.appendChild(mk('ERR-FB', eff.error_feedback,
+                                  'Structured error feedback was ' + (eff.error_feedback ? 'on' : 'off')));
             } catch (e) { /* non-fatal */ }
         }
 
