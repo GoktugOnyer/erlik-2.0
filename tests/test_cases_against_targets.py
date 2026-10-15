@@ -247,6 +247,80 @@ class TestHttpMethods:
         assert not vuln_types(r), vuln_types(r)
 
 
+class TestBrowserCache:
+    """WSTG-ATHN-06. The finding is the ABSENCE of Cache-Control: no-store on a
+    sensitive response, so the silence assertion is what proves the check reads
+    the header rather than always firing."""
+
+    def test_it_fires_when_a_sensitive_response_is_cacheable(self, targets):
+        r = run_case("WSTG-ATHN-06", url=targets["web"] + "/account")
+        assert "Browser Cache Weakness" in vuln_types(r), vuln_types(r)
+
+    def test_it_is_silent_when_no_store_is_set(self, targets):
+        r = run_case("WSTG-ATHN-06", url=targets["web_control"] + "/account")
+        assert not vuln_types(r), vuln_types(r)
+        assert r.steps, "no step ran; the silence is vacuous"
+
+
+class TestCSRFToken:
+    """WSTG-SESS-05. Fires on a POST form with no anti-CSRF token; stays silent
+    when a hidden token field is present."""
+
+    def test_it_fires_when_a_post_form_has_no_token(self, targets):
+        r = run_case("WSTG-SESS-05", url=targets["web"] + "/transfer")
+        assert "Cross-Site Request Forgery (no anti-CSRF token)" in vuln_types(r), \
+            vuln_types(r)
+
+    def test_it_is_silent_when_a_token_is_present(self, targets):
+        r = run_case("WSTG-SESS-05", url=targets["web_control"] + "/transfer")
+        assert not vuln_types(r), vuln_types(r)
+        assert r.steps, "no step ran; the silence is vacuous"
+
+
+class TestAdminInterface:
+    """WSTG-CONF-05. A 200 with an admin marker is the finding; a 403 is the
+    control, and it must stay silent."""
+
+    def test_it_fires_on_an_unauthenticated_admin_panel(self, targets):
+        r = run_case("WSTG-CONF-05", url=targets["web"] + "/admin")
+        assert "Unauthenticated Admin Interface" in vuln_types(r), vuln_types(r)
+
+    def test_it_is_silent_when_the_panel_is_forbidden(self, targets):
+        r = run_case("WSTG-CONF-05", url=targets["web_control"] + "/admin")
+        assert not vuln_types(r), vuln_types(r)
+        assert r.steps, "no step ran; the silence is vacuous"
+
+
+class TestCrossDomainPolicy:
+    """WSTG-CONF-08. The wildcard policy is the finding; a policy naming a
+    concrete domain is the control."""
+
+    def test_it_fires_on_a_wildcard_policy(self, targets):
+        r = run_case("WSTG-CONF-08", url=targets["web"])
+        assert "Permissive RIA Cross-Domain Policy" in vuln_types(r), vuln_types(r)
+
+    def test_it_is_silent_on_a_restricted_policy(self, targets):
+        r = run_case("WSTG-CONF-08", url=targets["web_control"])
+        assert not vuln_types(r), vuln_types(r)
+        assert r.steps, "no step ran; the silence is vacuous"
+
+
+class TestCommandInjection:
+    """WSTG-INPV-12. The finding is differential: `id` output must appear in the
+    injected response and NOT in the benign baseline. The control strips the
+    metacharacter, so `id` never runs and the case stays silent."""
+
+    def test_it_fires_when_the_injected_command_executes(self, targets):
+        r = run_case("WSTG-INPV-12", url=targets["cmd"] + "/ping", parameter="host")
+        assert "OS Command Injection" in vuln_types(r), vuln_types(r)
+
+    def test_it_is_silent_when_the_input_is_sanitised(self, targets):
+        r = run_case("WSTG-INPV-12", url=targets["cmd_control"] + "/ping",
+                     parameter="host")
+        assert not vuln_types(r), vuln_types(r)
+        assert r.steps, "no step ran; the silence is vacuous"
+
+
 class TestTheControlsAreRealControls:
     """Guard on the guards. If a control target stopped serving the route, its
     case would find nothing for the wrong reason and every silence above would

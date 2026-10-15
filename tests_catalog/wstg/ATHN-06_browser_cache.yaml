@@ -1,0 +1,57 @@
+id: WSTG-ATHN-06
+name: Browser Cache Weakness
+category: Authentication
+attack_class: authn
+severity: low
+# ext tier: a coverage case added after the campaign arms were frozen. It stays
+# out of `{case_catalogue}` (and the agent's runnable set) unless coverage_cases
+# is on, so the recorded ai_only/guided_ai prompts are byte-identical to before.
+# The deterministic v2 lane and the test harness still run it.
+tier: ext
+references:
+  - https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/04-Authentication_Testing/06-Testing_for_Browser_Cache_Weaknesses
+
+target_schema:
+  required: [url]
+  optional: [cookie, auth_header]
+
+# The question WSTG-ATHN-06 asks -- "may a shared or local cache retain this
+# sensitive response?" -- is decided by ONE directive: `Cache-Control: no-store`.
+# `no-store` is the only value that forbids writing the body to any cache at all;
+# `no-cache` permits storage and only forces revalidation, and `private` still
+# lets the user's own disk cache keep it. So the finding is the ABSENCE of
+# no-store on a response the operator has pointed this case at as sensitive.
+#
+# Absence is not something a regex over a single response can state, which is why
+# this is a shell verdict rather than a bare `regex` evaluator -- the same shape
+# SESS-02 and ATHN-01 use, and for the same reason: a model-only judgement
+# produces nothing offline, and a presence-matching regex cannot say "no-store is
+# missing". The verdict line is a canary a deterministic regex matches.
+#
+# Read-only: one GET of the page the operator supplied. No credentials submitted.
+steps:
+  - name: cache_headers
+    tool: curl
+    # `-D - -o /dev/null`, so the parse reads headers and never the body: a page
+    # that echoed the string `Cache-Control: no-store` in its content must not be
+    # read as having sent the header.
+    command: >-
+      bash -c 'U="{{url}}";
+      H=$(curl -s -b "{{cookie}}" -H "{{auth_header}}" -D - -o /dev/null
+      --connect-timeout 5 --max-time 15 -w "HTTPCODE=%{http_code}" "$U");
+      CODE=$(printf "%s" "$H" | grep -o "HTTPCODE=[0-9]*" | tail -1 | cut -d= -f2);
+      printf "%s\n" "$H";
+      CC=$(printf "%s" "$H" | grep -i "^Cache-Control:");
+      if [ "$CODE" = "000" ]; then
+      echo "ERLIK_CACHE_NO_RESPONSE: no response was received, so cache-control of the sensitive response was not assessed";
+      elif printf "%s" "$CC" | grep -qi "no-store"; then
+      echo "ERLIK_CACHE_OK: the response sends Cache-Control: no-store, so a cache may not retain it";
+      else
+      echo "ERLIK_CACHE_WEAK: the sensitive response does not send Cache-Control: no-store, so a downstream or local cache may retain it";
+      fi'
+    evaluators:
+      - type: regex
+        pattern: 'ERLIK_CACHE_WEAK'
+        emit_finding:
+          vuln_type: Browser Cache Weakness
+          severity: low

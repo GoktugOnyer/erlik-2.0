@@ -1716,6 +1716,11 @@
                             title="Open the client-ready HTML report (print to PDF from the browser)">
                             .HTML
                         </button>
+                        <button onclick="viewReportFormat('report.pdf')" class="font-pixel px-3 py-1 rounded border text-xs"
+                            style="font-size:0.45rem; color:var(--neon-cyan); border-color:var(--neon-cyan); background:transparent; cursor:pointer;"
+                            title="Download the client-ready PDF (server-rendered from the HTML report; needs Playwright + Chromium, else 503)">
+                            .PDF
+                        </button>
                         <button onclick="viewReportFormat('report.sarif')" class="font-pixel px-3 py-1 rounded border text-xs"
                             style="font-size:0.45rem; color:var(--neon-cyan); border-color:var(--neon-cyan); background:transparent; cursor:pointer;"
                             title="Open SARIF 2.1.0 (CI / security-tool ingestion)">
@@ -1730,6 +1735,11 @@
                             style="font-size:0.45rem; color:var(--neon-purple); border-color:var(--neon-purple); background:transparent; cursor:pointer;"
                             title="Jira CSV issue import">
                             JIRA CSV
+                        </button>
+                        <button onclick="viewReportFormat('report.hackerone.json')" class="font-pixel px-3 py-1 rounded border text-xs"
+                            style="font-size:0.45rem; color:var(--neon-purple); border-color:var(--neon-purple); background:transparent; cursor:pointer;"
+                            title="HackerOne report-submission JSON (one submission object per finding)">
+                            HACKERONE
                         </button>
                         <button onclick="closeReportDetail()" class="font-pixel px-3 py-1 rounded border text-xs"
                             style="font-size:0.45rem; color:var(--neon-red); border-color:var(--neon-red); background:transparent; cursor:pointer;">

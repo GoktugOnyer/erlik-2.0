@@ -48,7 +48,7 @@ CLASSES: list[dict] = [
      "api": [],
      "detectors": ["xsstrike:_detect_xss_tools", "dalfox:_detect_xss_tools"]},
     {"key": "cmdi", "label": "Command Injection", "owasp": "A03:2021 Injection",
-     "wstg": [],
+     "wstg": ["WSTG-INPV-12"],
      # injection: see API_UNMAPPED_REASON
      "api": [],
      "detectors": ["commix:_detect_commix"]},
@@ -84,7 +84,9 @@ CLASSES: list[dict] = [
                    "curl:_curl_idor_order"]},
     {"key": "authn", "label": "Authentication Weakness",
      "owasp": "A07:2021 Identification & Authentication Failures",
-     "wstg": ["WSTG-ATHN-01"], "api": ["API2:2023"], "detectors": ["hydra:_detect_hydra"]},
+     # ATHN-06 (browser cache weakness) is a coverage case under the same WSTG
+     # Authentication family; `authn` is the class that already names ATHN-01.
+     "wstg": ["WSTG-ATHN-01", "WSTG-ATHN-06"], "api": ["API2:2023"], "detectors": ["hydra:_detect_hydra"]},
     {"key": "jwt", "label": "JWT Weakness",
      "owasp": "A02:2021 Cryptographic Failures",
      "wstg": ["WSTG-SESS-10"],
@@ -95,13 +97,16 @@ CLASSES: list[dict] = [
      "wstg": ["WSTG-AUTHZ-05"], "api": ["API2:2023"], "detectors": []},
     {"key": "csrf", "label": "Cross-Site Request Forgery",
      "owasp": "A01:2021 Broken Access Control",
-     "wstg": ["WSTG-SESS-02"],
+     "wstg": ["WSTG-SESS-02", "WSTG-SESS-05"],
      # no API 2023 category. a token-authenticated API is not CSRF-shaped, and claiming API8 for it would overstate
      "api": [],
      "detectors": []},
     {"key": "cors", "label": "CORS Misconfiguration",
      "owasp": "A05:2021 Security Misconfiguration",
-     "wstg": ["WSTG-CLNT-07", "WSTG-CLNT-07b"], "api": ["API8:2023"], "detectors": ["curl:_curl_cors"]},
+     # CONF-08 is the RIA cross-domain policy (crossdomain.xml). It is not CORS
+     # over HTTP headers, but it is the same cross-origin trust concept this
+     # class names -- which foreign origins may read authenticated responses.
+     "wstg": ["WSTG-CLNT-07", "WSTG-CLNT-07b", "WSTG-CONF-08"], "api": ["API8:2023"], "detectors": ["curl:_curl_cors"]},
     {"key": "ssrf", "label": "Server-Side Request Forgery", "owasp": "A10:2021 SSRF",
      "wstg": ["WSTG-INPV-19"], "api": ["API7:2023"], "detectors": []},
     # WSTG-AUTHZ-01, not WSTG-INPV-15. This class is labelled "Path Traversal
@@ -149,7 +154,7 @@ CLASSES: list[dict] = [
                    "curl:_curl_exposed_user_data", "nikto:_detect_nikto"]},
     {"key": "recon", "label": "Recon & Content Discovery",
      "owasp": "—",
-     "wstg": ["WSTG-CONF-04", "WSTG-CONF-06", "WSTG-CONF-07", "WSTG-CLNT-09"],
+     "wstg": ["WSTG-CONF-04", "WSTG-CONF-05", "WSTG-CONF-06", "WSTG-CONF-07", "WSTG-CLNT-09"],
 
      # endpoint and shadow-API discovery is inventory management
      "api": ["API9:2023"],

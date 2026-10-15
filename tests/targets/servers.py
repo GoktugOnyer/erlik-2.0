@@ -146,6 +146,48 @@ class Web(_Base):
                 return self._send(200, body, "text/plain", h)
             return self._send(404, "not found", extra=h)
 
+        if p == "/account":
+            # ATHN-06: a sensitive, authenticated page. The flaw lets a shared
+            # or local cache retain it; the control forbids caching with
+            # no-store (and sends the belt-and-braces Pragma a control would).
+            cache = ("public, max-age=3600" if self.VULNERABLE
+                     else "no-store, no-cache, must-revalidate")
+            extra = {**h, "Cache-Control": cache}
+            if not self.VULNERABLE:
+                extra["Pragma"] = "no-cache"
+            return self._send(
+                200, "<html><body>Account balance: 4211.00 EUR</body></html>",
+                extra=extra)
+
+        if p == "/transfer":
+            # SESS-05: a state-changing POST form. The flaw omits the anti-CSRF
+            # token; the control carries a hidden csrf_token field.
+            token = ("" if self.VULNERABLE
+                     else '<input type="hidden" name="csrf_token" value="a1b2c3d4">')
+            body = ('<html><body><form method="post" action="/transfer">'
+                    f'{token}<input name="amount">'
+                    '<button>Send</button></form></body></html>')
+            return self._send(200, body, extra=h)
+
+        if p == "/admin":
+            # CONF-05: an administrative interface. The flaw serves it to an
+            # unauthenticated request; the control answers 403.
+            if self.VULNERABLE:
+                return self._send(
+                    200, "<html><body><h1>Admin Console</h1>"
+                    '<a href="/admin/users">User Management</a></body></html>',
+                    extra=h)
+            return self._send(403, "Forbidden", "text/plain", h)
+
+        if p == "/crossdomain.xml":
+            # CONF-08: the RIA cross-domain policy. The flaw grants access to any
+            # domain; the control names a concrete one.
+            domain = "*" if self.VULNERABLE else "assets.example.com"
+            body = ('<?xml version="1.0"?>\n<cross-domain-policy>'
+                    f'<allow-access-from domain="{domain}"/>'
+                    '</cross-domain-policy>')
+            return self._send(200, body, "text/x-cross-domain-policy", h)
+
         if p == "/search":
             v = (q.get("q") or [""])[0]
             if "'" in v:
@@ -214,6 +256,120 @@ class Redirector(_Base):
         self.send_header("Location", self.LOCATION)
         self.send_header("Content-Length", "0")
         self.end_headers()
+
+
+class Graphql(_Base):
+    """A minimal but faithful GraphQL endpoint for the graphql-probe tool.
+
+    Three abuse checks, each a real behaviour rather than a flag:
+
+      * introspection — the flaw answers `__schema`; the control refuses it.
+      * field-suggestion leakage — the flaw volunteers `Did you mean "X"?` for a
+        near-miss field name (including the universal `__typename`, which is
+        resolvable even when introspection is off, so the two are independent);
+        the control names no alternative.
+      * query batching — the flaw executes a JSON ARRAY of queries and returns an
+        array of results; the control rejects the batch.
+
+    Nothing here is a real GraphQL engine: it resolves a tiny fixed schema with
+    regex, which is all the probe's three queries exercise. The `User` type
+    carries a `passwordHash` field so introspection enumeration has something
+    worth disclosing.
+    """
+
+    # Query-root fields, plus the universal meta-field. The probe's suggestion
+    # query misspells `__typename`; `user`/`users`/`product` are the app surface.
+    KNOWN_FIELDS = ("user", "users", "product", "__typename")
+
+    _SCHEMA_TYPES = [
+        {"kind": "OBJECT", "name": "Query",
+         "fields": [{"name": "user"}, {"name": "users"}, {"name": "product"}]},
+        {"kind": "OBJECT", "name": "User",
+         "fields": [{"name": "id"}, {"name": "email"}, {"name": "passwordHash"}]},
+        {"kind": "OBJECT", "name": "Product",
+         "fields": [{"name": "id"}, {"name": "name"}, {"name": "price"}]},
+        # An introspection-machinery type: the probe must EXCLUDE it from the
+        # application surface it reports, so it is here to be excluded.
+        {"kind": "OBJECT", "name": "__Schema", "fields": [{"name": "types"}]},
+    ]
+
+    def _json(self, code, obj):
+        return self._send(code, json.dumps(obj), "application/json")
+
+    @staticmethod
+    def _edit_distance_1(a: str, b: str) -> bool:
+        if a == b:
+            return False
+        if abs(len(a) - len(b)) > 1:
+            return False
+        # one substitution
+        if len(a) == len(b):
+            return sum(x != y for x, y in zip(a, b)) == 1
+        # one insertion/deletion
+        short, long = (a, b) if len(a) < len(b) else (b, a)
+        i = j = 0
+        skipped = False
+        while i < len(short) and j < len(long):
+            if short[i] == long[j]:
+                i += 1
+                j += 1
+            elif skipped:
+                return False
+            else:
+                skipped = True
+                j += 1
+        return True
+
+    def _did_you_mean(self, field: str) -> str | None:
+        for known in self.KNOWN_FIELDS:
+            if self._edit_distance_1(field, known):
+                return known
+        return None
+
+    def _top_field(self, query: str) -> str | None:
+        m = re.search(r"\{\s*([_A-Za-z][_0-9A-Za-z]*)", query or "")
+        return m.group(1) if m else None
+
+    def _exec(self, query: str) -> dict:
+        field = self._top_field(query)
+        # Match the FIELD, not a substring: `__typenam` contains the text
+        # `__type` but is an ordinary (misspelled) field, not an introspection
+        # query — routing it to introspection would mask the suggestion probe.
+        if field in ("__schema", "__type"):
+            if self.VULNERABLE:
+                return {"data": {"__schema": {"queryType": {"name": "Query"},
+                                              "types": self._SCHEMA_TYPES}}}
+            return {"errors": [{"message": "GraphQL introspection is not allowed"}]}
+        if field and field not in self.KNOWN_FIELDS:
+            msg = f'Cannot query field "{field}" on type "Query".'
+            if self.VULNERABLE:
+                near = self._did_you_mean(field)
+                if near:
+                    msg = msg[:-1] + f'. Did you mean "{near}"?'
+            return {"errors": [{"message": msg}]}
+        return {"data": {field or "__typename": "Query"}}
+
+    def do_POST(self):
+        n = int(self.headers.get("Content-Length") or 0)
+        raw = self.rfile.read(n).decode("utf-8", "replace") if n else ""
+        try:
+            body = json.loads(raw)
+        except ValueError:
+            return self._json(400, {"errors": [{"message": "Must provide query string."}]})
+        if isinstance(body, list):
+            # Query batching: the flaw runs the whole array, the control refuses.
+            if self.VULNERABLE:
+                return self._json(200, [self._exec((q or {}).get("query", ""))
+                                        for q in body])
+            return self._json(200, {"errors": [{"message": "Batch queries are not allowed"}]})
+        return self._json(200, self._exec((body or {}).get("query", "")))
+
+    def do_GET(self):
+        u = urlparse(self.path)
+        q = (parse_qs(u.query).get("query") or [""])[0]
+        if not q:
+            return self._json(400, {"errors": [{"message": "Must provide query string."}]})
+        return self._json(200, self._exec(q))
 
 
 def serve(handler, tls: tuple[str, str] | None = None) -> tuple[ThreadingHTTPServer, int]:
@@ -433,3 +589,38 @@ class Deser(_Base):
         if m:
             return self._handle(m.group(1))
         return self._send(200, "home", "text/plain")
+
+
+class Cmd(_Base):
+    """WSTG-INPV-12's target: a `ping`-style endpoint that feeds a query value
+    to a shell.
+
+    Nothing executes here, exactly as Ssti's engine only multiplies and Deser
+    matches a serialized header: the flaw MATCHES a shell metacharacter followed
+    by `id` and returns the uid/gid line that command would print. The control
+    strips every metacharacter first, so the same payload produces only the
+    benign ping output and the differential the case depends on never appears.
+    """
+
+    _METACHAR_ID = re.compile(r"[;|&`]\s*id\b")
+
+    def do_GET(self):
+        u = urlparse(self.path)
+        vals = [v for vs in parse_qs(u.query, keep_blank_values=True).values()
+                for v in vs]
+        raw = vals[0] if vals else ""
+        if self.VULNERABLE:
+            host = re.split(r"[;|&`]", raw)[0] or raw
+            if self._METACHAR_ID.search(raw):
+                # The injected command ran -- its output comes back in band.
+                return self._send(
+                    200, f"PING {host}: 56 data bytes\n"
+                    "uid=33(www-data) gid=33(www-data) groups=33(www-data)\n",
+                    "text/plain")
+            return self._send(200, f"PING {host}: 56 data bytes\n"
+                              f"64 bytes from {host}\n", "text/plain")
+        # Control: only hostname-shaped characters survive, so a metacharacter
+        # payload can never reach a shell and `id` never runs.
+        safe = re.sub(r"[^A-Za-z0-9._-]", "", raw)
+        return self._send(200, f"PING {safe}: 56 data bytes\n"
+                          f"64 bytes from {safe}\n", "text/plain")

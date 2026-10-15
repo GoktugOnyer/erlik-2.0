@@ -62,16 +62,39 @@ class TestAgentFacingSurfacesAgree:
 
 
 class TestFreezeSafety:
-    """Nothing SHIPPED today is hidden by the default (off), so the frozen-arm
-    prompt is unchanged: every current case is core."""
+    """No CORE case is hidden by the default (off), so the frozen-arm prompt is
+    unchanged by tiering -- while EXT coverage cases are hidden, which is the
+    whole point of the mechanism.
 
-    def test_no_currently_shipped_case_is_hidden_by_default(self):
+    This once read "every current case is core", because none had been added yet.
+    The first ext coverage cases (WSTG-ATHN-06/SESS-05/CONF-05/CONF-08/INPV-12)
+    made that statement of fact false without making the freeze unsafe: an ext
+    case hidden by default is EXACTLY what keeps the recorded arms' prompt
+    unchanged. So the guard now checks the property that actually matters -- that
+    no CORE case is hidden -- rather than the incidental "nothing is hidden".
+    """
+
+    def test_no_currently_shipped_core_case_is_hidden_by_default(self):
         from orchestrator.testcase.loader import load_catalog
         shipped = load_catalog()
         assert shipped, "the catalogue is empty; this guard would be vacuous"
         runnable = set(M._runnable_case_ids(coverage_cases=False))
-        hidden = [cid for cid in shipped if cid not in runnable]
-        assert hidden == [], f"tiering hid shipped cases from the frozen arms: {hidden}"
+        hidden_core = [cid for cid, tc in shipped.items()
+                       if tc.tier == "core" and cid not in runnable]
+        assert hidden_core == [], (
+            f"tiering hid CORE cases from the frozen arms: {hidden_core}")
+
+    def test_every_ext_case_is_hidden_by_default(self):
+        """The complementary property: an ext case that leaked into the default
+        runnable set would change the frozen-arm prompt, which is the failure the
+        tier field exists to prevent."""
+        from orchestrator.testcase.loader import load_catalog
+        shipped = load_catalog()
+        ext = {cid for cid, tc in shipped.items() if tc.tier == "ext"}
+        assert ext, "no ext case in the catalogue; this guard would be vacuous"
+        runnable = set(M._runnable_case_ids(coverage_cases=False))
+        leaked = sorted(ext & runnable)
+        assert leaked == [], f"ext cases visible with coverage off: {leaked}"
 
 
 def test_the_run_case_resolver_consults_the_gate():

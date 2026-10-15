@@ -52,6 +52,12 @@ NOT_ASSESSED = {
     "ERLIK_HBH_UNSTABLE_BASELINE",
     "ERLIK_HSTS_NO_RESPONSE",
     "ERLIK_COOKIE_NO_RESPONSE",
+    # ext coverage cases added after the campaign arms were frozen. A no-response
+    # means the probe never reached its subject, so the row is amber, not green.
+    "ERLIK_CACHE_NO_RESPONSE",
+    "ERLIK_CSRF_NO_RESPONSE",
+    "ERLIK_ADMIN_NO_RESPONSE",
+    "ERLIK_XDOMAIN_NO_RESPONSE",
 }
 A_RESULT = {
     "ERLIK-LFI-ENCODED", "ERLIK-LFI-SOURCE", "ERLIK-LFI-TRAVERSAL",
@@ -66,6 +72,15 @@ A_RESULT = {
     "ERLIK_LDAP_BLIND_DIFFERENTIAL", "ERLIK_LDAP_SECOND_PROBE",
     "ERLIK_LDAP_WILDCARD_INTERPRETED",
     "ERLIK_NOSQL_OPERATOR_PARSED", "ERLIK_OPERATOR_RESPONSE",
+    # ext coverage cases. Each of these is a CONCLUSION -- a finding, a clean
+    # verdict, or "nothing here to judge" (the same class as ERLIK_COOKIE_NONE_SET
+    # above) -- so it renders as a result, never amber. ERLIK_CSRF_NO_FORM names a
+    # NO_FORM, not a NO_RESPONSE, so the dashboard regex leaves it a result.
+    "ERLIK_CACHE_OK", "ERLIK_CACHE_WEAK",
+    "ERLIK_CSRF_NO_FORM", "ERLIK_CSRF_OK", "ERLIK_CSRF_MISSING",
+    "ERLIK_ADMIN_PROTECTED", "ERLIK_ADMIN_OPEN", "ERLIK_ADMIN_NONE",
+    "ERLIK_XDOMAIN_NONE", "ERLIK_XDOMAIN_WILDCARD", "ERLIK_XDOMAIN_OK",
+    "ERLIK_CMDI_EXEC", "ERLIK_CMDI_NONE",
 }
 
 
