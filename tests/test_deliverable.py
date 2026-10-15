@@ -153,6 +153,12 @@ class TestEveryReportRouteIsAccountedFor:
             "/api/sessions/{session_id}/report.sarif",
             "/api/sessions/{session_id}/report.defectdojo.json",
             "/api/sessions/{session_id}/report.jira.csv",
+            # Both derive from _build_report_json like the five above, so they
+            # pass through the submission policy; the PDF additionally renders
+            # the (already-gated) HTML report, and both redact at the export
+            # boundary before shaping.
+            "/api/sessions/{session_id}/report.hackerone.json",
+            "/api/sessions/{session_id}/report.pdf",
         }
         known = generated_at_write_time | assembled_live | set(M.ALLOWED_UNGATED_REPORT_PATHS)
         unclassified = report_routes - known

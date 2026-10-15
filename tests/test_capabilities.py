@@ -546,17 +546,25 @@ class TestCasesAreFiledUnderTheRightAttackClass:
             C.CLASSES = real
 
     def test_a_class_with_no_case_says_so_rather_than_borrowing_one(self):
-        """`cmdi` reports no engine coverage. That is the honest answer; the
-        alternative was credit for WSTG-INPV-06, which tests LDAP.
+        """A class whose `wstg` list is empty reports "not covered" rather than
+        borrowing another class's case.
 
-        `ssti` was in this list until WSTG-INPV-18 was written for it — the
-        gap the corrected attribution made visible."""
+        `cmdi` was the standing example — it reported no engine coverage rather
+        than claim credit for WSTG-INPV-06, which tests LDAP. It has since
+        GRADUATED: WSTG-INPV-12 is a genuine command-injection case, so cmdi now
+        reads "deterministic", exactly as `ssti` graduated when WSTG-INPV-18 was
+        written for it. The property is what matters, not which real class
+        happens to be empty, so it is checked on a synthetic class that cannot
+        drift as the catalogue grows."""
         from orchestrator import capabilities as C
-        c = next(x for x in C.CLASSES if x["key"] == "cmdi")
-        assert c["wstg"] == [], f"cmdi claims {c['wstg']}"
-        assert C.verdicts(c)["wstg_engine"] == "not covered"
-        # ...and it is still reachable on the other lane, via commix.
-        assert C.verdicts(c)["agent_session"] == "confirmable"
+        empty = {"key": "x", "wstg": [], "detectors": [], "api": []}
+        assert C.verdicts(empty)["wstg_engine"] == "not covered"
+        # cmdi graduated: a real case rather than borrowed credit, and it stays
+        # reachable on the agent lane via commix.
+        cmdi = next(x for x in C.CLASSES if x["key"] == "cmdi")
+        assert cmdi["wstg"] == ["WSTG-INPV-12"], f"cmdi claims {cmdi['wstg']}"
+        assert C.verdicts(cmdi)["wstg_engine"] == "deterministic"
+        assert C.verdicts(cmdi)["agent_session"] == "confirmable"
 
     def test_the_classes_that_gained_correct_coverage(self):
         from orchestrator import capabilities as C

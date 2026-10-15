@@ -27,6 +27,11 @@ _DEFAULT_TOOLS: list[str] = [
     "curl", "netcat",
     # Capability helpers (added 2026-04-06 for RQ3-b action-space ablation)
     "login-helper", "diff-view", "interactive-pw",
+    # Exploitation tools (roadmap item 12). In-process probe engines, OFF by
+    # default behind their own ERLIK_* flags — see orchestrator/exploit_tools.py.
+    # Added to the DEFAULT set ONLY; the three frozen presets are untouched, so
+    # the action-space arms are byte-for-byte unaffected.
+    "graphql-probe", "ssti-deser",
 ]
 
 

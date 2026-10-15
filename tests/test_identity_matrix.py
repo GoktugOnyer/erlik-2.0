@@ -249,9 +249,9 @@ def test_the_declarations_do_not_widen_what_the_lane_supplies():
     # causes in test_curl_dialect.TestWhatTheLaneCannotRunIsDeclared rather than
     # absorbed into a smaller number here. Nothing about `subject_id` caused it.
     assert len(executable_test_cases()) == 9
-    # 35 since the business-logic and stale-access cases joined: BUSL-05 (usage
-    # limits), BUSL-06 (workflow circumvention) and AUTHZ-02 (access surviving an
-    # ownership transfer). None is lane-runnable and none may become so —
-    # both need operator-supplied fields (`request_template`, `final_request`) that
-    # the lane has no way to invent, so the 9 above is the figure that matters here.
-    assert len(load_catalog()) == 35
+    # 40 since five ext-tier coverage cases joined (WSTG-ATHN-06, SESS-05,
+    # CONF-05, CONF-08, INPV-12); before them it was 35, after the business-logic
+    # and stale-access cases (BUSL-05, BUSL-06, AUTHZ-02). None of the five is
+    # lane-runnable — each is a single `bash -c` step the curl-only lane refuses —
+    # so the 9 above is unchanged and remains the figure that matters here.
+    assert len(load_catalog()) == 40

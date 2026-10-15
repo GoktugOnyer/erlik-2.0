@@ -1,0 +1,54 @@
+id: WSTG-CONF-08
+name: Permissive RIA Cross-Domain Policy
+category: Configuration & Deployment Management
+attack_class: cors
+severity: medium
+# ext tier -- see ATHN-06. Added after the campaign arms were frozen.
+tier: ext
+references:
+  - https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/02-Configuration_and_Deployment_Management_Testing/08-Test_RIA_Cross_Domain_Policy
+
+target_schema:
+  required: [url]
+  optional: [cookie, auth_header]
+
+# Filed under the `cors` class, not because crossdomain.xml is CORS -- it is
+# Adobe's Flash/Silverlight cross-domain mechanism, a different transport -- but
+# because it is the same security concept the `cors` class names: which foreign
+# origins the application trusts to read its authenticated responses. A policy of
+# `allow-access-from domain="*"` lets a RIA on any site make credentialed reads,
+# exactly the trust failure WSTG-CLNT-07 catches over the HTTP CORS headers.
+#
+# The finding is the wildcard specifically. A published policy that names
+# concrete domains is the intended use of the file and is NOT reported; a 404 (no
+# policy at all) is clean; no response is not assessed. Reporting a restrictive
+# policy as a finding would flag every site that uses the mechanism correctly.
+#
+# The base `url` is the site root; the case appends the well-known path. The
+# verdict is a deterministic canary.
+#
+# Read-only: one GET of /crossdomain.xml.
+steps:
+  - name: fetch_crossdomain
+    tool: curl
+    command: >-
+      bash -c 'U="{{url}}";
+      B=$(curl -s -b "{{cookie}}" -H "{{auth_header}}"
+      --connect-timeout 5 --max-time 15 -w "HTTPCODE=%{http_code}" "$U/crossdomain.xml");
+      CODE=$(printf "%s" "$B" | grep -o "HTTPCODE=[0-9]*" | tail -1 | cut -d= -f2);
+      printf "%s\n" "$B";
+      if [ "$CODE" = "000" ]; then
+      echo "ERLIK_XDOMAIN_NO_RESPONSE: no response was received, so the cross-domain policy was not assessed";
+      elif [ "$CODE" != "200" ]; then
+      echo "ERLIK_XDOMAIN_NONE: no RIA cross-domain policy is served here (HTTP $CODE)";
+      elif printf "%s" "$B" | grep -qiE "allow-access-from[^>]*domain=.?\*"; then
+      echo "ERLIK_XDOMAIN_WILDCARD: the RIA cross-domain policy grants access to any domain";
+      else
+      echo "ERLIK_XDOMAIN_OK: a cross-domain policy is served and it names concrete domains rather than a wildcard";
+      fi'
+    evaluators:
+      - type: regex
+        pattern: 'ERLIK_XDOMAIN_WILDCARD'
+        emit_finding:
+          vuln_type: Permissive RIA Cross-Domain Policy
+          severity: medium

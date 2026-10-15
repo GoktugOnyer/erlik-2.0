@@ -1,6 +1,7 @@
 """Execute pentest tools inside the kali-tools Docker container (or natively via ERLIK_NATIVE)."""
 
 import asyncio
+import contextlib
 import fnmatch
 import ipaddress
 import os
@@ -10,9 +11,40 @@ import shlex
 import shutil
 import subprocess
 import time
+import weakref
 from urllib.parse import urlparse
 
 ERLIK_NATIVE = bool(os.environ.get("ERLIK_NATIVE", ""))
+
+# Global ceiling on tool subprocesses running at once. Every tool execution
+# ultimately lands in _sync_docker_exec on a worker thread; with N parallel
+# sessions (the matrix driver, several dashboard runs) nothing bounded how many
+# heavy scanners could be spawned simultaneously, so a busy host could thrash
+# or exhaust file descriptors. This bound is a throughput limit only — it never
+# changes a tool's output — so recorded campaigns stay byte-for-byte
+# comparable. Mirrors the LLM_RPM convention in llm_client: a non-positive
+# value disables the bound entirely (the historical unbounded behaviour).
+MAX_CONCURRENCY = int(os.environ.get("ERLIK_MAX_CONCURRENCY", "8") or 0)
+
+# The semaphore is created lazily and PER EVENT LOOP. A module-level
+# asyncio.Semaphore binds to the first loop that awaits it and then raises
+# "bound to a different event loop" under pytest-asyncio, which spins a fresh
+# loop per test. Keying by the running loop (weakly, so finished test loops are
+# collected) keeps one semaphore per loop without that cross-loop breakage.
+_exec_semaphores: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
+
+
+def _get_exec_semaphore():
+    """The concurrency semaphore for the current event loop, or None when the
+    bound is disabled (MAX_CONCURRENCY <= 0)."""
+    if MAX_CONCURRENCY <= 0:
+        return None
+    loop = asyncio.get_running_loop()
+    sem = _exec_semaphores.get(loop)
+    if sem is None:
+        sem = asyncio.Semaphore(MAX_CONCURRENCY)
+        _exec_semaphores[loop] = sem
+    return sem
 CONTAINER_NAME = "kali-tools"
 
 # Find docker binary — check PATH first, then well-known install locations on
@@ -106,6 +138,11 @@ TOOL_TIMEOUTS = {
     # Capability helpers (2026-04-06) — dumb, deterministic, no detection logic
     "login-helper": 15,  # generic two-user token fetcher (lab helper)
     "diff-view": 30,     # HTTP response diff viewer (NOT a detector)
+    # Exploitation probe engines (roadmap item 12). These run IN-PROCESS (httpx),
+    # not in the Kali container, so the timeout bounds the whole probe sequence
+    # rather than one shell command. OFF by default — see exploit_tools.py.
+    "graphql-probe": 30,
+    "ssti-deser": 30,
 }
 
 # Commands that are never allowed
@@ -1332,6 +1369,37 @@ async def execute_tool(command: str, enabled_tools: list[str], no_timeout: bool 
         return {"success": False, "output": "", "tool": tool_name, "duration_ms": 0,
                 "error": f"TOOLSET: {seg_err}", "executed": False}
 
+    # --- Exploitation probe engines (roadmap item 12) ---------------------- #
+    # graphql-probe / ssti-deser run IN-PROCESS (httpx), not through the Kali
+    # container. They are OFF by default and stay VISIBLE-but-disabled with the
+    # reason (CLAUDE.md convention 2): the env-flag gate is this tool's admission
+    # control, reported as a refusal the model can read. The scope, safe-mode and
+    # write-confinement guards still apply — they run here on the model's own
+    # command string, and because the probe needs no docker host-gateway rewrite
+    # the UN-sanitized command is checked (so a loopback target stays loopback
+    # instead of being rewritten past the scope guard).
+    from orchestrator import exploit_tools as _exploit
+    if _exploit.is_exploit_tool(tool_name):
+        _av = _exploit.availability(tool_name)
+        if not _av.enabled:
+            return {"success": False, "output": "", "tool": tool_name, "duration_ms": 0,
+                    "error": f"DISABLED: {tool_name} is {_av.reason}", "executed": False,
+                    "denied": True}
+        scope_err = _scope_violation(command, target_url, engagement_rows)
+        if scope_err:
+            return {"success": False, "output": "", "tool": tool_name, "duration_ms": 0,
+                    "error": f"SCOPE: {scope_err}", "executed": False, "denied": True}
+        safe_err = _safe_mode_violation(command, enabled=safe_mode)
+        if safe_err:
+            return {"success": False, "output": "", "tool": tool_name, "duration_ms": 0,
+                    "error": f"SAFE_MODE: {safe_err}", "executed": False, "denied": True}
+        start = time.time()
+        probe = await asyncio.get_event_loop().run_in_executor(
+            None, lambda: _exploit.run(tool_name, command, target_url=target_url))
+        probe["duration_ms"] = int((time.time() - start) * 1000)
+        probe.setdefault("tool", tool_name)
+        return probe
+
     # Resolve timeout (seconds). Precedence:
     #   no_timeout=True       -> truly unlimited (None). Optional ERLIK_NO_TIMEOUT_CAP>0
     #                            re-imposes a cap for safety-conscious deployments.
@@ -1399,12 +1467,17 @@ async def execute_tool(command: str, enabled_tools: list[str], no_timeout: bool 
     argv = _argv_eligible(sanitized, enabled_tools) if native_argv else None
     transport = "argv" if argv is not None else "shell"
 
-    # Execute in docker via sync subprocess in thread pool (Windows compatible)
+    # Execute in docker via sync subprocess in thread pool (Windows compatible).
+    # Held behind the global concurrency semaphore so parallel sessions cannot
+    # spawn an unbounded number of tool subprocesses at once (no-op when the
+    # bound is disabled).
     start = time.time()
     try:
-        result = await asyncio.get_event_loop().run_in_executor(
-            None, lambda: _sync_docker_exec(sanitized, timeout, argv=argv)
-        )
+        _sem = _get_exec_semaphore()
+        async with (_sem if _sem is not None else contextlib.nullcontext()):
+            result = await asyncio.get_event_loop().run_in_executor(
+                None, lambda: _sync_docker_exec(sanitized, timeout, argv=argv)
+            )
         duration_ms = int((time.time() - start) * 1000)
 
         output = result["output"]

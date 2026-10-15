@@ -138,7 +138,7 @@ class TestWriteSiteStampsIt:
         from pathlib import Path
         src = (Path(__file__).resolve().parents[1] / "orchestrator" / "main.py").read_text()
         i = src.index("INSERT INTO steps (session_id, phase, step_number, prompt_sent, "
-                      "model_response, \"\n                        \"tool_called")
+                      "model_response, \"\n                            \"tool_called")
         block = src[i:i + 700]
         assert "denied" in block
         assert '0 if result.get("executed", True) else 1' in block

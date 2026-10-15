@@ -52,6 +52,8 @@ included or redistributed here; you install them yourself.
 | Tool | License | Used by | Notes |
 |------|---------|---------|-------|
 | [OWASP Nettacker](https://github.com/OWASP/Nettacker) | Apache-2.0 | `orchestrator/integrations/nettacker.py` | Optional deterministic pre-scan. erlik builds a CLI invocation and parses Nettacker's JSON output; no Nettacker source is vendored. Enable with `ERLIK_NETTACKER=1`. |
+| [Playwright for Python](https://github.com/microsoft/playwright-python) | Apache-2.0 | `orchestrator/report_pdf.py` | Optional PDF export (`GET /report.pdf`). Driver library, pinned in `requirements-browser-login.txt`, not in the lean runtime install; absent → the route returns 503. No Playwright source is vendored. |
+| Chromium (headless) | BSD-3-Clause (bundles components under BSD / LGPL / MIT / ffmpeg) | driven by `orchestrator/report_pdf.py` via Playwright | The browser that prints the HTML report to PDF. erlik launches an externally installed binary (the container ships it at `/opt/pw-browsers/chromium`); nothing of Chromium is bundled or redistributed by erlik. |
 
 ## HackTricks (referenced, deliberately NOT vendored)
 
