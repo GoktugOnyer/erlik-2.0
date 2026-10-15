@@ -625,17 +625,66 @@ class ConnectionManager:
 
     async def broadcast(self, session_id: str, message: dict):
         import json
-        for ws in self.active.get(session_id, []):
+        conns = self.active.get(session_id)
+        if not conns:
+            return
+        payload = json.dumps(message)
+        dead = []
+        # Iterate a copy: a failing send and the prune below both mutate
+        # self.active[session_id].
+        for ws in list(conns):
             try:
-                await ws.send_text(json.dumps(message))
+                await ws.send_text(payload)
             except Exception:
-                pass
+                # A socket that errors on send is gone. Left in place it is
+                # broadcast to on every future message and never collected, so
+                # a long run leaks one dead socket per dropped client.
+                dead.append(ws)
+        if dead:
+            survivors = [c for c in self.active.get(session_id, []) if c not in dead]
+            if survivors:
+                self.active[session_id] = survivors
+            else:
+                self.active.pop(session_id, None)
 
 
 manager = ConnectionManager()
 
 # --- Running Agent Tasks ---
 running_tasks: dict[str, asyncio.Task] = {}
+
+# Strong references to fire-and-forget background tasks. asyncio keeps only a
+# weak reference to a bare create_task(), so a task nobody stores can be
+# garbage-collected mid-flight; and if such a task raises, the exception is
+# swallowed with only a late "Task exception was never retrieved" warning at GC
+# time. _track_task holds the reference AND attaches a done-callback that
+# surfaces the failure where it happens.
+_background_tasks: set[asyncio.Task] = set()
+
+
+def _track_task(task: asyncio.Task, label: str = "") -> asyncio.Task:
+    """Keep `task` alive and log any exception it finishes with.
+
+    Returns the same task so callers can still store or await it. Use for every
+    create_task() — a tracked task that also lives in running_tasks is fine
+    (the set discards it when it finishes), and one that lives nowhere else (the
+    benchmark sweep) is kept from collection until it is done.
+    """
+    _background_tasks.add(task)
+
+    def _done(t: asyncio.Task) -> None:
+        _background_tasks.discard(t)
+        if t.cancelled():
+            return
+        exc = t.exception()
+        if exc is not None:
+            import traceback
+            print(f"[task{(' ' + label) if label else ''}] unhandled exception: {exc!r}",
+                  flush=True)
+            traceback.print_exception(type(exc), exc, exc.__traceback__)
+
+    task.add_done_callback(_done)
+    return task
 
 
 # --- Agent Loop ---
@@ -4182,7 +4231,7 @@ async def _start_chain_session(session_id: str):
             max_turns=max_turns,
         )
     )
-    running_tasks[session_id] = task
+    running_tasks[session_id] = _track_task(task, f"agent:{session_id[:8]}")
 
     await manager.broadcast(session_id, {
         "type": "status", "status": "running",
@@ -5553,14 +5602,16 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
 
                 # Save step
                 db = await get_db()
-                await db.execute(
-                    "INSERT INTO steps (session_id, phase, step_number, prompt_sent, model_response, duration_ms) "
-                    "VALUES (?, ?, ?, ?, ?, ?)",
-                    (session_id, phase, step_number, "(nudge to JSON)", response[:2000], duration),
-                )
-                await db.commit()
-                await db.close()
-                db = None
+                try:
+                    await db.execute(
+                        "INSERT INTO steps (session_id, phase, step_number, prompt_sent, model_response, duration_ms) "
+                        "VALUES (?, ?, ?, ?, ?, ?)",
+                        (session_id, phase, step_number, "(nudge to JSON)", response[:2000], duration),
+                    )
+                    await db.commit()
+                finally:
+                    await db.close()
+                    db = None
                 continue
 
             action_type = action.get("action", "")
@@ -5920,17 +5971,19 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
 
                     # Save step to DB (cleaned output, larger truncation)
                     db = await get_db()
-                    await db.execute(
-                        "INSERT INTO steps (session_id, phase, step_number, prompt_sent, model_response, "
-                        "tool_called, tool_input, tool_output, duration_ms, denied) "
-                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                        (session_id, phase, step_number, reason[:500], response[:2000],
-                         tool_name, command[:1000], tool_output[:4000], tool_duration,
-                         0 if result.get("executed", True) else 1),
-                    )
-                    await db.commit()
-                    await db.close()
-                    db = None
+                    try:
+                        await db.execute(
+                            "INSERT INTO steps (session_id, phase, step_number, prompt_sent, model_response, "
+                            "tool_called, tool_input, tool_output, duration_ms, denied) "
+                            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                            (session_id, phase, step_number, reason[:500], response[:2000],
+                             tool_name, command[:1000], tool_output[:4000], tool_duration,
+                             0 if result.get("executed", True) else 1),
+                        )
+                        await db.commit()
+                    finally:
+                        await db.close()
+                        db = None
 
                     # Collect full untruncated data for file report
                     full_steps_data.append({
@@ -6189,17 +6242,19 @@ async def agent_loop(session_id: str, target_url: str, scope_mode: str,
                 summary = _format_case_result_for_agent(case_id, tc, case_result)
 
                 db = await get_db()
-                await db.execute(
-                    "INSERT INTO steps (session_id, phase, step_number, prompt_sent, "
-                    "model_response, tool_called, tool_input, tool_output, duration_ms, denied) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (session_id, phase, step_number, reason[:500], response[:2000],
-                     f"case:{case_id}", json.dumps(case_target)[:1000],
-                     summary[:4000], _case_ms, 0),
-                )
-                await db.commit()
-                await db.close()
-                db = None
+                try:
+                    await db.execute(
+                        "INSERT INTO steps (session_id, phase, step_number, prompt_sent, "
+                        "model_response, tool_called, tool_input, tool_output, duration_ms, denied) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (session_id, phase, step_number, reason[:500], response[:2000],
+                         f"case:{case_id}", json.dumps(case_target)[:1000],
+                         summary[:4000], _case_ms, 0),
+                    )
+                    await db.commit()
+                finally:
+                    await db.close()
+                    db = None
 
                 full_steps_data.append({
                     "step": step_number, "phase": phase, "tool": f"case:{case_id}",
@@ -6618,20 +6673,40 @@ async def _fail_parent_chain(session_id: str, reason: str, terminal_status: str 
 
 
 async def _finish_session(session_id: str, status: str):
-    db = await get_db()
-    try:
-        await db.execute(
-            "UPDATE sessions SET status = ?, updated_at = datetime('now') WHERE id = ?",
-            (status, session_id),
-        )
-        await db.commit()
-    finally:
-        await db.close()
+    # This write is the ONLY transition out of 'running'. If it raises and the
+    # exception escapes, the row is stranded in 'running' forever and every
+    # poller (dashboard, matrix driver) waits on a run that is already over. So
+    # retry a transient failure (a DB still locked after busy_timeout), and
+    # never propagate: a failed status write must not also skip the broadcast or
+    # crash the caller's own cleanup path.
+    last_err = None
+    for attempt in range(3):
+        try:
+            db = await get_db()
+            try:
+                await db.execute(
+                    "UPDATE sessions SET status = ?, updated_at = datetime('now') WHERE id = ?",
+                    (status, session_id),
+                )
+                await db.commit()
+            finally:
+                await db.close()
+            last_err = None
+            break
+        except Exception as e:  # noqa: BLE001 — see above; failure is logged, not raised
+            last_err = e
+            await asyncio.sleep(0.1 * (attempt + 1))
+    if last_err is not None:
+        print(f"[finish {session_id[:8]}] status write to '{status}' failed after "
+              f"retries: {last_err!r}", flush=True)
 
-    await manager.broadcast(session_id, {
-        "type": "status", "status": status,
-        "message": f"Session {status}",
-    })
+    try:
+        await manager.broadcast(session_id, {
+            "type": "status", "status": status,
+            "message": f"Session {status}",
+        })
+    except Exception as e:  # noqa: BLE001 — a broadcast failure must not raise either
+        print(f"[finish {session_id[:8]}] status broadcast failed: {e!r}", flush=True)
 
 
 # --- Routes ---
@@ -8130,7 +8205,8 @@ async def start_session(session_id: str):
                 await manager.broadcast(session_id, {
                     "type": "integration", "status": "failed",
                     "reason": "Assessment preflight or execution failed; inspect stage evidence"})
-        running_tasks[session_id] = asyncio.create_task(execute_assessment())
+        running_tasks[session_id] = _track_task(
+            asyncio.create_task(execute_assessment()), f"assess:{session_id[:8]}")
         return {"status": "running", "message": "Integration assessment started"}
 
     db = await get_db()
@@ -8170,7 +8246,7 @@ async def start_session(session_id: str):
             tool_timeout=tool_timeout,
         )
     )
-    running_tasks[session_id] = task
+    running_tasks[session_id] = _track_task(task, f"agent:{session_id[:8]}")
 
     await manager.broadcast(session_id, {
         "type": "status", "status": "running",
@@ -10722,7 +10798,7 @@ async def _run_benchmark_sequence(benchmark_id: str, data: BenchmarkCreate):
                     max_turns=effective_max_turns,
                 )
             )
-            running_tasks[cold_session_id] = task
+            running_tasks[cold_session_id] = _track_task(task, f"agent:{cold_session_id[:8]}")
 
             # Update session status to running
             db = await get_db()
@@ -10800,7 +10876,7 @@ async def _run_benchmark_sequence(benchmark_id: str, data: BenchmarkCreate):
                     max_turns=effective_max_turns,
                 )
             )
-            running_tasks[warm_session_id] = task
+            running_tasks[warm_session_id] = _track_task(task, f"agent:{warm_session_id[:8]}")
 
             db = await get_db()
             try:
@@ -10940,7 +11016,8 @@ async def run_benchmark(data: BenchmarkCreate):
         await db.close()
 
     # Launch benchmark as background task
-    asyncio.create_task(_run_benchmark_sequence(benchmark_id, data))
+    _track_task(asyncio.create_task(_run_benchmark_sequence(benchmark_id, data)),
+                f"benchmark:{benchmark_id[:8]}")
 
     return {
         "benchmark_id": benchmark_id,
